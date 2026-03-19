@@ -274,7 +274,8 @@ impl ValueConv {
 
         let low = self.low.unwrap_or(0.0);
         let high = self.high.unwrap_or(4096.0);
-        let raw = value.raw.clamp(low, high);
+        let unclamped_raw = value.raw;
+        let raw = unclamped_raw.clamp(low, high);
 
         let cur = if self.adc_mode {
             // ADC mode: threshold at midpoint -> binary
@@ -285,20 +286,37 @@ impl ValueConv {
             let min = self.min.unwrap_or(0.0);
             let max = self.max.unwrap_or(100.0);
 
-            // Boundary checks
-            if raw <= low {
-                min
-            } else if raw >= high {
-                max
-            } else {
-                tables
-                    .lookup(table_idx, raw, min, max)
-                    .unwrap_or_else(|| {
-                        // Fallback: range scaling
-                        let range = high - low;
-                        if range != 0.0 { raw / range } else { 0.0 }
-                    })
+            // Out-of-range fault detection: if the unclamped raw is at or
+            // beyond the table boundaries (with 2% margin), the sensor is
+            // likely disconnected (open circuit → low raw) or shorted
+            // (saturated → high raw). Report Fault with the boundary value
+            // so consumers know the reading is unreliable.
+            let range = high - low;
+            let margin = range * 0.02;
+            if unclamped_raw <= low + margin {
+                value.status = EngineStatus::Fault;
+                value.raw = unclamped_raw;
+                value.cur = min;
+                value.flags |= ValueFlags::CUR;
+                value.trigger = false;
+                return Ok(());
+            } else if unclamped_raw >= high - margin {
+                value.status = EngineStatus::Fault;
+                value.raw = unclamped_raw;
+                value.cur = max;
+                value.flags |= ValueFlags::CUR;
+                value.trigger = false;
+                return Ok(());
             }
+
+            // Normal table lookup (raw is within valid range)
+            tables
+                .lookup(table_idx, raw, min, max)
+                .unwrap_or_else(|| {
+                    // Fallback: range scaling
+                    let range = high - low;
+                    if range != 0.0 { raw / range } else { 0.0 }
+                })
         } else if self.low.is_some() && self.high.is_some() {
             // Range scaling (no table)
             let range = high - low;
@@ -767,5 +785,132 @@ mod tests {
         assert_eq!(value.status, crate::EngineStatus::Ok);
         assert!(!value.trigger);
         assert!(value.cur > 0.0);
+    }
+
+    // -- ADC out-of-range fault detection tests --------------------------------
+
+    #[test]
+    fn test_table_raw_below_low_is_fault() {
+        let tables = make_table_store();
+        let idx = tables.find_by_tag("test_table").unwrap();
+
+        let conv = ValueConv {
+            table_index: Some(idx),
+            low: Some(500.0),
+            high: Some(32000.0),
+            min: Some(-40.0),
+            max: Some(200.0),
+            ..Default::default()
+        };
+
+        // raw=92 is well below low=500 (disconnected thermistor)
+        let mut value = EngineValue::default();
+        value.set_raw(92.0);
+
+        let mut flow = None;
+        conv.convert(&mut value, &tables, 1113, &mut flow).unwrap();
+
+        assert_eq!(value.status, crate::EngineStatus::Fault);
+        assert_eq!(value.raw, 92.0);
+        assert_eq!(value.cur, -40.0); // min value
+    }
+
+    #[test]
+    fn test_table_raw_above_high_is_fault() {
+        let tables = make_table_store();
+        let idx = tables.find_by_tag("test_table").unwrap();
+
+        let conv = ValueConv {
+            table_index: Some(idx),
+            low: Some(500.0),
+            high: Some(32000.0),
+            min: Some(-40.0),
+            max: Some(200.0),
+            ..Default::default()
+        };
+
+        // raw=33000 is above high=32000 (shorted sensor)
+        let mut value = EngineValue::default();
+        value.set_raw(33000.0);
+
+        let mut flow = None;
+        conv.convert(&mut value, &tables, 1113, &mut flow).unwrap();
+
+        assert_eq!(value.status, crate::EngineStatus::Fault);
+        assert_eq!(value.raw, 33000.0);
+        assert_eq!(value.cur, 200.0); // max value
+    }
+
+    #[test]
+    fn test_table_raw_within_range_is_ok() {
+        let tables = make_table_store();
+        let idx = tables.find_by_tag("test_table").unwrap();
+
+        let conv = ValueConv {
+            table_index: Some(idx),
+            low: Some(0.0),
+            high: Some(4096.0),
+            min: Some(-40.0),
+            max: Some(120.0),
+            ..Default::default()
+        };
+
+        // raw=2048 is safely within range
+        let mut value = EngineValue::default();
+        value.set_raw(2048.0);
+
+        let mut flow = None;
+        conv.convert(&mut value, &tables, 1113, &mut flow).unwrap();
+
+        assert_eq!(value.status, crate::EngineStatus::Ok);
+    }
+
+    #[test]
+    fn test_table_raw_near_boundary_is_fault() {
+        let tables = make_table_store();
+        let idx = tables.find_by_tag("test_table").unwrap();
+
+        let conv = ValueConv {
+            table_index: Some(idx),
+            low: Some(500.0),
+            high: Some(32000.0),
+            min: Some(-40.0),
+            max: Some(200.0),
+            ..Default::default()
+        };
+
+        // 2% margin of 31500 range = 630. So 500 + 630 = 1130.
+        // raw=510 is within margin of low → Fault
+        let mut value = EngineValue::default();
+        value.set_raw(510.0);
+
+        let mut flow = None;
+        conv.convert(&mut value, &tables, 1113, &mut flow).unwrap();
+        assert_eq!(value.status, crate::EngineStatus::Fault);
+
+        // raw=1200 is outside margin → Ok
+        let mut value = EngineValue::default();
+        value.set_raw(1200.0);
+        conv.convert(&mut value, &tables, 1113, &mut flow).unwrap();
+        assert_eq!(value.status, crate::EngineStatus::Ok);
+    }
+
+    #[test]
+    fn test_range_scaling_no_fault_detection() {
+        // Range-scaling (no table) should NOT trigger fault detection
+        let conv = ValueConv {
+            low: Some(0.0),
+            high: Some(4096.0),
+            ..Default::default()
+        };
+
+        let mut value = EngineValue::default();
+        value.set_raw(5.0); // Near zero but range-scaling, not table
+
+        let tables = TableStore::new();
+        let mut flow = None;
+        conv.convert(&mut value, &tables, 0, &mut flow).unwrap();
+
+        assert_eq!(value.status, crate::EngineStatus::Ok);
     }
 }
