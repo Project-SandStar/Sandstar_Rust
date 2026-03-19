@@ -1,0 +1,85 @@
+{
+  "_description": "Morning warmup: Zone starts at 68°F, rises to 78°F over 120s as sun heats building. Outdoor air rises from 72→92°F. PID should progressively activate cooling stages.",
+  "steps": [
+    {
+      "offset_ms": 0,
+      "points": [
+        {"type": "analog", "device": 0, "address": 0, "value": 68.0},
+        {"type": "analog", "device": 0, "address": 1, "value": 55.0},
+        {"type": "analog", "device": 0, "address": 2, "value": 72.0},
+        {"type": "analog", "device": 0, "address": 3, "value": 67.0},
+        {"type": "i2c", "device": 2, "address": 64, "label": "sdp810", "value": 450.0},
+        {"type": "digital", "address": 40, "value": true}
+      ]
+    },
+    {
+      "offset_ms": 10000,
+      "points": [
+        {"type": "analog", "device": 0, "address": 0, "value": 70.0},
+        {"type": "analog", "device": 0, "address": 2, "value": 75.0}
+      ]
+    },
+    {
+      "offset_ms": 20000,
+      "points": [
+        {"type": "analog", "device": 0, "address": 0, "value": 72.0},
+        {"type": "analog", "device": 0, "address": 2, "value": 78.0}
+      ]
+    },
+    {
+      "offset_ms": 30000,
+      "points": [
+        {"type": "analog", "device": 0, "address": 0, "value": 73.5},
+        {"type": "analog", "device": 0, "address": 2, "value": 82.0}
+      ]
+    },
+    {
+      "offset_ms": 45000,
+      "points": [
+        {"type": "analog", "device": 0, "address": 0, "value": 75.0},
+        {"type": "analog", "device": 0, "address": 2, "value": 85.0}
+      ]
+    },
+    {
+      "offset_ms": 60000,
+      "points": [
+        {"type": "analog", "device": 0, "address": 0, "value": 76.5},
+        {"type": "analog", "device": 0, "address": 2, "value": 88.0}
+      ]
+    },
+    {
+      "offset_ms": 80000,
+      "points": [
+        {"type": "analog", "device": 0, "address": 0, "value": 78.0},
+        {"type": "analog", "device": 0, "address": 2, "value": 90.0}
+      ]
+    },
+    {
+      "offset_ms": 100000,
+      "points": [
+        {"type": "analog", "device": 0, "address": 0, "value": 76.0},
+        {"type": "analog", "device": 0, "address": 2, "value": 92.0},
+        {"type": "analog", "device": 0, "address": 1, "value": 50.0}
+      ]
+    },
+    {
+      "offset_ms": 120000,
+      "points": [
+        {"type": "analog", "device": 0, "address": 0, "value": 74.0},
+        {"type": "analog", "device": 0, "address": 1, "value": 48.0}
+      ]
+    },
+    {
+      "offset_ms": 150000,
+      "points": [
+        {"type": "analog", "device": 0, "address": 0, "value": 72.5}
+      ]
+    },
+    {
+      "offset_ms": 180000,
+      "points": [
+        {"type": "analog", "device": 0, "address": 0, "value": 72.0}
+      ]
+    }
+  ]
+}

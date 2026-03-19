@@ -1,0 +1,118 @@
+# Simulation Control Config — uses actual demo channel IDs
+#
+# Channel mapping:
+#   1113 = AI1 Zone Temp (Thermistor 10K)
+#   1200 = AI2 Discharge Air
+#   1300 = AI3 Outdoor Air
+#   1400 = AI4 Return Air
+#   612  = I2C SDP810 Airflow (CFM)
+#   2100 = DI1 Occupancy
+#   2001 = DO1 Cool Stage 1
+#   2002 = DO2 Cool Stage 2
+#   2003 = DO3 Cool Stage 3
+#   2004 = DO4 Cool Stage 4
+#   2005 = PWM1 Fan Speed
+#   7500 = Virtual: Zone Cooling Setpoint
+#   7501 = Virtual: Scheduled Setpoint
+#   7502 = Virtual: Calibrated Temp
+#   7503 = Virtual: Fan Speed Command
+#   7504 = Virtual: Aux Heat Relay
+#   7505 = Virtual: Safety Interlock
+#   7506 = Virtual: Compressor Delay
+
+# ── PID Loop: Zone Cooling ─────────────────────────────────────────
+# Mirrors production EacIo Sedona app: LP (PID) + LSeq (4-stage sequencer)
+
+[[loop]]
+name = "zone_cooling"
+feedback_channel = 1113         # AI1 zone temp sensor (raw ADC → °F via conversion)
+setpoint_channel = 7500         # Virtual: cooling setpoint (written by const_setpoint below)
+output_channels = [2001, 2002, 2003, 2004]   # 4 cooling stages
+write_level = 8
+
+[loop.pid]
+kp = 20.0                      # Proportional gain (matches Sedona LP)
+ki = 5.0                       # Integral gain (matches Sedona LP)
+kd = 0.0                       # No derivative
+min = 0.0
+max = 100.0
+bias = 50.0
+direct = false                 # Reverse action: error = pv - sp, so hotter → more cooling
+exec_interval_ms = 1000
+
+[loop.sequencer]
+hysteresis = 0.5               # 50% band overlap
+
+# ── Standalone Components ──────────────────────────────────────────
+
+# Constant: write fixed 72°F setpoint to virtual channel
+[[component]]
+name = "const_setpoint"
+type = "const_float"
+value = 72.0
+output_channel = 7500
+write_level = 8
+
+# Float offset: calibrate zone temp (-1.5°F correction)
+[[component]]
+name = "temp_calibration"
+type = "float_offset"
+input_channels = [1113]
+output_channel = 7502
+offset = -1.5
+write_level = 8
+
+# Thermostat: emergency low-temp heating cutoff
+[[component]]
+name = "aux_heat"
+type = "thermostat"
+input_channels = [1113]
+output_channel = 7504
+setpoint = 60.0
+deadband = 3.0
+heating = true
+write_level = 8
+
+# Hysteresis: fan speed high/low based on zone temp
+[[component]]
+name = "fan_speed_switch"
+type = "hysteresis"
+input_channels = [1113]
+output_channel = 7503
+rising_threshold = 76.0
+falling_threshold = 72.0
+high_value = 100.0
+low_value = 50.0
+write_level = 8
+
+# Daily schedule: time-of-day setpoint
+[[component]]
+name = "cooling_schedule"
+type = "daily_schedule_float"
+default_value = 72.0
+output_channel = 7501
+write_level = 8
+
+[[component.entries]]
+hour = 6
+minute = 0
+value = 70.0
+
+[[component.entries]]
+hour = 18
+minute = 0
+value = 76.0
+
+[[component.entries]]
+hour = 22
+minute = 0
+value = 72.0
+
+# Delay On: compressor startup delay (5 seconds after stage 1 activates)
+[[component]]
+name = "compressor_delay"
+type = "delay_on"
+input_channels = [2001]
+output_channel = 7506
+delay_ms = 5000
+write_level = 8

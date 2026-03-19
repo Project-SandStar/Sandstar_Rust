@@ -1,0 +1,800 @@
+//! Haystack REST API built on Axum.
+//!
+//! Uses the command-channel pattern: REST handlers send [`EngineCmd`] messages
+//! through an mpsc channel to the main `select!` loop, which executes them
+//! against the engine and replies via oneshot.
+//!
+//! `EngineHandle` is `Clone + Send + Sync`, so it works as Axum `State`
+//! without requiring `Rc<RefCell<>>` or `Arc<Mutex<>>`.
+
+mod error;
+pub mod filter;
+pub mod handlers;
+#[cfg(feature = "simulator-hal")]
+pub mod sim;
+mod types;
+pub mod ws;
+pub mod zinc_format;
+pub mod zinc_grid;
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use axum::extract::{DefaultBodyLimit, Json, Request, State};
+use axum::http::{HeaderName, Method, StatusCode};
+use axum::middleware;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::Router;
+use tokio::sync::{mpsc, oneshot};
+use tower_http::cors::CorsLayer;
+
+use sandstar_ipc::types::{ChannelInfo, PollInfo, StatusInfo};
+use crate::auth::AuthState;
+use crate::history::HistoryPoint;
+
+// ── Engine command channel ───────────────────────────────────
+
+/// Commands sent from REST handlers to the engine main loop.
+pub enum EngineCmd {
+    Status {
+        reply: oneshot::Sender<StatusInfo>,
+    },
+    ListChannels {
+        reply: oneshot::Sender<Vec<ChannelInfo>>,
+    },
+    ListPolls {
+        reply: oneshot::Sender<Vec<PollInfo>>,
+    },
+    ListTables {
+        reply: oneshot::Sender<Vec<String>>,
+    },
+    ReadChannel {
+        channel: u32,
+        reply: oneshot::Sender<Result<ChannelValue, String>>,
+    },
+    WriteChannel {
+        channel: u32,
+        value: Option<f64>,
+        level: u8,
+        who: String,
+        duration: f64,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    GetWriteLevels {
+        channel: u32,
+        reply: oneshot::Sender<Result<Vec<sandstar_ipc::types::WriteLevelInfo>, String>>,
+    },
+    PollNow {
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    ReloadConfig {
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Server boot time + current time (for /api/about).
+    AboutInfo {
+        reply: oneshot::Sender<(u64, u64)>, // (boot_epoch_secs, current_epoch_secs)
+    },
+    /// Create or extend a watch subscription.
+    WatchSub {
+        watch_id: Option<String>,
+        display_name: Option<String>,
+        channels: Vec<u32>,
+        reply: oneshot::Sender<Result<WatchResponse, String>>,
+    },
+    /// Unsubscribe channels or close a watch.
+    WatchUnsub {
+        watch_id: String,
+        close: bool,
+        channels: Vec<u32>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Poll for changed values since last poll.
+    WatchPoll {
+        watch_id: String,
+        refresh: bool,
+        reply: oneshot::Sender<Result<WatchResponse, String>>,
+    },
+    /// Query channel history from the in-memory ring buffer.
+    GetHistory {
+        channel: u32,
+        since_unix: u64,
+        limit: usize,
+        reply: oneshot::Sender<Vec<HistoryPoint>>,
+    },
+    Shutdown,
+}
+
+/// A single channel value reading (returned by ReadChannel).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ChannelValue {
+    pub channel: u32,
+    pub status: String,
+    pub raw: f64,
+    pub cur: f64,
+}
+
+/// Watch subscription response (returned by WatchSub / WatchPoll).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WatchResponse {
+    pub watch_id: String,
+    pub lease: u32,
+    pub rows: Vec<ChannelValue>,
+}
+
+/// Cloneable, Send+Sync handle to the engine command channel.
+///
+/// Passed to Axum as `State<EngineHandle>`. Each handler method
+/// sends a command and awaits the oneshot reply.
+#[derive(Clone)]
+pub struct EngineHandle {
+    tx: mpsc::Sender<EngineCmd>,
+}
+
+impl EngineHandle {
+    pub fn new(tx: mpsc::Sender<EngineCmd>) -> Self {
+        Self { tx }
+    }
+
+    pub async fn status(&self) -> Result<StatusInfo, String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCmd::Status { reply })
+            .await
+            .map_err(|_| "engine stopped".to_string())?;
+        rx.await.map_err(|_| "engine dropped reply".to_string())
+    }
+
+    pub async fn list_channels(&self) -> Result<Vec<ChannelInfo>, String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCmd::ListChannels { reply })
+            .await
+            .map_err(|_| "engine stopped".to_string())?;
+        rx.await.map_err(|_| "engine dropped reply".to_string())
+    }
+
+    pub async fn list_polls(&self) -> Result<Vec<PollInfo>, String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCmd::ListPolls { reply })
+            .await
+            .map_err(|_| "engine stopped".to_string())?;
+        rx.await.map_err(|_| "engine dropped reply".to_string())
+    }
+
+    pub async fn list_tables(&self) -> Result<Vec<String>, String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCmd::ListTables { reply })
+            .await
+            .map_err(|_| "engine stopped".to_string())?;
+        rx.await.map_err(|_| "engine dropped reply".to_string())
+    }
+
+    pub async fn read_channel(&self, channel: u32) -> Result<ChannelValue, String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCmd::ReadChannel { channel, reply })
+            .await
+            .map_err(|_| "engine stopped".to_string())?;
+        rx.await.map_err(|_| "engine dropped reply".to_string())?
+    }
+
+    pub async fn write_channel(
+        &self,
+        channel: u32,
+        value: Option<f64>,
+        level: u8,
+        who: String,
+        duration: f64,
+    ) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCmd::WriteChannel {
+                channel,
+                value,
+                level,
+                who,
+                duration,
+                reply,
+            })
+            .await
+            .map_err(|_| "engine stopped".to_string())?;
+        rx.await.map_err(|_| "engine dropped reply".to_string())?
+    }
+
+    pub async fn get_write_levels(
+        &self,
+        channel: u32,
+    ) -> Result<Vec<sandstar_ipc::types::WriteLevelInfo>, String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCmd::GetWriteLevels { channel, reply })
+            .await
+            .map_err(|_| "engine stopped".to_string())?;
+        rx.await.map_err(|_| "engine dropped reply".to_string())?
+    }
+
+    pub async fn poll_now(&self) -> Result<String, String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCmd::PollNow { reply })
+            .await
+            .map_err(|_| "engine stopped".to_string())?;
+        rx.await.map_err(|_| "engine dropped reply".to_string())?
+    }
+
+    pub async fn reload_config(&self) -> Result<String, String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCmd::ReloadConfig { reply })
+            .await
+            .map_err(|_| "engine stopped".to_string())?;
+        rx.await.map_err(|_| "engine dropped reply".to_string())?
+    }
+
+    pub async fn about_info(&self) -> Result<(u64, u64), String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCmd::AboutInfo { reply })
+            .await
+            .map_err(|_| "engine stopped".to_string())?;
+        rx.await.map_err(|_| "engine dropped reply".to_string())
+    }
+
+    pub async fn watch_sub(
+        &self,
+        watch_id: Option<String>,
+        display_name: Option<String>,
+        channels: Vec<u32>,
+    ) -> Result<WatchResponse, String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCmd::WatchSub {
+                watch_id,
+                display_name,
+                channels,
+                reply,
+            })
+            .await
+            .map_err(|_| "engine stopped".to_string())?;
+        rx.await.map_err(|_| "engine dropped reply".to_string())?
+    }
+
+    pub async fn watch_unsub(
+        &self,
+        watch_id: String,
+        close: bool,
+        channels: Vec<u32>,
+    ) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCmd::WatchUnsub {
+                watch_id,
+                close,
+                channels,
+                reply,
+            })
+            .await
+            .map_err(|_| "engine stopped".to_string())?;
+        rx.await.map_err(|_| "engine dropped reply".to_string())?
+    }
+
+    pub async fn watch_poll(
+        &self,
+        watch_id: String,
+        refresh: bool,
+    ) -> Result<WatchResponse, String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCmd::WatchPoll {
+                watch_id,
+                refresh,
+                reply,
+            })
+            .await
+            .map_err(|_| "engine stopped".to_string())?;
+        rx.await.map_err(|_| "engine dropped reply".to_string())?
+    }
+
+    pub async fn get_history(
+        &self,
+        channel: u32,
+        since_unix: u64,
+        limit: usize,
+    ) -> Result<Vec<HistoryPoint>, String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCmd::GetHistory {
+                channel,
+                since_unix,
+                limit,
+                reply,
+            })
+            .await
+            .map_err(|_| "engine stopped".to_string())?;
+        rx.await.map_err(|_| "engine dropped reply".to_string())
+    }
+}
+
+// ── Router construction ──────────────────────────────────────
+
+/// Middleware that increments the REST request counter on every request.
+async fn count_requests(
+    request: Request,
+    next: middleware::Next,
+) -> Response {
+    crate::metrics::metrics().rest_requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    next.run(request).await
+}
+
+/// Middleware that checks auth on protected (mutating) routes.
+///
+/// Supports three auth methods (checked in order):
+/// 1. **No auth configured** -- pass through (current behavior)
+/// 2. **Bearer token** -- `Authorization: Bearer <token>` (legacy or session token)
+/// 3. **SCRAM initiation** -- returns 401 with instructions (client should use /api/auth)
+async fn check_auth(
+    axum::extract::State(auth_state): axum::extract::State<AuthState>,
+    request: Request,
+    next: middleware::Next,
+) -> Result<Response, StatusCode> {
+    if !auth_state.store.is_auth_required() {
+        return Ok(next.run(request).await);
+    }
+
+    let auth_header = request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    // Check Bearer token (legacy bearer or session token from SCRAM)
+    if let Some(bearer) = auth_header.strip_prefix("Bearer ") {
+        if auth_state.check_token(bearer) {
+            return Ok(next.run(request).await);
+        }
+    }
+
+    Err(StatusCode::UNAUTHORIZED)
+}
+
+// ── SCRAM Auth Endpoint ─────────────────────────────────────
+
+/// JSON request/response types for the /api/auth SCRAM endpoint.
+#[derive(serde::Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase")]
+enum AuthRequest {
+    /// Step 1: Client sends hello with username.
+    Hello {
+        username: String,
+    },
+    /// Step 2: Client sends client-first-message (SCRAM).
+    #[serde(rename_all = "camelCase")]
+    ScramFirst {
+        data: String, // base64(client-first-message)
+    },
+    /// Step 3: Client sends client-final-message.
+    #[serde(rename_all = "camelCase")]
+    ScramFinal {
+        handshake_token: String,
+        data: String, // base64(client-final-message)
+    },
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthChallengeResponse {
+    handshake_token: String,
+    hash: &'static str,
+    salt: String,     // base64
+    iterations: u32,
+    data: String,      // base64(server-first-message)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthTokenResponse {
+    auth_token: String,
+    data: String, // base64(server-final/server-signature)
+}
+
+#[derive(serde::Serialize)]
+struct AuthErrorResponse {
+    error: String,
+}
+
+/// POST /api/auth -- SCRAM-SHA-256 authentication endpoint.
+///
+/// This endpoint handles the multi-step SCRAM handshake via JSON POST.
+async fn auth_endpoint(
+    State(auth_state): State<AuthState>,
+    Json(req): Json<AuthRequest>,
+) -> Response {
+    match req {
+        AuthRequest::Hello { username } => {
+            handle_auth_hello(&auth_state, &username)
+        }
+        AuthRequest::ScramFirst { data } => {
+            handle_scram_first(&auth_state, &data)
+        }
+        AuthRequest::ScramFinal { handshake_token, data } => {
+            handle_scram_final(&auth_state, &handshake_token, &data)
+        }
+    }
+}
+
+fn handle_auth_hello(auth_state: &AuthState, username: &str) -> Response {
+    // Look up the user's salt and iterations (for the client to derive keys)
+    match auth_state.store.get_credential(username) {
+        Some(cred) => {
+            let salt_b64 = base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                &cred.salt,
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "hash": "SHA-256",
+                    "salt": salt_b64,
+                    "iterations": cred.iterations,
+                })),
+            )
+                .into_response()
+        }
+        None => (
+            StatusCode::UNAUTHORIZED,
+            Json(AuthErrorResponse {
+                error: "unknown user".to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+fn handle_scram_first(auth_state: &AuthState, data_b64: &str) -> Response {
+    let client_first = match base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        data_b64,
+    ) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(AuthErrorResponse {
+                        error: "invalid UTF-8 in client-first".to_string(),
+                    }),
+                )
+                    .into_response()
+            }
+        },
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(AuthErrorResponse {
+                    error: "invalid base64".to_string(),
+                }),
+            )
+                .into_response()
+        }
+    };
+
+    match auth_state.begin_scram(&client_first) {
+        Ok((hs_token, server_first)) => {
+            // Parse server-first to extract salt and iterations for the response
+            let mut salt_b64 = String::new();
+            let mut iterations = 0u32;
+            for part in server_first.split(',') {
+                if let Some(s) = part.strip_prefix("s=") {
+                    salt_b64 = s.to_string();
+                } else if let Some(i) = part.strip_prefix("i=") {
+                    iterations = i.parse().unwrap_or(0);
+                }
+            }
+            let server_first_b64 = base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                server_first.as_bytes(),
+            );
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(AuthChallengeResponse {
+                    handshake_token: hs_token,
+                    hash: "SHA-256",
+                    salt: salt_b64,
+                    iterations,
+                    data: server_first_b64,
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::UNAUTHORIZED,
+            Json(AuthErrorResponse { error: e }),
+        )
+            .into_response(),
+    }
+}
+
+fn handle_scram_final(
+    auth_state: &AuthState,
+    handshake_token: &str,
+    data_b64: &str,
+) -> Response {
+    let client_final = match base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        data_b64,
+    ) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(AuthErrorResponse {
+                        error: "invalid UTF-8 in client-final".to_string(),
+                    }),
+                )
+                    .into_response()
+            }
+        },
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(AuthErrorResponse {
+                    error: "invalid base64".to_string(),
+                }),
+            )
+                .into_response()
+        }
+    };
+
+    match auth_state.complete_scram(handshake_token, &client_final) {
+        Ok((session_token, server_sig)) => (
+            StatusCode::OK,
+            Json(AuthTokenResponse {
+                auth_token: session_token,
+                data: server_sig,
+            }),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::UNAUTHORIZED,
+            Json(AuthErrorResponse { error: e }),
+        )
+            .into_response(),
+    }
+}
+
+// ── Rate limiting ────────────────────────────────────────────
+
+/// Simple sliding-window rate limiter using atomics.
+///
+/// Tracks request count within a 1-second window. When the window
+/// expires, the counter resets. This is a global (not per-IP) limiter,
+/// suitable for an embedded device with a single API.
+pub struct RateLimiter {
+    /// Number of requests seen in the current window.
+    count: AtomicU64,
+    /// Start of the current window (epoch milliseconds).
+    window_start: AtomicI64,
+    /// Maximum requests allowed per 1-second window.
+    max_per_second: u64,
+}
+
+impl RateLimiter {
+    /// Create a new rate limiter with the given requests-per-second cap.
+    pub fn new(max_per_second: u64) -> Self {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        Self {
+            count: AtomicU64::new(0),
+            window_start: AtomicI64::new(now),
+            max_per_second,
+        }
+    }
+
+    /// Check whether a request should be allowed.
+    ///
+    /// Returns `true` if the request is within the rate limit.
+    /// If the 1-second window has elapsed, resets the counter.
+    ///
+    /// Note: There is a small race window when resetting the counter,
+    /// but on an embedded device with modest concurrency this is
+    /// acceptable. The worst case is allowing a few extra requests
+    /// at the window boundary.
+    pub fn check(&self) -> bool {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        let window = self.window_start.load(Ordering::Relaxed);
+        if now - window >= 1000 {
+            // New window — reset counter. Small race is OK (see doc comment).
+            self.window_start.store(now, Ordering::Relaxed);
+            self.count.store(1, Ordering::Relaxed);
+            true
+        } else {
+            let prev = self.count.fetch_add(1, Ordering::Relaxed);
+            prev < self.max_per_second
+        }
+    }
+}
+
+/// Axum middleware that enforces the rate limit.
+///
+/// Returns 429 Too Many Requests when the limit is exceeded.
+async fn rate_limit_middleware(
+    State(limiter): State<Arc<RateLimiter>>,
+    request: Request,
+    next: middleware::Next,
+) -> Result<Response, StatusCode> {
+    if !limiter.check() {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    Ok(next.run(request).await)
+}
+
+/// Build the Axum router for the Haystack REST API.
+///
+/// `rate_limit` is the maximum requests per second (0 = unlimited).
+/// Accepts `AuthState` for SCRAM + bearer auth, or pass `AuthState::new(AuthStore::new())` for no auth.
+///
+/// **Backward compat**: `router_legacy` wraps this for callers that still use `Option<String>`.
+pub fn router(handle: EngineHandle, auth_token: Option<String>, rate_limit: u64) -> Router {
+    use crate::auth::AuthStore;
+    let auth_store = match auth_token {
+        Some(ref t) => AuthStore::with_bearer_token(t.clone()),
+        None => AuthStore::new(),
+    };
+    let auth_state = AuthState::new(auth_store);
+    router_with_auth(handle, auth_state, auth_token, rate_limit)
+}
+
+/// Build the router with full `AuthState` (SCRAM + bearer + sessions).
+pub fn router_with_auth(
+    handle: EngineHandle,
+    auth_state: AuthState,
+    auth_token: Option<String>,
+    rate_limit: u64,
+) -> Router {
+    // Public read-only routes (no auth required)
+    let public = Router::new()
+        .route("/api/about", get(handlers::about))
+        .route("/api/ops", get(handlers::ops))
+        .route("/api/formats", get(handlers::formats))
+        .route("/api/read", get(handlers::read))
+        .route("/api/status", get(handlers::status))
+        .route("/health", get(handlers::health))
+        .route("/api/metrics", get(handlers::metrics_endpoint))
+        .route("/api/channels", get(handlers::channels))
+        .route("/api/polls", get(handlers::polls))
+        .route("/api/tables", get(handlers::tables))
+        .route("/api/pointWrite", get(handlers::point_write_read))
+        .route("/api/history/{channel}", get(handlers::history))
+        .with_state(handle.clone());
+
+    // SCRAM auth endpoint (public — handles its own auth flow)
+    let auth_route = Router::new()
+        .route("/api/auth", post(auth_endpoint))
+        .with_state(auth_state.clone());
+
+    // WebSocket route (handles its own auth via query param, message, or SCRAM)
+    let ws_route = Router::new()
+        .route("/api/ws", get(ws::ws_upgrade))
+        .with_state(ws::WsState {
+            engine: handle.clone(),
+            auth_token,
+            auth_state: Some(auth_state.clone()),
+        });
+
+    // Protected mutating routes (auth required if token/SCRAM is configured)
+    let protected = Router::new()
+        .route("/api/pointWrite", post(handlers::point_write))
+        .route("/api/pollNow", post(handlers::poll_now))
+        .route("/api/reload", post(handlers::reload))
+        .route("/api/watchSub", post(handlers::watch_sub))
+        .route("/api/watchUnsub", post(handlers::watch_unsub))
+        .route("/api/watchPoll", post(handlers::watch_poll))
+        .route("/api/hisRead", post(handlers::his_read))
+        .route("/api/nav", post(handlers::nav))
+        .route("/api/invokeAction", post(handlers::invoke_action))
+        .route_layer(middleware::from_fn_with_state(
+            auth_state,
+            check_auth,
+        ))
+        .with_state(handle);
+
+    // CORS policy: allow any origin (embedded device accessed by various IPs)
+    // but restrict methods and headers to only what we actually use.
+    // This is safer than CorsLayer::permissive() which allows arbitrary
+    // headers and methods.
+    let cors = CorsLayer::new()
+        .allow_origin(tower_http::cors::Any)
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers([
+            HeaderName::from_static("content-type"),
+            HeaderName::from_static("authorization"),
+            HeaderName::from_static("accept"),
+        ])
+        .max_age(Duration::from_secs(3600));
+
+    // Merge and apply global middleware.
+    // Layer order (axum applies bottom-up): CORS → body limit → rate limit → count.
+    let mut app = public
+        .merge(protected)
+        .merge(ws_route)
+        .merge(auth_route)
+        .layer(middleware::from_fn(count_requests));
+
+    // Apply rate limiting only when configured (rate_limit > 0).
+    if rate_limit > 0 {
+        let limiter = Arc::new(RateLimiter::new(rate_limit));
+        app = app.layer(middleware::from_fn_with_state(limiter, rate_limit_middleware));
+    }
+
+    app.layer(DefaultBodyLimit::max(1_048_576))
+        .layer(cors)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rate_limiter_allows_under_limit() {
+        let limiter = RateLimiter::new(10);
+        // First 10 requests within the same window should be allowed
+        for i in 0..10 {
+            assert!(limiter.check(), "request {} should be allowed", i);
+        }
+    }
+
+    #[test]
+    fn rate_limiter_blocks_over_limit() {
+        let limiter = RateLimiter::new(5);
+        // Exhaust the limit
+        for _ in 0..5 {
+            assert!(limiter.check());
+        }
+        // 6th request should be blocked
+        assert!(!limiter.check(), "request over limit should be blocked");
+        assert!(!limiter.check(), "subsequent requests should also be blocked");
+    }
+
+    #[test]
+    fn rate_limiter_resets_after_window() {
+        let limiter = RateLimiter::new(3);
+        // Exhaust the limit
+        for _ in 0..3 {
+            assert!(limiter.check());
+        }
+        assert!(!limiter.check(), "over limit");
+
+        // Simulate window expiry by rewinding the window start
+        limiter.window_start.store(0, Ordering::Relaxed);
+
+        // Should be allowed again after window reset
+        assert!(limiter.check(), "should allow after window reset");
+    }
+
+    #[test]
+    fn rate_limiter_single_request_allowed() {
+        let limiter = RateLimiter::new(1);
+        assert!(limiter.check());
+        assert!(!limiter.check());
+    }
+
+    #[test]
+    fn rate_limiter_high_limit() {
+        let limiter = RateLimiter::new(10_000);
+        // All requests well under the limit should pass
+        for _ in 0..1_000 {
+            assert!(limiter.check());
+        }
+    }
+}

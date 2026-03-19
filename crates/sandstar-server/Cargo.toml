@@ -1,0 +1,121 @@
+[package]
+name = "sandstar-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Sandstar engine server binary"
+
+[lib]
+name = "sandstar_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sandstar-engine-server"
+path = "src/main.rs"
+
+[features]
+default = ["mock-hal"]
+mock-hal = []
+linux-hal = ["dep:sandstar-hal-linux", "dep:libc"]
+simulator-hal = ["sandstar-hal/simulator"]
+tls = ["dep:axum-server", "dep:rustls", "dep:rustls-pemfile"]
+
+[dependencies]
+sandstar-engine = { path = "../sandstar-engine" }
+sandstar-hal = { path = "../sandstar-hal" }
+sandstar-hal-linux = { path = "../sandstar-hal-linux", optional = true }
+sandstar-ipc = { path = "../sandstar-ipc" }
+sandstar-svm = { path = "../sandstar-svm" }
+tokio = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+clap = { workspace = true }
+toml = { workspace = true }
+fs2 = { workspace = true }
+libc = { version = "0.2", optional = true }
+axum = { workspace = true }
+serde_json = { workspace = true }
+tower-http = { workspace = true }
+futures-util = "0.3"
+sha2 = "0.10"
+hmac = "0.12"
+pbkdf2 = { version = "0.12", features = ["simple"] }
+base64 = "0.22"
+rand = "0.9"
+quick-xml = "0.37"
+axum-server = { version = "0.8", features = ["tls-rustls"], optional = true }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring"] }
+rustls-pemfile = { version = "2", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1", features = ["full", "test-util"] }
+tokio-tungstenite = "0.26"
+futures-util = "0.3"
+base64 = "0.22"
+tower = "0.5"
+
+[package.metadata.deb]
+name = "sandstar"
+maintainer = "EacIo <admin@eacio.com>"
+depends = ""
+section = "embedded"
+priority = "optional"
+extended-description = """Sandstar engine server for BeagleBone IoT.
+Reads analog/digital/I2C/PWM channels, converts raw ADC values
+via lookup tables, and exposes data over IPC and REST API (port 8085)."""
+# Build with: cargo deb --target armv7-unknown-linux-gnueabihf --no-build -p sandstar-server --variant linux-hal
+# Requires prior: cargo build --target armv7-unknown-linux-gnueabihf --release --no-default-features --features linux-hal
+maintainer-scripts = "deb/"
+assets = [
+    # Binaries
+    ["target/release/sandstar-engine-server", "/home/eacio/sandstar/bin/sandstar-engine-server", "755"],
+    ["target/release/sandstar-cli",          "/home/eacio/sandstar/bin/sandstar-cli",          "755"],
+    # Systemd services
+    ["../../etc/sandstar-engine.service", "/etc/systemd/system/sandstar-engine.service", "644"],
+    ["../../etc/sandstar-rust-validate.service", "/etc/systemd/system/sandstar-rust-validate.service", "644"],
+    # Hardware initialization script
+    ["../../etc/initialize.sh", "/home/eacio/sandstar/etc/init/initialize.sh", "755"],
+    # Operations scripts
+    ["../../tools/validate-engines.sh", "/home/eacio/sandstar/bin/validate-engines.sh", "755"],
+    ["../../tools/soak-monitor.sh",     "/home/eacio/sandstar/bin/soak-monitor.sh",     "755"],
+    ["../../tools/cutover-to-rust.sh",  "/home/eacio/sandstar/bin/cutover-to-rust.sh",  "755"],
+    ["../../tools/rollback-to-c.sh",    "/home/eacio/sandstar/bin/rollback-to-c.sh",    "755"],
+    # Logrotate
+    ["../../etc/logrotate.d/sandstar",  "/etc/logrotate.d/sandstar",                    "644"],
+    # Lookup tables (ADC-to-engineering-unit conversion)
+    ["../../../shaystack/sandstar/sandstar/usr/local/config/0-10v.txt",          "/home/eacio/sandstar/etc/config/0-10v.txt",          "644"],
+    ["../../../shaystack/sandstar/sandstar/usr/local/config/0-20ma.txt",         "/home/eacio/sandstar/etc/config/0-20ma.txt",         "644"],
+    ["../../../shaystack/sandstar/sandstar/usr/local/config/0-5v.txt",           "/home/eacio/sandstar/etc/config/0-5v.txt",           "644"],
+    ["../../../shaystack/sandstar/sandstar/usr/local/config/4-20ma.txt",         "/home/eacio/sandstar/etc/config/4-20ma.txt",         "644"],
+    ["../../../shaystack/sandstar/sandstar/usr/local/config/ni1000.txt",         "/home/eacio/sandstar/etc/config/ni1000.txt",         "644"],
+    ["../../../shaystack/sandstar/sandstar/usr/local/config/pt100.txt",          "/home/eacio/sandstar/etc/config/pt100.txt",          "644"],
+    ["../../../shaystack/sandstar/sandstar/usr/local/config/pt500.txt",          "/home/eacio/sandstar/etc/config/pt500.txt",          "644"],
+    ["../../../shaystack/sandstar/sandstar/usr/local/config/pt1000.txt",         "/home/eacio/sandstar/etc/config/pt1000.txt",         "644"],
+    ["../../../shaystack/sandstar/sandstar/usr/local/config/thermistor100K.txt", "/home/eacio/sandstar/etc/config/thermistor100K.txt", "644"],
+    ["../../../shaystack/sandstar/sandstar/usr/local/config/thermistor10K1.txt", "/home/eacio/sandstar/etc/config/thermistor10K1.txt", "644"],
+    ["../../../shaystack/sandstar/sandstar/usr/local/config/thermistor10K2.txt", "/home/eacio/sandstar/etc/config/thermistor10K2.txt", "644"],
+    ["../../../shaystack/sandstar/sandstar/usr/local/config/thermistor10K3.txt", "/home/eacio/sandstar/etc/config/thermistor10K3.txt", "644"],
+    ["../../../shaystack/sandstar/sandstar/usr/local/config/thermistor20K.txt",  "/home/eacio/sandstar/etc/config/thermistor20K.txt",  "644"],
+    ["../../../shaystack/sandstar/sandstar/usr/local/config/thermistor20K4.txt", "/home/eacio/sandstar/etc/config/thermistor20K4.txt", "644"],
+    ["../../../shaystack/sandstar/sandstar/usr/local/config/thermistor2200.txt", "/home/eacio/sandstar/etc/config/thermistor2200.txt", "644"],
+    ["../../../shaystack/sandstar/sandstar/usr/local/config/thermistor3000.txt", "/home/eacio/sandstar/etc/config/thermistor3000.txt", "644"],
+]
+conf-files = [
+    "/etc/systemd/system/sandstar-engine.service",
+    "/etc/systemd/system/sandstar-rust-validate.service",
+    "/home/eacio/sandstar/etc/init/initialize.sh",
+    "/etc/logrotate.d/sandstar",
+]
+
+[package.metadata.deb.variants.linux-hal]
+features = ["linux-hal"]
+default-features = false

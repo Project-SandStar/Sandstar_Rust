@@ -1,0 +1,13 @@
+[package]
+name = "sandstar-engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+bitflags = "2"
+sandstar-hal = { path = "../sandstar-hal" }
+
+[dev-dependencies]
+approx = "0.5"

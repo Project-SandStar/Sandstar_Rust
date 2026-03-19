@@ -1,0 +1,31 @@
+# Build artifacts
+/target/
+
+# Runtime logs and test outputs
+/logs/
+/test_logs/
+server_stderr.log
+
+# Sedona build artifacts
+/SedonaRepo/**/*.log
+/SedonaRepo/**/*.sab
+/SedonaRepo/**/*.scode
+/SedonaRepo/**/data.pstore
+/SedonaRepo/**/svm.exe
+/SedonaRepo/**/build-info.txt
+
+# OS/IDE files
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.iml
+
+# Environment / secrets
+.env
+.env.local
+*.pem
+*.key
+*.cert

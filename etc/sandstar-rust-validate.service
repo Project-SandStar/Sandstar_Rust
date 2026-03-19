@@ -1,0 +1,45 @@
+[Unit]
+Description=Sandstar Engine Server (Rust) - Validation Mode
+Documentation=Side-by-side with C engine for comparison testing
+After=sandstar.service network.target
+Wants=sandstar.service
+
+[Service]
+Type=simple
+
+# No ExecStartPre — the C engine's sandstar.service already runs initialize.sh
+
+ExecStart=/home/eacio/sandstar/bin/sandstar-engine-server \
+    --config-dir /home/eacio/sandstar/etc/EacIo \
+    --http-port 8086 \
+    --socket /tmp/sandstar-rust.sock \
+    --pid-file /var/run/sandstar/sandstar-rust.pid \
+    --log-file /var/log/sandstar/sandstar-rust.log \
+    --log-level info \
+    --read-only
+
+ExecReload=/bin/kill -HUP $MAINPID
+
+User=eacio
+Group=root
+SupplementaryGroups=i2c dialout gpio
+
+RuntimeDirectory=sandstar
+LogsDirectory=sandstar
+
+Restart=on-failure
+RestartSec=5
+
+# Lower memory limit (validation only, no writes)
+MemoryMax=64M
+LimitCORE=infinity
+UMask=0077
+
+# Security hardening
+ProtectSystem=strict
+ReadWritePaths=/home/eacio/sandstar /var/run/sandstar /var/log/sandstar /tmp
+ReadWritePaths=/sys/class/gpio /sys/class/pwm /sys/bus/iio /dev/i2c-2
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,45 @@
+#!/bin/bash
+set -e
+
+# Create eacio user if it doesn't exist
+if ! id -u eacio >/dev/null 2>&1; then
+    useradd -r -m -d /home/eacio -s /bin/bash eacio
+    echo "Created system user: eacio"
+fi
+
+# Ensure directory structure exists (including SVM/Sedona paths)
+for dir in \
+    /home/eacio/sandstar/bin \
+    /home/eacio/sandstar/etc/config \
+    /home/eacio/sandstar/etc/init \
+    /home/eacio/sandstar/etc/EacIo \
+    /home/eacio/sandstar/etc/sedona \
+    /home/eacio/sandstar/data \
+    /home/eacio/sandstar/backup \
+    /var/run/sandstar \
+    /var/log/sandstar; do
+    mkdir -p "$dir"
+    chown eacio:root "$dir"
+done
+
+chown -R eacio:root /home/eacio/sandstar/
+
+# Reload systemd for both services
+systemctl daemon-reload
+
+# Enable the production service (but don't auto-start on fresh install)
+systemctl enable sandstar-engine 2>/dev/null || true
+
+# Handle upgrade vs fresh install
+if systemctl is-active --quiet sandstar-engine; then
+    systemctl restart sandstar-engine
+    echo "Sandstar engine restarted"
+elif systemctl is-active --quiet sandstar-rust-validate; then
+    # Running in validation mode — restart that instead
+    systemctl restart sandstar-rust-validate
+    echo "Sandstar validation service restarted"
+else
+    # Fresh install — start production service
+    systemctl start sandstar-engine 2>/dev/null || true
+    echo "Sandstar engine started"
+fi

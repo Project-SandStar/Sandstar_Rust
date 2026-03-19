@@ -1,0 +1,13 @@
+[package]
+name = "sandstar-ipc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Shared IPC types and protocol for Sandstar engine communication"
+
+[dependencies]
+sandstar-engine = { path = "../sandstar-engine" }
+serde = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }

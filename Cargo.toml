@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.75"
+license = "Proprietary"
+
+[workspace.dependencies]
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["rt", "net", "time", "sync", "signal", "macros", "io-util"] }
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+clap = { version = "4", features = ["derive", "env"] }
+toml = "0.8"
+fs2 = "0.4"
+tracing-appender = "0.2"
+axum = { version = "0.8", features = ["ws"] }
+serde_json = "1"
+tower-http = { version = "0.6", features = ["cors", "trace"] }

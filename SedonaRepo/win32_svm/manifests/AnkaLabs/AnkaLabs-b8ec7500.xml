@@ -1,0 +1,24 @@
+<?xml version='1.0'?>
+<kitManifest
+   name="AnkaLabs"
+   checksum="b8ec7500"
+   hasNatives="true"
+   doc="false"
+   version="1.2.28"
+   vendor="Tridium"
+   description="blah"
+   buildHost="beaglebone"
+   buildTime="2017-03-19T09:22:36.088Z"
+>
+
+<!-- Dependencies -->
+<depends>
+  <depend on="sys 1.2+"/>
+</depends>
+
+<!-- AnkaLabs::BBBIO -->
+<type id="0" name="BBBIO" sizeof="40" base="sys::Component">
+  <slot id="0" name="in1" type="int"/>
+</type>
+
+</kitManifest>

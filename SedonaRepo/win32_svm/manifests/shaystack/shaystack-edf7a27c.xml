@@ -1,0 +1,264 @@
+<?xml version='1.0'?>
+<kitManifest
+   name="shaystack"
+   checksum="edf7a27c"
+   hasNatives="true"
+   doc="false"
+   version="1.2"
+   vendor="AnkaLabs"
+   description="Anka Labs Haystack Driver Kit"
+   buildHost="ubuntu-linux-22-04-02-desktop"
+   buildTime="2025-10-27T07:16:58.211-05:00"
+>
+
+<!-- Dependencies -->
+<depends>
+  <depend on="sys 1.2+"/>
+  <depend on="driver 1.2+"/>
+  <depend on="EacIo 1.2+"/>
+  <depend on="inet 1.2+"/>
+  <depend on="sox 1.2+"/>
+  <depend on="web 1.2+"/>
+</depends>
+
+<!-- shaystack::HaystackPoint -->
+<type id="0" name="HaystackPoint" sizeof="92" flags="a" base="driver::Point">
+  <facets>
+    <bool name="palette" val="false"/>
+  </facets>
+</type>
+
+<!-- shaystack::HaystackOPoint -->
+<type id="1" name="HaystackOPoint" sizeof="2420" flags="a" base="shaystack::HaystackPoint">
+  <facets>
+    <bool name="palette" val="false"/>
+  </facets>
+  <slot id="0" name="clientId" type="int" flags="c" default="-1">
+    <facets>
+      <bool name="config" val="true"/>
+    </facets>
+  </slot>
+  <slot id="1" name="pointId" type="sys::Buf" flags="cs" default="">
+    <facets>
+      <bool name="asStr" val="true"/>
+      <bool name="config" val="true"/>
+      <int name="max" val="255"/>
+    </facets>
+  </slot>
+  <slot id="2" name="level" type="int" flags="c" default="8">
+    <facets>
+      <int name="min" val="1"/>
+      <bool name="config" val="true"/>
+      <int name="max" val="17"/>
+    </facets>
+  </slot>
+  <slot id="3" name="duration" type="long" default="600"/>
+  <slot id="4" name="performRead" type="bool" default="true"/>
+  <slot id="5" name="performWrite" type="bool" default="false"/>
+  <slot id="6" name="performReset" type="bool" default="false"/>
+  <slot id="7" name="doWrite" type="void" flags="a"/>
+  <slot id="8" name="doReset" type="void" flags="a"/>
+  <slot id="9" name="onRead" type="sys::Buf" flags="a"/>
+  <slot id="10" name="onReadStatus" type="sys::Buf" flags="a"/>
+</type>
+
+<!-- shaystack::HaystackAOPoint -->
+<type id="2" name="HaystackAOPoint" sizeof="2424" base="shaystack::HaystackOPoint">
+  <slot id="0" name="val" type="float"/>
+</type>
+
+<!-- shaystack::HaystackIPoint -->
+<type id="3" name="HaystackIPoint" sizeof="14024" flags="a" base="shaystack::HaystackPoint">
+  <facets>
+    <bool name="palette" val="false"/>
+  </facets>
+  <slot id="0" name="clientId" type="int" flags="c" default="-1">
+    <facets>
+      <bool name="config" val="true"/>
+    </facets>
+  </slot>
+  <slot id="1" name="query" type="bool"/>
+  <slot id="2" name="pointId" type="sys::Buf" flags="cs" default="">
+    <facets>
+      <bool name="asStr" val="true"/>
+      <bool name="config" val="true"/>
+      <int name="max" val="255"/>
+    </facets>
+  </slot>
+  <slot id="3" name="expression" type="sys::Buf" flags="cs" default="">
+    <facets>
+      <bool name="asStr" val="true"/>
+      <bool name="config" val="true"/>
+      <int name="max" val="255"/>
+    </facets>
+  </slot>
+  <slot id="4" name="maxFreq" type="long" flags="c" default="1000">
+    <facets>
+      <bool name="config" val="true"/>
+    </facets>
+  </slot>
+  <slot id="5" name="updateInterval" type="long" flags="c" default="5">
+    <facets>
+      <bool name="config" val="true"/>
+    </facets>
+  </slot>
+  <slot id="6" name="doCall" type="void" flags="a"/>
+  <slot id="7" name="onSub" type="sys::Buf" flags="a"/>
+  <slot id="8" name="onPoll" type="sys::Buf" flags="a"/>
+  <slot id="9" name="onRead" type="sys::Buf" flags="a"/>
+</type>
+
+<!-- shaystack::HaystackAiPoint -->
+<type id="4" name="HaystackAiPoint" sizeof="14028" base="shaystack::HaystackIPoint">
+  <slot id="0" name="out" type="float"/>
+  <slot id="1" name="onRead" type="sys::Buf" flags="a"/>
+  <slot id="2" name="onPoll" type="sys::Buf" flags="a"/>
+</type>
+
+<!-- shaystack::HaystackDOPoint -->
+<type id="5" name="HaystackDOPoint" sizeof="2424" base="shaystack::HaystackOPoint">
+  <slot id="0" name="val" type="bool"/>
+</type>
+
+<!-- shaystack::HaystackDevice -->
+<type id="6" name="HaystackDevice" sizeof="15048" base="driver::Device">
+  <facets>
+    <str name="niagaraIcon" val="module://icons/x16/folder.png"/>
+  </facets>
+  <slot id="0" name="hostname" type="sys::Buf" flags="cs" default="localhost">
+    <facets>
+      <bool name="asStr" val="true"/>
+      <bool name="config" val="true"/>
+      <int name="max" val="32"/>
+    </facets>
+  </slot>
+  <slot id="1" name="port" type="int" flags="c" default="8086">
+    <facets>
+      <bool name="config" val="true"/>
+    </facets>
+  </slot>
+  <slot id="2" name="username" type="sys::Buf" flags="cs" default="admin">
+    <facets>
+      <bool name="asStr" val="true"/>
+      <bool name="config" val="true"/>
+      <int name="max" val="32"/>
+    </facets>
+  </slot>
+  <slot id="3" name="password" type="sys::Buf" flags="cs" default="admin">
+    <facets>
+      <bool name="asStr" val="true"/>
+      <bool name="config" val="true"/>
+      <int name="max" val="32"/>
+    </facets>
+  </slot>
+  <slot id="4" name="projName" type="sys::Buf" flags="cs" default="demo">
+    <facets>
+      <bool name="asStr" val="true"/>
+      <bool name="config" val="true"/>
+      <int name="max" val="32"/>
+    </facets>
+  </slot>
+  <slot id="5" name="forceReauthenticate" type="long" flags="c" default="10800">
+    <facets>
+      <bool name="config" val="true"/>
+    </facets>
+  </slot>
+  <slot id="6" name="clientId" type="int" flags="c" default="-1">
+    <facets>
+      <bool name="config" val="true"/>
+    </facets>
+  </slot>
+  <slot id="7" name="connection_status" type="sys::Buf" flags="s" default="none">
+    <facets>
+      <bool name="asStr" val="true"/>
+      <bool name="readonly" val="true"/>
+      <int name="max" val="32"/>
+    </facets>
+  </slot>
+  <slot id="8" name="WebClientPreset" type="sys::Buf" flags="s" default="Not present">
+    <facets>
+      <bool name="asStr" val="true"/>
+      <bool name="readonly" val="true"/>
+      <int name="max" val="32"/>
+    </facets>
+  </slot>
+  <slot id="9" name="find_webclient" type="void" flags="a"/>
+  <slot id="10" name="reconnect" type="void" flags="a"/>
+  <slot id="11" name="onAuthMessage" type="sys::Buf" flags="a"/>
+</type>
+
+<!-- shaystack::HaystackDiPoint -->
+<type id="7" name="HaystackDiPoint" sizeof="14028" base="shaystack::HaystackIPoint">
+  <slot id="0" name="out" type="bool"/>
+  <slot id="1" name="onRead" type="sys::Buf" flags="a"/>
+  <slot id="2" name="onPoll" type="sys::Buf" flags="a"/>
+</type>
+
+<!-- shaystack::HaystackEval -->
+<type id="8" name="HaystackEval" sizeof="14288" flags="a" base="shaystack::HaystackIPoint">
+  <facets>
+    <bool name="palette" val="false"/>
+  </facets>
+  <slot id="0" name="rowNum" type="int" flags="c" default="0">
+    <facets>
+      <bool name="config" val="true"/>
+    </facets>
+  </slot>
+  <slot id="1" name="colName" type="sys::Buf" flags="cs" default="v0">
+    <facets>
+      <bool name="asStr" val="true"/>
+      <bool name="config" val="true"/>
+      <int name="max" val="255"/>
+    </facets>
+  </slot>
+</type>
+
+<!-- shaystack::HaystackEvalBool -->
+<type id="9" name="HaystackEvalBool" sizeof="14292" base="shaystack::HaystackEval">
+  <slot id="0" name="out" type="bool"/>
+  <slot id="1" name="onRead" type="sys::Buf" flags="a"/>
+</type>
+
+<!-- shaystack::HaystackEvalFloat -->
+<type id="10" name="HaystackEvalFloat" sizeof="14292" base="shaystack::HaystackEval">
+  <slot id="0" name="out" type="float"/>
+  <slot id="1" name="onRead" type="sys::Buf" flags="a"/>
+</type>
+
+<!-- shaystack::HaystackFilter -->
+<type id="11" name="HaystackFilter" sizeof="5240" base="shaystack::HaystackPoint">
+  <slot id="0" name="clientId" type="int" flags="c" default="-1">
+    <facets>
+      <bool name="config" val="true"/>
+    </facets>
+  </slot>
+  <slot id="1" name="expression" type="sys::Buf" flags="cs" default="">
+    <facets>
+      <bool name="asStr" val="true"/>
+      <bool name="config" val="true"/>
+      <int name="max" val="255"/>
+    </facets>
+  </slot>
+  <slot id="2" name="pointId" type="sys::Buf" flags="s" default="">
+    <facets>
+      <bool name="asStr" val="true"/>
+      <int name="max" val="255"/>
+    </facets>
+  </slot>
+  <slot id="3" name="dis" type="sys::Buf" flags="s" default="">
+    <facets>
+      <bool name="asStr" val="true"/>
+      <int name="max" val="255"/>
+    </facets>
+  </slot>
+  <slot id="4" name="query" type="bool" default="true"/>
+  <slot id="5" name="doQuery" type="void" flags="a"/>
+  <slot id="6" name="onRead" type="sys::Buf" flags="a"/>
+  <slot id="7" name="onReadDis" type="sys::Buf" flags="a"/>
+</type>
+
+<!-- shaystack::WebClient -->
+<type id="12" name="WebClient" sizeof="64" base="sys::Service">
+</type>
+
+</kitManifest>

@@ -1,0 +1,12 @@
+#!/bin/bash
+set -e
+
+if systemctl is-active --quiet sandstar-engine; then
+    systemctl stop sandstar-engine
+    echo "Sandstar engine stopped"
+fi
+
+if systemctl is-active --quiet sandstar-rust-validate; then
+    systemctl stop sandstar-rust-validate
+    echo "Sandstar validation service stopped"
+fi

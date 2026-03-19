@@ -1,0 +1,140 @@
+# EacIo Zone Cooling Control
+# Matches the Sedona app.sax production configuration.
+#
+# The Sedona app has:
+#   - control::LP (PID loop): kp=20, ki=5, sp from ch75, cv from ch4
+#   - hvac::LSeq (Lead Sequencer): 4 stages, delta=20
+#   - BoolOutput stages: ch35 (stage 1), ch50 (stage 2), ch53 (stage 3), ch47 (stage 4)
+#
+# This TOML replaces those Sedona components with a native Rust control runner.
+
+[[loop]]
+name = "zone_cooling"
+feedback_channel = 4          # AI1 zone air temp sensor
+setpoint_channel = 75         # Virtual channel: zone cooling setpoint (70F default)
+output_channels = [35, 50, 53, 47]  # DO: cooling stages 1-4
+write_level = 8               # BACnet priority level (default 8, matching Sedona)
+
+[loop.pid]
+kp = 20.0                     # Proportional gain
+ki = 5.0                      # Integral gain (resets per minute)
+kd = 0.0                      # Derivative gain (not used)
+min = 0.0                     # Output minimum (%)
+max = 100.0                   # Output maximum (%)
+direct = false                # Reverse action (cooling): error = pv - sp, more output when hotter
+exec_interval_ms = 1000       # Execute every 1 second
+
+[loop.sequencer]
+hysteresis = 0.5              # 50% band overlap (prevents rapid cycling)
+# num_stages is auto-detected from output_channels length (4)
+
+# ── Standalone Components ────────────────────────────────────────
+# Components run independently of PID loops and wire directly
+# between engine channels. They execute after loops in each cycle.
+
+# Constant float: write a fixed setpoint to a virtual channel.
+[[component]]
+name = "const_setpoint"
+type = "const_float"
+value = 70.0                  # Fixed cooling setpoint (degrees F)
+output_channel = 75           # Virtual channel: zone cooling setpoint
+write_level = 8
+
+# Division: compute damper position ratio from two sensor inputs.
+[[component]]
+name = "damper_ratio"
+type = "div2"
+input_channels = [16, 10]     # Numerator from ch16, denominator from ch10
+output_channel = 22           # Result written to ch22
+write_level = 8
+
+# Addition: combine two offsets.
+[[component]]
+name = "offset_sum"
+type = "add2"
+input_channels = [20, 21]     # Sum of ch20 + ch21
+output_channel = 23
+write_level = 8
+
+# Float offset: apply a calibration offset to a sensor reading.
+[[component]]
+name = "temp_calibration"
+type = "float_offset"
+input_channels = [4]          # Raw temperature
+output_channel = 5            # Calibrated temperature
+offset = -1.5                 # Subtract 1.5F calibration error
+write_level = 8
+
+# Ramp: generate a ramp signal cycling between min and max.
+[[component]]
+name = "ramp_test"
+type = "ramp"
+min = 50.0
+max = 100.0
+period_ms = 5000              # 5-second ramp cycle
+output_channel = 30
+write_level = 8
+
+# Thermostat: simple on/off heating control with deadband.
+[[component]]
+name = "aux_heat"
+type = "thermostat"
+input_channels = [4]          # Zone temperature sensor
+output_channel = 40           # Heating relay output (1.0=on, 0.0=off)
+setpoint = 65.0               # Emergency low-temp setpoint
+deadband = 3.0                # 3-degree deadband
+heating = true
+write_level = 8
+
+# Hysteresis: switch between high/low values with hysteresis band.
+[[component]]
+name = "fan_speed_switch"
+type = "hysteresis"
+input_channels = [4]          # Zone temperature
+output_channel = 41
+rising_threshold = 78.0       # Switch to high at 78F
+falling_threshold = 74.0      # Switch to low at 74F
+high_value = 100.0            # High fan speed (%)
+low_value = 50.0              # Low fan speed (%)
+write_level = 8
+
+# Daily schedule: time-of-day setpoint schedule.
+# Requires two input channels for hour and minute (or uses system clock).
+[[component]]
+name = "cooling_schedule"
+type = "daily_schedule_float"
+default_value = 72.0          # Default setpoint (used before first entry)
+output_channel = 76           # Scheduled setpoint output
+write_level = 8
+
+[[component.entries]]
+hour = 6
+minute = 0
+value = 70.0                  # Morning: 70F
+
+[[component.entries]]
+hour = 18
+minute = 0
+value = 76.0                  # Evening: relax to 76F
+
+[[component.entries]]
+hour = 22
+minute = 0
+value = 72.0                  # Night: 72F
+
+# Delay On: output goes true only after input has been true for delay_ms.
+[[component]]
+name = "compressor_delay"
+type = "delay_on"
+input_channels = [35]         # Cooling stage 1
+output_channel = 42           # Delayed compressor enable
+delay_ms = 5000               # 5-second startup delay
+write_level = 8
+
+# Logic AND: both inputs must be true (non-zero).
+[[component]]
+name = "safety_interlock"
+type = "and2"
+input_channels = [60, 61]     # Two safety switches
+output_channel = 62           # Combined interlock (1.0 if both ok)
+write_level = 8

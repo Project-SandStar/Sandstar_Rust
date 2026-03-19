@@ -1,0 +1,271 @@
+<sedonaApp>
+<schema>
+  <kit name="sys" />
+  <kit name="EacIo" />
+  <kit name="control" />
+  <kit name="func" />
+  <kit name="hvac" />
+  <kit name="inet" />
+  <kit name="logic" />
+  <kit name="math" />
+  <kit name="platUnix" />
+  <kit name="pricomp" />
+  <kit name="sox" />
+  <kit name="types" />
+  <kit name="web" />
+
+</schema>
+<app>
+  <prop name="deviceName" val="EAC IO"/>
+  <prop name="appName" val="EAC IO App"/>
+  <!-- /service -->
+  <comp name="service" id="1" type="sys::Folder">
+    <prop name="meta" val="33685505"/>
+    <!-- /service/plat -->
+    <comp name="plat" id="6" type="platUnix::UnixPlatformService">
+      <prop name="platformId" val="ankalabs-EAC-1.2.28"/>
+      <prop name="platformVer" val="1.2.28"/>
+      <prop name="memAvailable" val="37216256"/>
+    </comp>
+    <!-- /service/users -->
+    <comp name="users" id="2" type="sys::UserService">
+      <prop name="meta" val="17367041"/>
+      <!-- /service/users/admin -->
+      <comp name="admin" id="3" type="sys::User">
+        <prop name="cred" val="hE49ksThgAeLkWB3NUU1NWeDO54="/>
+        <prop name="perm" val="2147483647"/>
+        <prop name="prov" val="255"/>
+      </comp>
+    </comp>
+    <!-- /service/sox -->
+    <comp name="sox" id="4" type="sox::SoxService">
+      <prop name="meta" val="17104897"/>
+    </comp>
+    <!-- /service/web -->
+    <comp name="web" id="5" type="web::WebService">
+      <prop name="meta" val="16842753"/>
+      <prop name="port" val="8080"/>
+    </comp>
+  </comp>
+  <!-- /cool -->
+  <comp name="cool" id="9" type="EacIo::CycleFolder">
+    <prop name="meta" val="352583681"/>
+    <!-- /cool/RecordC -->
+    <comp name="RecordC" id="10" type="EacIo::RecordCount">
+      <prop name="meta" val="218431489"/>
+      <prop name="pointQuery" val="cool,cmd"/>
+      <prop name="pointQuerySize" val="4"/>
+      <prop name="recordExist" val="true"/>
+    </comp>
+    <!-- /cool/BoolOut -->
+    <comp name="BoolOut" id="11" type="EacIo::BoolOutput">
+      <prop name="meta" val="1442971649"/>
+      <prop name="channel" val="35"/>
+      <prop name="out" val="true"/>
+      <prop name="in10" val="true"/>
+      <prop name="pointQuery" val="cool,cmd,stage:1"/>
+      <prop name="pointQuerySize" val="1"/>
+      <prop name="pointQueryStatus" val="true"/>
+      <prop name="curStatus" val="ok"/>
+      <prop name="enabled" val="true"/>
+    </comp>
+    <!-- /cool/BoolOu1 -->
+    <comp name="BoolOu1" id="12" type="EacIo::BoolOutput">
+      <prop name="meta" val="1192493057"/>
+      <prop name="channel" val="50"/>
+      <prop name="out" val="true"/>
+      <prop name="in10" val="true"/>
+      <prop name="pointQuery" val="cool,cmd,stage:2"/>
+      <prop name="pointQuerySize" val="1"/>
+      <prop name="pointQueryStatus" val="true"/>
+      <prop name="curStatus" val="ok"/>
+      <prop name="enabled" val="true"/>
+    </comp>
+    <!-- /cool/BoolOu2 -->
+    <comp name="BoolOu2" id="13" type="EacIo::BoolOutput">
+      <prop name="meta" val="1428553729"/>
+      <prop name="channel" val="53"/>
+      <prop name="out" val="true"/>
+      <prop name="in10" val="true"/>
+      <prop name="pointQuery" val="cool,cmd,stage:3"/>
+      <prop name="pointQuerySize" val="1"/>
+      <prop name="pointQueryStatus" val="true"/>
+      <prop name="curStatus" val="ok"/>
+      <prop name="enabled" val="true"/>
+    </comp>
+    <!-- /cool/LP -->
+    <comp name="LP" id="14" type="control::LP">
+      <prop name="meta" val="537657345"/>
+      <prop name="sp" val="70.0"/>
+      <prop name="cv" val="77.458336"/>
+      <prop name="out" val="100.0"/>
+      <prop name="kp" val="20.0"/>
+      <prop name="ki" val="5.0"/>
+    </comp>
+    <!-- /cool/LSeq -->
+    <comp name="LSeq" id="15" type="hvac::LSeq">
+      <prop name="meta" val="872742913"/>
+      <prop name="in" val="100.0"/>
+      <prop name="numOuts" val="4"/>
+      <prop name="delta" val="20.0"/>
+      <prop name="dOn" val="4"/>
+      <prop name="out1" val="true"/>
+      <prop name="out2" val="true"/>
+      <prop name="out3" val="true"/>
+      <prop name="out4" val="true"/>
+    </comp>
+    <!-- /cool/BoolOu3 -->
+    <comp name="BoolOu3" id="28" type="EacIo::BoolOutput">
+      <prop name="meta" val="1713897473"/>
+      <prop name="channel" val="47"/>
+      <prop name="out" val="true"/>
+      <prop name="in10" val="true"/>
+      <prop name="pointQuery" val="cool,cmd,stage:4"/>
+      <prop name="pointQuerySize" val="1"/>
+      <prop name="pointQueryStatus" val="true"/>
+      <prop name="curStatus" val="ok"/>
+      <prop name="enabled" val="true"/>
+    </comp>
+  </comp>
+  <!-- /setpt -->
+  <comp name="setpt" id="16" type="EacIo::CycleFolder">
+    <prop name="meta" val="352845825"/>
+    <!-- /setpt/AnalogV -->
+    <comp name="AnalogV" id="17" type="EacIo::AnalogValue">
+      <prop name="meta" val="285868033"/>
+      <prop name="virtualCh" val="75"/>
+      <prop name="out" val="70.0"/>
+      <prop name="in16" val="70.0"/>
+      <prop name="pointQuery" val="air,cooling,occ,sp,temp,zone"/>
+      <prop name="pointQuerySize" val="1"/>
+      <prop name="pointQueryStatus" val="true"/>
+      <prop name="curStatus" val="ok"/>
+      <prop name="enabled" val="true"/>
+    </comp>
+    <!-- /setpt/BinaryV -->
+    <comp name="BinaryV" id="7" type="EacIo::BinaryValue">
+      <prop name="meta" val="1174994945"/>
+      <prop name="virtualCh" val="71"/>
+      <prop name="out" val="true"/>
+      <prop name="in11" val="true"/>
+      <prop name="pointQuery" val="occupied,zone"/>
+      <prop name="pointQuerySize" val="1"/>
+      <prop name="pointQueryStatus" val="true"/>
+      <prop name="curStatus" val="ok"/>
+      <prop name="enabled" val="true"/>
+    </comp>
+    <!-- /setpt/WriteFl -->
+    <comp name="WriteFl" id="20" type="control::WriteFloat">
+      <prop name="meta" val="739770369"/>
+      <prop name="in" val="70.0"/>
+      <prop name="out" val="70.0"/>
+    </comp>
+    <!-- /setpt/ConstFl -->
+    <comp name="ConstFl" id="23" type="control::ConstFloat">
+      <prop name="meta" val="68747265"/>
+      <prop name="out" val="70.0"/>
+    </comp>
+  </comp>
+  <!-- /sensor -->
+  <comp name="sensor" id="8" type="EacIo::CycleFolder">
+    <prop name="meta" val="352321537"/>
+    <!-- /sensor/AnalogI -->
+    <comp name="AnalogI" id="18" type="EacIo::AnalogInput">
+      <prop name="meta" val="218365953"/>
+      <prop name="channel" val="4"/>
+      <prop name="pointQuery" val="zone,air,temp,sensor"/>
+      <prop name="pointQuerySize" val="1"/>
+      <prop name="pointQueryStatus" val="true"/>
+      <prop name="out" val="77.458336"/>
+      <prop name="curStatus" val="ok"/>
+      <prop name="enabled" val="true"/>
+    </comp>
+    <!-- /sensor/WriteFl -->
+    <comp name="WriteFl" id="19" type="control::WriteFloat">
+      <prop name="meta" val="839647233"/>
+      <prop name="in" val="77.458336"/>
+      <prop name="out" val="77.458336"/>
+    </comp>
+  </comp>
+  <!-- /fan -->
+  <comp name="fan" id="21" type="EacIo::CycleFolder">
+    <prop name="meta" val="353107969"/>
+    <!-- /fan/BoolOut -->
+    <comp name="BoolOut" id="22" type="EacIo::BoolOutput">
+      <prop name="meta" val="588054529"/>
+      <prop name="channelName" val="Digital Output 1"/>
+      <prop name="channel" val="32"/>
+      <prop name="out" val="false"/>
+      <prop name="pointQuery" val="discharge,fan,cmd"/>
+      <prop name="pointQuerySize" val="1"/>
+      <prop name="pointQueryStatus" val="true"/>
+      <prop name="curStatus" val="ok"/>
+      <prop name="enabled" val="true"/>
+    </comp>
+  </comp>
+  <!-- /AnalogO -->
+  <comp name="AnalogO" id="24" type="EacIo::AnalogOutput">
+    <prop name="meta" val="169476097"/>
+    <prop name="channelName" val="PWM Output 4"/>
+    <prop name="channel" val="22"/>
+    <prop name="out" val="1.6"/>
+    <prop name="in10" val="1.6"/>
+    <prop name="pointQuery" val="air,cmd,damper,outside"/>
+    <prop name="pointQuerySize" val="1"/>
+    <prop name="pointQueryStatus" val="true"/>
+    <prop name="curStatus" val="ok"/>
+    <prop name="enabled" val="true"/>
+  </comp>
+  <!-- /ExposeT -->
+  <comp name="ExposeT" id="25" type="EacIo::ExposeTags">
+    <prop name="meta" val="538705921"/>
+    <prop name="channel" val="22"/>
+    <prop name="Tag" val="minOaSetpoint"/>
+    <prop name="TagType" val="2"/>
+    <prop name="status" val="true"/>
+    <prop name="BoolVal" val="null"/>
+    <prop name="NumberVal" val="16.0"/>
+  </comp>
+  <!-- /Div2 -->
+  <comp name="Div2" id="26" type="math::Div2">
+    <prop name="meta" val="691011585"/>
+    <prop name="out" val="1.6"/>
+    <prop name="in1" val="16.0"/>
+    <prop name="in2" val="10.0"/>
+  </comp>
+  <!-- /ConstFl -->
+  <comp name="ConstFl" id="27" type="control::ConstFloat">
+    <prop name="meta" val="489816065"/>
+    <prop name="out" val="10.0"/>
+  </comp>
+  <!-- /econo -->
+  <comp name="econo" id="29" type="EacIo::CycleFolder">
+    <prop name="meta" val="353370113"/>
+    <prop name="Cycle" val="false"/>
+    <!-- /econo/RecordC -->
+    <comp name="RecordC" id="30" type="EacIo::RecordCount">
+      <prop name="meta" val="167968769"/>
+      <prop name="pointQuery" val="econo"/>
+    </comp>
+  </comp>
+</app>
+<links>
+  <link from="/cool/RecordC.pointQuerySize" to="/cool/LSeq.numOuts"/>
+  <link from="/cool/RecordC.recordExist" to="/cool/LP.enable"/>
+  <link from="/cool/LP.out" to="/cool/LSeq.in"/>
+  <link from="/cool/LSeq.out4" to="/cool/BoolOu3.in10"/>
+  <link from="/cool/LSeq.out3" to="/cool/BoolOu2.in10"/>
+  <link from="/cool/LSeq.out2" to="/cool/BoolOu1.in10"/>
+  <link from="/cool/LSeq.out1" to="/cool/BoolOut.in10"/>
+  <link from="/setpt/AnalogV.out" to="/setpt/WriteFl.in"/>
+  <link from="/setpt/WriteFl.out" to="/cool/LP.sp"/>
+  <link from="/setpt/ConstFl.out" to="/setpt/AnalogV.in16"/>
+  <link from="/sensor/AnalogI.out" to="/sensor/WriteFl.in"/>
+  <link from="/sensor/WriteFl.out" to="/cool/LP.cv"/>
+  <link from="/AnalogO.channel" to="/ExposeT.channel"/>
+  <link from="/ExposeT.NumberVal" to="/Div2.in1"/>
+  <link from="/Div2.out" to="/AnalogO.in10"/>
+  <link from="/ConstFl.out" to="/Div2.in2"/>
+  <link from="/econo/RecordC.recordExist" to="/econo.Cycle"/>
+</links>
+</sedonaApp>

@@ -1,0 +1,20 @@
+[package]
+name = "sandstar-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Sandstar engine CLI tools"
+
+[[bin]]
+name = "sandstar-cli"
+path = "src/main.rs"
+
+[dependencies]
+sandstar-ipc = { path = "../sandstar-ipc" }
+sandstar-server = { path = "../sandstar-server", default-features = false }
+tokio = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }

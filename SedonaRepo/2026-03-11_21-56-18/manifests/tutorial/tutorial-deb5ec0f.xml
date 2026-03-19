@@ -1,0 +1,24 @@
+<?xml version='1.0'?>
+<kitManifest
+   name="tutorial"
+   checksum="deb5ec0f"
+   hasNatives="true"
+   doc="false"
+   version="1.2.28"
+   vendor="Tridium"
+   description="blah"
+   buildHost="beaglebone"
+   buildTime="2017-03-19T11:08:16.439Z"
+>
+
+<!-- Dependencies -->
+<depends>
+  <depend on="sys 1.2+"/>
+</depends>
+
+<!-- tutorial::BBBIO -->
+<type id="0" name="BBBIO" sizeof="40" base="sys::Component">
+  <slot id="0" name="in1" type="int"/>
+</type>
+
+</kitManifest>

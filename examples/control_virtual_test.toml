@@ -1,0 +1,109 @@
+# Virtual Control Test — ALL channels are virtual, no hardware effects
+#
+# Channel mapping (all virtual):
+#   8000 = Simulated Zone Temp (inject via REST: POST /api/write {"channel":8000,"value":75.0})
+#   7500 = Zone Cooling Setpoint (written by const_setpoint component)
+#   8001 = Virtual Cool Stage 1 (PID sequencer output)
+#   8002 = Virtual Cool Stage 2
+#   8003 = Virtual Cool Stage 3
+#   8004 = Virtual Cool Stage 4
+#   7501 = Scheduled Setpoint (daily schedule output)
+#   7502 = Calibrated Temp (offset output)
+#   7503 = Fan Speed Command (hysteresis output)
+#   7504 = Aux Heat Relay (thermostat output)
+#
+# Test procedure:
+#   1. Deploy this + updated database.zinc to device
+#   2. Restart sandstar-engine
+#   3. Write simulated temps via REST:
+#      curl -X POST http://192.168.1.104:8085/api/write -d '{"channel":8000,"value":65.0}'
+#   4. Read outputs:
+#      curl http://192.168.1.104:8085/api/channels
+#   5. Observe PID stages responding to temperature changes
+
+# ── PID Loop: Zone Cooling (all virtual) ──────────────────────────
+
+[[loop]]
+name = "zone_cooling"
+feedback_channel = 8000             # Virtual: simulated zone temp (inject via REST)
+setpoint_channel = 7500             # Virtual: cooling setpoint (72F from const_setpoint)
+output_channels = [8001, 8002, 8003, 8004]   # Virtual: 4 cooling stages
+write_level = 8
+
+[loop.pid]
+kp = 20.0                          # Proportional gain
+ki = 5.0                           # Integral gain (resets/min)
+kd = 0.0                           # No derivative
+min = 0.0
+max = 100.0
+bias = 50.0
+direct = false                     # Reverse action: hotter → more cooling
+exec_interval_ms = 1000
+
+[loop.sequencer]
+hysteresis = 0.5                   # 50% band overlap
+
+# ── Standalone Components (all virtual) ───────────────────────────
+
+# Constant: write fixed 72F setpoint
+[[component]]
+name = "const_setpoint"
+type = "const_float"
+value = 72.0
+output_channel = 7500
+write_level = 8
+
+# Float offset: calibrate simulated temp (-1.5F correction)
+[[component]]
+name = "temp_calibration"
+type = "float_offset"
+input_channels = [8000]
+output_channel = 7502
+offset = -1.5
+write_level = 8
+
+# Thermostat: emergency low-temp heating cutoff
+[[component]]
+name = "aux_heat"
+type = "thermostat"
+input_channels = [8000]
+output_channel = 7504
+setpoint = 60.0
+deadband = 3.0
+heating = true
+write_level = 8
+
+# Hysteresis: fan speed high/low based on zone temp
+[[component]]
+name = "fan_speed_switch"
+type = "hysteresis"
+input_channels = [8000]
+output_channel = 7503
+rising_threshold = 76.0
+falling_threshold = 72.0
+high_value = 100.0
+low_value = 50.0
+write_level = 8
+
+# Daily schedule: time-of-day setpoint
+[[component]]
+name = "cooling_schedule"
+type = "daily_schedule_float"
+default_value = 72.0
+output_channel = 7501
+write_level = 8
+
+[[component.entries]]
+hour = 6
+minute = 0
+value = 70.0
+
+[[component.entries]]
+hour = 18
+minute = 0
+value = 76.0
+
+[[component.entries]]
+hour = 22
+minute = 0
+value = 72.0

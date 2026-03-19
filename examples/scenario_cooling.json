@@ -1,0 +1,53 @@
+{
+  "steps": [
+    {
+      "offset_ms": 0,
+      "points": [
+        {"type": "analog", "device": 0, "address": 0, "value": 1800.0},
+        {"type": "analog", "device": 0, "address": 1, "value": 2000.0}
+      ]
+    },
+    {
+      "offset_ms": 5000,
+      "points": [
+        {"type": "analog", "device": 0, "address": 0, "value": 2000.0}
+      ]
+    },
+    {
+      "offset_ms": 10000,
+      "points": [
+        {"type": "analog", "device": 0, "address": 0, "value": 2200.0}
+      ]
+    },
+    {
+      "offset_ms": 15000,
+      "points": [
+        {"type": "analog", "device": 0, "address": 0, "value": 2400.0}
+      ]
+    },
+    {
+      "offset_ms": 20000,
+      "points": [
+        {"type": "analog", "device": 0, "address": 0, "value": 2600.0}
+      ]
+    },
+    {
+      "offset_ms": 30000,
+      "points": [
+        {"type": "analog", "device": 0, "address": 0, "value": 2800.0}
+      ]
+    },
+    {
+      "offset_ms": 45000,
+      "points": [
+        {"type": "analog", "device": 0, "address": 0, "value": 2400.0}
+      ]
+    },
+    {
+      "offset_ms": 60000,
+      "points": [
+        {"type": "analog", "device": 0, "address": 0, "value": 2000.0}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,227 @@
+<?xml version='1.0'?>
+<!--
+  EacIo Control Logic - Win32 Simulation
+  =======================================
+  Full PID + Lead Sequencer cooling control from the production EacIo app,
+  adapted for Win32 SVM (no EacIo kit / no hardware natives).
+
+  Replacements:
+    EacIo::AnalogInput  -> func::Ramp (simulates zone temp 65-85F)
+    EacIo::BoolOutput   -> control::WriteBool (visible stage outputs)
+    EacIo::AnalogValue  -> control::WriteFloat (writable setpoint)
+    EacIo::AnalogOutput -> control::WriteFloat (damper output)
+    EacIo::CycleFolder  -> sys::Folder
+    EacIo::RecordCount  -> removed (engine-query only)
+    EacIo::ExposeTags   -> removed (engine-query only)
+    EacIo::BinaryValue  -> control::WriteBool (occupancy)
+
+  SOX: UDP 1876 (admin/admin)
+  Web: HTTP 8080
+-->
+<sedonaApp>
+<schema>
+  <kit name="sys"/>
+  <kit name="control"/>
+  <kit name="func"/>
+  <kit name="hvac"/>
+  <kit name="logic"/>
+  <kit name="math"/>
+  <kit name="timing"/>
+  <kit name="types"/>
+  <kit name="pricomp"/>
+  <kit name="inet"/>
+  <kit name="sox"/>
+  <kit name="web"/>
+  <kit name="pstore"/>
+  <kit name="datetime"/>
+  <kit name="datetimeStd"/>
+  <kit name="basicSchedule"/>
+  <kit name="platWin32"/>
+</schema>
+<app>
+  <prop name="deviceName" val="EAC IO Win32"/>
+  <prop name="appName" val="EAC IO Sim"/>
+
+  <!-- ============================================================ -->
+  <!-- /service - System services                                    -->
+  <!-- ============================================================ -->
+  <comp name="service" id="1" type="sys::Folder">
+    <prop name="meta" val="33685505"/>
+    <!-- /service/plat -->
+    <comp name="plat" id="6" type="platWin32::Win32PlatformService"/>
+    <!-- /service/users -->
+    <comp name="users" id="2" type="sys::UserService">
+      <prop name="meta" val="17367041"/>
+      <comp name="admin" id="3" type="sys::User">
+        <prop name="cred" val="hE49ksThgAeLkWB3NUU1NWeDO54="/>
+        <prop name="perm" val="2147483647"/>
+        <prop name="prov" val="255"/>
+      </comp>
+    </comp>
+    <!-- /service/sox -->
+    <comp name="sox" id="4" type="sox::SoxService">
+      <prop name="meta" val="17104897"/>
+    </comp>
+    <!-- /service/web -->
+    <comp name="web" id="5" type="web::WebService">
+      <prop name="meta" val="16842753"/>
+      <prop name="port" val="8080"/>
+    </comp>
+    <!-- /service/pstore -->
+    <comp name="pstore" id="40" type="pstore::PstoreService"/>
+    <!-- /service/time -->
+    <comp name="time" id="41" type="datetimeStd::DateTimeServiceStd">
+      <prop name="osUtcOffset" val="true"/>
+    </comp>
+  </comp>
+
+  <!-- ============================================================ -->
+  <!-- /cool - COOLING CONTROL (PID + 4-Stage Lead Sequencer)       -->
+  <!-- Mirrors production: LP(kp=20,ki=5) -> LSeq(4 stages,delta=20)-->
+  <!-- ============================================================ -->
+  <comp name="cool" id="9" type="sys::Folder">
+    <prop name="meta" val="352583681"/>
+
+    <!-- PID Loop: sp=setpoint, cv=sensor, out=0-100% -->
+    <comp name="LP" id="14" type="control::LP">
+      <prop name="meta" val="537657345"/>
+      <prop name="sp" val="70.0"/>
+      <prop name="cv" val="72.0"/>
+      <prop name="out" val="0.0"/>
+      <prop name="kp" val="20.0"/>
+      <prop name="ki" val="5.0"/>
+    </comp>
+
+    <!-- Lead Sequencer: 4 stages, 20% delta, 4s delay-on -->
+    <comp name="LSeq" id="15" type="hvac::LSeq">
+      <prop name="meta" val="872742913"/>
+      <prop name="in" val="0.0"/>
+      <prop name="numOuts" val="4"/>
+      <prop name="delta" val="20.0"/>
+      <prop name="dOn" val="4"/>
+    </comp>
+
+    <!-- Stage 1 output (replaces EacIo::BoolOutput ch35) -->
+    <comp name="Stage1" id="11" type="control::WriteBool">
+      <prop name="meta" val="1442971649"/>
+    </comp>
+    <!-- Stage 2 output (replaces EacIo::BoolOutput ch50) -->
+    <comp name="Stage2" id="12" type="control::WriteBool">
+      <prop name="meta" val="1192493057"/>
+    </comp>
+    <!-- Stage 3 output (replaces EacIo::BoolOutput ch53) -->
+    <comp name="Stage3" id="13" type="control::WriteBool">
+      <prop name="meta" val="1428553729"/>
+    </comp>
+    <!-- Stage 4 output (replaces EacIo::BoolOutput ch47) -->
+    <comp name="Stage4" id="28" type="control::WriteBool">
+      <prop name="meta" val="1713897473"/>
+    </comp>
+  </comp>
+
+  <!-- ============================================================ -->
+  <!-- /setpt - SETPOINT MANAGEMENT                                  -->
+  <!-- ConstFloat(70F) -> WriteFloat -> LP.sp                        -->
+  <!-- Change ConstFl.out in SAE to adjust cooling setpoint          -->
+  <!-- ============================================================ -->
+  <comp name="setpt" id="16" type="sys::Folder">
+    <prop name="meta" val="352845825"/>
+
+    <!-- Writable setpoint (replaces EacIo::AnalogValue vch75) -->
+    <comp name="SetptVal" id="17" type="control::ConstFloat">
+      <prop name="meta" val="285868033"/>
+      <prop name="out" val="70.0"/>
+    </comp>
+    <comp name="WriteFl" id="20" type="control::WriteFloat">
+      <prop name="meta" val="739770369"/>
+      <prop name="in" val="70.0"/>
+    </comp>
+    <!-- Default setpoint source -->
+    <comp name="ConstFl" id="23" type="control::ConstFloat">
+      <prop name="meta" val="68747265"/>
+      <prop name="out" val="70.0"/>
+    </comp>
+
+    <!-- Occupancy flag (replaces EacIo::BinaryValue vch71) -->
+    <comp name="Occupied" id="7" type="logic::Not">
+      <prop name="meta" val="1174994945"/>
+      <prop name="in" val="false"/>
+    </comp>
+  </comp>
+
+  <!-- ============================================================ -->
+  <!-- /sensor - ZONE TEMPERATURE SENSOR (simulated)                 -->
+  <!-- Ramp 65-85F exercises PID in real time via SAE                -->
+  <!-- ============================================================ -->
+  <comp name="sensor" id="8" type="sys::Folder">
+    <prop name="meta" val="352321537"/>
+
+    <!-- Simulated zone temp: ramps 65-85F continuously -->
+    <comp name="SimTemp" id="18" type="func::Ramp">
+      <prop name="meta" val="218365953"/>
+      <prop name="min" val="65.0"/>
+      <prop name="max" val="85.0"/>
+    </comp>
+    <comp name="WriteFl" id="19" type="control::WriteFloat">
+      <prop name="meta" val="839647233"/>
+    </comp>
+  </comp>
+
+  <!-- ============================================================ -->
+  <!-- /fan - FAN CONTROL                                            -->
+  <!-- ============================================================ -->
+  <comp name="fan" id="21" type="sys::Folder">
+    <prop name="meta" val="353107969"/>
+    <!-- Fan output (replaces EacIo::BoolOutput ch32) -->
+    <comp name="FanOut" id="22" type="control::WriteBool">
+      <prop name="meta" val="588054529"/>
+    </comp>
+  </comp>
+
+  <!-- ============================================================ -->
+  <!-- /damper - OUTSIDE AIR DAMPER                                  -->
+  <!-- ConstFl(10) -> Div2(16/10=1.6) -> DamperOut                  -->
+  <!-- ============================================================ -->
+  <comp name="damper" id="50" type="sys::Folder">
+    <prop name="meta" val="169476097"/>
+    <!-- Damper output (replaces EacIo::AnalogOutput ch22) -->
+    <comp name="DamperOut" id="24" type="control::WriteFloat">
+      <prop name="meta" val="169476098"/>
+      <prop name="in" val="1.6"/>
+    </comp>
+    <!-- MinOA setpoint value -->
+    <comp name="MinOaSp" id="25" type="control::ConstFloat">
+      <prop name="meta" val="538705921"/>
+      <prop name="out" val="16.0"/>
+    </comp>
+    <comp name="Div2" id="26" type="math::Div2">
+      <prop name="meta" val="691011585"/>
+      <prop name="in1" val="16.0"/>
+      <prop name="in2" val="10.0"/>
+    </comp>
+    <comp name="Scale" id="27" type="control::ConstFloat">
+      <prop name="meta" val="489816065"/>
+      <prop name="out" val="10.0"/>
+    </comp>
+  </comp>
+
+</app>
+<links>
+  <!-- === Cooling control chain === -->
+  <!-- Sensor -> PID -> Sequencer -> Stage outputs -->
+  <link from="/sensor/SimTemp.out" to="/sensor/WriteFl.in"/>
+  <link from="/sensor/WriteFl.out" to="/cool/LP.cv"/>
+  <link from="/setpt/SetptVal.out" to="/setpt/WriteFl.in"/>
+  <link from="/setpt/WriteFl.out" to="/cool/LP.sp"/>
+  <link from="/cool/LP.out" to="/cool/LSeq.in"/>
+  <link from="/cool/LSeq.out1" to="/cool/Stage1.in"/>
+  <link from="/cool/LSeq.out2" to="/cool/Stage2.in"/>
+  <link from="/cool/LSeq.out3" to="/cool/Stage3.in"/>
+  <link from="/cool/LSeq.out4" to="/cool/Stage4.in"/>
+
+  <!-- === Damper chain === -->
+  <link from="/damper/MinOaSp.out" to="/damper/Div2.in1"/>
+  <link from="/damper/Scale.out" to="/damper/Div2.in2"/>
+  <link from="/damper/Div2.out" to="/damper/DamperOut.in"/>
+</links>
+</sedonaApp>

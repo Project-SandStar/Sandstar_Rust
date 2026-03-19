@@ -1,0 +1,43 @@
+[Unit]
+Description=Sandstar Engine Server (Rust)
+After=network.target
+
+[Service]
+Type=simple
+WatchdogSec=10
+
+# Hardware initialization: run as root (+ prefix) before engine starts
+ExecStartPre=+/home/eacio/sandstar/etc/init/initialize.sh
+
+ExecStart=/home/eacio/sandstar/bin/sandstar-engine-server \
+    --config-dir /home/eacio/sandstar/etc/EacIo \
+    --pid-file /var/run/sandstar/sandstar-engine.pid \
+    --log-file /var/log/sandstar/sandstar-engine.log \
+    --log-level info
+
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Run as eacio user with root group for hardware access
+User=eacio
+Group=root
+SupplementaryGroups=i2c dialout gpio
+
+# Systemd-managed directories (auto-created with correct permissions)
+RuntimeDirectory=sandstar
+
+Restart=on-failure
+RestartSec=5
+
+# Resource limits (BeagleBone: ARM Cortex-A8, 512MB RAM)
+MemoryLimit=128M
+LimitCORE=infinity
+UMask=0077
+
+# Security hardening
+ProtectSystem=full
+ReadWritePaths=/home/eacio/sandstar /var/run/sandstar /var/log/sandstar /tmp
+ReadWritePaths=/sys/class/gpio /sys/class/pwm /sys/bus/iio /dev/i2c-2
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

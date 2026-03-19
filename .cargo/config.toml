@@ -1,0 +1,30 @@
+# ── ARM Cross-Compilation ──────────────────────────────────────
+# BeagleBone: ARMv7-A Cortex-A8, hard-float, NEON SIMD
+
+[target.armv7-unknown-linux-gnueabihf]
+# Use zig cc as cross-linker via cargo-zigbuild wrapper at C:\czb (no spaces in path)
+# Wrapper invokes: zig cc -target arm-linux-gnueabihf -mcpu=generic+v7a+vfp3-d32+thumb2-neon
+linker = "C:\\czb\\zigcc-arm.bat"
+rustflags = [
+    "-C", "link-arg=-static-libgcc",     # Static libgcc (no runtime dependency)
+]
+
+# musl variant (unused — keeping for reference)
+[target.armv7-unknown-linux-musleabihf]
+linker = "arm-linux-musleabihf-gcc"
+
+# ── Release Profile (BeagleBone: 512MB RAM, ARM Cortex-A8) ───
+[profile.release]
+lto = true                # Link-time optimization (smaller binary)
+strip = true              # Strip debug symbols
+codegen-units = 1         # Single codegen unit (better optimization)
+opt-level = "s"           # Optimize for size (not speed)
+panic = "abort"           # No unwind tables (~10% smaller)
+
+# ── Cargo Aliases ─────────────────────────────────────────────
+[alias]
+arm-build = "build --target armv7-unknown-linux-gnueabihf --release --no-default-features --features linux-hal -p sandstar-server -p sandstar-cli"
+arm-check = "check --target armv7-unknown-linux-gnueabihf --no-default-features --features linux-hal -p sandstar-server -p sandstar-cli"
+arm-deb   = "deb --target armv7-unknown-linux-gnueabihf --no-build -p sandstar-server --variant linux-hal"
+lint      = "clippy --all-targets -- -W clippy::all"
+sim-run   = "run -p sandstar-server --no-default-features --features simulator-hal"

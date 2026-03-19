@@ -1,0 +1,33 @@
+<sedonaCode
+  endian="little" blockSize="4"
+  refSize="4" main="sys::Sys.main" debug="true" test="true"
+>
+
+<!-- Core -->
+<depend on="sys 1.2+" />
+
+<!-- Control logic (LP, WriteFloat, ConstFloat, WriteBool) -->
+<depend on="control 1.2+" />
+
+<!-- Split kits (func, hvac, logic, math, timing, types, pricomp) -->
+<depend on="func 1.2+" />
+<depend on="hvac 1.2+" />
+<depend on="logic 1.2+" />
+<depend on="math 1.2+" />
+<depend on="timing 1.2+" />
+<depend on="types 1.2+" />
+<depend on="pricomp 1.2+" />
+
+<!-- Services -->
+<depend on="inet 1.2+" />
+<depend on="sox 1.2+" />
+<depend on="web 1.2+" />
+<depend on="pstore 1.2+" />
+<depend on="datetime 1.2+" />
+<depend on="datetimeStd 1.2+" />
+<depend on="basicSchedule 1.2+" />
+
+<!-- Platform -->
+<depend on="platWin32 1.2+" />
+
+</sedonaCode>

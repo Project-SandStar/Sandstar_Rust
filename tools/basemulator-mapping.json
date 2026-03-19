@@ -1,0 +1,23 @@
+{
+  "basemulator_url": "http://localhost:5001",
+  "basemulator_auth": {"user": "admin", "pass": "admin"},
+  "sandstar_url": "http://localhost:8085",
+  "poll_interval_s": 1.0,
+
+  "inputs": [
+    {"bas_idx": 0, "bas_name": "UI1 Zone Temp", "sandstar_type": "analog", "sandstar_device": 0, "sandstar_address": 0},
+    {"bas_idx": 1, "bas_name": "UI2 Discharge Air", "sandstar_type": "analog", "sandstar_device": 0, "sandstar_address": 1},
+    {"bas_idx": 2, "bas_name": "UI3 Outdoor Air", "sandstar_type": "analog", "sandstar_device": 0, "sandstar_address": 2},
+    {"bas_idx": 3, "bas_name": "UI4 Return Air", "sandstar_type": "analog", "sandstar_device": 0, "sandstar_address": 3},
+    {"bas_idx": 4, "bas_name": "UI5 Airflow", "sandstar_type": "i2c", "sandstar_device": 2, "sandstar_address": 64, "sandstar_label": "sdp810"},
+    {"bas_idx": 8, "bas_name": "BI1 Occupancy", "sandstar_type": "digital", "sandstar_address": 40}
+  ],
+
+  "outputs": [
+    {"bas_idx": 16, "bas_name": "BO1 Cool Stage 1", "sandstar_key_type": "Digital", "sandstar_key_address": 45},
+    {"bas_idx": 17, "bas_name": "BO2 Cool Stage 2", "sandstar_key_type": "Digital", "sandstar_key_address": 46},
+    {"bas_idx": 18, "bas_name": "BO3 Cool Stage 3", "sandstar_key_type": "Digital", "sandstar_key_address": 47},
+    {"bas_idx": 19, "bas_name": "BO4 Cool Stage 4", "sandstar_key_type": "Digital", "sandstar_key_address": 48},
+    {"bas_idx": 12, "bas_name": "AO1 Fan Speed", "sandstar_key_type": "Pwm", "sandstar_key_chip": 4, "sandstar_key_channel": 0}
+  ]
+}

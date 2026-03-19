@@ -1,0 +1,18 @@
+ver:"3.0"
+actions,analog,channel,cur,curErr,curStatus,curVal,deadBand,device,deviceRef,disMacro,enabled,humidity,hystOff,hystOn,hysteresis,id,input,kFactor,kind,max,maxVal,min,minVal,mod,navName,offset,point,raw,rawVal,scale,scaleFactor,sedonaId,sedonaType,sp,spikeFilter,spikeThreshold,startupDiscard,temp,thermistor10K2,unit,value,virtualChannel,writable
+N,,,,,,N,,M,,"$navName",,,,,,@p:eac3484E414E04E:r:308ceac3-b261d2ac "TEST FLOW",,,,,,,,2025-10-23T14:29:16.050Z UTC,"TEST FLOW",,,,N,,,,,,,,,,,,,,
+N,M,612,M,"","",N,1,,@p:eac3484E414E04E:r:308ceac3-b261d2ac "TEST FLOW","$deviceRef $navName - $channel",M,,8,16,M,@p:eac3484E414E04E:r:308ceae3-e04de9ce "TEST FLOW CFM Flow - 612",M,3200,"Number",M,1000,,,,"CFM Flow",,M,M,N,,60,,,,M,5,5,,,"cfm",,,
+N,M,1113,M,"","ok",N,,,@p:eac3484E414E04E:r:308ceac3-b261d2ac "TEST FLOW","$deviceRef $navName - $channel",M,,,,,@p:eac3484E414E04E:r:308cecf3-ce61f42c "TEST FLOW Analog Input - 1113",M,,"Number",M,303,M,-40,2025-11-26T00:27:20.059Z UTC,"Analog Input",,M,M,N,,,0,"EacIo::Analog9",,,,,,M,"°F",,,
+"ver:\"2.0\"\nexpr,dis\n\"pointOverride($self, true, $duration)\",\"Active\"\n\"pointOverride($self, false, $duration)\",\"Inactive\"\n\"pointAuto($self)\",\"Auto\"\n\"pointEmergencyOverride($self, true, $duration)\",\"Emergency Active\"\n\"pointEmergencyOverride($self, false, $duration)\",\"Emergency Inactive\"\n\"pointEmergencyAuto($self)\",\"Emergency Auto\"\n\"pointSetDef($self, $val)\",\"Set\"",M,102,M,"","ok",N,,,@p:eac3484E414E04E:r:308ceac3-b261d2ac "TEST FLOW","$deviceRef $navName - $channel",M,,,,,@p:eac3484E414E04E:r:308cfbea-bdb0a745 "TEST FLOW Test Writable - 102",,,"Number",,,,,2025-10-23T14:45:36.801Z UTC,"Test Writable",,M,M,N,,,0,"na",M,,,,M,,,M,M,M
+"ver:\"2.0\"\nexpr,dis\n\"pointOverride($self, true, $duration)\",\"Active\"\n\"pointOverride($self, false, $duration)\",\"Inactive\"\n\"pointAuto($self)\",\"Auto\"\n\"pointEmergencyOverride($self, true, $duration)\",\"Emergency Active\"\n\"pointEmergencyOverride($self, false, $duration)\",\"Emergency Inactive\"\n\"pointEmergencyAuto($self)\",\"Emergency Auto\"\n\"pointSetDef($self, $val)\",\"Set\"",M,103,M,"","ok",N,,,@p:eac3484E414E04E:r:308ceac3-b261d2ac "TEST FLOW","$deviceRef $navName - $channel",M,M,,,,@p:eac3484E414E04E:r:308d094b-a315c40c "TEST FLOW Humidity Setpoint - 103",,,"Number",,,,,2025-10-23T15:43:08.799Z UTC,"Humidity Setpoint",,M,M,N,,,0,"na",M,,,,,,,M,M,M
+N,M,615,M,"","ok",N,,,@p:eac3484E414E04E:r:308ceac3-b261d2ac "TEST FLOW","$deviceRef $navName - $channel",M,,,,,@p:eac3484E414E04E:r:30b9f766-264c7fa3 "TEST FLOW Temp in flow - 615",M,,"Number",,,,,2025-11-26T17:47:02.524Z UTC,"Temp in flow",32,M,M,N,0.009,,,,,,,,,,,,,
+N,M,8000,,,,N,,,,,M,,,,,,,,"Number",,,,,,"Sim Zone Temp",,M,,N,,,,,,,,,,,,M,M
+N,M,7500,,,,N,,,,,M,,,,,,,,"Number",,,,,,"Cooling Setpoint",,M,,N,,,,,,,,,,,,M,M
+N,M,8001,,,,N,,,,,M,,,,,,,,"Number",,,,,,"Virt Cool Stage 1",,M,,N,,,,,,,,,,,,M,M
+N,M,8002,,,,N,,,,,M,,,,,,,,"Number",,,,,,"Virt Cool Stage 2",,M,,N,,,,,,,,,,,,M,M
+N,M,8003,,,,N,,,,,M,,,,,,,,"Number",,,,,,"Virt Cool Stage 3",,M,,N,,,,,,,,,,,,M,M
+N,M,8004,,,,N,,,,,M,,,,,,,,"Number",,,,,,"Virt Cool Stage 4",,M,,N,,,,,,,,,,,,M,M
+N,M,7501,,,,N,,,,,M,,,,,,,,"Number",,,,,,"Scheduled Setpoint",,M,,N,,,,,,,,,,,,M,M
+N,M,7502,,,,N,,,,,M,,,,,,,,"Number",,,,,,"Calibrated Temp",,M,,N,,,,,,,,,,,,M,M
+N,M,7503,,,,N,,,,,M,,,,,,,,"Number",,,,,,"Fan Speed Cmd",,M,,N,,,,,,,,,,,,M,M
+N,M,7504,,,,N,,,,,M,,,,,,,,"Number",,,,,,"Aux Heat Relay",,M,,N,,,,,,,,,,,,M,M

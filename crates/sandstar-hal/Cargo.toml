@@ -1,0 +1,11 @@
+[package]
+name = "sandstar-hal"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde = { workspace = true, optional = true }
+
+[features]
+simulator = ["dep:serde"]

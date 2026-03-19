@@ -1,0 +1,7 @@
+#ifndef SEDONAC_SEDONA_PLATFORM_H
+#define SEDONAC_SEDONA_PLATFORM_H
+
+#define PLATFORM_ID "ankalabs-EAC-1.2.28"
+#define PLAT_BUILD_VERSION "1.2.28"
+
+#endif
