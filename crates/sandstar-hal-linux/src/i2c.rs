@@ -65,26 +65,43 @@ pub enum SensorProtocol {
     Sdp810Temp,
 }
 
-/// Detect the sensor protocol from a human-readable label string.
+/// Detect the sensor protocol from label and I2C address.
 ///
 /// The label matching is case-insensitive, consistent with the C implementation
 /// in `i2cio.c` (`i2cio_label_contains`).
 ///
-/// Rules:
-/// - Contains "sdp810" AND "_temp" => `Sdp810Temp`
-/// - Contains "sdp810"            => `Sdp810Dp`
-/// - Everything else              => `Sdp510`
+/// Rules (checked in order):
+/// 1. Label contains "sdp810" AND "_temp" => `Sdp810Temp`
+/// 2. Label contains "sdp810"             => `Sdp810Dp`
+/// 3. Label contains "temp" AND address is 0x25 => `Sdp810Temp`
+/// 4. Address is 0x25 (SDP810 default)    => `Sdp810Dp`
+/// 5. Everything else                     => `Sdp510`
 pub fn detect_protocol(label: &str) -> SensorProtocol {
+    detect_protocol_with_address(label, 0)
+}
+
+/// Detect the sensor protocol using both label and I2C address.
+///
+/// Address 0x25 is the SDP810 default I2C address. When channels don't
+/// include "sdp810" in their label (e.g. "CFM Flow", "Temp in flow"),
+/// the address provides a reliable fallback for protocol selection.
+pub fn detect_protocol_with_address(label: &str, address: u32) -> SensorProtocol {
     let lower = label.to_ascii_lowercase();
+    // Label-based detection (highest priority)
     if lower.contains("sdp810") {
         if lower.contains("_temp") {
-            SensorProtocol::Sdp810Temp
-        } else {
-            SensorProtocol::Sdp810Dp
+            return SensorProtocol::Sdp810Temp;
         }
-    } else {
-        SensorProtocol::Sdp510
+        return SensorProtocol::Sdp810Dp;
     }
+    // Address-based fallback for SDP810 (0x25 = 37 decimal)
+    if address == 0x25 {
+        if lower.contains("temp") {
+            return SensorProtocol::Sdp810Temp;
+        }
+        return SensorProtocol::Sdp810Dp;
+    }
+    SensorProtocol::Sdp510
 }
 
 // ---------------------------------------------------------------------------
@@ -159,7 +176,7 @@ impl LinuxI2c {
         address: u32,
         label: &str,
     ) -> Result<f64, HalError> {
-        let protocol = detect_protocol(label);
+        let protocol = detect_protocol_with_address(label, address);
         debug!(
             device,
             address,
@@ -228,7 +245,7 @@ impl LinuxI2c {
         address: u32,
         label: &str,
     ) -> Result<(), HalError> {
-        let protocol = detect_protocol(label);
+        let protocol = detect_protocol_with_address(label, address);
         info!(device, address, ?protocol, "i2c: reinit_sensor");
         self.reinit_sensor_impl(device, address, protocol)
     }
@@ -723,6 +740,33 @@ mod tests {
         assert_eq!(detect_protocol("SDP810_TEMP"), SensorProtocol::Sdp810Temp);
         assert_eq!(
             detect_protocol("ch4_sdp810_temp_sensor"),
+            SensorProtocol::Sdp810Temp
+        );
+    }
+
+    #[test]
+    fn detect_sdp810_by_address_fallback() {
+        // Channels like "CFM Flow" don't contain "sdp810" but are on address 0x25
+        assert_eq!(
+            detect_protocol_with_address("CFM Flow", 0x25),
+            SensorProtocol::Sdp810Dp
+        );
+        assert_eq!(
+            detect_protocol_with_address("Temp in flow", 0x25),
+            SensorProtocol::Sdp810Temp
+        );
+        assert_eq!(
+            detect_protocol_with_address("SDP810_inWC", 0x25),
+            SensorProtocol::Sdp810Dp
+        );
+        // Non-SDP810 address should still default to Sdp510
+        assert_eq!(
+            detect_protocol_with_address("CFM Flow", 0x40),
+            SensorProtocol::Sdp510
+        );
+        // Label-based detection still takes priority
+        assert_eq!(
+            detect_protocol_with_address("sdp810_temp", 0x40),
             SensorProtocol::Sdp810Temp
         );
     }
