@@ -347,6 +347,38 @@ pub fn handle_engine_cmd<H: HalRead + HalWrite + HalDiagnostics>(
             let points = ctx.history_store.query(channel, since_unix, limit);
             let _ = reply.send(points);
         }
+        EngineCmd::Diagnostics { reply } => {
+            let uptime = ctx.start_time.elapsed();
+            let m = crate::metrics::metrics();
+
+            let channels_fault = engine
+                .channels
+                .iter()
+                .filter(|(_, ch)| ch.value.status == sandstar_engine::EngineStatus::Fault)
+                .count();
+            let channels_down = engine
+                .channels
+                .iter()
+                .filter(|(_, ch)| ch.value.status == sandstar_engine::EngineStatus::Down)
+                .count();
+            let i2c_backoff_active = engine.i2c_backoff.len();
+
+            let last_us = m.poll_duration_us_last.load(std::sync::atomic::Ordering::Relaxed);
+            let max_us = m.poll_duration_us_max.load(std::sync::atomic::Ordering::Relaxed);
+
+            let _ = reply.send(sandstar_ipc::types::DiagnosticsInfo {
+                uptime_secs: uptime.as_secs(),
+                poll_count: m.poll_count.load(std::sync::atomic::Ordering::Relaxed),
+                last_poll_duration_ms: last_us / 1000,
+                max_poll_duration_ms: max_us / 1000,
+                poll_overrun_count: m.poll_overrun_count.load(std::sync::atomic::Ordering::Relaxed),
+                poll_interval_ms: ctx.config.poll_interval_ms,
+                channels_total: engine.channels.count(),
+                channels_fault,
+                channels_down,
+                i2c_backoff_active,
+            });
+        }
         EngineCmd::Shutdown => {}
     }
 }
@@ -959,5 +991,74 @@ mod tests {
         assert_eq!(points.len(), 5);
         assert_eq!(points[0].ts, 1000);
         assert_eq!(points[4].cur, 76.0);
+    }
+
+    #[test]
+    fn test_diagnostics() {
+        let mut engine = make_engine();
+        let config = make_config();
+        let history = HistoryStore::new(100);
+        let mut watches = HashMap::new();
+        let mut counter = 0u64;
+        let mut ctx = make_ctx(&config, &mut watches, &mut counter, &history);
+
+        let (reply, rx) = oneshot::channel();
+        handle_engine_cmd(EngineCmd::Diagnostics { reply }, &mut engine, &mut ctx);
+        let info = rx.blocking_recv().unwrap();
+        assert_eq!(info.channels_total, 3);
+        assert_eq!(info.channels_fault, 0);
+        assert_eq!(info.channels_down, 0);
+        assert_eq!(info.i2c_backoff_active, 0);
+        assert_eq!(info.poll_interval_ms, 1000);
+    }
+
+    #[test]
+    fn test_diagnostics_with_faults() {
+        let mut engine = make_engine();
+        // Set one channel to Down status
+        if let Some(ch) = engine.channels.get_mut(612) {
+            ch.value.status = sandstar_engine::EngineStatus::Down;
+        }
+        // Set another to Fault status
+        if let Some(ch) = engine.channels.get_mut(1200) {
+            ch.value.status = sandstar_engine::EngineStatus::Fault;
+        }
+
+        let config = make_config();
+        let history = HistoryStore::new(100);
+        let mut watches = HashMap::new();
+        let mut counter = 0u64;
+        let mut ctx = make_ctx(&config, &mut watches, &mut counter, &history);
+
+        let (reply, rx) = oneshot::channel();
+        handle_engine_cmd(EngineCmd::Diagnostics { reply }, &mut engine, &mut ctx);
+        let info = rx.blocking_recv().unwrap();
+        assert_eq!(info.channels_total, 3);
+        assert_eq!(info.channels_fault, 1, "one channel should be Fault");
+        assert_eq!(info.channels_down, 1, "one channel should be Down");
+    }
+
+    #[test]
+    fn test_diagnostics_with_i2c_backoff() {
+        let mut engine = make_engine();
+        // Insert a fake I2C backoff entry
+        engine.i2c_backoff.insert(
+            (2, 0x40),
+            sandstar_engine::engine::I2cBackoffState {
+                cooldown: 60,
+                consecutive_failures: 1,
+            },
+        );
+
+        let config = make_config();
+        let history = HistoryStore::new(100);
+        let mut watches = HashMap::new();
+        let mut counter = 0u64;
+        let mut ctx = make_ctx(&config, &mut watches, &mut counter, &history);
+
+        let (reply, rx) = oneshot::channel();
+        handle_engine_cmd(EngineCmd::Diagnostics { reply }, &mut engine, &mut ctx);
+        let info = rx.blocking_recv().unwrap();
+        assert_eq!(info.i2c_backoff_active, 1, "should have one I2C sensor in backoff");
     }
 }

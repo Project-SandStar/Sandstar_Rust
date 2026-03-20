@@ -46,6 +46,9 @@ pub enum EngineCommand {
 
     /// Query channel value history from the ring buffer.
     GetHistory { channel: u32, since_secs: u64, limit: usize },
+
+    /// Get engine diagnostics (poll timing, channel health, I2C backoff state).
+    Diagnostics,
 }
 
 /// Responses sent from the engine server back to CLI tools.
@@ -79,6 +82,9 @@ pub enum EngineResponse {
 
     /// Channel value history.
     History(Vec<HistoryEntry>),
+
+    /// Engine diagnostics.
+    Diagnostics(DiagnosticsInfo),
 
     /// Error message.
     Error(String),
@@ -122,6 +128,21 @@ pub struct WriteLevelInfo {
     pub level_dis: String,
     pub val: Option<f64>,
     pub who: String,
+}
+
+/// Engine diagnostics summary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticsInfo {
+    pub uptime_secs: u64,
+    pub poll_count: u64,
+    pub last_poll_duration_ms: u64,
+    pub max_poll_duration_ms: u64,
+    pub poll_overrun_count: u64,
+    pub poll_interval_ms: u64,
+    pub channels_total: usize,
+    pub channels_fault: usize,
+    pub channels_down: usize,
+    pub i2c_backoff_active: usize,
 }
 
 /// A single history entry from the ring buffer.

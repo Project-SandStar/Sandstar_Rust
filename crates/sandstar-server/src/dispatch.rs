@@ -220,5 +220,38 @@ fn execute<H: HalRead + HalWrite + HalDiagnostics>(
                 .collect();
             EngineResponse::History(entries)
         }
+
+        EngineCommand::Diagnostics => {
+            let uptime = start_time.elapsed();
+            let m = crate::metrics::metrics();
+
+            let channels_fault = engine
+                .channels
+                .iter()
+                .filter(|(_, ch)| ch.value.status == sandstar_engine::EngineStatus::Fault)
+                .count();
+            let channels_down = engine
+                .channels
+                .iter()
+                .filter(|(_, ch)| ch.value.status == sandstar_engine::EngineStatus::Down)
+                .count();
+            let i2c_backoff_active = engine.i2c_backoff.len();
+
+            let last_us = m.poll_duration_us_last.load(std::sync::atomic::Ordering::Relaxed);
+            let max_us = m.poll_duration_us_max.load(std::sync::atomic::Ordering::Relaxed);
+
+            EngineResponse::Diagnostics(DiagnosticsInfo {
+                uptime_secs: uptime.as_secs(),
+                poll_count: m.poll_count.load(std::sync::atomic::Ordering::Relaxed),
+                last_poll_duration_ms: last_us / 1000,
+                max_poll_duration_ms: max_us / 1000,
+                poll_overrun_count: m.poll_overrun_count.load(std::sync::atomic::Ordering::Relaxed),
+                poll_interval_ms: config.poll_interval_ms,
+                channels_total: engine.channels.count(),
+                channels_fault,
+                channels_down,
+                i2c_backoff_active,
+            })
+        }
     }
 }

@@ -103,6 +103,10 @@ pub enum EngineCmd {
         limit: usize,
         reply: oneshot::Sender<Vec<HistoryPoint>>,
     },
+    /// Get engine diagnostics (poll timing, channel health, I2C backoff).
+    Diagnostics {
+        reply: oneshot::Sender<sandstar_ipc::types::DiagnosticsInfo>,
+    },
     Shutdown,
 }
 
@@ -298,6 +302,15 @@ impl EngineHandle {
             .await
             .map_err(|_| "engine stopped".to_string())?;
         rx.await.map_err(|_| "engine dropped reply".to_string())?
+    }
+
+    pub async fn diagnostics(&self) -> Result<sandstar_ipc::types::DiagnosticsInfo, String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCmd::Diagnostics { reply })
+            .await
+            .map_err(|_| "engine stopped".to_string())?;
+        rx.await.map_err(|_| "engine dropped reply".to_string())
     }
 
     pub async fn get_history(
@@ -671,6 +684,7 @@ pub fn router_with_auth(
         .route("/api/status", get(handlers::status))
         .route("/health", get(handlers::health))
         .route("/api/metrics", get(handlers::metrics_endpoint))
+        .route("/api/diagnostics", get(handlers::diagnostics))
         .route("/api/channels", get(handlers::channels))
         .route("/api/polls", get(handlers::polls))
         .route("/api/tables", get(handlers::tables))

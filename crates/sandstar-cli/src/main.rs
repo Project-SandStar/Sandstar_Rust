@@ -125,6 +125,9 @@ enum Commands {
     /// Show engine health summary (status + channel breakdown).
     Health,
 
+    /// Show engine diagnostics (poll timing, channel health, I2C backoff).
+    Diagnostics,
+
     /// Convert a Sedona .sax file to control.toml format.
     ConvertSax {
         /// Path to the .sax XML file.
@@ -211,6 +214,7 @@ fn main() {
                 limit: *limit,
             }
         }
+        Commands::Diagnostics => EngineCommand::Diagnostics,
         Commands::Health => unreachable!("handled above"),
         Commands::ConvertSax { .. } => unreachable!("handled above"),
     };
@@ -251,6 +255,7 @@ fn print_json(response: EngineResponse) {
         EngineResponse::Status(s) => serde_json::to_value(&s).unwrap(),
         EngineResponse::WriteLevels(levels) => serde_json::to_value(&levels).unwrap(),
         EngineResponse::History(entries) => serde_json::to_value(&entries).unwrap(),
+        EngineResponse::Diagnostics(d) => serde_json::to_value(&d).unwrap(),
         EngineResponse::Error(msg) => {
             let err = json!({"ok": false, "error": msg});
             println!("{}", serde_json::to_string_pretty(&err).unwrap());
@@ -346,6 +351,22 @@ fn print_text(response: EngineResponse) {
                 };
                 println!("{:<6} {:<12} {:<12} {}", l.level, l.level_dis, val_str, l.who);
             }
+        }
+
+        EngineResponse::Diagnostics(d) => {
+            println!("Sandstar Engine Diagnostics");
+            println!("===========================");
+            println!("  uptime:              {}s", d.uptime_secs);
+            println!("  poll count:          {}", d.poll_count);
+            println!("  poll interval:       {}ms", d.poll_interval_ms);
+            println!("  last poll duration:  {}ms", d.last_poll_duration_ms);
+            println!("  max poll duration:   {}ms", d.max_poll_duration_ms);
+            println!("  poll overruns:       {}", d.poll_overrun_count);
+            println!();
+            println!("  channels total:      {}", d.channels_total);
+            println!("  channels fault:      {}", d.channels_fault);
+            println!("  channels down:       {}", d.channels_down);
+            println!("  i2c backoff active:  {}", d.i2c_backoff_active);
         }
 
         EngineResponse::History(entries) => {
@@ -859,5 +880,11 @@ mod tests {
             Commands::WriteLevels { channel } => assert_eq!(channel, 1113),
             _ => panic!("expected WriteLevels command"),
         }
+    }
+
+    #[test]
+    fn test_diagnostics_subcommand() {
+        let cli = try_parse(&["sandstar-cli", "diagnostics"]).unwrap();
+        assert!(matches!(cli.command, Commands::Diagnostics));
     }
 }

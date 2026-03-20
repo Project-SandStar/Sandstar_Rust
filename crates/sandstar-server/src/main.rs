@@ -449,6 +449,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 metrics::metrics().poll_duration_us_last.store(elapsed_us, std::sync::atomic::Ordering::Relaxed);
                 metrics::metrics().poll_duration_us_max.fetch_max(elapsed_us, std::sync::atomic::Ordering::Relaxed);
 
+                // Poll cycle overrun detection: warn if cycle took >80% of interval
+                let overrun_threshold_ms = (config.poll_interval_ms * 80) / 100;
+                let elapsed_ms = elapsed.as_millis() as u64;
+                if elapsed_ms > overrun_threshold_ms {
+                    metrics::metrics().poll_overrun_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    warn!(
+                        duration_ms = elapsed_ms,
+                        limit_ms = config.poll_interval_ms,
+                        "poll cycle overrun: took {}ms (limit {}ms)",
+                        elapsed_ms,
+                        config.poll_interval_ms,
+                    );
+                }
+
                 // Capture all polled values into history ring buffers
                 if let Some(ref eng) = engine {
                     let now_unix = SystemTime::now()

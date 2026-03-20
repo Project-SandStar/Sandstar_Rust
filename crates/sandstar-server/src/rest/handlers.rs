@@ -350,6 +350,14 @@ pub async fn metrics_endpoint() -> Json<serde_json::Value> {
     Json(crate::metrics::metrics().to_json())
 }
 
+/// GET /api/diagnostics — engine diagnostics (poll timing, channel health, I2C backoff).
+pub async fn diagnostics(
+    State(handle): State<EngineHandle>,
+) -> Result<Json<sandstar_ipc::types::DiagnosticsInfo>, AppError> {
+    let info = handle.diagnostics().await.map_err(AppError::from)?;
+    Ok(Json(info))
+}
+
 /// GET /api/channels — list all channels.
 pub async fn channels(
     headers: HeaderMap,
