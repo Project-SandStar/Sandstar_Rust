@@ -1,8 +1,8 @@
 # Sandstar Rust Migration -- Roadmap v2
 
 **Date:** 2026-03-20 (updated)
-**Status:** PRODUCTION DEPLOYED — Rust v1.0.0 running on BeagleBone (Todd Air Flow). C system removed.
-**Version:** 1.0.1 (7 crates, 820 tests, ~31,000 lines of Rust)
+**Status:** PRODUCTION DEPLOYED — Rust v1.1.0 running on BeagleBone (Todd Air Flow). First live sensor (Solidyne 00-WTS-A) reading 78°F.
+**Version:** 1.1.0 (7 crates, 824 tests, ~31,000+ lines of Rust)
 **Feature Parity:** ~99% (80/80 features vs C system + extras)
 **Research Documents:** 20 analysis docs (00-19) — deep gap analysis completed 2026-03-20
 **Research Coverage:** ~72% weighted (100% on core docs 00-11, deferred on future docs 12-19)
@@ -499,20 +499,23 @@ Remaining future tracks (post-production):
 | Rust source lines | ~31,000 |
 | C/C++ replaced | ~27,000 lines (60% reduction) |
 | POCO eliminated | ~500,000 lines |
-| Test count | 820 passing, 0 failures |
+| Test count | 824 passing, 0 failures |
 | Crates | 7 (engine, hal, hal-linux, ipc, server, cli, svm) |
 | REST endpoints | 25 (14 Haystack + health + metrics + zinc + WebSocket + rate-limit + auth + 4 simulator) |
 | Control components | 22 (PID, sequencer + 20 library components) |
 | IPC commands | 13 |
-| CLI commands | 11 (status, channels, polls, tables, read, write, shutdown, reload, history, convert-sax, health) |
+| CLI commands | 12 (status, channels, polls, tables, read, write, shutdown, reload, history, convert-sax, health, diagnostics) |
 | Feature parity | ~99% (80/80 features + extras) |
-| Production deployment | BeagleBone (Todd Air Flow, 192.168.1.104), 3.4MB RAM, 0.28% CPU |
+| Production deployment | BeagleBone (Todd Air Flow, DHCP — was .104/.105), 3.4MB RAM, 0.28% CPU |
+| Live sensors | 1 — Solidyne 00-WTS-A (10K NTC, channel 1713, 78°F validated) |
+| CI/CD | GitHub Actions: fmt + clippy + test on push/PR, ARM cross-compile on master |
+| Monitoring | health-monitor.sh cron (5min), /api/diagnostics endpoint, CLI health + diagnostics |
 | ARM binary size | Server ~2.1MB + CLI 580KB (stripped, with crypto deps) |
 | Security issues open | 0 Critical, 0 High, 0 Medium — all resolved |
 | Research documents | 20 (00-19) — deep gap analysis 2026-03-20 |
 | Research coverage | ~72% weighted (100% core, deferred on future phases) |
 | Simulation tools | SimulatorHal + BASemulator bridge + DataLogger + sim.sh |
-| Features surpassing C | 6 (WebSocket, SimulatorHal, data logging, ADC fault detect, I2C backoff, CLI health) |
+| Features surpassing C | 8 (WebSocket, SimulatorHal, data logging, ADC fault detect, I2C backoff, CLI health/diagnostics, poll overrun detect, CI/CD) |
 | Clippy warnings | 0 |
 | Test coverage (est.) | ~80% public API |
 | Project health score | 9.5/10 (production validated, 2026-03-20) |
@@ -591,3 +594,7 @@ Deep gap analysis completed 2026-03-20 (3-agent, 20 documents vs full codebase).
 | Custom Zinc/filter over libhaystack | Research docs 03/05 proposed libhaystack crate. Deliberate choice to use custom impl (~1500 lines) — no external dependency on third-party crate for critical data format | 2026-03-20 |
 | Channel-centric over component-centric | Rust uses flat channel tables instead of Sedona component tree. Simpler, works for EacIo. Future Driver Framework (Phase 12.0) may need component model | 2026-03-20 |
 | GitHub repo created | Private repo at TurkerMertkan/Sandstar_Rust. Milestone releases for significant phases | 2026-03-19 |
+| Solidyne 00-WTS-A requires halved table | EacIo voltage divider produces ADC at half expected range for this sensor. Created thermistor10K2_wts.txt (values/2). Swapped on device | 2026-03-20 |
+| auto_detect skip when pre-configured | auto_detect_sensor() was overwriting zinc-loaded config every poll. Now skips if table_index+low+high already set | 2026-03-20 |
+| BeagleBone needs static IP | DHCP reassigns IP on power loss (was .104, now .105). Static IP or DHCP reservation needed for reliable access | 2026-03-20 |
+| Haystack API opened to 0.0.0.0 | Changed --http-bind from 127.0.0.1 to 0.0.0.0 in systemd service for future SkySpark connectivity | 2026-03-20 |
