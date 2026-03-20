@@ -386,6 +386,8 @@ pub mod mock {
         digital_sticky: RefCell<HashMap<u32, bool>>,
         digital_writes: RefCell<Vec<DigitalWrite>>,
         pwm_writes: RefCell<Vec<PwmWrite>>,
+        /// Queued results for `reinit_i2c_sensor` calls. If empty, returns Ok(()).
+        reinit_results: RefCell<Vec<Result<(), HalError>>>,
     }
 
     impl MockHal {
@@ -397,6 +399,7 @@ pub mod mock {
                 digital_sticky: RefCell::new(HashMap::new()),
                 digital_writes: RefCell::new(Vec::new()),
                 pwm_writes: RefCell::new(Vec::new()),
+                reinit_results: RefCell::new(Vec::new()),
             }
         }
 
@@ -460,6 +463,12 @@ pub mod mock {
         /// Get all recorded PWM writes.
         pub fn pwm_writes(&self) -> Vec<PwmWrite> {
             self.pwm_writes.borrow().clone()
+        }
+
+        /// Queue a reinit_i2c_sensor result (consumed in FIFO order).
+        /// If the queue is empty when reinit is called, Ok(()) is returned.
+        pub fn queue_reinit_result(&self, result: Result<(), HalError>) {
+            self.reinit_results.borrow_mut().push(result);
         }
 
         /// Pop a read result from the queue, fall back to sticky value.
@@ -559,7 +568,16 @@ pub mod mock {
     }
 
     impl HalControl for MockHal {}
-    impl HalDiagnostics for MockHal {}
+    impl HalDiagnostics for MockHal {
+        fn reinit_i2c_sensor(&self, _device: u32, _address: u32, _label: &str) -> Result<(), HalError> {
+            let mut queue = self.reinit_results.borrow_mut();
+            if queue.is_empty() {
+                Ok(())
+            } else {
+                queue.remove(0)
+            }
+        }
+    }
 
     #[cfg(test)]
     mod tests {

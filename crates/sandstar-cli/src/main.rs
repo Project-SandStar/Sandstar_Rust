@@ -122,6 +122,9 @@ enum Commands {
         limit: usize,
     },
 
+    /// Show engine health summary (status + channel breakdown).
+    Health,
+
     /// Convert a Sedona .sax file to control.toml format.
     ConvertSax {
         /// Path to the .sax XML file.
@@ -134,6 +137,12 @@ enum Commands {
 
 fn main() {
     let cli = Cli::parse();
+
+    // Health is a composite command — issues multiple IPC calls.
+    if matches!(&cli.command, Commands::Health) {
+        run_health(&cli.socket, cli.json);
+        return;
+    }
 
     // ConvertSax is a local command — no IPC needed.
     if let Commands::ConvertSax { sax_file, output } = &cli.command {
@@ -202,6 +211,7 @@ fn main() {
                 limit: *limit,
             }
         }
+        Commands::Health => unreachable!("handled above"),
         Commands::ConvertSax { .. } => unreachable!("handled above"),
     };
 
@@ -357,6 +367,257 @@ fn print_text(response: EngineResponse) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Health subcommand — composite view from Status + ListChannels + ListPolls
+// ---------------------------------------------------------------------------
+
+fn run_health(socket: &str, as_json: bool) {
+    // Issue three IPC calls to gather all the data we need.
+    let status = match client::send_command(socket, &EngineCommand::Status) {
+        Ok(EngineResponse::Status(s)) => s,
+        Ok(EngineResponse::Error(e)) => {
+            eprintln!("engine error: {e}");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("error: {e}\n  is the engine server running?\n  socket: {socket}");
+            std::process::exit(1);
+        }
+        _ => {
+            eprintln!("unexpected response for Status");
+            std::process::exit(1);
+        }
+    };
+
+    let channels = match client::send_command(socket, &EngineCommand::ListChannels) {
+        Ok(EngineResponse::Channels(c)) => c,
+        Ok(EngineResponse::Error(e)) => {
+            eprintln!("engine error: {e}");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        _ => {
+            eprintln!("unexpected response for ListChannels");
+            std::process::exit(1);
+        }
+    };
+
+    let polls = match client::send_command(socket, &EngineCommand::ListPolls) {
+        Ok(EngineResponse::Polls(p)) => p,
+        Ok(EngineResponse::Error(e)) => {
+            eprintln!("engine error: {e}");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        _ => {
+            eprintln!("unexpected response for ListPolls");
+            std::process::exit(1);
+        }
+    };
+
+    if as_json {
+        print_health_json(&status, &channels, &polls);
+    } else {
+        print_health_text(&status, &channels, &polls);
+    }
+}
+
+/// Format uptime seconds as a human-readable string (e.g., "2h 15m").
+fn format_uptime(secs: u64) -> String {
+    let days = secs / 86400;
+    let hours = (secs % 86400) / 3600;
+    let mins = (secs % 3600) / 60;
+    let s = secs % 60;
+
+    if days > 0 {
+        format!("{days}d {hours}h {mins}m")
+    } else if hours > 0 {
+        format!("{hours}h {mins}m")
+    } else if mins > 0 {
+        format!("{mins}m {s}s")
+    } else {
+        format!("{s}s")
+    }
+}
+
+use sandstar_ipc::types::ChannelInfo;
+
+/// Categorise channels by their type prefix (I2c, Virtual*, Analog, Digital, Pwm, etc.).
+fn channel_type_category(ch: &ChannelInfo) -> &'static str {
+    let t = ch.channel_type.as_str();
+    if t.starts_with("Virtual") {
+        "Virtual"
+    } else if t == "I2c" {
+        "I2C"
+    } else if t == "Analog" {
+        "Analog"
+    } else if t == "Digital" {
+        "Digital"
+    } else if t == "Pwm" {
+        "PWM"
+    } else {
+        "Other"
+    }
+}
+
+fn print_health_text(
+    status: &sandstar_ipc::types::StatusInfo,
+    channels: &[ChannelInfo],
+    polls: &[sandstar_ipc::types::PollInfo],
+) {
+    let version = env!("CARGO_PKG_VERSION");
+    let uptime = format_uptime(status.uptime_secs);
+
+    // Classify channels by status.
+    let total = channels.len();
+    let fault: Vec<&ChannelInfo> = channels.iter().filter(|c| c.status == "Fault").collect();
+    let down: Vec<&ChannelInfo> = channels.iter().filter(|c| c.status == "Down").collect();
+    let disabled: Vec<&ChannelInfo> = channels.iter().filter(|c| !c.enabled).collect();
+    let ok_count = total - fault.len() - down.len() - disabled.len();
+
+    println!("Sandstar Engine Health Report");
+    println!("==============================");
+    println!("Status:    active | uptime {uptime}");
+    println!("Version:   {version}");
+    println!();
+    println!(
+        "Channels:  {total} total | {f} Fault | {d} Down | {dis} Disabled | {ok} Ok",
+        f = fault.len(),
+        d = down.len(),
+        dis = disabled.len(),
+        ok = ok_count,
+    );
+    println!("Polls:     {} active", polls.len());
+    println!("Tables:    {} loaded", status.table_count);
+
+    // Faulted channels.
+    if !fault.is_empty() {
+        println!();
+        println!("Faulted Channels:");
+        for ch in &fault {
+            println!(
+                "  {:<6} {:<20} raw={:<10.1} {}",
+                ch.id, ch.label, ch.raw, ch.status,
+            );
+        }
+    }
+
+    // Down channels.
+    if !down.is_empty() {
+        println!();
+        println!("Down Channels:");
+        for ch in &down {
+            println!(
+                "  {:<6} {:<20} raw={:<10.1} {}",
+                ch.id, ch.label, ch.raw, ch.status,
+            );
+        }
+    }
+
+    // Per-type breakdown.
+    let categories: &[&str] = &["Analog", "Digital", "I2C", "PWM", "Virtual", "Other"];
+    println!();
+    for cat in categories {
+        let in_cat: Vec<&ChannelInfo> = channels
+            .iter()
+            .filter(|c| channel_type_category(c) == *cat)
+            .collect();
+        if in_cat.is_empty() {
+            continue;
+        }
+        let cat_ok = in_cat.iter().filter(|c| c.status == "Ok" || c.status == "Unknown").count();
+        let cat_down = in_cat.iter().filter(|c| c.status == "Down").count();
+        let cat_fault = in_cat.iter().filter(|c| c.status == "Fault").count();
+        let cat_dis = in_cat.iter().filter(|c| !c.enabled).count();
+        print!("{:<10} {} channels", format!("{cat}:"), in_cat.len());
+        if cat_ok > 0 {
+            print!(", {cat_ok} Ok");
+        }
+        if cat_down > 0 {
+            print!(", {cat_down} Down");
+        }
+        if cat_fault > 0 {
+            print!(", {cat_fault} Fault");
+        }
+        if cat_dis > 0 {
+            print!(", {cat_dis} Disabled");
+        }
+        println!();
+    }
+}
+
+fn print_health_json(
+    status: &sandstar_ipc::types::StatusInfo,
+    channels: &[ChannelInfo],
+    polls: &[sandstar_ipc::types::PollInfo],
+) {
+    let version = env!("CARGO_PKG_VERSION");
+    let total = channels.len();
+    let fault_count = channels.iter().filter(|c| c.status == "Fault").count();
+    let down_count = channels.iter().filter(|c| c.status == "Down").count();
+    let disabled_count = channels.iter().filter(|c| !c.enabled).count();
+    let ok_count = total - fault_count - down_count - disabled_count;
+
+    let fault_list: Vec<_> = channels
+        .iter()
+        .filter(|c| c.status == "Fault")
+        .map(|c| json!({"id": c.id, "label": c.label, "raw": c.raw, "status": c.status}))
+        .collect();
+
+    let down_list: Vec<_> = channels
+        .iter()
+        .filter(|c| c.status == "Down")
+        .map(|c| json!({"id": c.id, "label": c.label, "raw": c.raw, "status": c.status}))
+        .collect();
+
+    // Per-type breakdown.
+    let mut type_breakdown = serde_json::Map::new();
+    for cat in &["Analog", "Digital", "I2C", "PWM", "Virtual", "Other"] {
+        let in_cat: Vec<&ChannelInfo> = channels
+            .iter()
+            .filter(|c| channel_type_category(c) == *cat)
+            .collect();
+        if in_cat.is_empty() {
+            continue;
+        }
+        type_breakdown.insert(
+            cat.to_string(),
+            json!({
+                "total": in_cat.len(),
+                "ok": in_cat.iter().filter(|c| c.status == "Ok" || c.status == "Unknown").count(),
+                "down": in_cat.iter().filter(|c| c.status == "Down").count(),
+                "fault": in_cat.iter().filter(|c| c.status == "Fault").count(),
+                "disabled": in_cat.iter().filter(|c| !c.enabled).count(),
+            }),
+        );
+    }
+
+    let output = json!({
+        "version": version,
+        "uptime_secs": status.uptime_secs,
+        "uptime_human": format_uptime(status.uptime_secs),
+        "channels": {
+            "total": total,
+            "ok": ok_count,
+            "fault": fault_count,
+            "down": down_count,
+            "disabled": disabled_count,
+        },
+        "polls": polls.len(),
+        "tables": status.table_count,
+        "faulted_channels": fault_list,
+        "down_channels": down_list,
+        "type_breakdown": type_breakdown,
+    });
+    println!("{}", serde_json::to_string_pretty(&output).unwrap());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,6 +745,64 @@ mod tests {
             }
             _ => panic!("expected ConvertSax command"),
         }
+    }
+
+    #[test]
+    fn test_health_subcommand() {
+        let cli = try_parse(&["sandstar-cli", "health"]).unwrap();
+        assert!(matches!(cli.command, Commands::Health));
+    }
+
+    #[test]
+    fn test_health_with_json_flag() {
+        let cli = try_parse(&["sandstar-cli", "--json", "health"]).unwrap();
+        assert!(cli.json);
+        assert!(matches!(cli.command, Commands::Health));
+    }
+
+    #[test]
+    fn test_format_uptime_seconds() {
+        assert_eq!(format_uptime(0), "0s");
+        assert_eq!(format_uptime(45), "45s");
+    }
+
+    #[test]
+    fn test_format_uptime_minutes() {
+        assert_eq!(format_uptime(65), "1m 5s");
+        assert_eq!(format_uptime(3599), "59m 59s");
+    }
+
+    #[test]
+    fn test_format_uptime_hours() {
+        assert_eq!(format_uptime(3600), "1h 0m");
+        assert_eq!(format_uptime(8100), "2h 15m");
+    }
+
+    #[test]
+    fn test_format_uptime_days() {
+        assert_eq!(format_uptime(90061), "1d 1h 1m");
+        assert_eq!(format_uptime(172800), "2d 0h 0m");
+    }
+
+    #[test]
+    fn test_channel_type_category() {
+        let make = |ct: &str| ChannelInfo {
+            id: 0,
+            label: String::new(),
+            channel_type: ct.to_string(),
+            direction: String::new(),
+            enabled: true,
+            status: "Ok".to_string(),
+            cur: 0.0,
+            raw: 0.0,
+        };
+        assert_eq!(channel_type_category(&make("Analog")), "Analog");
+        assert_eq!(channel_type_category(&make("Digital")), "Digital");
+        assert_eq!(channel_type_category(&make("I2c")), "I2C");
+        assert_eq!(channel_type_category(&make("Pwm")), "PWM");
+        assert_eq!(channel_type_category(&make("VirtualAnalog")), "Virtual");
+        assert_eq!(channel_type_category(&make("VirtualDigital")), "Virtual");
+        assert_eq!(channel_type_category(&make("SomeNewType")), "Other");
     }
 
     #[test]

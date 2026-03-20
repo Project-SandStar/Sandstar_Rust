@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use sandstar_hal::{HalDiagnostics, HalError, HalRead, HalWrite};
+use tracing::{debug, info, warn};
 
 use crate::channel::{ChannelStore, ChannelType};
 use crate::conversion::auto_detect::auto_detect_sensor;
@@ -29,11 +30,55 @@ type I2cCacheKey = (u32, u32, String);
 /// Pre-read cache: maps (device, address, label) → HAL read result.
 type I2cReadCache = HashMap<I2cCacheKey, std::result::Result<f64, HalError>>;
 
-/// Retry cooldown: number of poll cycles before retrying a failed channel.
-const RETRY_COOLDOWN: u32 = 30;
+/// Base retry cooldown: number of poll cycles before the first reinit attempt.
+/// At 1 Hz poll rate this is ~30 seconds.
+const RETRY_COOLDOWN_BASE: u32 = 30;
+
+/// Maximum retry cooldown after exponential backoff (poll cycles).
+/// At 1 Hz this caps at ~300 seconds (5 minutes).
+const RETRY_COOLDOWN_MAX: u32 = 300;
 
 /// Consecutive read failures before resetting the fail counter.
 const CONSECUTIVE_FAIL_THRESHOLD: u32 = 5;
+
+/// Key for I2C backoff state: (device, address).
+type I2cBackoffKey = (u32, u32);
+
+/// Tracks exponential backoff state for a failed I2C sensor (device, address).
+#[derive(Debug, Clone)]
+pub struct I2cBackoffState {
+    /// Current cooldown interval in poll cycles (starts at RETRY_COOLDOWN_BASE).
+    pub cooldown: u32,
+    /// Number of consecutive reinit failures for this sensor.
+    pub consecutive_failures: u32,
+}
+
+impl I2cBackoffState {
+    fn new() -> Self {
+        Self {
+            cooldown: RETRY_COOLDOWN_BASE,
+            consecutive_failures: 0,
+        }
+    }
+
+    /// Record a reinit failure and increase the backoff interval.
+    /// Returns the new cooldown value.
+    fn record_failure(&mut self) -> u32 {
+        self.consecutive_failures += 1;
+        // Double the cooldown, capped at max
+        let new_cooldown = (self.cooldown * 2).min(RETRY_COOLDOWN_MAX);
+        if new_cooldown != self.cooldown {
+            self.cooldown = new_cooldown;
+        }
+        self.cooldown
+    }
+
+    /// Reset backoff after a successful recovery.
+    fn reset(&mut self) {
+        self.cooldown = RETRY_COOLDOWN_BASE;
+        self.consecutive_failures = 0;
+    }
+}
 
 /// Notification produced by a poll cycle.
 #[derive(Debug, Clone)]
@@ -58,6 +103,9 @@ pub struct Engine<H> {
     pub polls: PollStore,
     pub watches: WatchStore,
     pub notifies: NotifyStore,
+    /// Per-sensor exponential backoff state for I2C reinit attempts.
+    /// Keyed by (device, address).
+    pub i2c_backoff: HashMap<I2cBackoffKey, I2cBackoffState>,
 }
 
 impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
@@ -69,7 +117,104 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
             polls: PollStore::new(),
             watches: WatchStore::new(),
             notifies: NotifyStore::new(),
+            i2c_backoff: HashMap::new(),
         }
+    }
+
+    /// Handle failed/retry cooldown for a channel, with exponential backoff
+    /// for I2C sensors.
+    ///
+    /// Returns:
+    /// - `Ok(Some(EngineValue))` if the channel is still in cooldown (return Down)
+    /// - `Ok(None)` if the channel is not failed, or recovery succeeded (proceed to read)
+    fn try_i2c_recovery(&mut self, id: ChannelId) -> Result<Option<EngineValue>> {
+        let ch = self.channels.get_mut(id).ok_or(EngineError::ChannelNotFound(id))?;
+        if !ch.failed {
+            return Ok(None);
+        }
+
+        // Determine the current cooldown for this channel
+        let cooldown = if ch.channel_type == ChannelType::I2c {
+            let key = (ch.device, ch.address);
+            self.i2c_backoff
+                .get(&key)
+                .map(|s| s.cooldown)
+                .unwrap_or(RETRY_COOLDOWN_BASE)
+        } else {
+            RETRY_COOLDOWN_BASE
+        };
+
+        if ch.retry_counter < cooldown {
+            ch.retry_counter += 1;
+            return Ok(Some(EngineValue::with_status(EngineStatus::Down)));
+        }
+
+        // Cooldown expired -- attempt recovery
+        if ch.channel_type == ChannelType::I2c {
+            let device = ch.device;
+            let address = ch.address;
+            let label = ch.label.clone();
+            let key = (device, address);
+
+            if let Err(_e) = self.hal.reinit_i2c_sensor(device, address, &label) {
+                // Reinit failed -- increase backoff
+                let backoff = self.i2c_backoff.entry(key).or_insert_with(I2cBackoffState::new);
+                let old_cooldown = backoff.cooldown;
+                let new_cooldown = backoff.record_failure();
+
+                // First failure: WARN, subsequent repeated failures: DEBUG
+                if backoff.consecutive_failures == 1 {
+                    warn!(
+                        device,
+                        address,
+                        retry_in_s = new_cooldown,
+                        "i2c: reinit failed",
+                    );
+                } else {
+                    debug!(
+                        device,
+                        address,
+                        consecutive_failures = backoff.consecutive_failures,
+                        retry_in_s = new_cooldown,
+                        "i2c: reinit still failing",
+                    );
+                }
+
+                // Log at INFO when backoff interval increases
+                if new_cooldown > old_cooldown {
+                    info!(
+                        device,
+                        address,
+                        interval = new_cooldown,
+                        "i2c: backing off reinit",
+                    );
+                }
+
+                let ch = self.channels.get_mut(id).ok_or(EngineError::ChannelNotFound(id))?;
+                ch.retry_counter = 0;
+                return Ok(Some(EngineValue::with_status(EngineStatus::Down)));
+            }
+
+            // Reinit succeeded -- sensor recovered!
+            let backoff = self.i2c_backoff.get(&key);
+            let had_backoff = backoff.map(|b| b.consecutive_failures > 0).unwrap_or(false);
+            if had_backoff {
+                info!(device, address, "i2c: sensor recovered");
+            }
+            // Reset backoff state
+            if let Some(backoff) = self.i2c_backoff.get_mut(&key) {
+                backoff.reset();
+            }
+
+            let ch = self.channels.get_mut(id).ok_or(EngineError::ChannelNotFound(id))?;
+            ch.failed = false;
+            ch.retry_counter = 0;
+        } else {
+            ch.failed = false;
+            ch.retry_counter = 0;
+        }
+
+        Ok(None)
     }
 
     /// Read a channel value through the full pipeline.
@@ -107,33 +252,8 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
 
         // 3. Failed/retry cooldown
         {
-            let ch = self.channels.get_mut(id).ok_or(EngineError::ChannelNotFound(id))?;
-            if ch.failed {
-                if ch.retry_counter < RETRY_COOLDOWN {
-                    ch.retry_counter += 1;
-                    return Ok(EngineValue::with_status(EngineStatus::Down));
-                }
-
-                // Cooldown expired — attempt recovery
-                // For I2C channels, reinit the sensor before retrying (matches C engine)
-                if ch.channel_type == ChannelType::I2c {
-                    let device = ch.device;
-                    let address = ch.address;
-                    let label = ch.label.clone();
-                    if let Err(_e) = self.hal.reinit_i2c_sensor(device, address, &label) {
-                        // Reinit failed — stay failed, reset counter, try again later
-                        let ch = self.channels.get_mut(id).ok_or(EngineError::ChannelNotFound(id))?;
-                        ch.retry_counter = 0;
-                        return Ok(EngineValue::with_status(EngineStatus::Down));
-                    }
-                    // Re-borrow after HAL call
-                    let ch = self.channels.get_mut(id).ok_or(EngineError::ChannelNotFound(id))?;
-                    ch.failed = false;
-                    ch.retry_counter = 0;
-                } else {
-                    ch.failed = false;
-                    ch.retry_counter = 0;
-                }
+            if let Some(result) = self.try_i2c_recovery(id)? {
+                return Ok(result);
             }
         }
 
@@ -567,29 +687,8 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
 
         // 3. Failed/retry cooldown
         {
-            let ch = self.channels.get_mut(id).ok_or(EngineError::ChannelNotFound(id))?;
-            if ch.failed {
-                if ch.retry_counter < RETRY_COOLDOWN {
-                    ch.retry_counter += 1;
-                    return Ok(EngineValue::with_status(EngineStatus::Down));
-                }
-
-                if ch.channel_type == ChannelType::I2c {
-                    let device = ch.device;
-                    let address = ch.address;
-                    let label = ch.label.clone();
-                    if let Err(_e) = self.hal.reinit_i2c_sensor(device, address, &label) {
-                        let ch = self.channels.get_mut(id).ok_or(EngineError::ChannelNotFound(id))?;
-                        ch.retry_counter = 0;
-                        return Ok(EngineValue::with_status(EngineStatus::Down));
-                    }
-                    let ch = self.channels.get_mut(id).ok_or(EngineError::ChannelNotFound(id))?;
-                    ch.failed = false;
-                    ch.retry_counter = 0;
-                } else {
-                    ch.failed = false;
-                    ch.retry_counter = 0;
-                }
+            if let Some(result) = self.try_i2c_recovery(id)? {
+                return Ok(result);
             }
         }
 
@@ -2039,5 +2138,249 @@ mod tests {
         let last_write = writes.last().unwrap();
         assert_eq!(last_write.address, 5);
         assert!(!last_write.value, "effective value 0.0 should write false to digital HAL");
+    }
+
+    // ========================================================================
+    // I2C exponential backoff tests
+    // ========================================================================
+
+    #[test]
+    fn test_i2c_backoff_state_doubles() {
+        let mut state = super::I2cBackoffState::new();
+        assert_eq!(state.cooldown, 30);
+
+        // First failure: 30 -> 60
+        assert_eq!(state.record_failure(), 60);
+        assert_eq!(state.consecutive_failures, 1);
+
+        // Second failure: 60 -> 120
+        assert_eq!(state.record_failure(), 120);
+
+        // Third: 120 -> 240
+        assert_eq!(state.record_failure(), 240);
+
+        // Fourth: 240 -> 300 (capped)
+        assert_eq!(state.record_failure(), 300);
+
+        // Fifth: stays at 300
+        assert_eq!(state.record_failure(), 300);
+        assert_eq!(state.consecutive_failures, 5);
+    }
+
+    #[test]
+    fn test_i2c_backoff_state_reset() {
+        let mut state = super::I2cBackoffState::new();
+        state.record_failure();
+        state.record_failure();
+        assert_eq!(state.cooldown, 120);
+        assert_eq!(state.consecutive_failures, 2);
+
+        state.reset();
+        assert_eq!(state.cooldown, 30);
+        assert_eq!(state.consecutive_failures, 0);
+    }
+
+    #[test]
+    fn test_i2c_backoff_increases_on_repeated_reinit_failure() {
+        let mut engine = make_engine();
+        engine.channels.add(i2c_channel(612)).unwrap();
+
+        // Mark as failed
+        engine.channels.get_mut(612).unwrap().failed = true;
+
+        // Queue reinit failures
+        engine.hal.queue_reinit_result(Err(
+            sandstar_hal::HalError::BusError(2, "sensor down".into()),
+        ));
+
+        // First cooldown: 30 cycles at base rate
+        for i in 0..30 {
+            let value = engine.channel_read(612).unwrap();
+            assert_eq!(value.status, EngineStatus::Down, "cycle {}", i);
+        }
+
+        // 31st cycle: attempts reinit, fails -> backoff increases to 60
+        let value = engine.channel_read(612).unwrap();
+        assert_eq!(value.status, EngineStatus::Down);
+        assert_eq!(
+            engine.i2c_backoff.get(&(2, 0x40)).unwrap().cooldown,
+            60,
+            "backoff should double to 60 after first reinit failure"
+        );
+
+        // Now need 60 cycles before next attempt
+        engine.hal.queue_reinit_result(Err(
+            sandstar_hal::HalError::BusError(2, "sensor down".into()),
+        ));
+        for _ in 0..60 {
+            let value = engine.channel_read(612).unwrap();
+            assert_eq!(value.status, EngineStatus::Down);
+        }
+
+        // Next reinit attempt, fails again -> backoff to 120
+        let value = engine.channel_read(612).unwrap();
+        assert_eq!(value.status, EngineStatus::Down);
+        assert_eq!(
+            engine.i2c_backoff.get(&(2, 0x40)).unwrap().cooldown,
+            120,
+            "backoff should double to 120 after second reinit failure"
+        );
+    }
+
+    #[test]
+    fn test_i2c_backoff_caps_at_max() {
+        let mut engine = make_engine();
+        engine.channels.add(i2c_channel(612)).unwrap();
+
+        // Pre-set backoff to near max
+        engine.i2c_backoff.insert(
+            (2, 0x40),
+            super::I2cBackoffState {
+                cooldown: 240,
+                consecutive_failures: 3,
+            },
+        );
+        engine.channels.get_mut(612).unwrap().failed = true;
+
+        // Queue reinit failure
+        engine.hal.queue_reinit_result(Err(
+            sandstar_hal::HalError::BusError(2, "sensor down".into()),
+        ));
+
+        // Burn through 240 cycles
+        for _ in 0..240 {
+            engine.channel_read(612).unwrap();
+        }
+
+        // Reinit attempt fails -> should cap at 300
+        engine.channel_read(612).unwrap();
+        assert_eq!(
+            engine.i2c_backoff.get(&(2, 0x40)).unwrap().cooldown,
+            300,
+            "backoff should cap at 300"
+        );
+
+        // Queue another failure
+        engine.hal.queue_reinit_result(Err(
+            sandstar_hal::HalError::BusError(2, "sensor down".into()),
+        ));
+
+        // Burn through 300 cycles
+        for _ in 0..300 {
+            engine.channel_read(612).unwrap();
+        }
+
+        // Should still be 300
+        engine.channel_read(612).unwrap();
+        assert_eq!(
+            engine.i2c_backoff.get(&(2, 0x40)).unwrap().cooldown,
+            300,
+            "backoff should remain at 300 (max)"
+        );
+    }
+
+    #[test]
+    fn test_i2c_backoff_resets_on_recovery() {
+        let mut engine = make_engine();
+        engine.channels.add(i2c_channel(612)).unwrap();
+        engine.hal.set_i2c(2, 0x40, "sdp810", Ok(60.0));
+
+        // Pre-set backoff state as if we had previous failures
+        engine.i2c_backoff.insert(
+            (2, 0x40),
+            super::I2cBackoffState {
+                cooldown: 120,
+                consecutive_failures: 2,
+            },
+        );
+
+        engine.channels.get_mut(612).unwrap().failed = true;
+
+        // Burn through 120 cycles (the current backoff)
+        for _ in 0..120 {
+            let value = engine.channel_read(612).unwrap();
+            assert_eq!(value.status, EngineStatus::Down);
+        }
+
+        // reinit_i2c_sensor returns Ok(()) by default (no queued error),
+        // so sensor "recovers"
+        let value = engine.channel_read(612).unwrap();
+        assert_eq!(value.status, EngineStatus::Ok, "sensor should recover");
+
+        // Backoff should be reset
+        let backoff = engine.i2c_backoff.get(&(2, 0x40)).unwrap();
+        assert_eq!(backoff.cooldown, 30, "cooldown should reset to base");
+        assert_eq!(backoff.consecutive_failures, 0, "failures should reset");
+    }
+
+    #[test]
+    fn test_i2c_backoff_non_i2c_uses_base_cooldown() {
+        // Non-I2C channels should always use the base cooldown (30),
+        // not affected by backoff logic
+        let mut engine = make_engine();
+        engine.channels.add(analog_channel(1100)).unwrap();
+        engine.channels.get_mut(1100).unwrap().failed = true;
+
+        // Should return Down for 30 cycles (base cooldown)
+        for _ in 0..30 {
+            let value = engine.channel_read(1100).unwrap();
+            assert_eq!(value.status, EngineStatus::Down);
+        }
+
+        // 31st cycle: recovery
+        engine.hal.set_analog(0, 0, Ok(2048.0));
+        let value = engine.channel_read(1100).unwrap();
+        assert_eq!(value.status, EngineStatus::Ok);
+
+        // No backoff state should exist for non-I2C
+        assert!(engine.i2c_backoff.is_empty());
+    }
+
+    #[test]
+    fn test_i2c_backoff_shared_across_channels_same_sensor() {
+        // Multiple I2C channels sharing the same (device, address) should
+        // share backoff state
+        let mut engine = make_engine();
+
+        // Two channels on same sensor (device=2, address=0x40)
+        engine.channels.add(i2c_channel(610)).unwrap();
+        engine.channels.add(i2c_channel(611)).unwrap();
+
+        // Queue reinit failures for both
+        engine.hal.queue_reinit_result(Err(
+            sandstar_hal::HalError::BusError(2, "sensor down".into()),
+        ));
+        engine.hal.queue_reinit_result(Err(
+            sandstar_hal::HalError::BusError(2, "sensor down".into()),
+        ));
+
+        // Mark both as failed
+        engine.channels.get_mut(610).unwrap().failed = true;
+        engine.channels.get_mut(611).unwrap().failed = true;
+
+        // Burn through base cooldown for channel 610
+        for _ in 0..30 {
+            engine.channel_read(610).unwrap();
+        }
+
+        // Channel 610 reinit fails -> backoff to 60
+        engine.channel_read(610).unwrap();
+        assert_eq!(engine.i2c_backoff.get(&(2, 0x40)).unwrap().cooldown, 60);
+
+        // Channel 611 should also use the 60-cycle cooldown now
+        // (it shares the same device/address key)
+        // Burn through 30 base cycles for channel 611
+        for _ in 0..30 {
+            engine.channel_read(611).unwrap();
+        }
+
+        // Channel 611's counter is at 30, but the cooldown is now 60,
+        // so it should still be Down
+        let value = engine.channel_read(611).unwrap();
+        assert_eq!(
+            value.status,
+            EngineStatus::Down,
+            "channel 611 should still be in cooldown (60 > 31)"
+        );
     }
 }
