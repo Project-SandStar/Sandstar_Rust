@@ -30,10 +30,10 @@ pub mod types;
 pub mod opcodes;
 pub mod vm_error;
 pub mod image_loader;
+pub mod vm_memory;
+pub mod native_table;
 // Future phases:
-// pub mod vm_stack;
-// pub mod vm_memory;
-// pub mod native_table;
+pub mod vm_stack;
 // pub mod vm_interpreter;
 // pub mod rust_runner;
 
