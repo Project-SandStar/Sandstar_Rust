@@ -43,6 +43,12 @@ pub fn auto_detect_sensor(
     conv: &mut ValueConv,
     tables: &TableStore,
 ) -> bool {
+    // Skip if table already configured (e.g., from database.zinc loader
+    // with explicit low/high/min/max for custom sensor calibration).
+    if conv.table_index.is_some() && conv.low.is_some() && conv.high.is_some() {
+        return false;
+    }
+
     // Only auto-detect for analog input channels (1100-1723)
     if !(1100..=1723).contains(&channel) {
         return false;
