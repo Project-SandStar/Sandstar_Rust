@@ -1,11 +1,13 @@
 # Sandstar Rust Migration -- Roadmap v2
 
-**Date:** 2026-03-10 (updated)
-**Status:** HARDWARE-READY — All software phases complete. 800 tests, 0 clippy warnings, 0 security issues. Only blocker: BeagleBone network access for 4-8h hardware validation.
-**Version:** 1.0.0 (7 crates, 800 tests, 25,000+ lines of Rust)
+**Date:** 2026-03-20 (updated)
+**Status:** PRODUCTION DEPLOYED — Rust v1.0.0 running on BeagleBone (Todd Air Flow). C system removed.
+**Version:** 1.0.1 (7 crates, 820 tests, ~31,000 lines of Rust)
 **Feature Parity:** ~99% (80/80 features vs C system + extras)
-**Research Documents:** 20 analysis docs (00-19) — all reviewed and mapped to phases
-**Codebase Audit:** 2026-03-10 — 3-agent deep analysis (code quality, research coverage, test coverage)
+**Research Documents:** 20 analysis docs (00-19) — deep gap analysis completed 2026-03-20
+**Research Coverage:** ~72% weighted (100% on core docs 00-11, deferred on future docs 12-19)
+**GitHub:** https://github.com/TurkerMertkan/Sandstar_Rust (private)
+**Codebase Audit:** 2026-03-20 — 3-agent deep research gap analysis (20 docs vs codebase)
 
 ---
 
@@ -470,11 +472,12 @@ Remaining future tracks (post-production):
 | Phase 1 | REST API | -- | -- | COMPLETE | 04, 05 |
 | Phase 5.5-5.6 | Hardening + Performance | -- | -- | COMPLETE | 08 |
 | 5.7 | Security hardening | Critical | [M] | COMPLETE (6/6 tasks) | -- |
-| **5.8** | **Production validation** | **Critical** | **[M]** | **MOSTLY COMPLETE** (6/10 software tasks done; 4-8h hardware validation awaiting network) | -- |
+| 5.8 | Production validation | Critical | [M] | COMPLETE (hardware validated 2026-03-19) | -- |
 | 5.8h | Code quality cleanup | High | [S] | COMPLETE (70 clippy fixed, 3 dead code removed, 55 limits documented) | -- |
 | 5.8i | Test coverage expansion | High | [M] | COMPLETE (65 new tests: cmd_handler, CLI, IPC, filter, handlers, integration) | -- |
 | 5.8j | Hardware readiness assessment | High | [S] | COMPLETE (project declared hardware-ready, soak reduced 48h→4-8h) | -- |
-| **5.9** | **Production cutover** | **Critical** | **[S]** | Awaiting 5.8 hardware validation | -- |
+| **5.9** | **Production cutover** | **Critical** | **[S]** | **COMPLETE** (2026-03-18, C removed, Rust v1.0.0 live) | -- |
+| **5.10** | **Post-deployment fixes** | **High** | **[S]** | **COMPLETE** (I2C protocol fix, ADC fault detection, backoff, health CLI) | 02 |
 | 6.0 | Sedona VM integration | High | [L] | MOSTLY COMPLETE (4/5) | 06 |
 | 6.5 | TLS + advanced security | Medium | [M] | COMPLETE (5/5 tasks) | -- |
 | 7.0 | Engine core polish | Medium | [M] | COMPLETE (4/4 tasks) | 01, 02 |
@@ -493,54 +496,58 @@ Remaining future tracks (post-production):
 
 | Metric | Value |
 |--------|-------|
-| Rust source lines | ~25,000 |
+| Rust source lines | ~31,000 |
 | C/C++ replaced | ~27,000 lines (60% reduction) |
 | POCO eliminated | ~500,000 lines |
-| Test count | 800 passing, 0 failures (679 unit + 121 integration) |
+| Test count | 820 passing, 0 failures |
 | Crates | 7 (engine, hal, hal-linux, ipc, server, cli, svm) |
-| REST endpoints | 24 (14 Haystack + health + metrics + zinc + WebSocket + rate-limit + auth + 4 simulator) |
+| REST endpoints | 25 (14 Haystack + health + metrics + zinc + WebSocket + rate-limit + auth + 4 simulator) |
 | Control components | 22 (PID, sequencer + 20 library components) |
-| IPC commands | 12 |
-| CLI commands | 10 (status, channels, polls, tables, read, write, shutdown, reload, history, convert-sax) |
+| IPC commands | 13 |
+| CLI commands | 11 (status, channels, polls, tables, read, write, shutdown, reload, history, convert-sax, health) |
 | Feature parity | ~99% (80/80 features + extras) |
-| ARM binary size | Server ~2.1MB + CLI 580KB (stripped, est. with crypto deps) |
+| Production deployment | BeagleBone (Todd Air Flow, 192.168.1.104), 3.4MB RAM, 0.28% CPU |
+| ARM binary size | Server ~2.1MB + CLI 580KB (stripped, with crypto deps) |
 | Security issues open | 0 Critical, 0 High, 0 Medium — all resolved |
-| Research documents | 20 (00-19) — all analyzed, mapped to phases |
+| Research documents | 20 (00-19) — deep gap analysis 2026-03-20 |
+| Research coverage | ~72% weighted (100% core, deferred on future phases) |
 | Simulation tools | SimulatorHal + BASemulator bridge + DataLogger + sim.sh |
-| Features surpassing C | 3 (WebSocket, SimulatorHal, structured data logging) |
-| Clippy warnings | 0 (70 fixed in Phase 5.8h) |
-| Test coverage (est.) | ~75% public API (up from ~60%, +65 tests in Phase 5.8i) |
-| Previously untested | cmd_handler.rs (+10), CLI (+19), ipc.rs (+5) — now covered |
-| Project health score | 9/10 (codebase audit, 2026-03-10) |
+| Features surpassing C | 6 (WebSocket, SimulatorHal, data logging, ADC fault detect, I2C backoff, CLI health) |
+| Clippy warnings | 0 |
+| Test coverage (est.) | ~80% public API |
+| Project health score | 9.5/10 (production validated, 2026-03-20) |
+| GitHub | https://github.com/TurkerMertkan/Sandstar_Rust (private) |
 
 ---
 
 ## 8. Research Document Coverage
 
-All 20 research documents in `docs/research/` have been analyzed and mapped to implementation phases.
+Deep gap analysis completed 2026-03-20 (3-agent, 20 documents vs full codebase).
 
-| Doc | Title | Phase | Implementation Status |
-|-----|-------|-------|----------------------|
-| 00 | Executive Summary | All | 100% — migration complete |
-| 01 | Engine Core Analysis | 0, 2, 7.0 | 100% — channels, tables, conversions, filters, polls |
-| 02 | Hardware Drivers | 3D, 7.0c | 100% — LinuxHal, I2C coalescing, Mutex safety |
-| 03 | Haystack Type System | 2 | 100% — TagValue enum, Zinc grids |
-| 04 | REST API (Axum) | 1 | 100% — 14 Haystack endpoints + extras |
-| 05 | Zinc I/O Encoding | 3H | 100% — content negotiation, Zinc parser/writer |
-| 06 | Sedona FFI Strategy | 4, 6.0 | 95% — bridge + native methods done, VM exec needs hardware |
-| 07 | IPC Bridge | 3A | 100% — length-prefixed bincode, 12 commands |
-| 08 | Memory Safety | All | 100% — zero unsafe in production code |
-| 09 | Dependency Mapping | All | 100% — all deps resolved in Cargo.toml |
-| 10 | Build & Cross-compile | 3E | 100% — cargo-zigbuild + cargo-deb |
-| 11 | Migration Roadmap | 0-5 | 100% — original plan fully executed |
-| 12 | SVM Architecture | 11.0 | Not started — deferred (config-driven control replaces SVM for EacIo) |
-| 13 | SVM Porting Strategy | 11.0 | Not started — deferred |
-| 14 | Scalability Limits | 5.6, 7.0c | Partially addressed — rate limiter, I2C coalescing, watch caps |
-| 15 | SOX/WebSocket Migration | 8.0A, 8.0B | 50% — Haystack-over-WS done, Full ROX/SOX not started |
-| 16 | roxWarp Protocol | 9.0 | Not started — clustering deferred |
-| 17 | Name Length Analysis | 11.0c | Not started — name interning part of VM Rust port |
-| 18 | Driver Framework v2 | **12.0** (NEW) | Not started — Haxall-inspired pure Rust drivers |
-| 19 | Dynamic Slots | **13.0** (NEW) | Not started — hybrid static+dynamic slot model |
+| Doc | Title | Phase | Coverage | Key Finding |
+|-----|-------|-------|----------|-------------|
+| 00 | Executive Summary | All | 98% | Complete; test count outdated (820 vs 627) |
+| 01 | Engine Core Analysis | 0, 2, 7.0 | 100% | Surpassed: PID, sequencer, components, priority arrays |
+| 02 | Hardware Drivers | 3D, 7.0c | 95% | GPIO uses sysfs (not chardev); async I2C/UART unnecessary |
+| 03 | Haystack Type System | 2 | 90% | Custom impl instead of libhaystack (deliberate tradeoff) |
+| 04 | REST API (Axum) | 1 | 92% | No Xeto/Commit/Root ops (low priority); surpassed with WS+auth |
+| 05 | Zinc I/O Encoding | 3H | 80% | Custom Zinc parser works; not libhaystack |
+| 06 | Sedona FFI Strategy | 4, 6.0 | 75% | Architecture changed: in-process bridge replaces 29 FFI functions |
+| 07 | IPC Bridge | 3A | 85% | Skipped POSIX IPC (correct); typed bincode over TCP/Unix |
+| 08 | Memory Safety | All | 100% | All 13 C/C++ bug classes eliminated structurally |
+| 09 | Dependency Mapping | All | 92% | libhaystack not used; zig CC instead of Docker cross |
+| 10 | Build & Cross-compile | 3E | 95% | No CI/CD; zig CC surpasses Docker approach |
+| 11 | Migration Roadmap | 0-5 | 98% | All 7 phases complete + WebSocket, control engine, SCRAM |
+| 12 | SVM Architecture | 11.0 | 70% | VM stays C (by design); Kit 4 ported to Rust; config-driven control replaces VM |
+| 13 | SVM Porting Strategy | 11.0 | 25% | Intentionally deferred; FFI bridge is Priority 2 (done) |
+| 14 | Scalability Limits | 5.6, 7.0c | 80% | Rust engine fixes most; VM-internal limits unchanged |
+| 15 | SOX/WebSocket | 8.0A, 8.0B | 25% | WS + SCRAM done; no Trio encoding, no component-tree ops |
+| 16 | roxWarp Protocol | 9.0 | 0% | Entirely unimplemented (future Phase 9.0) |
+| 17 | Name Length Analysis | 11.0c | 40% | Unlimited names via String; interning unnecessary at scale |
+| 18 | Driver Framework v2 | 12.0 | 30% | HAL traits + Linux drivers done; no async Driver trait/DriverManager |
+| 19 | Dynamic Slots | 13.0 | 10% | Basic tags HashMap on channels; full DynSlotStore not needed yet |
+
+**Key architectural divergence:** Custom Zinc/filter implementation instead of libhaystack dependency (docs 03/05); in-process bridge instead of 29-function C FFI (doc 06); channel-centric model instead of component-centric (docs 18/19). All are defensible engineering decisions that reduced complexity and external dependencies.
 
 ---
 
@@ -576,3 +583,11 @@ All 20 research documents in `docs/research/` have been analyzed and mapped to i
 | Phase 5.8i added (test coverage) | dispatch.rs, CLI, main.rs, ipc.rs have 0 tests. Targeting ~55-75 new tests to reach ~80% coverage | 2026-03-10 |
 | Hardware soak reduced 48h→4-8h | 800 tests + SimulatorHal E2E + soak/stress tests provide confidence that 48h was designed to build. 4-8h validates only hardware-specific behavior (I2C timing, ADC accuracy, ARM constraints) | 2026-03-10 |
 | Project declared hardware-ready | All software phases complete. 800 tests, 0 clippy, 0 security issues. Only blocker is BeagleBone network access. Deployment checklist created at docs/DEPLOYMENT_CHECKLIST.md | 2026-03-10 |
+| Phase 5.9 production cutover | C sandstar v0.1.1 removed, Rust v1.0.0 deployed to BeagleBone (Todd Air Flow). 150 channels, 15 polls, 3.4MB memory, 0.28% CPU | 2026-03-18 |
+| I2C protocol detection by address | SDP810 channels with generic labels ("CFM Flow") were using wrong protocol. Added address-based fallback (0x25 → SDP810) | 2026-03-19 |
+| ADC out-of-range fault detection | Disconnected thermistors showed Ok/-40°F. Now raw at table boundaries → Fault status. 2% margin distinguishes near-limit from at-limit | 2026-03-19 |
+| I2C exponential backoff | Reinit spam ~232 WARN/hr → ~12 DEBUG/hr. Backoff 30s→60s→120s→240s→300s cap. Recovery resets immediately | 2026-03-20 |
+| CLI health command | At-a-glance device status: channel fault/down summary, per-type breakdown, uptime. Supports --json | 2026-03-20 |
+| Custom Zinc/filter over libhaystack | Research docs 03/05 proposed libhaystack crate. Deliberate choice to use custom impl (~1500 lines) — no external dependency on third-party crate for critical data format | 2026-03-20 |
+| Channel-centric over component-centric | Rust uses flat channel tables instead of Sedona component tree. Simpler, works for EacIo. Future Driver Framework (Phase 12.0) may need component model | 2026-03-20 |
+| GitHub repo created | Private repo at TurkerMertkan/Sandstar_Rust. Milestone releases for significant phases | 2026-03-19 |
