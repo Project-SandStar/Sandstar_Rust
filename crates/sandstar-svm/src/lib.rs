@@ -26,6 +26,17 @@ pub mod ffi;
 pub mod runner;
 pub mod types;
 
+// Pure Rust VM modules (Phase A)
+pub mod opcodes;
+pub mod vm_error;
+pub mod image_loader;
+// Future phases:
+// pub mod vm_stack;
+// pub mod vm_memory;
+// pub mod native_table;
+// pub mod vm_interpreter;
+// pub mod rust_runner;
+
 pub use bridge::{
     set_engine_bridge, set_write_queue, set_tag_write_queue,
     drain_writes, drain_tag_writes,
