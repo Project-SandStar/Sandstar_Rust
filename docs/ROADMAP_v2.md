@@ -1,8 +1,8 @@
 # Sandstar Rust Migration -- Roadmap v2
 
-**Date:** 2026-03-20 (updated)
-**Status:** PRODUCTION DEPLOYED — Rust v1.1.0 running on BeagleBone (Todd Air Flow). First live sensor (Solidyne 00-WTS-A) reading 78°F.
-**Version:** 1.1.0 (7 crates, 824 tests, ~31,000+ lines of Rust)
+**Date:** 2026-03-22 (updated)
+**Status:** PRODUCTION DEPLOYED — Rust v1.1.0 on BeagleBone. **SOX protocol fully operational** — Sedona Application Editor connected to pure Rust engine (industry first).
+**Version:** 1.1.0 (7 crates, 824+ tests, ~32,000+ lines of Rust)
 **Feature Parity:** ~99% (80/80 features vs C system + extras)
 **Research Documents:** 20 analysis docs (00-19) — deep gap analysis completed 2026-03-20
 **Research Coverage:** ~72% weighted (100% on core docs 00-11, deferred on future docs 12-19)
@@ -35,7 +35,21 @@
 | Phase 5.6 | Performance: conv.clone() elimination, format!("{:?}") to as_str(), HistoryPoint String to enum, atomic metrics counters | -- | 2026-03-04 |
 | Phase 5.7 | Security hardening: --http-bind default 127.0.0.1, bearer auth middleware, filter depth limit (32), watch caps (64), socket perms 0660 | 3 | 2026-03-04 |
 
-**Summary:** All core phases (0 through 10.0E) are complete. 800 tests passing, 0 failures.
+| Phase 8.0A-SOX | SOX/DASP protocol: Sedona Application Editor connectivity | -- | 2026-03-22 |
+
+**Phase 8.0A-SOX Details (2026-03-22):**
+- Full DASP transport (UDP reliable messaging with ACK piggybacking, session management)
+- SOX readSchema ('v'), readVersion ('y'), readComp ('c') with tree/config/runtime/links
+- SOX file transfer (fileOpen/fileRead/fileClose) with `m:` manifest URI + `/kits/` binary URI
+- Null-terminated string wire format (Sedona spec compliance)
+- 15 kit definitions with correct checksums + versions from production manifests
+- Component tree: App, Folder, SoxService, UserService, PlatformService, 150 AnalogInput channels
+- Kit/type IDs verified against actual kit manifest XML (sys, sox, EacIo)
+- Path traversal protection (canonicalize + bounds check) on file transfer
+- Manifest extraction from .kit ZIP files deployed to `/home/eacio/sandstar/etc/manifests/`
+- Cross-compile fix: `--sysroot` with 8.3 short path for zig linker on Windows with spaces in username
+
+**Summary:** All core phases (0 through 10.0E + SOX) are complete. 800+ tests passing, 0 failures.
 
 ### Partially Complete
 
@@ -48,7 +62,7 @@
 
 | Phase | Description | Complexity | Research Doc | Priority |
 |-------|-------------|-----------|--------------|----------|
-| Phase 8.0B | Full ROX Protocol (Trio-over-WebSocket, SOX compat) | L | 15 | Medium |
+| Phase 8.0B | Full ROX Protocol (Trio-over-WebSocket, extended SOX ops: subscribe COV, invoke, add/delete/rename) | L | 15 | Medium |
 | Phase 9.0 | Northbound clustering (roxWarp) | XL | 16 | Low |
 | Phase 11.0 | Sedona VM Rust port (bytecode interpreter, name interning) | XL | 12, 13, 17 | Very Low |
 | Phase 12.0 | Driver Framework v2 (Haxall-inspired, pure Rust) | XL | 18 | Very Low |

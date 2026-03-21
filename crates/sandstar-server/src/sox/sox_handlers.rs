@@ -174,8 +174,8 @@ impl ComponentTree {
             parent_id: NO_PARENT,
             name: "app".into(),
             type_name: "sys::App".into(),
-            kit_id: 0,
-            type_id: 0,
+            kit_id: 0,  // sys
+            type_id: 10, // App
             children: Vec::new(),
             slots: vec![VirtualSlot {
                 name: "appName".into(),
@@ -191,8 +191,8 @@ impl ComponentTree {
             parent_id: 0,
             name: "service".into(),
             type_name: "sys::Folder".into(),
-            kit_id: 0,
-            type_id: 1,
+            kit_id: 0,  // sys
+            type_id: 11, // Folder
             children: Vec::new(),
             slots: Vec::new(),
         });
@@ -203,8 +203,8 @@ impl ComponentTree {
             parent_id: 1,
             name: "sox".into(),
             type_name: "sox::SoxService".into(),
-            kit_id: 0,
-            type_id: 2,
+            kit_id: 12, // sox
+            type_id: 1,  // SoxService
             children: Vec::new(),
             slots: vec![VirtualSlot {
                 name: "port".into(),
@@ -220,8 +220,8 @@ impl ComponentTree {
             parent_id: 1,
             name: "users".into(),
             type_name: "sys::UserService".into(),
-            kit_id: 0,
-            type_id: 3,
+            kit_id: 0,  // sys
+            type_id: 16, // UserService
             children: Vec::new(),
             slots: Vec::new(),
         });
@@ -232,8 +232,8 @@ impl ComponentTree {
             parent_id: 1,
             name: "plat".into(),
             type_name: "sys::PlatformService".into(),
-            kit_id: 0,
-            type_id: 4,
+            kit_id: 0,  // sys
+            type_id: 13, // PlatformService
             children: Vec::new(),
             slots: vec![VirtualSlot {
                 name: "platformId".into(),
@@ -249,8 +249,8 @@ impl ComponentTree {
             parent_id: 0,
             name: "io".into(),
             type_name: "sys::Folder".into(),
-            kit_id: 0,
-            type_id: 1,
+            kit_id: 0,  // sys
+            type_id: 11, // Folder
             children: Vec::new(),
             slots: Vec::new(),
         });
@@ -261,8 +261,8 @@ impl ComponentTree {
             parent_id: 0,
             name: "control".into(),
             type_name: "sys::Folder".into(),
-            kit_id: 0,
-            type_id: 1,
+            kit_id: 0,  // sys
+            type_id: 11, // Folder
             children: Vec::new(),
             slots: Vec::new(),
         });
@@ -275,8 +275,8 @@ impl ComponentTree {
                 parent_id: 5, // io folder
                 name: format!("ch_{}", ch.id),
                 type_name: channel_type_name(&ch.direction),
-                kit_id: 3, // "EacIo" kit
-                type_id: 10,
+                kit_id: 1, // EacIo kit (index 1 in DEFAULT_KITS)
+                type_id: 0, // AnalogInput
                 children: Vec::new(),
                 slots: channel_slots(ch),
             });
@@ -473,35 +473,32 @@ pub fn decode_slot_value(reader: &mut SoxReader<'_>, type_id: u8) -> Option<Slot
 
 // ---- Kit definitions ----
 
-/// Kit info for readSchema responses.
+/// Kit info for readSchema/readVersion responses.
 #[derive(Debug, Clone)]
 pub struct KitInfo {
     pub name: &'static str,
     pub checksum: u32,
+    pub version: &'static str,
 }
 
-/// Default kit list matching the EacIo Sedona application.
+/// Default kit list matching the EacIo Sedona application (from shaystack/app/app.sax).
+/// Checksums extracted from kit filenames on device (name-CHECKSUM-version.kit).
 pub const DEFAULT_KITS: &[KitInfo] = &[
-    KitInfo {
-        name: "sys",
-        checksum: 0xd3984c51,
-    },
-    KitInfo {
-        name: "sox",
-        checksum: 0x25648ba7,
-    },
-    KitInfo {
-        name: "inet",
-        checksum: 0x1a2b3c4d,
-    },
-    KitInfo {
-        name: "EacIo",
-        checksum: 0x6f9da65b,
-    },
-    KitInfo {
-        name: "datetimeStd",
-        checksum: 0xfc5628d7,
-    },
+    KitInfo { name: "sys",        checksum: 0xd3984c51, version: "1.2.28" },
+    KitInfo { name: "EacIo",     checksum: 0x6f9da65b, version: "1.2.30" },
+    KitInfo { name: "control",   checksum: 0x808b7db3, version: "1.2.28" },
+    KitInfo { name: "driver",    checksum: 0xb4cc82ce, version: "1.2.28" },
+    KitInfo { name: "func",      checksum: 0x821b7396, version: "1.2.28" },
+    KitInfo { name: "hvac",      checksum: 0x7264c67c, version: "1.2.28" },
+    KitInfo { name: "inet",      checksum: 0x25648ba7, version: "1.2.28" },
+    KitInfo { name: "logic",     checksum: 0x9fe95ce1, version: "1.2.28" },
+    KitInfo { name: "math",      checksum: 0xc22b255c, version: "1.2.28" },
+    KitInfo { name: "platUnix",  checksum: 0x751711ab, version: "1.2.28" },
+    KitInfo { name: "pricomp",   checksum: 0xb5cd6698, version: "1.2.28" },
+    KitInfo { name: "shaystack", checksum: 0xedf7a27c, version: "1.2"    },
+    KitInfo { name: "sox",       checksum: 0x397a84dd, version: "1.2.28" },
+    KitInfo { name: "types",     checksum: 0x10936551, version: "1.2.28" },
+    KitInfo { name: "web",       checksum: 0x0d0dd007, version: "1.2.29" },
 ];
 
 // ---- Subscription manager ----
@@ -639,14 +636,144 @@ pub fn handle_sox_request(
     session_id: u16,
 ) -> SoxResponse {
     match request.cmd {
-        SoxCmd::ReadSchema => handle_read_schema(request),
+        SoxCmd::ReadSchema | SoxCmd::ReadSchemaDetail => handle_read_schema(request),
         SoxCmd::ReadVersion => handle_read_version(request),
         SoxCmd::ReadComp => handle_read_comp(request, tree),
         SoxCmd::Subscribe => handle_subscribe(request, subscriptions, session_id),
         SoxCmd::Unsubscribe => handle_unsubscribe(request, subscriptions, session_id),
         SoxCmd::Write => handle_write(request, tree),
+        SoxCmd::FileOpen => handle_file_open(request),
+        SoxCmd::FileRead => handle_file_read(request),
+        SoxCmd::FileClose => handle_file_close(request),
         _ => error_msg(request.cmd, request.req_id, "unsupported command"),
     }
+}
+
+// ---- SOX File Transfer ----
+
+use std::sync::Mutex;
+
+/// Global file transfer state for SOX kit downloads.
+static SOX_FILE_XFER: Mutex<Option<SoxFileXfer>> = Mutex::new(None);
+
+struct SoxFileXfer {
+    data: Vec<u8>,
+    chunk_size: usize,
+}
+
+const SOX_CHUNK_SIZE: usize = 256;
+const KITS_BASE_DIR: &str = "/home/eacio/sandstar/etc/kits";
+const MANIFESTS_DIR: &str = "/home/eacio/sandstar/etc/manifests";
+
+/// fileOpen ('f') — open a file for reading, return size info.
+///
+/// Supports URI schemes:
+///   - `m:kitname.xml` — kit manifest download
+///   - `m:m.zip` — bundled manifests (not yet implemented, returns error)
+///   - `/kits/...` — kit binary download
+///
+/// Response: u4 fileSize, u2 numChunks, u2 chunkSize
+fn handle_file_open(req: &SoxRequest) -> SoxResponse {
+    let mut reader = SoxReader::new(&req.payload);
+    let method = reader.read_str().unwrap_or_default();
+    let uri = reader.read_str().unwrap_or_default();
+
+    tracing::info!(method = %method, uri = %uri, "SOX: fileOpen");
+
+    // Resolve URI to a local file path
+    let local_path = if uri.starts_with("m:") {
+        // Manifest URI: "m:kitname.xml" or "m:m.zip"
+        let manifest_name = &uri[2..];
+        if manifest_name == "m.zip" {
+            tracing::warn!("SOX: fileOpen m:m.zip not supported");
+            return error_msg(SoxCmd::FileOpen, req.req_id, "m.zip not supported");
+        }
+        format!("{}/{}", MANIFESTS_DIR, manifest_name)
+    } else if uri.starts_with("/kits/") {
+        format!("{}/{}", KITS_BASE_DIR, &uri[6..])
+    } else {
+        format!("{}/{}", KITS_BASE_DIR, &uri)
+    };
+
+    // Sanitize against path traversal
+    if local_path.contains("..") || local_path.contains('\0') {
+        tracing::warn!(uri = %uri, "SOX: fileOpen rejected — path traversal");
+        return error_msg(SoxCmd::FileOpen, req.req_id, "invalid path");
+    }
+
+    // Canonicalize and verify the resolved path stays within allowed dirs
+    let canonical = match std::fs::canonicalize(&local_path) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(path = %local_path, err = %e, "SOX: fileOpen failed");
+            return error_msg(SoxCmd::FileOpen, req.req_id, "file not found");
+        }
+    };
+    let canonical_str = canonical.to_string_lossy();
+    if !canonical_str.starts_with(KITS_BASE_DIR) && !canonical_str.starts_with(MANIFESTS_DIR) {
+        tracing::warn!(path = %canonical_str, "SOX: fileOpen rejected — outside allowed dirs");
+        return error_msg(SoxCmd::FileOpen, req.req_id, "invalid path");
+    }
+
+    match std::fs::read(&canonical) {
+        Ok(data) => {
+            let file_size = data.len();
+            let num_chunks = (file_size + SOX_CHUNK_SIZE - 1) / SOX_CHUNK_SIZE;
+
+            tracing::info!(path = %canonical_str, size = file_size, chunks = num_chunks, "SOX: fileOpen OK");
+
+            let mut xfer = SOX_FILE_XFER.lock().expect("SOX file xfer mutex poisoned");
+            *xfer = Some(SoxFileXfer {
+                data,
+                chunk_size: SOX_CHUNK_SIZE,
+            });
+
+            let mut resp = SoxResponse::success(SoxCmd::FileOpen, req.req_id);
+            resp.write_u32(file_size as u32);
+            resp.write_u16(num_chunks as u16);
+            resp.write_u16(SOX_CHUNK_SIZE as u16);
+            resp
+        }
+        Err(e) => {
+            tracing::warn!(path = %canonical_str, err = %e, "SOX: fileOpen read failed");
+            error_msg(SoxCmd::FileOpen, req.req_id, "file not found")
+        }
+    }
+}
+
+/// fileRead ('g') — read a chunk of the open file.
+/// Request: u2 chunkNum
+/// Response: raw chunk bytes
+fn handle_file_read(req: &SoxRequest) -> SoxResponse {
+    let mut reader = SoxReader::new(&req.payload);
+    let chunk_num = reader.read_u16().unwrap_or(0) as usize;
+
+    let xfer = SOX_FILE_XFER.lock().expect("SOX file xfer mutex poisoned");
+    if let Some(ref file) = *xfer {
+        let start = match chunk_num.checked_mul(file.chunk_size) {
+            Some(s) => s,
+            None => return error_msg(SoxCmd::FileRead, req.req_id, "chunk out of range"),
+        };
+        let end = (start + file.chunk_size).min(file.data.len());
+
+        if start < file.data.len() {
+            let mut resp = SoxResponse::success(SoxCmd::FileRead, req.req_id);
+            resp.write_bytes(&file.data[start..end]);
+            resp
+        } else {
+            error_msg(SoxCmd::FileRead, req.req_id, "chunk out of range")
+        }
+    } else {
+        error_msg(SoxCmd::FileRead, req.req_id, "no file open")
+    }
+}
+
+/// fileClose ('q') — close the current file transfer.
+fn handle_file_close(req: &SoxRequest) -> SoxResponse {
+    let mut xfer = SOX_FILE_XFER.lock().expect("SOX file xfer mutex poisoned");
+    *xfer = None;
+    tracing::info!("SOX: fileClose");
+    SoxResponse::success(SoxCmd::FileClose, req.req_id)
 }
 
 /// Create an error response with a message.
@@ -656,7 +783,9 @@ fn error_msg(cmd: SoxCmd, req_id: u8, msg: &str) -> SoxResponse {
     resp
 }
 
-/// readSchema ('n') -- return kit list with checksums.
+/// readSchema ('v') — return kit names + checksums.
+///
+/// Sedona SOX spec: u1 kitCount, then per kit: str name, i4 checksum
 fn handle_read_schema(req: &SoxRequest) -> SoxResponse {
     let mut resp = SoxResponse::success(SoxCmd::ReadSchema, req.req_id);
     resp.write_u8(DEFAULT_KITS.len() as u8);
@@ -667,21 +796,24 @@ fn handle_read_schema(req: &SoxRequest) -> SoxResponse {
     resp
 }
 
-/// readVersion ('v') -- return platform version info.
+/// readVersion ('y') — return platform ID, scode flags, kit versions, and properties.
+///
+/// Sedona SOX spec:
+///   str platformId, u1 scodeFlags,
+///   kits[kitCount] { str version },
+///   u1 numProps, props[numProps] { str key, str value }
 fn handle_read_version(req: &SoxRequest) -> SoxResponse {
     let mut resp = SoxResponse::success(SoxCmd::ReadVersion, req.req_id);
-    // Kit count
-    resp.write_u8(DEFAULT_KITS.len() as u8);
-    // Per kit: name + checksum
+    resp.write_str("EacIo");   // platformId
+    resp.write_u8(0x00);       // scodeFlags
+    // Kit version strings (same order as readSchema)
     for kit in DEFAULT_KITS {
-        resp.write_str(kit.name);
-        resp.write_u32(kit.checksum);
+        resp.write_str(kit.version);
     }
-    // Platform ID string
-    resp.write_str("sandstar-rust");
-    // Scodeflags (i32) + block size (u16)
-    resp.write_i32(0); // scodeFlags
-    resp.write_u16(0); // blockSize (unused)
+    // Properties
+    resp.write_u8(1);
+    resp.write_str("soxVer");
+    resp.write_str("1.1");
     resp
 }
 
@@ -702,44 +834,35 @@ fn handle_read_comp(req: &SoxRequest, tree: &ComponentTree) -> SoxResponse {
 
     let mut resp = SoxResponse::success(SoxCmd::ReadComp, req.req_id);
     resp.write_u16(comp.comp_id);
-    resp.write_u8(comp.kit_id);
-    resp.write_u8(comp.type_id);
-    resp.write_str(&comp.name);
-    resp.write_u16(comp.parent_id);
-
-    // Children count + IDs
-    resp.write_u8(comp.children.len() as u8);
-    for &child_id in &comp.children {
-        resp.write_u16(child_id);
-    }
+    resp.write_u8(what); // echo the 'what' byte back
 
     match what {
         b't' => {
-            // Tree mode: just component structure (already written above).
+            // Tree: kitId, typeId, name, parentId, permissions, children
+            resp.write_u8(comp.kit_id);
+            resp.write_u8(comp.type_id);
+            resp.write_str(&comp.name);
+            resp.write_u16(comp.parent_id);
+            resp.write_u8(0xFF); // permissions (operator level)
+            resp.write_u8(comp.children.len() as u8);
+            for &child_id in &comp.children {
+                resp.write_u16(child_id);
+            }
         }
         b'c' | b'r' => {
-            // Config or runtime: include slot values.
-            resp.write_u8(comp.slots.len() as u8);
+            // Config or runtime: slot values.
+            // The client reads slots based on its schema type definition,
+            // not a count prefix. Write slot values in schema order.
             for slot in &comp.slots {
-                resp.write_str(&slot.name);
-                resp.write_u8(slot.type_id);
-                resp.write_u8(slot.flags);
                 encode_slot_value(&mut resp, &slot.value);
             }
         }
         b'l' => {
-            // Links: we have no links in the virtual tree.
-            resp.write_u8(0);
+            // Links: u1 numLinks, then link data.
+            resp.write_u8(0); // no links
         }
         _ => {
-            // Default: include slots.
-            resp.write_u8(comp.slots.len() as u8);
-            for slot in &comp.slots {
-                resp.write_str(&slot.name);
-                resp.write_u8(slot.type_id);
-                resp.write_u8(slot.flags);
-                encode_slot_value(&mut resp, &slot.value);
-            }
+            // Unknown what — return empty
         }
     }
 

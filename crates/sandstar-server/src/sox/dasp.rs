@@ -636,13 +636,13 @@ impl DaspTransport {
 
     /// Send a SOX response payload to a session as a DATAGRAM.
     pub fn send_to_session(&mut self, session_id: u16, payload: &[u8]) -> std::io::Result<()> {
-        let (remote_addr, remote_id, seq) = {
+        let (remote_addr, remote_id, seq, recv_seq) = {
             let session = self
                 .sessions
                 .get_mut(&session_id)
                 .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "session not found"))?;
             let seq = session.next_seq();
-            (session.remote_addr, session.remote_id, seq)
+            (session.remote_addr, session.remote_id, seq, session.recv_seq)
         };
 
         let hdr = DaspHeader {
@@ -657,7 +657,7 @@ impl DaspTransport {
             digest: None,
             ideal_max: None,
             abs_max: None,
-            ack: None,
+            ack: Some(recv_seq), // piggyback ACK of last received request
             ack_more: None,
             receive_max: None,
             receive_timeout_secs: None,

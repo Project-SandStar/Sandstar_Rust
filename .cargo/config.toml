@@ -7,6 +7,7 @@
 linker = "C:\\czb\\zigcc-arm.bat"
 rustflags = [
     "-C", "link-arg=-static-libgcc",     # Static libgcc (no runtime dependency)
+    "--sysroot", "C:\\Users\\TURKER~1\\RUSTUP~1\\TOOLCH~1\\STABLE~1",  # 8.3 short path — avoids space-in-path bug with zig linker
 ]
 
 # musl variant (unused — keeping for reference)
@@ -15,7 +16,7 @@ linker = "arm-linux-musleabihf-gcc"
 
 # ── Release Profile (BeagleBone: 512MB RAM, ARM Cortex-A8) ───
 [profile.release]
-lto = true                # Link-time optimization (smaller binary)
+lto = "thin"              # Thin LTO — saves ~10-15% binary size vs false; fat LTO may OOM
 strip = true              # Strip debug symbols
 codegen-units = 1         # Single codegen unit (better optimization)
 opt-level = "s"           # Optimize for size (not speed)

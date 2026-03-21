@@ -25,10 +25,12 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SoxCmd {
     // -- Queries --
-    /// Read platform version / kit list + type checksums.
-    ReadVersion = b'v',
-    /// Read schema (kit metadata).
-    ReadSchema = b'n',
+    /// Read schema: kit names + checksums ('v' request, 'V' response).
+    ReadSchema = b'v',
+    /// Read version: platform ID + kit versions ('y' request, 'Y' response).
+    ReadVersion = b'y',
+    /// Read detailed schema (kit metadata).
+    ReadSchemaDetail = b'n',
     /// Read component tree + slot values.
     ReadComp = b'c',
     /// Read single property.
@@ -77,8 +79,9 @@ impl SoxCmd {
     /// Try to convert a raw byte into a `SoxCmd`.
     pub fn from_byte(b: u8) -> Option<Self> {
         match b {
-            b'v' => Some(Self::ReadVersion),
-            b'n' => Some(Self::ReadSchema),
+            b'v' => Some(Self::ReadSchema),
+            b'y' => Some(Self::ReadVersion),
+            b'n' => Some(Self::ReadSchemaDetail),
             b'c' => Some(Self::ReadComp),
             b'p' => Some(Self::ReadProp),
             b'l' => Some(Self::ReadLink),
@@ -261,14 +264,12 @@ impl SoxResponse {
         self
     }
 
-    /// Append a length-prefixed string (u8 length + UTF-8 bytes).
+    /// Append a null-terminated string (UTF-8 bytes + 0x00).
     ///
-    /// The string is silently truncated to 255 bytes if it exceeds that limit.
+    /// This matches the Sedona SOX wire format where `str()` reads until NUL.
     pub fn write_str(&mut self, s: &str) -> &mut Self {
-        let bytes = s.as_bytes();
-        let len = bytes.len().min(255) as u8;
-        self.payload.push(len);
-        self.payload.extend_from_slice(&bytes[..len as usize]);
+        self.payload.extend_from_slice(s.as_bytes());
+        self.payload.push(0x00);
         self
     }
 
@@ -392,15 +393,20 @@ impl<'a> SoxReader<'a> {
     }
 
     /// Read a length-prefixed string (u8 length + UTF-8 bytes).
+    /// Read a null-terminated string from the payload.
+    ///
+    /// Matches the Sedona SOX wire format where strings end with 0x00.
     pub fn read_str(&mut self) -> Option<String> {
-        let len = self.read_u8()? as usize;
-        if self.pos + len <= self.data.len() {
-            let s = String::from_utf8_lossy(&self.data[self.pos..self.pos + len]).into_owned();
-            self.pos += len;
-            Some(s)
-        } else {
-            None
+        let start = self.pos;
+        while self.pos < self.data.len() {
+            if self.data[self.pos] == 0x00 {
+                let s = String::from_utf8_lossy(&self.data[start..self.pos]).into_owned();
+                self.pos += 1; // skip NUL
+                return Some(s);
+            }
+            self.pos += 1;
         }
+        None // no NUL terminator found
     }
 
     /// Read exactly `len` raw bytes.
@@ -641,26 +647,17 @@ mod tests {
     }
 
     #[test]
-    fn response_write_str_with_length_prefix() {
+    fn response_write_str_null_terminated() {
         let mut resp = SoxResponse::success(SoxCmd::ReadComp, 0);
         resp.write_str("hello");
-        assert_eq!(resp.payload, vec![5, b'h', b'e', b'l', b'l', b'o']);
+        assert_eq!(resp.payload, vec![b'h', b'e', b'l', b'l', b'o', 0x00]);
     }
 
     #[test]
     fn response_write_str_empty() {
         let mut resp = SoxResponse::success(SoxCmd::ReadComp, 0);
         resp.write_str("");
-        assert_eq!(resp.payload, vec![0]);
-    }
-
-    #[test]
-    fn response_write_str_truncates_at_255() {
-        let long = "A".repeat(300);
-        let mut resp = SoxResponse::success(SoxCmd::ReadComp, 0);
-        resp.write_str(&long);
-        assert_eq!(resp.payload[0], 255);
-        assert_eq!(resp.payload.len(), 256); // 1 len + 255 chars
+        assert_eq!(resp.payload, vec![0x00]);
     }
 
     #[test]
@@ -694,8 +691,8 @@ mod tests {
         assert_eq!(bytes[2], 0x00);
         assert_eq!(bytes[3], 0x42);
         assert_eq!(bytes[4], b't');
-        assert_eq!(bytes[5], 3); // str len
-        assert_eq!(&bytes[6..9], b"App");
+        assert_eq!(&bytes[5..8], b"App");
+        assert_eq!(bytes[8], 0x00); // NUL terminator
         // 72.5f = 0x42910000
         assert_eq!(&bytes[9..13], &[0x42, 0x91, 0x00, 0x00]);
     }
@@ -748,7 +745,7 @@ mod tests {
     #[test]
     fn reader_read_str() {
         // len=5 + "hello"
-        let data = [5, b'h', b'e', b'l', b'l', b'o'];
+        let data = [b'h', b'e', b'l', b'l', b'o', 0x00];
         let mut r = SoxReader::new(&data);
         assert_eq!(r.read_str(), Some("hello".to_string()));
         assert_eq!(r.remaining(), 0);
@@ -756,15 +753,15 @@ mod tests {
 
     #[test]
     fn reader_read_str_empty() {
-        let data = [0];
+        let data = [0x00];
         let mut r = SoxReader::new(&data);
         assert_eq!(r.read_str(), Some(String::new()));
     }
 
     #[test]
-    fn reader_read_str_truncated_returns_none() {
-        // claims 10 bytes but only 3 follow
-        let data = [10, b'a', b'b', b'c'];
+    fn reader_read_str_no_nul_returns_none() {
+        // no null terminator
+        let data = [b'a', b'b', b'c'];
         let mut r = SoxReader::new(&data);
         assert_eq!(r.read_str(), None);
     }
