@@ -91,7 +91,7 @@ mod tests {
     #[test]
     fn do_now_returns_positive_nanos() {
         let (mut mem, params) = test_ctx();
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let nanos = datetime_do_now(&mut ctx, &params).expect("doNow failed");
         assert!(nanos > 0, "doNow should return positive nanos, got {nanos}");
     }
@@ -100,7 +100,7 @@ mod tests {
     fn do_now_roughly_correct() {
         // Verify the value is within 1 day of the expected value.
         let (mut mem, params) = test_ctx();
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let nanos = datetime_do_now(&mut ctx, &params).expect("doNow failed");
 
         // Compute expected from std::time directly
@@ -121,7 +121,7 @@ mod tests {
     #[test]
     fn do_now_monotonically_increasing() {
         let (mut mem, params) = test_ctx();
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let first = datetime_do_now(&mut ctx, &params).expect("doNow first call");
         let second = datetime_do_now(&mut ctx, &params).expect("doNow second call");
         assert!(
@@ -134,7 +134,7 @@ mod tests {
     fn do_now_is_after_2025() {
         // Sanity: nanos since 2000-01-01 should represent > 25 years
         let (mut mem, params) = test_ctx();
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let nanos = datetime_do_now(&mut ctx, &params).expect("doNow failed");
         let secs = nanos / 1_000_000_000;
         let years_approx = secs / (365 * 86400);
@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn do_set_clock_returns_zero() {
         let (mut mem, params) = test_ctx();
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let result = datetime_do_set_clock(&mut ctx, &params).expect("doSetClock failed");
         assert_eq!(result, 0, "doSetClock should always return 0");
     }
@@ -156,7 +156,7 @@ mod tests {
     fn do_set_clock_ignores_params() {
         let (mut mem, _) = test_ctx();
         let params = vec![42i32, 99];
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let result = datetime_do_set_clock(&mut ctx, &params).expect("doSetClock failed");
         assert_eq!(result, 0, "doSetClock should return 0 regardless of params");
     }
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn do_get_utc_offset_in_valid_range() {
         let (mut mem, params) = test_ctx();
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let offset = datetime_do_get_utc_offset(&mut ctx, &params).expect("doGetUtcOffset failed");
         // Valid UTC offsets range from -12h to +14h
         let min_offset = -12 * 3600;
@@ -180,7 +180,7 @@ mod tests {
         // Most time zones are whole-hour or half-hour offsets (divisible by 900s)
         // A few are at 45min (e.g., Nepal +5:45). All are divisible by 60s.
         let (mut mem, params) = test_ctx();
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let offset = datetime_do_get_utc_offset(&mut ctx, &params).expect("doGetUtcOffset failed");
         assert_eq!(
             offset % 60,
@@ -222,7 +222,7 @@ mod tests {
         register_kit9(&mut table);
 
         let (mut mem, params) = test_ctx();
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
 
         // Call doSetClock via dispatch
         let result = table.call(9, 1, &mut ctx, &params).expect("dispatch doSetClock");

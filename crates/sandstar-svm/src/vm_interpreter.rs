@@ -1809,9 +1809,7 @@ impl VmInterpreter {
 
                 // Create native context with mutable data access
                 let mut data_vec = Vec::new(); // placeholder
-                let mut ctx = NativeContext {
-                    memory: &mut data_vec,
-                };
+                let mut ctx = NativeContext::new(&mut data_vec);
 
                 let result = self.natives.call(kit_id, method_id, &mut ctx, &params)?;
 
@@ -1834,9 +1832,7 @@ impl VmInterpreter {
                 }
 
                 let mut data_vec = Vec::new();
-                let mut ctx = NativeContext {
-                    memory: &mut data_vec,
-                };
+                let mut ctx = NativeContext::new(&mut data_vec);
 
                 let result = self.natives.call_wide(kit_id, method_id, &mut ctx, &params)?;
 
@@ -1858,9 +1854,7 @@ impl VmInterpreter {
                 }
 
                 let mut data_vec = Vec::new();
-                let mut ctx = NativeContext {
-                    memory: &mut data_vec,
-                };
+                let mut ctx = NativeContext::new(&mut data_vec);
 
                 let _ = self.natives.call(kit_id, method_id, &mut ctx, &params)?;
 

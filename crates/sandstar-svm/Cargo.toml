@@ -16,3 +16,4 @@ cc = "1"
 
 [features]
 default = []
+pure-rust-vm = []

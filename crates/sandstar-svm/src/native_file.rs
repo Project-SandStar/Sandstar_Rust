@@ -487,7 +487,7 @@ mod tests {
         fs::write(&path, b"hello").unwrap();
 
         let mut mem = ctx_with_string(&path);
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let result = filestore_do_size(&mut ctx, &[0]).unwrap();
         assert_eq!(result, 5);
 
@@ -501,7 +501,7 @@ mod tests {
         cleanup(&path); // ensure it doesn't exist
 
         let mut mem = ctx_with_string(&path);
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let result = filestore_do_size(&mut ctx, &[0]).unwrap();
         assert_eq!(result, -1);
     }
@@ -516,12 +516,12 @@ mod tests {
 
         let mut mem = ctx_with_two_strings(&path, "w");
         let mode_offset = (path.len() + 1) as i32;
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let handle = filestore_do_open(&mut ctx, &[0, mode_offset]).unwrap();
         assert!(handle > 0, "expected valid handle, got {handle}");
 
         // Close it.
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let closed = filestore_do_close(&mut ctx, &[handle]).unwrap();
         assert_eq!(closed, 1);
 
@@ -537,11 +537,11 @@ mod tests {
 
         let mut mem = ctx_with_two_strings(&path, "r");
         let mode_offset = (path.len() + 1) as i32;
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let handle = filestore_do_open(&mut ctx, &[0, mode_offset]).unwrap();
         assert!(handle > 0);
 
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         filestore_do_close(&mut ctx, &[handle]).unwrap();
         cleanup(&path);
     }
@@ -554,7 +554,7 @@ mod tests {
 
         let mut mem = ctx_with_two_strings(&path, "r");
         let mode_offset = (path.len() + 1) as i32;
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let handle = filestore_do_open(&mut ctx, &[0, mode_offset]).unwrap();
         assert_eq!(handle, 0);
     }
@@ -570,37 +570,37 @@ mod tests {
         // Open for write.
         let mut mem = ctx_with_two_strings(&path, "w");
         let mode_offset = (path.len() + 1) as i32;
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let wh = filestore_do_open(&mut ctx, &[0, mode_offset]).unwrap();
         assert!(wh > 0);
 
         // Write byte 0x42.
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let ok = filestore_do_write(&mut ctx, &[wh, 0x42]).unwrap();
         assert_eq!(ok, 1);
 
         // Close.
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         filestore_do_close(&mut ctx, &[wh]).unwrap();
 
         // Reopen for read.
         let mut mem = ctx_with_two_strings(&path, "r");
         let mode_offset = (path.len() + 1) as i32;
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let rh = filestore_do_open(&mut ctx, &[0, mode_offset]).unwrap();
         assert!(rh > 0);
 
         // Read one byte.
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let byte = filestore_do_read(&mut ctx, &[rh]).unwrap();
         assert_eq!(byte, 0x42);
 
         // Next read should be EOF.
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let eof = filestore_do_read(&mut ctx, &[rh]).unwrap();
         assert_eq!(eof, -1);
 
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         filestore_do_close(&mut ctx, &[rh]).unwrap();
         cleanup(&path);
     }
@@ -622,12 +622,12 @@ mod tests {
         mem.extend_from_slice(data);
 
         // Open for write.
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let wh = filestore_do_open(&mut ctx, &[0, mode_offset as i32]).unwrap();
         assert!(wh > 0);
 
         // Write 5 bytes from buffer.
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let ok = filestore_do_write_bytes(
             &mut ctx,
             &[wh, buf_start as i32, 0, data.len() as i32],
@@ -636,7 +636,7 @@ mod tests {
         assert_eq!(ok, 1);
 
         // Close.
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         filestore_do_close(&mut ctx, &[wh]).unwrap();
 
         // Reopen for read — rebuild memory with read buffer area.
@@ -645,11 +645,11 @@ mod tests {
         let buf_start = mem.len();
         mem.extend_from_slice(&[0u8; 10]); // read buffer (zeroed)
 
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let rh = filestore_do_open(&mut ctx, &[0, mode_offset as i32]).unwrap();
         assert!(rh > 0);
 
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let n = filestore_do_read_bytes(
             &mut ctx,
             &[rh, buf_start as i32, 0, 5],
@@ -658,7 +658,7 @@ mod tests {
         assert_eq!(n, 5);
         assert_eq!(&mem[buf_start..buf_start + 5], b"HELLO");
 
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         filestore_do_close(&mut ctx, &[rh]).unwrap();
         cleanup(&path);
     }
@@ -673,27 +673,27 @@ mod tests {
 
         let mut mem = ctx_with_two_strings(&path, "r");
         let mode_offset = (path.len() + 1) as i32;
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let h = filestore_do_open(&mut ctx, &[0, mode_offset]).unwrap();
         assert!(h > 0);
 
         // Tell at start = 0.
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         assert_eq!(filestore_do_tell(&mut ctx, &[h]).unwrap(), 0);
 
         // Seek to 5.
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         assert_eq!(filestore_do_seek(&mut ctx, &[h, 5]).unwrap(), 1);
 
         // Tell = 5.
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         assert_eq!(filestore_do_tell(&mut ctx, &[h]).unwrap(), 5);
 
         // Read byte at position 5 → 'f' = 0x66.
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         assert_eq!(filestore_do_read(&mut ctx, &[h]).unwrap(), b'f' as i32);
 
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         filestore_do_close(&mut ctx, &[h]).unwrap();
         cleanup(&path);
     }
@@ -708,15 +708,15 @@ mod tests {
 
         let mut mem = ctx_with_two_strings(&path, "w");
         let mode_offset = (path.len() + 1) as i32;
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let h = filestore_do_open(&mut ctx, &[0, mode_offset]).unwrap();
         assert!(h > 0);
 
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let result = filestore_do_flush(&mut ctx, &[h]).unwrap();
         assert_eq!(result, 1);
 
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         filestore_do_close(&mut ctx, &[h]).unwrap();
         cleanup(&path);
     }
@@ -727,7 +727,7 @@ mod tests {
     fn close_invalid_handle_returns_zero() {
 
         let mut mem = vec![0u8; 16];
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let result = filestore_do_close(&mut ctx, &[9999]).unwrap();
         assert_eq!(result, 0);
     }
@@ -736,7 +736,7 @@ mod tests {
     fn close_zero_handle_returns_neg_one() {
 
         let mut mem = vec![0u8; 16];
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let result = filestore_do_close(&mut ctx, &[0]).unwrap();
         assert_eq!(result, -1);
     }
@@ -755,7 +755,7 @@ mod tests {
 
         let mut mem = ctx_with_two_strings(&from, &to);
         let to_offset = (from.len() + 1) as i32;
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let result = filestore_rename(&mut ctx, &[0, to_offset]).unwrap();
         assert_eq!(result, 1);
 
@@ -776,7 +776,7 @@ mod tests {
 
         let mut mem = ctx_with_two_strings(&from, &to);
         let to_offset = (from.len() + 1) as i32;
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let result = filestore_rename(&mut ctx, &[0, to_offset]).unwrap();
         assert_eq!(result, 0);
     }
@@ -791,12 +791,12 @@ mod tests {
 
         let mut mem = ctx_with_two_strings(&path, "m");
         let mode_offset = (path.len() + 1) as i32;
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let h = filestore_do_open(&mut ctx, &[0, mode_offset]).unwrap();
         assert!(h > 0, "mode 'm' should create the file");
         assert!(Path::new(&path).exists());
 
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         filestore_do_close(&mut ctx, &[h]).unwrap();
         cleanup(&path);
     }
@@ -809,19 +809,19 @@ mod tests {
 
         let mut mem = ctx_with_two_strings(&path, "m");
         let mode_offset = (path.len() + 1) as i32;
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let h = filestore_do_open(&mut ctx, &[0, mode_offset]).unwrap();
         assert!(h > 0);
 
         // Read first byte → 'A'.
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         assert_eq!(filestore_do_read(&mut ctx, &[h]).unwrap(), b'A' as i32);
 
         // Write a byte at current position (overwrite 'B' with 'X').
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         assert_eq!(filestore_do_write(&mut ctx, &[h, b'X' as i32]).unwrap(), 1);
 
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         filestore_do_close(&mut ctx, &[h]).unwrap();
 
         // Verify file content.
@@ -844,14 +844,14 @@ mod tests {
         // Open file 1 for write.
         let mut mem1 = ctx_with_two_strings(&p1, "w");
         let mo1 = (p1.len() + 1) as i32;
-        let mut ctx = NativeContext { memory: &mut mem1 };
+        let mut ctx = NativeContext::new(&mut mem1);
         let h1 = filestore_do_open(&mut ctx, &[0, mo1]).unwrap();
         assert!(h1 > 0);
 
         // Open file 2 for write.
         let mut mem2 = ctx_with_two_strings(&p2, "w");
         let mo2 = (p2.len() + 1) as i32;
-        let mut ctx = NativeContext { memory: &mut mem2 };
+        let mut ctx = NativeContext::new(&mut mem2);
         let h2 = filestore_do_open(&mut ctx, &[0, mo2]).unwrap();
         assert!(h2 > 0);
 
@@ -859,21 +859,21 @@ mod tests {
         assert_ne!(h1, h2);
 
         // Write to both.
-        let mut ctx = NativeContext { memory: &mut mem1 };
+        let mut ctx = NativeContext::new(&mut mem1);
         filestore_do_write(&mut ctx, &[h1, b'1' as i32]).unwrap();
-        let mut ctx = NativeContext { memory: &mut mem2 };
+        let mut ctx = NativeContext::new(&mut mem2);
         filestore_do_write(&mut ctx, &[h2, b'2' as i32]).unwrap();
 
         // Flush both to ensure data is on disk before close.
-        let mut ctx = NativeContext { memory: &mut mem1 };
+        let mut ctx = NativeContext::new(&mut mem1);
         filestore_do_flush(&mut ctx, &[h1]).unwrap();
-        let mut ctx = NativeContext { memory: &mut mem2 };
+        let mut ctx = NativeContext::new(&mut mem2);
         filestore_do_flush(&mut ctx, &[h2]).unwrap();
 
         // Close both.
-        let mut ctx = NativeContext { memory: &mut mem1 };
+        let mut ctx = NativeContext::new(&mut mem1);
         filestore_do_close(&mut ctx, &[h1]).unwrap();
-        let mut ctx = NativeContext { memory: &mut mem2 };
+        let mut ctx = NativeContext::new(&mut mem2);
         filestore_do_close(&mut ctx, &[h2]).unwrap();
 
         // Verify.
@@ -902,7 +902,11 @@ mod tests {
 
     #[test]
     fn register_replaces_stubs() {
-        let mut table = NativeTable::with_defaults();
+        // Use a fresh table with only stubs (not with_defaults which registers all)
+        let mut table = NativeTable::new();
+        for id in 0..60u16 {
+            table.register_stub(0, id);
+        }
 
         // Before registration, slot 44 is a Stub.
         let entry = table.lookup(0, 44).unwrap();
@@ -925,7 +929,7 @@ mod tests {
     fn read_invalid_handle_returns_neg_one() {
 
         let mut mem = vec![0u8; 16];
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         assert_eq!(filestore_do_read(&mut ctx, &[9999]).unwrap(), -1);
     }
 
@@ -940,11 +944,11 @@ mod tests {
 
         let mut mem = ctx_with_two_strings(&file_path, "w");
         let mode_offset = (file_path.len() + 1) as i32;
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         let h = filestore_do_open(&mut ctx, &[0, mode_offset]).unwrap();
         assert!(h > 0);
 
-        let mut ctx = NativeContext { memory: &mut mem };
+        let mut ctx = NativeContext::new(&mut mem);
         filestore_do_close(&mut ctx, &[h]).unwrap();
 
         assert!(Path::new(&file_path).exists());

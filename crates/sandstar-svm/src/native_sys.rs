@@ -730,7 +730,7 @@ mod tests {
     use crate::native_table::NativeContext;
 
     fn test_ctx(mem: &mut Vec<u8>) -> NativeContext<'_> {
-        NativeContext { memory: mem }
+        NativeContext::new(mem)
     }
 
     // ── String formatting ────────────────────────────────────
@@ -1374,7 +1374,11 @@ mod tests {
 
     #[test]
     fn register_kit0_sys_leaves_stubs_for_component_methods() {
-        let mut table = NativeTable::with_defaults();
+        // Use a fresh table with only stubs (not with_defaults which registers all)
+        let mut table = NativeTable::new();
+        for id in 0..60u16 {
+            table.register_stub(0, id);
+        }
         register_kit0_sys(&mut table);
 
         for id in 22..=39u16 {
@@ -1387,7 +1391,11 @@ mod tests {
 
     #[test]
     fn register_kit0_sys_leaves_stubs_for_filestore() {
-        let mut table = NativeTable::with_defaults();
+        // Use a fresh table with only stubs (not with_defaults which registers all)
+        let mut table = NativeTable::new();
+        for id in 0..60u16 {
+            table.register_stub(0, id);
+        }
         register_kit0_sys(&mut table);
 
         for id in 44..=54u16 {
@@ -1400,7 +1408,11 @@ mod tests {
 
     #[test]
     fn register_kit0_sys_implemented_count() {
-        let mut table = NativeTable::with_defaults();
+        // Use a fresh table with only stubs to test sys registration in isolation
+        let mut table = NativeTable::new();
+        for id in 0..60u16 {
+            table.register_stub(0, id);
+        }
         register_kit0_sys(&mut table);
         // 29 methods: 0-21 (22) + 41-43 (3) + 56 (1) + 57-59 (3)
         assert_eq!(table.implemented_count(0), 29);

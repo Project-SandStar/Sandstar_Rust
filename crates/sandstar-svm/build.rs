@@ -1,4 +1,12 @@
 fn main() {
+    // If pure-rust-vm feature is active, skip C compilation entirely.
+    // All native methods are provided by Rust modules (native_sys, native_file,
+    // native_datetime, etc.) so no C compiler is needed.
+    if cfg!(feature = "pure-rust-vm") {
+        println!("cargo:warning=Building with pure Rust VM (no C code)");
+        return;
+    }
+
     let csrc = std::path::Path::new("csrc");
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let is_unix_target = target_os == "linux" || target_os == "android" || target_os == "freebsd";

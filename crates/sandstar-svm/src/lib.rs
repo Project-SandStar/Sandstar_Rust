@@ -36,6 +36,9 @@ pub mod native_sys;
 pub mod native_file;
 pub mod test_utils;
 pub mod native_datetime;
+pub mod native_component;
+pub mod native_inet;
+pub mod native_mod;
 // Future phases:
 pub mod vm_stack;
 pub mod vm_interpreter;

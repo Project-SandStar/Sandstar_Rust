@@ -29,7 +29,35 @@ pub struct NativeContext<'a> {
     /// Raw VM data memory (stack + heap).  Native methods read/write slots
     /// by indexing into this buffer.
     pub memory: &'a mut Vec<u8>,
-    // Future: typed VmMemory, engine bridge, I/O queues, etc.
+    /// Read-only code segment (scode image).  Required by Component reflection
+    /// methods that follow const references from data to the code segment.
+    /// `None` when code access is not needed (most native methods).
+    pub code: Option<&'a [u8]>,
+    /// Block size in bytes (typically 4).  Used by `get_const` to convert
+    /// block indices to byte offsets.
+    pub block_size: u8,
+}
+
+impl<'a> NativeContext<'a> {
+    /// Create a minimal context with only data memory (no code access).
+    /// Suitable for native methods that don't need Component reflection.
+    pub fn new(memory: &'a mut Vec<u8>) -> Self {
+        Self {
+            memory,
+            code: None,
+            block_size: 4,
+        }
+    }
+
+    /// Create a context with both data and code segment access.
+    /// Required for Component.get*/set*/invoke* native methods.
+    pub fn with_code(memory: &'a mut Vec<u8>, code: &'a [u8], block_size: u8) -> Self {
+        Self {
+            memory,
+            code: Some(code),
+            block_size,
+        }
+    }
 }
 
 /// Signature for a normal native method.
@@ -106,6 +134,8 @@ impl NativeTable {
         for id in 0..60u16 {
             table.register_stub(0, id);
         }
+        // Register Component reflection (slots 22-39), Type.malloc (40), Test.doMain (55)
+        crate::native_component::register_kit0_component(&mut table);
 
         // ── Kit 2: inet (17 methods) ─────────────────────────
         table.set_kit_name(2, "inet");
@@ -152,6 +182,14 @@ impl NativeTable {
         for id in 0..28u16 {
             table.register_stub(100, id);
         }
+
+        // ── Overwrite stubs with real Rust implementations ─────
+        // Real implementations are registered AFTER stubs so they
+        // replace the stub entries for methods that have been ported.
+        crate::native_sys::register_kit0_sys(&mut table);
+        crate::native_file::register_kit0_file(&mut table);
+        // crate::native_inet::register_kit2(&mut table);  // uncomment when ready
+        crate::native_datetime::register_kit9(&mut table);
 
         table
     }
@@ -494,7 +532,7 @@ mod tests {
 
     /// Helper: create a minimal NativeContext for testing.
     fn test_ctx(mem: &mut Vec<u8>) -> NativeContext<'_> {
-        NativeContext { memory: mem }
+        NativeContext::new(mem)
     }
 
     // ── Construction tests ────────────────────────────────────
@@ -678,9 +716,25 @@ mod tests {
     }
 
     #[test]
-    fn with_defaults_kit0_all_stubs() {
+    fn with_defaults_kit0_has_real_implementations() {
         let t = NativeTable::with_defaults();
-        assert_eq!(t.implemented_count(0), 0);
+        // Kit 0 sys methods (22 from native_sys) + file methods (11 from native_file) = 33
+        let count = t.implemented_count(0);
+        assert!(
+            count >= 33,
+            "kit 0 should have at least 33 real implementations (sys + file), got {count}"
+        );
+    }
+
+    #[test]
+    fn with_defaults_kit9_has_real_implementations() {
+        let t = NativeTable::with_defaults();
+        // Kit 9: 3 methods from native_datetime (all implemented)
+        assert_eq!(
+            t.implemented_count(9),
+            3,
+            "kit 9 should have 3 real implementations (datetime)"
+        );
     }
 
     // ── Overwrite existing method ────────────────────────────
