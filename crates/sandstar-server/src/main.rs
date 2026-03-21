@@ -397,7 +397,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // 8b. Notify systemd that the service is ready (Type=notify)
+    // 8b. Start SOX/DASP server (optional, for Sedona Application Editor)
+    let _sox_handle = if args.sox {
+        let sox_engine_handle = rest::EngineHandle::new(cmd_tx.clone());
+        info!(port = args.sox_port, "SOX/DASP server starting");
+        Some(sandstar_server::sox::spawn_sox_server(
+            args.sox_port,
+            args.sox_user.clone(),
+            args.sox_pass.clone(),
+            sox_engine_handle,
+        ))
+    } else {
+        None
+    };
+
+    // 8c. Notify systemd that the service is ready (Type=notify)
     sd_notify::ready();
 
     // 9. Watch subscription state (lives in main loop scope)

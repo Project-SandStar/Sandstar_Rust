@@ -99,6 +99,22 @@ pub struct ServerArgs {
     /// TLS private key file path (PEM format). Required when --tls-cert is set.
     #[arg(long, env = "SANDSTAR_TLS_KEY")]
     pub tls_key: Option<PathBuf>,
+
+    /// Enable SOX protocol server for Sedona Application Editor.
+    #[arg(long, default_value_t = false)]
+    pub sox: bool,
+
+    /// SOX/DASP UDP port (default 1876).
+    #[arg(long, default_value_t = 1876)]
+    pub sox_port: u16,
+
+    /// SOX username (or env SANDSTAR_SOX_USER, default "admin").
+    #[arg(long, env = "SANDSTAR_SOX_USER", default_value = "admin")]
+    pub sox_user: String,
+
+    /// SOX password (or env SANDSTAR_SOX_PASS, default "admin").
+    #[arg(long, env = "SANDSTAR_SOX_PASS", default_value = "admin")]
+    pub sox_pass: String,
 }
 
 fn default_socket() -> String {
@@ -270,5 +286,39 @@ mod tests {
         ]);
         assert!(args.tls_cert.is_some());
         assert!(args.tls_key.is_none());
+    }
+
+    #[test]
+    fn test_sox_defaults() {
+        let args = ServerArgs::parse_from(["sandstar-engine-server"]);
+        assert!(!args.sox);
+        assert_eq!(args.sox_port, 1876);
+        assert_eq!(args.sox_user, "admin");
+        assert_eq!(args.sox_pass, "admin");
+    }
+
+    #[test]
+    fn test_sox_flag_enabled() {
+        let args = ServerArgs::parse_from(["sandstar-engine-server", "--sox"]);
+        assert!(args.sox);
+        assert_eq!(args.sox_port, 1876);
+    }
+
+    #[test]
+    fn test_sox_custom_port_and_creds() {
+        let args = ServerArgs::parse_from([
+            "sandstar-engine-server",
+            "--sox",
+            "--sox-port",
+            "1877",
+            "--sox-user",
+            "myuser",
+            "--sox-pass",
+            "mypass",
+        ]);
+        assert!(args.sox);
+        assert_eq!(args.sox_port, 1877);
+        assert_eq!(args.sox_user, "myuser");
+        assert_eq!(args.sox_pass, "mypass");
     }
 }

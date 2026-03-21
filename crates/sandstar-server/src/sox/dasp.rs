@@ -695,6 +695,18 @@ impl DaspTransport {
         }
     }
 
+    /// Return the IDs of sessions that have expired (no activity within timeout).
+    ///
+    /// This is useful for cleaning up subscription state before calling
+    /// `cleanup_expired()` which removes the sessions from the transport.
+    pub fn expired_session_ids(&self) -> Vec<u16> {
+        self.sessions
+            .iter()
+            .filter(|(_, s)| s.is_expired())
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     /// Return list of authenticated session IDs.
     pub fn authenticated_sessions(&self) -> Vec<u16> {
         self.sessions

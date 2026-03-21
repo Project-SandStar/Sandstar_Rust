@@ -202,7 +202,7 @@ fn format_to_strbuf(s: &str) -> i32 {
 fn read_cstr_from_handle(handle: i32) -> Option<String> {
     let ptr = resolve_ptr(handle)?;
     unsafe {
-        let cstr = std::ffi::CStr::from_ptr(ptr as *const i8);
+        let cstr = std::ffi::CStr::from_ptr(ptr as *const std::ffi::c_char);
         cstr.to_str().ok().map(|s| s.to_string())
     }
 }
