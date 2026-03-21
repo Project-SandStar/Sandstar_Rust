@@ -32,11 +32,14 @@ pub mod vm_error;
 pub mod image_loader;
 pub mod vm_memory;
 pub mod native_table;
+pub mod native_sys;
+pub mod native_file;
 pub mod test_utils;
+pub mod native_datetime;
 // Future phases:
 pub mod vm_stack;
 pub mod vm_interpreter;
-// pub mod rust_runner;
+pub mod rust_runner;
 
 pub use bridge::{
     set_engine_bridge, set_write_queue, set_tag_write_queue,

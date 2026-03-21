@@ -9,6 +9,7 @@ description = "Sedona Virtual Machine FFI bridge for Sandstar engine"
 sandstar-engine = { path = "../sandstar-engine" }
 sandstar-hal = { path = "../sandstar-hal" }
 tracing = { workspace = true }
+chrono = "0.4"
 
 [build-dependencies]
 cc = "1"
