@@ -496,10 +496,11 @@ Remaining future tracks (post-production):
 
 | Metric | Value |
 |--------|-------|
-| Rust source lines | ~31,000 |
-| C/C++ replaced | ~27,000 lines (60% reduction) |
+| Rust source lines | ~39,000 (~7,700 new VM + native methods) |
+| C/C++ replaced | ~27,000 lines engine + 6,839 lines SVM (pure-rust-vm feature) |
 | POCO eliminated | ~500,000 lines |
-| Test count | 824 passing, 0 failures |
+| Test count | 1,382 passing, 0 failures (557 in SVM crate) |
+| Pure Rust VM | 240 opcodes, 80 native methods, `--features pure-rust-vm` builds without C |
 | Crates | 7 (engine, hal, hal-linux, ipc, server, cli, svm) |
 | REST endpoints | 25 (14 Haystack + health + metrics + zinc + WebSocket + rate-limit + auth + 4 simulator) |
 | Control components | 22 (PID, sequencer + 20 library components) |

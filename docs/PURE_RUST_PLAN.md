@@ -1,22 +1,28 @@
 # Pure Rust Sandstar — Implementation Plan
 
-**Date:** 2026-03-20
+**Date:** 2026-03-21 (updated)
 **Goal:** Eliminate all C code, enable Sedona Application Editor connectivity
-**Total Effort:** ~54 dev-days (~8,300 lines of new Rust)
-**Current C Code:** 6,839 lines in `crates/sandstar-svm/csrc/`
+**Total Effort:** ~42 dev-days (~8,300 lines of new Rust)
+**Current C Code:** 6,839 lines in `crates/sandstar-svm/csrc/` (bypassed via `pure-rust-vm` feature)
+**Status:** Phases A-D COMPLETE. Phase S in progress.
 
 ---
 
 ## Overview
 
-Three major workstreams, executed in order:
+| Workstream | What | New Lines | Dev-Days | Result | Status |
+|------------|------|-----------|----------|--------|--------|
+| **Phase A** | Pure Rust VM interpreter | ~5,250 | 15 | Rust bytecode execution | **COMPLETE** |
+| **Phase B-D** | Native methods in Rust | ~2,480 | 17 | Zero C kit files | **COMPLETE** |
+| **Phase S** | SOX protocol server | ~1,800 | 10 | Sedona Editor connects | **IN PROGRESS** |
+| **Total** | 15 files | **~7,730** | **42** | **Pure Rust + Sedona Editor** | |
 
-| Workstream | What | New Lines | Dev-Days | Result |
-|------------|------|-----------|----------|--------|
-| **Phase A** | Pure Rust VM interpreter | ~2,500 | 15 | Rust bytecode execution |
-| **Phase B-D** | Native methods in Rust | ~1,920 | 17 | Zero C kit files |
-| **Phase S** | SOX protocol server | ~1,800 | 10 | Sedona Editor connects |
-| **Total** | | **~6,220** | **42** | **Pure Rust + Sedona Editor** |
+### Completed (2026-03-21)
+- `pure-rust-vm` feature flag: compiles with ZERO C code
+- All 240 VM opcodes implemented and tested (141 integration tests)
+- All 80 native methods ported: Kit 0 (60), Kit 2 (17), Kit 9 (3)
+- RustSvmRunner: start/resume/stop lifecycle
+- 1,382 tests passing, 557 in SVM crate alone
 
 ---
 
