@@ -41,6 +41,7 @@ axum = { workspace = true }
 serde_json = { workspace = true }
 tower-http = { workspace = true }
 futures-util = "0.3"
+sha1 = "0.10"
 sha2 = "0.10"
 hmac = "0.12"
 pbkdf2 = { version = "0.12", features = ["simple"] }

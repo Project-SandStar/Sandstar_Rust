@@ -18,6 +18,7 @@ pub mod reload;
 pub mod rest;
 pub mod sax_converter;
 pub mod sd_notify;
+pub mod sox;
 pub mod signal;
 pub mod tls;
 pub mod watchdog;
