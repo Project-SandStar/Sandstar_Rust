@@ -32,9 +32,10 @@ pub mod vm_error;
 pub mod image_loader;
 pub mod vm_memory;
 pub mod native_table;
+pub mod test_utils;
 // Future phases:
 pub mod vm_stack;
-// pub mod vm_interpreter;
+pub mod vm_interpreter;
 // pub mod rust_runner;
 
 pub use bridge::{
