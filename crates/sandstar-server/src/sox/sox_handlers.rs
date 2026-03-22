@@ -1290,12 +1290,12 @@ impl WriteRequest {
     /// engine channel ID and the float value to write.
     ///
     /// Channel components have comp_id >= CHANNEL_COMP_BASE.
-    /// The "in" slot (index 1) is the writable input.
+    /// Slot 6 ("out") is the primary writable output.
     pub fn to_channel_write(&self, tree: &ComponentTree) -> Option<(u32, f64)> {
         if self.comp_id < CHANNEL_COMP_BASE {
             return None;
         }
-        // Slot 6 is "out" (the writable float output).
+        // Only slot 6 ("out") is writable for channel components.
         if self.slot_id != 6 {
             return None;
         }
