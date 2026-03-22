@@ -142,6 +142,56 @@ async fn run_sox_server(
                             );
                         }
 
+                        // After Add/Delete: push tree event for the parent so editor refreshes
+                        if request.cmd as u8 == b'a' || request.cmd as u8 == b'd' {
+                            // Get parent_id from the request payload
+                            let parent_id = if request.payload.len() >= 2 {
+                                u16::from_be_bytes([request.payload[0], request.payload[1]])
+                            } else { 0 };
+                            // Send tree event for parent component
+                            if let Some(parent) = tree.get(parent_id) {
+                                let mut evt = Vec::with_capacity(64);
+                                evt.push(b'e');
+                                evt.push(0xFF);
+                                evt.extend_from_slice(&parent_id.to_be_bytes());
+                                evt.push(b't'); // tree change
+                                evt.push(parent.kit_id);
+                                evt.push(parent.type_id);
+                                // name (null-terminated)
+                                evt.extend_from_slice(parent.name.as_bytes());
+                                evt.push(0x00);
+                                evt.extend_from_slice(&parent.parent_id.to_be_bytes());
+                                evt.push(0xFF); // permissions
+                                evt.push(parent.children.len() as u8);
+                                for &child_id in &parent.children {
+                                    evt.extend_from_slice(&child_id.to_be_bytes());
+                                }
+                                // Also send tree event for the new/deleted component itself
+                                let _ = transport.send_to_session(session_id, &evt);
+                            }
+                            // If it was an Add, also send tree event for the new component
+                            if request.cmd as u8 == b'a' {
+                                let new_id = u16::from_be_bytes([
+                                    response_bytes[2], response_bytes[3]
+                                ]);
+                                if let Some(comp) = tree.get(new_id) {
+                                    let mut evt = Vec::with_capacity(64);
+                                    evt.push(b'e');
+                                    evt.push(0xFF);
+                                    evt.extend_from_slice(&new_id.to_be_bytes());
+                                    evt.push(b't');
+                                    evt.push(comp.kit_id);
+                                    evt.push(comp.type_id);
+                                    evt.extend_from_slice(comp.name.as_bytes());
+                                    evt.push(0x00);
+                                    evt.extend_from_slice(&comp.parent_id.to_be_bytes());
+                                    evt.push(0xFF);
+                                    evt.push(0); // no children
+                                    let _ = transport.send_to_session(session_id, &evt);
+                                }
+                            }
+                        }
+
                         // After batchSubscribe: push initial state events for all subscribed components
                         if request.cmd as u8 == b's' && request.payload.len() > 3 {
                             // batchSubscribe detected (>3 bytes = not doSubscribe)
