@@ -68,11 +68,8 @@ async fn run_sox_server(
 
     info!(port, "SOX/DASP server listening");
 
-    // Wait for the engine to complete its first poll cycle so virtual channels
-    // have their computed values (setpoints, stages, etc.) before we build the tree.
-    tokio::time::sleep(Duration::from_secs(3)).await;
-
     // Build initial component tree from current channel data.
+    // Values will be corrected on the first `update_from_channels` tick.
     let mut tree = match engine_handle.list_channels().await {
         Ok(channels) => {
             let t = ComponentTree::from_channels(&channels);
@@ -102,19 +99,8 @@ async fn run_sox_server(
             match transport.poll() {
                 Some((session_id, payload)) => {
                     packets_this_round += 1;
-                    info!(session = session_id, payload_len = payload.len(), first_byte = payload.first().copied().unwrap_or(0), "SOX: received payload");
                     if let Some(request) = SoxRequest::parse(&payload) {
-                        // Log compId+what for readComp requests
-                        let extra = if request.cmd as u8 == b'c' && request.payload.len() >= 3 {
-                            format!(" compId={} what={}", u16::from_be_bytes([request.payload[0], request.payload[1]]), request.payload[2] as char)
-                        } else if request.cmd as u8 == b'c' && request.payload.len() >= 2 {
-                            format!(" compId={}", u16::from_be_bytes([request.payload[0], request.payload[1]]))
-                        } else { String::new() };
-                        info!(session = session_id, cmd_byte = request.cmd as u8, req_id = request.req_id, extra = %extra, "SOX: parsed command");
-                    } else {
-                        warn!(session = session_id, payload_len = payload.len(), "SOX: failed to parse request");
-                    }
-                    if let Some(request) = SoxRequest::parse(&payload) {
+                        debug!(session = session_id, cmd = request.cmd as u8, req_id = request.req_id, "SOX request");
                         // Handle write commands: forward to engine via EngineHandle.
                         if request.cmd == sox_protocol::SoxCmd::Write {
                             if let Some(write_req) = parse_write_request(&request) {
@@ -147,7 +133,6 @@ async fn run_sox_server(
                         let response =
                             handle_sox_request(&request, &tree, &mut subscriptions, session_id);
                         let response_bytes = response.to_bytes();
-                        info!(session = session_id, resp_cmd = response_bytes[0], resp_len = response_bytes.len(), "SOX: sending response");
                         if let Err(e) =
                             transport.send_to_session(session_id, &response_bytes)
                         {
@@ -194,11 +179,7 @@ async fn run_sox_server(
                         if !changed.is_empty() {
                             let events = subscriptions.build_events(&changed, &tree);
                             if !events.is_empty() {
-                                // Log hex dump of first event for debugging
-                                let hex = events.first().map(|(_, b)| {
-                                    b.iter().take(50).map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" ")
-                                }).unwrap_or_default();
-                                info!(changed = changed.len(), events = events.len(), hex = %hex, "SOX: pushing COV events");
+                                debug!(changed = changed.len(), events = events.len(), "SOX: pushing COV events");
                             }
                             for (session_id, event_bytes) in events {
                                 if let Err(e) = transport.send_to_session(session_id, &event_bytes) {

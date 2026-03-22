@@ -436,8 +436,9 @@ mod tests {
     #[test]
     fn cmd_from_byte_all_known() {
         let cases: &[(u8, SoxCmd)] = &[
-            (b'v', SoxCmd::ReadVersion),
-            (b'n', SoxCmd::ReadSchema),
+            (b'v', SoxCmd::ReadSchema),
+            (b'y', SoxCmd::ReadVersion),
+            (b'n', SoxCmd::ReadSchemaDetail),
             (b'c', SoxCmd::ReadComp),
             (b'p', SoxCmd::ReadProp),
             (b'l', SoxCmd::ReadLink),
@@ -477,7 +478,7 @@ mod tests {
         assert_eq!(SoxCmd::ReadComp.response_byte(), b'C');
         assert_eq!(SoxCmd::Write.response_byte(), b'W');
         assert_eq!(SoxCmd::Subscribe.response_byte(), b'S');
-        assert_eq!(SoxCmd::ReadVersion.response_byte(), b'V');
+        assert_eq!(SoxCmd::ReadVersion.response_byte(), b'Y');
     }
 
     #[test]
@@ -487,8 +488,9 @@ mod tests {
 
     #[test]
     fn cmd_repr_values_match_sedona_spec() {
-        assert_eq!(SoxCmd::ReadVersion as u8, 0x76);
-        assert_eq!(SoxCmd::ReadSchema as u8, 0x6E);
+        assert_eq!(SoxCmd::ReadSchema as u8, 0x76);
+        assert_eq!(SoxCmd::ReadVersion as u8, 0x79);
+        assert_eq!(SoxCmd::ReadSchemaDetail as u8, 0x6E);
         assert_eq!(SoxCmd::ReadComp as u8, 0x63);
         assert_eq!(SoxCmd::Subscribe as u8, 0x73);
         assert_eq!(SoxCmd::Unsubscribe as u8, 0x75);
@@ -552,7 +554,7 @@ mod tests {
     #[test]
     fn parse_empty_payload() {
         // readVersion has no payload
-        let data = [b'v', 0];
+        let data = [b'y', 0];
         let req = SoxRequest::parse(&data).unwrap();
         assert_eq!(req.cmd, SoxCmd::ReadVersion);
         assert_eq!(req.req_id, 0);

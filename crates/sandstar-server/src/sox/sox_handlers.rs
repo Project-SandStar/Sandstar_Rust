@@ -663,7 +663,6 @@ impl SubscriptionManager {
     ///
     /// Returns `(session_id, event_bytes)` pairs for each subscriber
     /// that needs to be notified.
-    /// Build COV event payloads for changed components.
     ///
     /// Sedona event wire format (unsolicited push):
     ///   byte 0:   'e' (lowercase — unsolicited event, NOT a response)
@@ -1169,13 +1168,13 @@ impl WriteRequest {
         if self.comp_id < CHANNEL_COMP_BASE {
             return None;
         }
-        // Slot 1 is "in" (the writable input).
-        if self.slot_id != 1 {
+        // Slot 6 is "out" (the writable float output).
+        if self.slot_id != 6 {
             return None;
         }
         let comp = tree.get(self.comp_id)?;
-        // Extract channel ID from the "channelId" slot (index 5).
-        let channel_id = match &comp.slots.get(5)?.value {
+        // Extract channel ID from the "channel" slot (index 2).
+        let channel_id = match &comp.slots.get(2)?.value {
             SlotValue::Int(id) => *id as u32,
             _ => return None,
         };
@@ -1361,20 +1360,23 @@ mod tests {
         let tree = ComponentTree::from_channels(&channels);
 
         let ch = tree.get(100).unwrap();
-        assert_eq!(ch.slots.len(), 7);
-        assert_eq!(ch.slots[0].name, "out");
-        assert_eq!(ch.slots[1].name, "in");
-        assert_eq!(ch.slots[2].name, "status");
-        assert_eq!(ch.slots[3].name, "enabled");
-        assert_eq!(ch.slots[4].name, "label");
-        assert_eq!(ch.slots[5].name, "channelId");
-        assert_eq!(ch.slots[6].name, "raw");
+        // 9 slots: meta, channelName, channel, pointQuery, pointQuerySize,
+        //          pointQueryStatus, out, curStatus, enabled
+        assert_eq!(ch.slots.len(), 9);
+        assert_eq!(ch.slots[0].name, "meta");
+        assert_eq!(ch.slots[1].name, "channelName");
+        assert_eq!(ch.slots[2].name, "channel");
+        assert_eq!(ch.slots[3].name, "pointQuery");
+        assert_eq!(ch.slots[4].name, "pointQuerySize");
+        assert_eq!(ch.slots[5].name, "pointQueryStatus");
+        assert_eq!(ch.slots[6].name, "out");
+        assert_eq!(ch.slots[7].name, "curStatus");
+        assert_eq!(ch.slots[8].name, "enabled");
 
-        assert_eq!(ch.slots[0].value, SlotValue::Float(72.5));
-        assert_eq!(ch.slots[1].value, SlotValue::Float(72.5));
-        assert_eq!(ch.slots[2].value, SlotValue::Int(0)); // ok -> 0
-        assert_eq!(ch.slots[3].value, SlotValue::Bool(true));
-        assert_eq!(ch.slots[5].value, SlotValue::Int(1113));
+        assert_eq!(ch.slots[0].value, SlotValue::Int(1)); // meta
+        assert_eq!(ch.slots[2].value, SlotValue::Int(1113)); // channel
+        assert_eq!(ch.slots[6].value, SlotValue::Float(72.5)); // out
+        assert_eq!(ch.slots[8].value, SlotValue::Bool(true)); // enabled
     }
 
     #[test]
@@ -1477,7 +1479,8 @@ mod tests {
     fn encode_str_value() {
         let mut resp = SoxResponse::success(SoxCmd::Event, 0);
         encode_slot_value(&mut resp, &SlotValue::Str("hi".into()));
-        assert_eq!(resp.payload, vec![2, b'h', b'i']);
+        // Sedona Str format: u2(len+1) + bytes + 0x00
+        assert_eq!(resp.payload, vec![0, 3, b'h', b'i', 0x00]);
     }
 
     #[test]
@@ -1564,7 +1567,7 @@ mod tests {
         };
         let resp = handle_read_schema(&req);
         let bytes = resp.to_bytes();
-        assert_eq!(bytes[0], b'N');
+        assert_eq!(bytes[0], b'V');
         assert_eq!(bytes[1], 10);
         assert_eq!(bytes[2], DEFAULT_KITS.len() as u8);
     }
@@ -1577,9 +1580,12 @@ mod tests {
             payload: Vec::new(),
         };
         let resp = handle_read_version(&req);
-        assert_eq!(resp.cmd, b'V');
+        assert_eq!(resp.cmd, b'Y');
         assert_eq!(resp.req_id, 5);
-        assert_eq!(resp.payload[0], DEFAULT_KITS.len() as u8);
+        // Payload starts with null-terminated platformId "EacIo"
+        let mut r = SoxReader::new(&resp.payload);
+        assert_eq!(r.read_str(), Some("EacIo".into())); // platformId
+        assert_eq!(r.read_u8(), Some(0x00)); // scodeFlags
     }
 
     #[test]
@@ -1597,10 +1603,12 @@ mod tests {
         assert_eq!(resp.cmd, b'C');
         let mut r = SoxReader::new(&resp.payload);
         assert_eq!(r.read_u16(), Some(0)); // comp_id
-        assert_eq!(r.read_u8(), Some(0)); // kit_id
-        assert_eq!(r.read_u8(), Some(0)); // type_id
+        assert_eq!(r.read_u8(), Some(b't')); // what byte echoed back
+        assert_eq!(r.read_u8(), Some(0)); // kit_id (sys)
+        assert_eq!(r.read_u8(), Some(10)); // type_id (App)
         assert_eq!(r.read_str(), Some("app".into()));
         assert_eq!(r.read_u16(), Some(NO_PARENT));
+        assert_eq!(r.read_u8(), Some(0xFF)); // permissions
         let child_count = r.read_u8().unwrap();
         assert_eq!(child_count, 3); // service, io, control
     }
@@ -1730,8 +1738,8 @@ mod tests {
         let events = subs.build_events(&[100], &tree);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].0, 1); // session_id
-        // Event payload starts with 'E' (response byte for Event), 0xFF
-        assert_eq!(events[0].1[0], b'E');
+        // Event payload starts with 'e' (lowercase unsolicited event), 0xFF
+        assert_eq!(events[0].1[0], b'e');
         assert_eq!(events[0].1[1], 0xFF);
     }
 
@@ -1801,7 +1809,7 @@ mod tests {
         let mut subs = SubscriptionManager::new();
         let mut payload = Vec::new();
         payload.extend_from_slice(&100u16.to_be_bytes());
-        payload.push(1); // slot_id (in)
+        payload.push(6); // slot_id (out)
         payload.push(SoxValueType::Float as u8);
         payload.extend_from_slice(&75.0f32.to_be_bytes());
         let req = SoxRequest {
@@ -1898,7 +1906,7 @@ mod tests {
         let tree = ComponentTree::from_channels(&channels);
         let wr = WriteRequest {
             comp_id: 100,
-            slot_id: 1,
+            slot_id: 6, // "out" slot (index 6 in new layout)
             value: SlotValue::Float(80.0),
         };
         let (ch_id, val) = wr.to_channel_write(&tree).unwrap();
@@ -1922,7 +1930,7 @@ mod tests {
         let tree = ComponentTree::from_channels(&sample_channels());
         let wr = WriteRequest {
             comp_id: 100,
-            slot_id: 0, // "out" slot, not writable
+            slot_id: 0, // "meta" slot, not the writable "out" slot
             value: SlotValue::Float(0.0),
         };
         assert!(wr.to_channel_write(&tree).is_none());
@@ -1957,7 +1965,8 @@ mod tests {
         }];
         let tree = ComponentTree::from_channels(&channels);
         let comp = tree.get(100).unwrap();
-        assert_eq!(comp.slots[5].value, SlotValue::Int(5555));
+        // channel ID is now at slot index 2 ("channel")
+        assert_eq!(comp.slots[2].value, SlotValue::Int(5555));
     }
 
     // ---- Error response tests ----
@@ -1968,7 +1977,10 @@ mod tests {
         let bytes = resp.to_bytes();
         assert_eq!(bytes[0], b'!');
         assert_eq!(bytes[1], 7);
-        assert_eq!(bytes[2], 8); // "bad slot" is 8 bytes
+        // write_str is null-terminated: "bad slot" + 0x00
+        assert_eq!(bytes[2], b'b'); // first char of "bad slot"
+        assert_eq!(bytes[bytes.len() - 1], 0x00); // null terminator
+        assert_eq!(bytes.len(), 2 + 8 + 1); // header + "bad slot" + NUL
     }
 
     #[test]
@@ -1996,18 +2008,15 @@ mod tests {
         };
         let resp = handle_read_comp(&req, &tree);
         assert_eq!(resp.cmd, b'C');
-        // Parse past comp structure to verify slot count is present
+        // Config mode: comp_id + what + config slot values (no tree structure)
         let mut r = SoxReader::new(&resp.payload);
-        r.read_u16(); // comp_id
-        r.read_u8(); // kit_id
-        r.read_u8(); // type_id
-        r.read_str(); // name
-        r.read_u16(); // parent_id
-        let child_count = r.read_u8().unwrap();
-        for _ in 0..child_count {
-            r.read_u16(); // child_id
-        }
-        let slot_count = r.read_u8().unwrap();
-        assert_eq!(slot_count, 7); // 7 slots for a channel component
+        assert_eq!(r.read_u16(), Some(100)); // comp_id
+        assert_eq!(r.read_u8(), Some(b'c')); // what byte echoed back
+        // Config slots: meta (Int=1) and pointQuery (Str="")
+        // meta: i4(1)
+        assert_eq!(r.read_i32(), Some(1));
+        // pointQuery: u2(1) + 0x00 (empty string with null terminator)
+        assert_eq!(r.read_u16(), Some(1)); // size=1 (just the null)
+        assert_eq!(r.read_u8(), Some(0x00)); // null terminator
     }
 }
