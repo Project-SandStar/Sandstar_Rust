@@ -91,6 +91,8 @@ async fn run_sox_server(
     let mut tree_refresh_interval = tokio::time::interval(Duration::from_secs(1));
     tree_refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    let mut initial_state_pushed = false;
+
     loop {
         // 1. Poll for incoming DASP packets (non-blocking).
         //    Process up to 16 packets per iteration to drain bursts without starving timers.
@@ -100,13 +102,20 @@ async fn run_sox_server(
                 Some((session_id, payload)) => {
                     packets_this_round += 1;
                     if let Some(request) = SoxRequest::parse(&payload) {
-                        debug!(session = session_id, cmd = request.cmd as u8, req_id = request.req_id, "SOX request");
+                        // Log write/invoke at info level, everything else at debug
+                        if request.cmd as u8 == b'w' || request.cmd as u8 == b'k' {
+                            info!(session = session_id, cmd = request.cmd as u8, req_id = request.req_id, "SOX write/invoke received");
+                        } else {
+                            debug!(session = session_id, cmd = request.cmd as u8, req_id = request.req_id, "SOX request");
+                        }
                         // Handle write commands: forward to engine via EngineHandle.
                         if request.cmd == sox_protocol::SoxCmd::Write {
                             if let Some(write_req) = parse_write_request(&request) {
+                                info!(comp_id = write_req.comp_id, slot_id = write_req.slot_id, "SOX: write parsed");
                                 if let Some((channel_id, value)) =
                                     write_req.to_channel_write(&tree)
                                 {
+                                    info!(channel_id, value, "SOX: writing to engine");
                                     let handle = engine_handle.clone();
                                     // Fire-and-forget write (don't block the SOX loop).
                                     tokio::spawn(async move {
@@ -140,6 +149,15 @@ async fn run_sox_server(
                                 session = session_id,
                                 "SOX: failed to send response: {e}"
                             );
+                        }
+
+                        // After Write: push runtime COV event so editor sees the new value
+                        if request.cmd as u8 == b'w' && request.payload.len() >= 2 {
+                            let written_comp = u16::from_be_bytes([request.payload[0], request.payload[1]]);
+                            let events = subscriptions.build_events(&[written_comp], &tree);
+                            for (sid, evt) in events {
+                                let _ = transport.send_to_session(sid, &evt);
+                            }
                         }
 
                         // After Add/Delete: push tree event for the parent so editor refreshes
@@ -192,13 +210,15 @@ async fn run_sox_server(
                             }
                         }
 
-                        // After batchSubscribe: push initial state events for all subscribed components
-                        if request.cmd as u8 == b's' && request.payload.len() > 3 {
-                            // batchSubscribe detected (>3 bytes = not doSubscribe)
+                        // Reset initial state flag on new session's first subscribe
+                        if request.cmd as u8 == b's' && request.payload.len() > 3
+                            && !initial_state_pushed
+                        {
+                            initial_state_pushed = true; // only push once per session
                             let all_comp_ids = tree.comp_ids();
                             let initial_events = subscriptions.build_events(&all_comp_ids, &tree);
                             if !initial_events.is_empty() {
-                                info!(session = session_id, count = initial_events.len(), "SOX: pushing initial state after batchSubscribe");
+                                info!(session = session_id, count = initial_events.len(), "SOX: pushing initial state (once)");
                                 for (sid, evt) in initial_events {
                                     let _ = transport.send_to_session(sid, &evt);
                                 }

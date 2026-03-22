@@ -1221,7 +1221,7 @@ fn handle_invoke(req: &SoxRequest) -> SoxResponse {
 /// write ('w') -- write a slot value on a component.
 ///
 /// Request payload: u2 compId, u1 slotId, u1 typeId, value.
-fn handle_write(req: &SoxRequest, tree: &ComponentTree) -> SoxResponse {
+fn handle_write(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
     let mut reader = SoxReader::new(&req.payload);
     let comp_id = match reader.read_u16() {
         Some(id) => id,
@@ -1235,7 +1235,7 @@ fn handle_write(req: &SoxRequest, tree: &ComponentTree) -> SoxResponse {
         Some(id) => id,
         None => return error_msg(req.cmd, req.req_id, "missing typeId"),
     };
-    let _value = match decode_slot_value(&mut reader, type_id) {
+    let value = match decode_slot_value(&mut reader, type_id) {
         Some(v) => v,
         None => return error_msg(req.cmd, req.req_id, "bad value"),
     };
@@ -1244,14 +1244,25 @@ fn handle_write(req: &SoxRequest, tree: &ComponentTree) -> SoxResponse {
     let Some(comp) = tree.get(comp_id) else {
         return error_msg(req.cmd, req.req_id, "unknown comp");
     };
+    let _ = comp; // drop immutable borrow
 
-    // Verify the slot exists.
-    if (slot_id as usize) >= comp.slots.len() {
-        return error_msg(req.cmd, req.req_id, "bad slot");
+    // Update or create the slot value in the tree.
+    if let Some(comp) = tree.get_mut(comp_id) {
+        // Auto-extend slots if needed (for dynamically added components)
+        while comp.slots.len() <= slot_id as usize {
+            comp.slots.push(VirtualSlot {
+                name: format!("slot{}", comp.slots.len()),
+                type_id: type_id,
+                flags: SLOT_FLAG_RUNTIME,
+                value: SlotValue::Null,
+            });
+        }
+        let slot = &mut comp.slots[slot_id as usize];
+        slot.type_id = type_id;
+        tracing::info!(comp_id, slot_id, name = %slot.name, ?value, "SOX: slot value updated");
+        slot.value = value;
     }
 
-    // Build a success response. The actual engine write will be
-    // handled by the caller using the parsed WriteRequest.
     let mut resp = SoxResponse::success(SoxCmd::Write, req.req_id);
     resp.write_u16(comp_id);
     resp.write_u8(slot_id);
