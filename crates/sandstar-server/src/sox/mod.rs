@@ -131,7 +131,7 @@ async fn run_sox_server(
                         }
 
                         let response =
-                            handle_sox_request(&request, &tree, &mut subscriptions, session_id);
+                            handle_sox_request(&request, &mut tree, &mut subscriptions, session_id);
                         let response_bytes = response.to_bytes();
                         if let Err(e) =
                             transport.send_to_session(session_id, &response_bytes)

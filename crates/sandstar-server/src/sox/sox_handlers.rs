@@ -156,9 +156,34 @@ impl ComponentTree {
     }
 
     /// All component IDs in the tree (unordered).
-    #[allow(dead_code)]
     pub fn comp_ids(&self) -> Vec<u16> {
         self.components.keys().copied().collect()
+    }
+
+    /// Allocate the next available component ID.
+    pub fn next_comp_id(&self) -> u16 {
+        self.components.keys().copied().max().unwrap_or(0) + 1
+    }
+
+    /// Remove a component and unlink it from its parent's children list.
+    /// Returns the removed component, or None if not found.
+    pub fn remove(&mut self, comp_id: u16) -> Option<VirtualComponent> {
+        let comp = self.components.remove(&comp_id)?;
+        // Remove from parent's children list
+        if let Some(parent) = self.components.get_mut(&comp.parent_id) {
+            parent.children.retain(|&id| id != comp_id);
+        }
+        Some(comp)
+    }
+
+    /// Rename a component. Returns true if found and renamed.
+    pub fn rename(&mut self, comp_id: u16, new_name: String) -> bool {
+        if let Some(comp) = self.components.get_mut(&comp_id) {
+            comp.name = new_name;
+            true
+        } else {
+            false
+        }
     }
 
     /// Build a virtual component tree from engine channel data.
@@ -720,7 +745,7 @@ impl Default for SubscriptionManager {
 /// Handle a SOX request and produce a response.
 pub fn handle_sox_request(
     request: &SoxRequest,
-    tree: &ComponentTree,
+    tree: &mut ComponentTree,
     subscriptions: &mut SubscriptionManager,
     session_id: u16,
 ) -> SoxResponse {
@@ -731,6 +756,10 @@ pub fn handle_sox_request(
         SoxCmd::Subscribe => handle_subscribe(request, subscriptions, session_id, tree),
         SoxCmd::Unsubscribe => handle_unsubscribe(request, subscriptions, session_id),
         SoxCmd::Write => handle_write(request, tree),
+        SoxCmd::Add => handle_add(request, tree),
+        SoxCmd::Delete => handle_delete(request, tree),
+        SoxCmd::Rename => handle_rename(request, tree),
+        SoxCmd::Invoke => handle_invoke(request),
         SoxCmd::FileOpen => handle_file_open(request),
         SoxCmd::FileRead => handle_file_read(request),
         SoxCmd::FileClose => handle_file_close(request),
@@ -1089,6 +1118,104 @@ fn handle_unsubscribe(
 
     subs.unsubscribe(session_id, comp_id);
     SoxResponse::success(SoxCmd::Unsubscribe, req.req_id)
+}
+
+/// add ('a') — add a new component to the tree.
+///
+/// Request: u2 parentId, u1 kitId, u1 typeId, str name, [configValues...]
+/// Response: 'A' + u2 newCompId
+fn handle_add(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
+    let mut reader = SoxReader::new(&req.payload);
+    let parent_id = match reader.read_u16() {
+        Some(id) => id,
+        None => return error_msg(req.cmd, req.req_id, "missing parentId"),
+    };
+    let kit_id = reader.read_u8().unwrap_or(0);
+    let type_id = reader.read_u8().unwrap_or(0);
+    let name = reader.read_str().unwrap_or_default();
+
+    // Verify parent exists
+    if tree.get(parent_id).is_none() {
+        return error_msg(req.cmd, req.req_id, "bad compId");
+    }
+
+    let new_id = tree.next_comp_id();
+    let comp = VirtualComponent {
+        comp_id: new_id,
+        parent_id,
+        name,
+        type_name: format!("kit{}::type{}", kit_id, type_id),
+        kit_id,
+        type_id,
+        children: Vec::new(),
+        slots: Vec::new(), // config values could be parsed from remaining bytes
+    };
+    tree.add(comp);
+
+    tracing::info!(new_id, parent_id, kit_id, type_id, "SOX: component added");
+
+    let mut resp = SoxResponse::success(SoxCmd::Add, req.req_id);
+    resp.write_u16(new_id);
+    resp
+}
+
+/// delete ('d') — remove a component from the tree.
+///
+/// Request: u2 compId
+/// Response: 'D'
+fn handle_delete(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
+    let mut reader = SoxReader::new(&req.payload);
+    let comp_id = match reader.read_u16() {
+        Some(id) => id,
+        None => return error_msg(req.cmd, req.req_id, "missing compId"),
+    };
+
+    // Don't allow deleting the root app (comp 0) or service nodes
+    if comp_id < 7 {
+        return error_msg(req.cmd, req.req_id, "cannot delete system component");
+    }
+
+    if tree.remove(comp_id).is_some() {
+        tracing::info!(comp_id, "SOX: component deleted");
+        SoxResponse::success(SoxCmd::Delete, req.req_id)
+    } else {
+        error_msg(req.cmd, req.req_id, "bad compId")
+    }
+}
+
+/// rename ('r') — rename a component.
+///
+/// Request: u2 compId, str newName
+/// Response: 'R'
+fn handle_rename(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
+    let mut reader = SoxReader::new(&req.payload);
+    let comp_id = match reader.read_u16() {
+        Some(id) => id,
+        None => return error_msg(req.cmd, req.req_id, "missing compId"),
+    };
+    let new_name = reader.read_str().unwrap_or_default();
+
+    if tree.rename(comp_id, new_name.clone()) {
+        tracing::info!(comp_id, name = %new_name, "SOX: component renamed");
+        SoxResponse::success(SoxCmd::Rename, req.req_id)
+    } else {
+        error_msg(req.cmd, req.req_id, "bad compId")
+    }
+}
+
+/// invoke ('k') — invoke an action on a component.
+///
+/// Request: u2 compId, u1 slotId, [argValue]
+/// Response: 'K'
+fn handle_invoke(req: &SoxRequest) -> SoxResponse {
+    let mut reader = SoxReader::new(&req.payload);
+    let comp_id = reader.read_u16().unwrap_or(0);
+    let slot_id = reader.read_u8().unwrap_or(0);
+
+    tracing::info!(comp_id, slot_id, "SOX: invoke action (no-op)");
+
+    // Actions are acknowledged but not executed (no Sedona VM)
+    SoxResponse::success(SoxCmd::Invoke, req.req_id)
 }
 
 /// write ('w') -- write a slot value on a component.
@@ -1770,7 +1897,7 @@ mod tests {
 
     #[test]
     fn handle_subscribe_via_request() {
-        let tree = ComponentTree::from_channels(&sample_channels());
+        let mut tree = ComponentTree::from_channels(&sample_channels());
         let mut subs = SubscriptionManager::new();
         let mut payload = Vec::new();
         payload.extend_from_slice(&100u16.to_be_bytes());
@@ -1780,14 +1907,14 @@ mod tests {
             req_id: 20,
             payload,
         };
-        let resp = handle_sox_request(&req, &tree, &mut subs, 1);
+        let resp = handle_sox_request(&req, &mut tree, &mut subs, 1);
         assert_eq!(resp.cmd, b'S');
         assert!(subs.is_subscribed(1, 100));
     }
 
     #[test]
     fn handle_unsubscribe_via_request() {
-        let tree = ComponentTree::from_channels(&sample_channels());
+        let mut tree = ComponentTree::from_channels(&sample_channels());
         let mut subs = SubscriptionManager::new();
         subs.subscribe(1, 100);
         let mut payload = Vec::new();
@@ -1798,14 +1925,14 @@ mod tests {
             req_id: 21,
             payload,
         };
-        let resp = handle_sox_request(&req, &tree, &mut subs, 1);
+        let resp = handle_sox_request(&req, &mut tree, &mut subs, 1);
         assert_eq!(resp.cmd, b'U');
         assert!(!subs.is_subscribed(1, 100));
     }
 
     #[test]
     fn handle_write_valid_slot() {
-        let tree = ComponentTree::from_channels(&sample_channels());
+        let mut tree = ComponentTree::from_channels(&sample_channels());
         let mut subs = SubscriptionManager::new();
         let mut payload = Vec::new();
         payload.extend_from_slice(&100u16.to_be_bytes());
@@ -1817,13 +1944,13 @@ mod tests {
             req_id: 30,
             payload,
         };
-        let resp = handle_sox_request(&req, &tree, &mut subs, 1);
+        let resp = handle_sox_request(&req, &mut tree, &mut subs, 1);
         assert_eq!(resp.cmd, b'W');
     }
 
     #[test]
     fn handle_write_bad_slot() {
-        let tree = ComponentTree::from_channels(&sample_channels());
+        let mut tree = ComponentTree::from_channels(&sample_channels());
         let mut subs = SubscriptionManager::new();
         let mut payload = Vec::new();
         payload.extend_from_slice(&100u16.to_be_bytes());
@@ -1835,13 +1962,13 @@ mod tests {
             req_id: 31,
             payload,
         };
-        let resp = handle_sox_request(&req, &tree, &mut subs, 1);
+        let resp = handle_sox_request(&req, &mut tree, &mut subs, 1);
         assert_eq!(resp.cmd, b'!');
     }
 
     #[test]
     fn handle_write_unknown_comp() {
-        let tree = ComponentTree::from_channels(&[]);
+        let mut tree = ComponentTree::from_channels(&[]);
         let mut subs = SubscriptionManager::new();
         let mut payload = Vec::new();
         payload.extend_from_slice(&999u16.to_be_bytes());
@@ -1853,20 +1980,20 @@ mod tests {
             req_id: 32,
             payload,
         };
-        let resp = handle_sox_request(&req, &tree, &mut subs, 1);
+        let resp = handle_sox_request(&req, &mut tree, &mut subs, 1);
         assert_eq!(resp.cmd, b'!');
     }
 
     #[test]
     fn handle_unsupported_command() {
-        let tree = ComponentTree::from_channels(&[]);
+        let mut tree = ComponentTree::from_channels(&[]);
         let mut subs = SubscriptionManager::new();
         let req = SoxRequest {
             cmd: SoxCmd::Add,
             req_id: 40,
             payload: Vec::new(),
         };
-        let resp = handle_sox_request(&req, &tree, &mut subs, 1);
+        let resp = handle_sox_request(&req, &mut tree, &mut subs, 1);
         assert_eq!(resp.cmd, b'!');
     }
 
