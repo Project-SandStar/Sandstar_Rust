@@ -320,50 +320,80 @@ fn channel_type_name(direction: &str) -> String {
 }
 
 /// Build the slot list for a channel-mapped component.
+///
+/// Must match EacIo::AnalogInput manifest slot order exactly.
+/// The editor reads slot values by iterating the schema's slot array — no type bytes on wire.
+///
+/// From EacIo-6f9da65b.xml type id="0" (AnalogInput):
+///   Inherited: meta (int, config)
+///   0: channelName (Buf, runtime)
+///   1: channel     (int, runtime)
+///   2: pointQuery  (Buf, config)
+///   3: pointQuerySize (int, runtime)
+///   4: pointQueryStatus (bool, runtime)
+///   5: out         (float, runtime)
+///   6: curStatus   (Buf, runtime)
+///   7: enabled     (bool, runtime)
+///   8: query       (void, action — not serialized)
 fn channel_slots(ch: &ChannelInfo) -> Vec<VirtualSlot> {
     vec![
+        // Inherited from sys::Component
+        VirtualSlot {
+            name: "meta".into(),
+            type_id: SoxValueType::Int as u8,
+            flags: SLOT_FLAG_CONFIG,
+            value: SlotValue::Int(1), // default meta value
+        },
+        // EacIo::AnalogInput slots in manifest order
+        VirtualSlot {
+            name: "channelName".into(),
+            type_id: SoxValueType::Buf as u8,
+            flags: SLOT_FLAG_RUNTIME,
+            value: SlotValue::Str(ch.label.clone()),
+        },
+        VirtualSlot {
+            name: "channel".into(),
+            type_id: SoxValueType::Int as u8,
+            flags: SLOT_FLAG_RUNTIME,
+            value: SlotValue::Int(ch.id as i32),
+        },
+        VirtualSlot {
+            name: "pointQuery".into(),
+            type_id: SoxValueType::Buf as u8,
+            flags: SLOT_FLAG_CONFIG,
+            value: SlotValue::Str(String::new()),
+        },
+        VirtualSlot {
+            name: "pointQuerySize".into(),
+            type_id: SoxValueType::Int as u8,
+            flags: SLOT_FLAG_RUNTIME,
+            value: SlotValue::Int(0),
+        },
+        VirtualSlot {
+            name: "pointQueryStatus".into(),
+            type_id: SoxValueType::Bool as u8,
+            flags: SLOT_FLAG_RUNTIME,
+            value: SlotValue::Bool(false),
+        },
         VirtualSlot {
             name: "out".into(),
             type_id: SoxValueType::Float as u8,
-            flags: SLOT_FLAG_PROPERTY,
+            flags: SLOT_FLAG_RUNTIME,
             value: SlotValue::Float(ch.cur as f32),
         },
         VirtualSlot {
-            name: "in".into(),
-            type_id: SoxValueType::Float as u8,
-            flags: SLOT_FLAG_CONFIG,
-            value: SlotValue::Float(ch.cur as f32),
-        },
-        VirtualSlot {
-            name: "status".into(),
-            type_id: SoxValueType::Int as u8,
-            flags: SLOT_FLAG_PROPERTY,
-            value: SlotValue::Int(status_to_int(&ch.status)),
+            name: "curStatus".into(),
+            type_id: SoxValueType::Buf as u8,
+            flags: SLOT_FLAG_RUNTIME,
+            value: SlotValue::Str(format!("{:?}", ch.status)),
         },
         VirtualSlot {
             name: "enabled".into(),
             type_id: SoxValueType::Bool as u8,
-            flags: SLOT_FLAG_CONFIG,
+            flags: SLOT_FLAG_RUNTIME,
             value: SlotValue::Bool(ch.enabled),
         },
-        VirtualSlot {
-            name: "label".into(),
-            type_id: SoxValueType::Float as u8, // string slot
-            flags: SLOT_FLAG_CONFIG,
-            value: SlotValue::Str(ch.label.clone()),
-        },
-        VirtualSlot {
-            name: "channelId".into(),
-            type_id: SoxValueType::Int as u8,
-            flags: SLOT_FLAG_CONFIG,
-            value: SlotValue::Int(ch.id as i32),
-        },
-        VirtualSlot {
-            name: "raw".into(),
-            type_id: SoxValueType::Float as u8,
-            flags: SLOT_FLAG_PROPERTY,
-            value: SlotValue::Float(ch.raw as f32),
-        },
+        // query (void, action) — not included, never serialized
     ]
 }
 
@@ -437,6 +467,31 @@ pub fn encode_slot_value(resp: &mut SoxResponse, value: &SlotValue) {
         SlotValue::Null => {
             // No payload for void/null.
         }
+    }
+}
+
+/// Encode a slot value directly into a raw byte vector (for COV events).
+///
+/// Sedona property values on the wire: no type prefix, just the value bytes.
+/// Buf/Str properties use u2 length + bytes (NOT null-terminated).
+fn encode_slot_value_raw(buf: &mut Vec<u8>, value: &SlotValue) {
+    match value {
+        SlotValue::Bool(v) => buf.push(if *v { 1 } else { 0 }),
+        SlotValue::Int(v) => buf.extend_from_slice(&v.to_be_bytes()),
+        SlotValue::Long(v) => buf.extend_from_slice(&v.to_be_bytes()),
+        SlotValue::Float(v) => buf.extend_from_slice(&v.to_be_bytes()),
+        SlotValue::Double(v) => buf.extend_from_slice(&v.to_be_bytes()),
+        SlotValue::Str(s) => {
+            // Buf/Str property: u2 length + raw bytes (Sedona Buf binary encoding)
+            let bytes = s.as_bytes();
+            buf.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+            buf.extend_from_slice(bytes);
+        }
+        SlotValue::Buf(v) => {
+            buf.extend_from_slice(&(v.len() as u16).to_be_bytes());
+            buf.extend_from_slice(v);
+        }
+        SlotValue::Null => {} // void — no bytes
     }
 }
 
@@ -590,6 +645,14 @@ impl SubscriptionManager {
     ///
     /// Returns `(session_id, event_bytes)` pairs for each subscriber
     /// that needs to be notified.
+    /// Build COV event payloads for changed components.
+    ///
+    /// Sedona event wire format (unsolicited push):
+    ///   byte 0:   'e' (lowercase — unsolicited event, NOT a response)
+    ///   byte 1:   0xFF (replyNum — no reply expected)
+    ///   byte 2-3: comp_id (u16 big-endian)
+    ///   byte 4:   what ('r' for runtime)
+    ///   bytes 5+: slot values in schema order (NO type bytes, NO count)
     pub fn build_events(
         &self,
         changed_comps: &[u16],
@@ -603,15 +666,24 @@ impl SubscriptionManager {
             let Some(watchers) = self.subscriptions.get(&comp_id) else {
                 continue;
             };
-            // Build the event payload: [cmd='e', 0xFF, comp_id, slot_count, slot values...]
-            let mut event_resp = SoxResponse::success(SoxCmd::Event, 0xFF);
-            event_resp.write_u16(comp_id);
-            event_resp.write_u8(comp.slots.len() as u8);
+            // Build raw event bytes: ['e', 0xFF, comp_id, 'r', slot_values...]
+            let mut payload = Vec::with_capacity(64);
+            payload.push(b'e');  // lowercase — unsolicited event
+            payload.push(0xFF);  // replyNum (unused for events)
+            payload.extend_from_slice(&comp_id.to_be_bytes());
+            payload.push(b'r');  // what = runtime
+
+            // Write slot values in schema order (NO type_id prefix, NO count)
             for slot in &comp.slots {
-                event_resp.write_u8(slot.type_id);
-                encode_slot_value(&mut event_resp, &slot.value);
+                if slot.flags & SLOT_FLAG_ACTION != 0 {
+                    continue; // skip action slots
+                }
+                if slot.flags & SLOT_FLAG_CONFIG != 0 {
+                    continue; // skip config slots — this is a runtime event
+                }
+                encode_slot_value_raw(&mut payload, &slot.value);
             }
-            let payload = event_resp.to_bytes();
+
             for &session_id in watchers {
                 events.push((session_id, payload.clone()));
             }
@@ -639,7 +711,7 @@ pub fn handle_sox_request(
         SoxCmd::ReadSchema | SoxCmd::ReadSchemaDetail => handle_read_schema(request),
         SoxCmd::ReadVersion => handle_read_version(request),
         SoxCmd::ReadComp => handle_read_comp(request, tree),
-        SoxCmd::Subscribe => handle_subscribe(request, subscriptions, session_id),
+        SoxCmd::Subscribe => handle_subscribe(request, subscriptions, session_id, tree),
         SoxCmd::Unsubscribe => handle_unsubscribe(request, subscriptions, session_id),
         SoxCmd::Write => handle_write(request, tree),
         SoxCmd::FileOpen => handle_file_open(request),
@@ -849,11 +921,19 @@ fn handle_read_comp(req: &SoxRequest, tree: &ComponentTree) -> SoxResponse {
                 resp.write_u16(child_id);
             }
         }
-        b'c' | b'r' => {
-            // Config or runtime: slot values.
-            // The client reads slots based on its schema type definition,
-            // not a count prefix. Write slot values in schema order.
+        b'c' => {
+            // Config: only slots with CONFIG flag, in schema order.
             for slot in &comp.slots {
+                if slot.flags & SLOT_FLAG_ACTION != 0 { continue; }
+                if slot.flags & SLOT_FLAG_CONFIG == 0 { continue; } // skip non-config
+                encode_slot_value(&mut resp, &slot.value);
+            }
+        }
+        b'r' => {
+            // Runtime: only slots WITHOUT CONFIG flag, in schema order.
+            for slot in &comp.slots {
+                if slot.flags & SLOT_FLAG_ACTION != 0 { continue; }
+                if slot.flags & SLOT_FLAG_CONFIG != 0 { continue; } // skip config
                 encode_slot_value(&mut resp, &slot.value);
             }
         }
@@ -869,22 +949,39 @@ fn handle_read_comp(req: &SoxRequest, tree: &ComponentTree) -> SoxResponse {
     resp
 }
 
-/// subscribe ('s') -- register for COV events on a component.
+/// subscribe ('s') — register for COV events.
 ///
-/// Request payload: u2 compId, u1 whatMask.
+/// SOX 1.1 batch format: u1 mask, u1 count, [u2 compId...]
+/// If count=0: subscribe to all components (tree-wide).
+/// Legacy format: u2 compId, u1 whatMask (detected by payload length).
 fn handle_subscribe(
     req: &SoxRequest,
     subs: &mut SubscriptionManager,
     session_id: u16,
+    tree: &ComponentTree,
 ) -> SoxResponse {
     let mut reader = SoxReader::new(&req.payload);
-    let comp_id = match reader.read_u16() {
-        Some(id) => id,
-        None => return error_msg(req.cmd, req.req_id, "missing compId"),
-    };
-    let _what_mask = reader.read_u8().unwrap_or(0xFF);
 
-    subs.subscribe(session_id, comp_id);
+    // SOX 1.1 batch format: first byte is mask, second is count
+    let mask = reader.read_u8().unwrap_or(0xFF);
+    let count = reader.read_u8().unwrap_or(0);
+
+    if count == 0 && mask == 0xFF {
+        // Subscribe to ALL components (subscribeToAllTreeEvents)
+        for comp_id in tree.comp_ids() {
+            subs.subscribe(session_id, comp_id);
+        }
+        tracing::info!(session = session_id, "SOX: subscribed to all components");
+    } else {
+        // Subscribe to specific components
+        for _ in 0..count {
+            if let Some(comp_id) = reader.read_u16() {
+                subs.subscribe(session_id, comp_id);
+            }
+        }
+        tracing::info!(session = session_id, mask, count, "SOX: batch subscribe");
+    }
+
     SoxResponse::success(SoxCmd::Subscribe, req.req_id)
 }
 
