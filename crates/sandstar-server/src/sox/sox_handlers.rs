@@ -310,6 +310,19 @@ impl Default for ComponentTree {
     }
 }
 
+/// Recursively collect a component and all its descendants.
+fn collect_subtree(tree: &ComponentTree, comp_id: u16, out: &mut Vec<u16>) {
+    if out.contains(&comp_id) {
+        return;
+    }
+    out.push(comp_id);
+    if let Some(comp) = tree.get(comp_id) {
+        for &child_id in &comp.children {
+            collect_subtree(tree, child_id, out);
+        }
+    }
+}
+
 /// Determine the Sedona type name from channel direction.
 fn channel_type_name(direction: &str) -> String {
     match direction {
@@ -385,7 +398,7 @@ fn channel_slots(ch: &ChannelInfo) -> Vec<VirtualSlot> {
             name: "curStatus".into(),
             type_id: SoxValueType::Buf as u8,
             flags: SLOT_FLAG_RUNTIME,
-            value: SlotValue::Str(format!("{:?}", ch.status)),
+            value: SlotValue::Str(ch.status.clone()),
         },
         VirtualSlot {
             name: "enabled".into(),
@@ -458,7 +471,11 @@ pub fn encode_slot_value(resp: &mut SoxResponse, value: &SlotValue) {
             resp.write_f64(*v);
         }
         SlotValue::Str(v) => {
-            resp.write_str(v);
+            // Sedona Str binary format: u2 size (including null) + chars + 0x00
+            let bytes = v.as_bytes();
+            resp.write_u16((bytes.len() + 1) as u16); // size includes null terminator
+            resp.write_bytes(bytes);
+            resp.write_u8(0x00); // null terminator
         }
         SlotValue::Buf(v) => {
             resp.write_u16(v.len() as u16);
@@ -474,7 +491,7 @@ pub fn encode_slot_value(resp: &mut SoxResponse, value: &SlotValue) {
 ///
 /// Sedona property values on the wire: no type prefix, just the value bytes.
 /// Buf/Str properties use u2 length + bytes (NOT null-terminated).
-fn encode_slot_value_raw(buf: &mut Vec<u8>, value: &SlotValue) {
+pub fn encode_slot_value_raw(buf: &mut Vec<u8>, value: &SlotValue) {
     match value {
         SlotValue::Bool(v) => buf.push(if *v { 1 } else { 0 }),
         SlotValue::Int(v) => buf.extend_from_slice(&v.to_be_bytes()),
@@ -482,10 +499,11 @@ fn encode_slot_value_raw(buf: &mut Vec<u8>, value: &SlotValue) {
         SlotValue::Float(v) => buf.extend_from_slice(&v.to_be_bytes()),
         SlotValue::Double(v) => buf.extend_from_slice(&v.to_be_bytes()),
         SlotValue::Str(s) => {
-            // Buf/Str property: u2 length + raw bytes (Sedona Buf binary encoding)
+            // Sedona Str binary format: u2 size (including null) + chars + 0x00
             let bytes = s.as_bytes();
-            buf.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+            buf.extend_from_slice(&((bytes.len() + 1) as u16).to_be_bytes());
             buf.extend_from_slice(bytes);
+            buf.push(0x00); // null terminator
         }
         SlotValue::Buf(v) => {
             buf.extend_from_slice(&(v.len() as u16).to_be_bytes());
@@ -920,6 +938,8 @@ fn handle_read_comp(req: &SoxRequest, tree: &ComponentTree) -> SoxResponse {
             for &child_id in &comp.children {
                 resp.write_u16(child_id);
             }
+            // Note: tree mode only includes structure, not property values.
+            // Property values come from COV events or readComp what='c'/'r'.
         }
         b'c' => {
             // Config: only slots with CONFIG flag, in schema order.
@@ -951,9 +971,11 @@ fn handle_read_comp(req: &SoxRequest, tree: &ComponentTree) -> SoxResponse {
 
 /// subscribe ('s') — register for COV events.
 ///
-/// SOX 1.1 batch format: u1 mask, u1 count, [u2 compId...]
-/// If count=0: subscribe to all components (tree-wide).
-/// Legacy format: u2 compId, u1 whatMask (detected by payload length).
+/// Old protocol (doSubscribe): u2 compId, u1 what (e.g. 't', 'c', 'r', 'l')
+///   Response: 'S' + replyNum + compId + what + component data
+///
+/// New protocol (batchSubscribe): u1 mask, u1 count, [u2 compId...]
+///   Response: 'S' + replyNum + remaining(u1)
 fn handle_subscribe(
     req: &SoxRequest,
     subs: &mut SubscriptionManager,
@@ -962,27 +984,93 @@ fn handle_subscribe(
 ) -> SoxResponse {
     let mut reader = SoxReader::new(&req.payload);
 
-    // SOX 1.1 batch format: first byte is mask, second is count
-    let mask = reader.read_u8().unwrap_or(0xFF);
-    let count = reader.read_u8().unwrap_or(0);
+    // Detect old vs new format by payload length:
+    // Old: 3 bytes (u2 compId + u1 what)
+    // New: 2+ bytes (u1 mask + u1 count + optional u2 compId[])
+    if req.payload.len() == 3 {
+        // Old protocol (doSubscribe): u2 compId, u1 what
+        let comp_id = reader.read_u16().unwrap_or(0);
+        let what = reader.read_u8().unwrap_or(b't');
 
-    if count == 0 && mask == 0xFF {
-        // Subscribe to ALL components (subscribeToAllTreeEvents)
-        for comp_id in tree.comp_ids() {
-            subs.subscribe(session_id, comp_id);
+        subs.subscribe(session_id, comp_id);
+        // Also subscribe descendants
+        let mut all_ids = Vec::new();
+        collect_subtree(tree, comp_id, &mut all_ids);
+        for &id in &all_ids {
+            subs.subscribe(session_id, id);
         }
-        tracing::info!(session = session_id, "SOX: subscribed to all components");
-    } else {
-        // Subscribe to specific components
-        for _ in 0..count {
-            if let Some(comp_id) = reader.read_u16() {
-                subs.subscribe(session_id, comp_id);
+
+        tracing::info!(session = session_id, comp_id, what_byte = what, "SOX: doSubscribe (old protocol)");
+
+        // Response includes component data (same as readComp)
+        let mut resp = SoxResponse::success(SoxCmd::Subscribe, req.req_id);
+        if let Some(comp) = tree.get(comp_id) {
+            resp.write_u16(comp_id);
+            resp.write_u8(what);
+            match what {
+                b't' => {
+                    resp.write_u8(comp.kit_id);
+                    resp.write_u8(comp.type_id);
+                    resp.write_str(&comp.name);
+                    resp.write_u16(comp.parent_id);
+                    resp.write_u8(0xFF);
+                    resp.write_u8(comp.children.len() as u8);
+                    for &child_id in &comp.children {
+                        resp.write_u16(child_id);
+                    }
+                }
+                b'c' => {
+                    for slot in &comp.slots {
+                        if slot.flags & SLOT_FLAG_ACTION != 0 { continue; }
+                        if slot.flags & SLOT_FLAG_CONFIG == 0 { continue; }
+                        encode_slot_value(&mut resp, &slot.value);
+                    }
+                }
+                b'r' => {
+                    for slot in &comp.slots {
+                        if slot.flags & SLOT_FLAG_ACTION != 0 { continue; }
+                        if slot.flags & SLOT_FLAG_CONFIG != 0 { continue; }
+                        encode_slot_value(&mut resp, &slot.value);
+                    }
+                }
+                b'l' => {
+                    resp.write_u8(0);
+                }
+                _ => {}
             }
         }
-        tracing::info!(session = session_id, mask, count, "SOX: batch subscribe");
-    }
+        resp
+    } else {
+        // New protocol (batchSubscribe): u1 mask, u1 count, [u2 compId...]
+        let mask = reader.read_u8().unwrap_or(0xFF);
+        let count = reader.read_u8().unwrap_or(0);
 
-    SoxResponse::success(SoxCmd::Subscribe, req.req_id)
+        let mut comp_ids: Vec<u16> = Vec::new();
+        if count == 0 {
+            comp_ids = tree.comp_ids();
+        } else {
+            for _ in 0..count {
+                if let Some(comp_id) = reader.read_u16() {
+                    comp_ids.push(comp_id);
+                }
+            }
+        }
+
+        let mut all_ids: Vec<u16> = Vec::new();
+        for &id in &comp_ids {
+            collect_subtree(tree, id, &mut all_ids);
+        }
+        for &id in &all_ids {
+            subs.subscribe(session_id, id);
+        }
+        tracing::info!(session = session_id, mask, requested = comp_ids.len(), total = all_ids.len(), "SOX: batchSubscribe");
+
+        let mut resp = SoxResponse::success(SoxCmd::Subscribe, req.req_id);
+        // remaining: number of pending events the client should wait for.
+        // Set to min(total, 255) so the client blocks and processes initial COV events.
+        resp.write_u8(all_ids.len().min(255) as u8);
+        resp
+    }
 }
 
 /// unsubscribe ('u') -- remove COV registration for a component.

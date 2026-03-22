@@ -671,9 +671,43 @@ impl DaspTransport {
         Ok(())
     }
 
-    /// Send a COV event to a session (same as send_to_session but semantically distinct).
+    /// Send a COV event to a session as an unsolicited datagram (seq=0xFFFF).
+    ///
+    /// Events use seq_num=0xFFFF to signal they are unsolicited pushes,
+    /// not responses to client requests. This matches the Sedona DASP convention.
     pub fn send_event(&mut self, session_id: u16, payload: &[u8]) -> std::io::Result<()> {
-        self.send_to_session(session_id, payload)
+        let (remote_addr, remote_id, recv_seq) = {
+            let session = self
+                .sessions
+                .get(&session_id)
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "session not found"))?;
+            (session.remote_addr, session.remote_id, session.recv_seq)
+        };
+
+        let hdr = DaspHeader {
+            session_id: remote_id,
+            seq_num: 0xFFFF, // unsolicited — no ACK expected
+            msg_type: DaspMsgType::Datagram,
+            version: None,
+            remote_id: None,
+            digest_algorithm: None,
+            nonce: None,
+            username: None,
+            digest: None,
+            ideal_max: None,
+            abs_max: None,
+            ack: Some(recv_seq),
+            ack_more: None,
+            receive_max: None,
+            receive_timeout_secs: None,
+            error_code: None,
+            platform_id: None,
+            payload_offset: 0,
+        };
+
+        encode_message(&hdr, payload, &mut self.encode_buf);
+        self.socket.send_to(&self.encode_buf, remote_addr)?;
+        Ok(())
     }
 
     /// Remove sessions that have not had any activity within the timeout.

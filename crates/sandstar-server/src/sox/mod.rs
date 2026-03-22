@@ -68,6 +68,10 @@ async fn run_sox_server(
 
     info!(port, "SOX/DASP server listening");
 
+    // Wait for the engine to complete its first poll cycle so virtual channels
+    // have their computed values (setpoints, stages, etc.) before we build the tree.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
     // Build initial component tree from current channel data.
     let mut tree = match engine_handle.list_channels().await {
         Ok(channels) => {
@@ -100,8 +104,10 @@ async fn run_sox_server(
                     packets_this_round += 1;
                     info!(session = session_id, payload_len = payload.len(), first_byte = payload.first().copied().unwrap_or(0), "SOX: received payload");
                     if let Some(request) = SoxRequest::parse(&payload) {
-                        // Log compId for readComp requests
-                        let extra = if request.cmd as u8 == b'c' && request.payload.len() >= 2 {
+                        // Log compId+what for readComp requests
+                        let extra = if request.cmd as u8 == b'c' && request.payload.len() >= 3 {
+                            format!(" compId={} what={}", u16::from_be_bytes([request.payload[0], request.payload[1]]), request.payload[2] as char)
+                        } else if request.cmd as u8 == b'c' && request.payload.len() >= 2 {
                             format!(" compId={}", u16::from_be_bytes([request.payload[0], request.payload[1]]))
                         } else { String::new() };
                         info!(session = session_id, cmd_byte = request.cmd as u8, req_id = request.req_id, extra = %extra, "SOX: parsed command");
@@ -150,6 +156,19 @@ async fn run_sox_server(
                                 "SOX: failed to send response: {e}"
                             );
                         }
+
+                        // After batchSubscribe: push initial state events for all subscribed components
+                        if request.cmd as u8 == b's' && request.payload.len() > 3 {
+                            // batchSubscribe detected (>3 bytes = not doSubscribe)
+                            let all_comp_ids = tree.comp_ids();
+                            let initial_events = subscriptions.build_events(&all_comp_ids, &tree);
+                            if !initial_events.is_empty() {
+                                info!(session = session_id, count = initial_events.len(), "SOX: pushing initial state after batchSubscribe");
+                                for (sid, evt) in initial_events {
+                                    let _ = transport.send_to_session(sid, &evt);
+                                }
+                            }
+                        }
                     }
                 }
                 None => break,
@@ -174,6 +193,13 @@ async fn run_sox_server(
                         // Push COV events to subscribed sessions.
                         if !changed.is_empty() {
                             let events = subscriptions.build_events(&changed, &tree);
+                            if !events.is_empty() {
+                                // Log hex dump of first event for debugging
+                                let hex = events.first().map(|(_, b)| {
+                                    b.iter().take(50).map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" ")
+                                }).unwrap_or_default();
+                                info!(changed = changed.len(), events = events.len(), hex = %hex, "SOX: pushing COV events");
+                            }
                             for (session_id, event_bytes) in events {
                                 if let Err(e) = transport.send_to_session(session_id, &event_bytes) {
                                     debug!(session = session_id, "SOX: COV send failed: {e}");
