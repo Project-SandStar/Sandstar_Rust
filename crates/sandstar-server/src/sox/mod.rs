@@ -91,7 +91,8 @@ async fn run_sox_server(
     let mut tree_refresh_interval = tokio::time::interval(Duration::from_secs(1));
     tree_refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    let mut initial_state_pushed = false;
+    let mut force_full_cov = false;
+    let mut pending_cov: std::collections::VecDeque<u16> = std::collections::VecDeque::new();
 
     loop {
         // 1. Poll for incoming DASP packets (non-blocking).
@@ -110,7 +111,7 @@ async fn run_sox_server(
                         }
                         // Handle write commands: forward to engine via EngineHandle.
                         if request.cmd == sox_protocol::SoxCmd::Write {
-                            if let Some(write_req) = parse_write_request(&request) {
+                            if let Some(write_req) = parse_write_request(&request, &tree) {
                                 info!(comp_id = write_req.comp_id, slot_id = write_req.slot_id, "SOX: write parsed");
                                 if let Some((channel_id, value)) =
                                     write_req.to_channel_write(&tree)
@@ -151,12 +152,14 @@ async fn run_sox_server(
                             );
                         }
 
-                        // After Write: push runtime COV event so editor sees the new value
+                        // After Write to a channel component: push COV event.
                         if request.cmd as u8 == b'w' && request.payload.len() >= 2 {
                             let written_comp = u16::from_be_bytes([request.payload[0], request.payload[1]]);
-                            let events = subscriptions.build_events(&[written_comp], &tree);
-                            for (sid, evt) in events {
-                                let _ = transport.send_to_session(sid, &evt);
+                            if tree.is_channel_comp(written_comp) {
+                                let events = subscriptions.build_events(&[written_comp], &tree);
+                                for (sid, evt) in events {
+                                    let _ = transport.send_to_session(sid, &evt);
+                                }
                             }
                         }
 
@@ -210,19 +213,9 @@ async fn run_sox_server(
                             }
                         }
 
-                        // Reset initial state flag on new session's first subscribe
-                        if request.cmd as u8 == b's' && request.payload.len() > 3
-                            && !initial_state_pushed
-                        {
-                            initial_state_pushed = true; // only push once per session
-                            let all_comp_ids = tree.comp_ids();
-                            let initial_events = subscriptions.build_events(&all_comp_ids, &tree);
-                            if !initial_events.is_empty() {
-                                info!(session = session_id, count = initial_events.len(), "SOX: pushing initial state (once)");
-                                for (sid, evt) in initial_events {
-                                    let _ = transport.send_to_session(sid, &evt);
-                                }
-                            }
+                        // After FIRST subscribe: queue all channel components for COV push.
+                        if request.cmd as u8 == b's' && !force_full_cov && pending_cov.is_empty() {
+                            force_full_cov = true;
                         }
                     }
                 }
@@ -245,16 +238,33 @@ async fn run_sox_server(
                 match engine_handle.list_channels().await {
                     Ok(channels) => {
                         let changed = tree.update_from_channels(&channels);
-                        // Push COV events to subscribed sessions.
-                        if !changed.is_empty() {
-                            let events = subscriptions.build_events(&changed, &tree);
-                            if !events.is_empty() {
-                                debug!(changed = changed.len(), events = events.len(), "SOX: pushing COV events");
+
+                        // On first tick after subscribe, queue ALL channel comps for gradual push
+                        if force_full_cov {
+                            force_full_cov = false;
+                            pending_cov.clear();
+                            for id in sox_handlers::CHANNEL_COMP_BASE..tree.channel_comp_end {
+                                pending_cov.push_back(id);
                             }
+                            info!(count = pending_cov.len(), "SOX: queued full COV after subscribe");
+                        }
+
+                        // Add newly changed comps to pending queue
+                        for id in &changed {
+                            if !pending_cov.contains(id) {
+                                pending_cov.push_back(*id);
+                            }
+                        }
+
+                        // Push COV events using unsolicited datagrams (seq=0xFFFF)
+                        // to avoid consuming seq_nums that responses need.
+                        let mut sent = 0;
+                        while sent < 20 {
+                            let Some(comp_id) = pending_cov.pop_front() else { break };
+                            let events = subscriptions.build_events(&[comp_id], &tree);
                             for (session_id, event_bytes) in events {
-                                if let Err(e) = transport.send_to_session(session_id, &event_bytes) {
-                                    debug!(session = session_id, "SOX: COV send failed: {e}");
-                                }
+                                let _ = transport.send_event(session_id, &event_bytes);
+                                sent += 1;
                             }
                         }
                     }

@@ -105,6 +105,10 @@ pub const CHANNEL_COMP_BASE: u16 = 100;
 pub struct ComponentTree {
     components: HashMap<u16, VirtualComponent>,
     next_id: u16,
+    /// Upper bound (exclusive) of channel-mapped component IDs.
+    /// Components in [CHANNEL_COMP_BASE, channel_comp_end) are channels with valid schemas.
+    /// Components >= channel_comp_end are dynamically added (no manifest schema).
+    pub channel_comp_end: u16,
 }
 
 impl ComponentTree {
@@ -113,6 +117,7 @@ impl ComponentTree {
         Self {
             components: HashMap::new(),
             next_id: 0,
+            channel_comp_end: CHANNEL_COMP_BASE,
         }
     }
 
@@ -307,7 +312,15 @@ impl ComponentTree {
             });
         }
 
+        // Record the upper bound of channel comp_ids
+        tree.channel_comp_end = CHANNEL_COMP_BASE + channels.len() as u16;
+
         tree
+    }
+
+    /// Check if a comp_id is a channel-mapped component with a valid manifest schema.
+    pub fn is_channel_comp(&self, comp_id: u16) -> bool {
+        comp_id >= CHANNEL_COMP_BASE && comp_id < self.channel_comp_end
     }
 
     /// Update slot values for channel-mapped components from fresh channel data.
@@ -702,6 +715,11 @@ impl SubscriptionManager {
     ) -> Vec<(u16, Vec<u8>)> {
         let mut events = Vec::new();
         for &comp_id in changed_comps {
+            // Only push COV events for channel-mapped components with valid manifest schemas.
+            // Added components (comp_id >= channel_comp_end) have auto-extended slots.
+            if !tree.is_channel_comp(comp_id) {
+                continue;
+            }
             let Some(comp) = tree.get(comp_id) else {
                 continue;
             };
@@ -750,16 +768,17 @@ pub fn handle_sox_request(
     session_id: u16,
 ) -> SoxResponse {
     match request.cmd {
-        SoxCmd::ReadSchema | SoxCmd::ReadSchemaDetail => handle_read_schema(request),
+        SoxCmd::ReadSchema => handle_read_schema(request),
         SoxCmd::ReadVersion => handle_read_version(request),
         SoxCmd::ReadComp => handle_read_comp(request, tree),
+        SoxCmd::ReadProp => handle_read_prop(request, tree),
         SoxCmd::Subscribe => handle_subscribe(request, subscriptions, session_id, tree),
         SoxCmd::Unsubscribe => handle_unsubscribe(request, subscriptions, session_id),
         SoxCmd::Write => handle_write(request, tree),
         SoxCmd::Add => handle_add(request, tree),
         SoxCmd::Delete => handle_delete(request, tree),
         SoxCmd::Rename => handle_rename(request, tree),
-        SoxCmd::Invoke => handle_invoke(request),
+        SoxCmd::Invoke => handle_invoke(request, tree),
         SoxCmd::FileOpen => handle_file_open(request),
         SoxCmd::FileRead => handle_file_read(request),
         SoxCmd::FileClose => handle_file_close(request),
@@ -997,6 +1016,43 @@ fn handle_read_comp(req: &SoxRequest, tree: &ComponentTree) -> SoxResponse {
     resp
 }
 
+/// readProp ('r') — read a single property value.
+///
+/// Request: u2 compId, u1 slotId
+/// Response: 'R' + u2 compId + u1 slotId + u1 typeId + encoded value
+fn handle_read_prop(req: &SoxRequest, tree: &ComponentTree) -> SoxResponse {
+    let mut reader = SoxReader::new(&req.payload);
+    let comp_id = match reader.read_u16() {
+        Some(id) => id,
+        None => return error_msg(req.cmd, req.req_id, "missing compId"),
+    };
+    let slot_id = match reader.read_u8() {
+        Some(id) => id,
+        None => return error_msg(req.cmd, req.req_id, "missing slotId"),
+    };
+
+    let Some(comp) = tree.get(comp_id) else {
+        return error_msg(req.cmd, req.req_id, "unknown comp");
+    };
+
+    let Some(slot) = comp.slots.get(slot_id as usize) else {
+        // For added components, return a default float 0.0
+        let mut resp = SoxResponse::success(SoxCmd::ReadProp, req.req_id);
+        resp.write_u16(comp_id);
+        resp.write_u8(slot_id);
+        resp.write_u8(SoxValueType::Float as u8);
+        resp.write_f32(0.0);
+        return resp;
+    };
+
+    let mut resp = SoxResponse::success(SoxCmd::ReadProp, req.req_id);
+    resp.write_u16(comp_id);
+    resp.write_u8(slot_id);
+    resp.write_u8(slot.type_id);
+    encode_slot_value(&mut resp, &slot.value);
+    resp
+}
+
 /// subscribe ('s') — register for COV events.
 ///
 /// Old protocol (doSubscribe): u2 compId, u1 what (e.g. 't', 'c', 'r', 'l')
@@ -1207,20 +1263,42 @@ fn handle_rename(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
 ///
 /// Request: u2 compId, u1 slotId, [argValue]
 /// Response: 'K'
-fn handle_invoke(req: &SoxRequest) -> SoxResponse {
+///
+/// For "set" actions (like ConstFloat.set), parse the float argument
+/// and update the component's "out" slot value in the tree.
+fn handle_invoke(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
     let mut reader = SoxReader::new(&req.payload);
     let comp_id = reader.read_u16().unwrap_or(0);
     let slot_id = reader.read_u8().unwrap_or(0);
 
-    tracing::info!(comp_id, slot_id, "SOX: invoke action (no-op)");
+    // Try to parse a float argument (common for "set" actions)
+    let arg_value = reader.read_f32();
 
-    // Actions are acknowledged but not executed (no Sedona VM)
+    if let Some(val) = arg_value {
+        tracing::info!(comp_id, slot_id, value = val, "SOX: invoke set action");
+        // Update the component's slots — find a float slot named "out" or use slot 1
+        if let Some(comp) = tree.get_mut(comp_id) {
+            // Look for "out" slot or the first float slot after actions
+            for slot in comp.slots.iter_mut() {
+                if slot.name == "out" || (matches!(slot.value, SlotValue::Float(_))) {
+                    slot.value = SlotValue::Float(val);
+                    tracing::info!(comp_id, slot = %slot.name, value = val, "SOX: set action applied");
+                    break;
+                }
+            }
+        }
+    } else {
+        tracing::info!(comp_id, slot_id, "SOX: invoke action (no arg)");
+    }
+
     SoxResponse::success(SoxCmd::Invoke, req.req_id)
 }
 
 /// write ('w') -- write a slot value on a component.
 ///
-/// Request payload: u2 compId, u1 slotId, u1 typeId, value.
+/// Request payload: u2 compId, u1 slotId, value (NO typeId prefix).
+/// The Java editor's `val.encodeBinary(req)` writes the value directly
+/// without a type discriminator. We determine the type from the existing slot.
 fn handle_write(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
     let mut reader = SoxReader::new(&req.payload);
     let comp_id = match reader.read_u16() {
@@ -1231,10 +1309,14 @@ fn handle_write(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
         Some(id) => id,
         None => return error_msg(req.cmd, req.req_id, "missing slotId"),
     };
-    let type_id = match reader.read_u8() {
-        Some(id) => id,
-        None => return error_msg(req.cmd, req.req_id, "missing typeId"),
-    };
+
+    // Determine the slot type from the existing component schema.
+    // If the slot doesn't exist yet, try to decode as float (most common).
+    let type_id = tree.get(comp_id)
+        .and_then(|c| c.slots.get(slot_id as usize))
+        .map(|s| s.type_id)
+        .unwrap_or(SoxValueType::Float as u8);
+
     let value = match decode_slot_value(&mut reader, type_id) {
         Some(v) => v,
         None => return error_msg(req.cmd, req.req_id, "bad value"),
@@ -1263,23 +1345,25 @@ fn handle_write(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
         slot.value = value;
     }
 
-    let mut resp = SoxResponse::success(SoxCmd::Write, req.req_id);
-    resp.write_u16(comp_id);
-    resp.write_u8(slot_id);
-    resp
+    // Response: just 'W' + replyNum (no extra data — Java client only reads these 2 bytes)
+    SoxResponse::success(SoxCmd::Write, req.req_id)
 }
 
 /// Extract write request details from a SOX write command.
 ///
 /// Returns a `WriteRequest` if the request is a valid write.
-pub fn parse_write_request(req: &SoxRequest) -> Option<WriteRequest> {
+/// The tree is needed to determine the slot's type (no typeId on the wire).
+pub fn parse_write_request(req: &SoxRequest, tree: &ComponentTree) -> Option<WriteRequest> {
     if req.cmd != SoxCmd::Write {
         return None;
     }
     let mut reader = SoxReader::new(&req.payload);
     let comp_id = reader.read_u16()?;
     let slot_id = reader.read_u8()?;
-    let type_id = reader.read_u8()?;
+    let type_id = tree.get(comp_id)
+        .and_then(|c| c.slots.get(slot_id as usize))
+        .map(|s| s.type_id)
+        .unwrap_or(SoxValueType::Float as u8);
     let value = decode_slot_value(&mut reader, type_id)?;
     Some(WriteRequest {
         comp_id,
@@ -1948,7 +2032,6 @@ mod tests {
         let mut payload = Vec::new();
         payload.extend_from_slice(&100u16.to_be_bytes());
         payload.push(6); // slot_id (out)
-        payload.push(SoxValueType::Float as u8);
         payload.extend_from_slice(&75.0f32.to_be_bytes());
         let req = SoxRequest {
             cmd: SoxCmd::Write,
@@ -1960,21 +2043,24 @@ mod tests {
     }
 
     #[test]
-    fn handle_write_bad_slot() {
+    fn handle_write_auto_extends_slots() {
         let mut tree = ComponentTree::from_channels(&sample_channels());
         let mut subs = SubscriptionManager::new();
         let mut payload = Vec::new();
         payload.extend_from_slice(&100u16.to_be_bytes());
-        payload.push(99); // invalid slot
-        payload.push(SoxValueType::Float as u8);
-        payload.extend_from_slice(&0.0f32.to_be_bytes());
+        payload.push(99); // slot beyond current len → auto-extended
+        payload.extend_from_slice(&42.0f32.to_be_bytes());
         let req = SoxRequest {
             cmd: SoxCmd::Write,
             req_id: 31,
             payload,
         };
         let resp = handle_sox_request(&req, &mut tree, &mut subs, 1);
-        assert_eq!(resp.cmd, b'!');
+        assert_eq!(resp.cmd, b'W'); // success — slot auto-created
+        // Verify the slot was created with the written value
+        let comp = tree.get(100).unwrap();
+        assert!(comp.slots.len() > 99);
+        assert_eq!(comp.slots[99].value, SlotValue::Float(42.0));
     }
 
     #[test]
@@ -1984,7 +2070,6 @@ mod tests {
         let mut payload = Vec::new();
         payload.extend_from_slice(&999u16.to_be_bytes());
         payload.push(0);
-        payload.push(SoxValueType::Float as u8);
         payload.extend_from_slice(&0.0f32.to_be_bytes());
         let req = SoxRequest {
             cmd: SoxCmd::Write,
@@ -2012,30 +2097,31 @@ mod tests {
 
     #[test]
     fn parse_write_request_valid() {
+        let tree = ComponentTree::from_channels(&sample_channels());
         let mut payload = Vec::new();
         payload.extend_from_slice(&100u16.to_be_bytes());
-        payload.push(1); // slot_id
-        payload.push(SoxValueType::Float as u8);
+        payload.push(6); // slot_id=6 ("out", Float type)
         payload.extend_from_slice(&72.5f32.to_be_bytes());
         let req = SoxRequest {
             cmd: SoxCmd::Write,
             req_id: 0,
             payload,
         };
-        let wr = parse_write_request(&req).unwrap();
+        let wr = parse_write_request(&req, &tree).unwrap();
         assert_eq!(wr.comp_id, 100);
-        assert_eq!(wr.slot_id, 1);
+        assert_eq!(wr.slot_id, 6);
         assert_eq!(wr.value, SlotValue::Float(72.5));
     }
 
     #[test]
     fn parse_write_request_non_write_cmd() {
+        let tree = ComponentTree::from_channels(&[]);
         let req = SoxRequest {
             cmd: SoxCmd::ReadComp,
             req_id: 0,
             payload: Vec::new(),
         };
-        assert!(parse_write_request(&req).is_none());
+        assert!(parse_write_request(&req, &tree).is_none());
     }
 
     #[test]

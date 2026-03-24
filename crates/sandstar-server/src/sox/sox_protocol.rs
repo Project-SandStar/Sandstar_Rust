@@ -29,12 +29,10 @@ pub enum SoxCmd {
     ReadSchema = b'v',
     /// Read version: platform ID + kit versions ('y' request, 'Y' response).
     ReadVersion = b'y',
-    /// Read detailed schema (kit metadata).
-    ReadSchemaDetail = b'n',
     /// Read component tree + slot values.
     ReadComp = b'c',
-    /// Read single property.
-    ReadProp = b'p',
+    /// Read single property ('r' request, 'R' response).
+    ReadProp = b'r',
     /// Read link.
     ReadLink = b'l',
 
@@ -53,8 +51,8 @@ pub enum SoxCmd {
     Add = b'a',
     /// Delete component.
     Delete = b'd',
-    /// Rename component.
-    Rename = b'r',
+    /// Rename component ('n' request, 'N' response).
+    Rename = b'n',
     /// Reorder children.
     Reorder = b'o',
 
@@ -81,9 +79,8 @@ impl SoxCmd {
         match b {
             b'v' => Some(Self::ReadSchema),
             b'y' => Some(Self::ReadVersion),
-            b'n' => Some(Self::ReadSchemaDetail),
             b'c' => Some(Self::ReadComp),
-            b'p' => Some(Self::ReadProp),
+            b'r' => Some(Self::ReadProp),
             b'l' => Some(Self::ReadLink),
             b's' => Some(Self::Subscribe),
             b'u' => Some(Self::Unsubscribe),
@@ -91,7 +88,7 @@ impl SoxCmd {
             b'k' => Some(Self::Invoke),
             b'a' => Some(Self::Add),
             b'd' => Some(Self::Delete),
-            b'r' => Some(Self::Rename),
+            b'n' => Some(Self::Rename),
             b'o' => Some(Self::Reorder),
             b'f' => Some(Self::FileOpen),
             b'g' => Some(Self::FileRead),
@@ -438,9 +435,9 @@ mod tests {
         let cases: &[(u8, SoxCmd)] = &[
             (b'v', SoxCmd::ReadSchema),
             (b'y', SoxCmd::ReadVersion),
-            (b'n', SoxCmd::ReadSchemaDetail),
+            (b'n', SoxCmd::Rename),
             (b'c', SoxCmd::ReadComp),
-            (b'p', SoxCmd::ReadProp),
+            (b'r', SoxCmd::ReadProp),
             (b'l', SoxCmd::ReadLink),
             (b's', SoxCmd::Subscribe),
             (b'u', SoxCmd::Unsubscribe),
@@ -448,7 +445,7 @@ mod tests {
             (b'k', SoxCmd::Invoke),
             (b'a', SoxCmd::Add),
             (b'd', SoxCmd::Delete),
-            (b'r', SoxCmd::Rename),
+            (b'n', SoxCmd::Rename),
             (b'o', SoxCmd::Reorder),
             (b'f', SoxCmd::FileOpen),
             (b'g', SoxCmd::FileRead),
@@ -490,7 +487,7 @@ mod tests {
     fn cmd_repr_values_match_sedona_spec() {
         assert_eq!(SoxCmd::ReadSchema as u8, 0x76);
         assert_eq!(SoxCmd::ReadVersion as u8, 0x79);
-        assert_eq!(SoxCmd::ReadSchemaDetail as u8, 0x6E);
+        assert_eq!(SoxCmd::Rename as u8, 0x6E);
         assert_eq!(SoxCmd::ReadComp as u8, 0x63);
         assert_eq!(SoxCmd::Subscribe as u8, 0x73);
         assert_eq!(SoxCmd::Unsubscribe as u8, 0x75);
@@ -498,7 +495,8 @@ mod tests {
         assert_eq!(SoxCmd::Invoke as u8, 0x6B);
         assert_eq!(SoxCmd::Add as u8, 0x61);
         assert_eq!(SoxCmd::Delete as u8, 0x64);
-        assert_eq!(SoxCmd::Rename as u8, 0x72);
+        assert_eq!(SoxCmd::Rename as u8, 0x6E);
+        assert_eq!(SoxCmd::ReadProp as u8, 0x72);
         assert_eq!(SoxCmd::Reorder as u8, 0x6F);
         assert_eq!(SoxCmd::FileOpen as u8, 0x66);
         assert_eq!(SoxCmd::FileRead as u8, 0x67);
