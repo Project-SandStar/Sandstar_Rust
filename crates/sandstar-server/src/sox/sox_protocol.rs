@@ -45,8 +45,8 @@ pub enum SoxCmd {
     // -- Mutations --
     /// Write slot value.
     Write = b'w',
-    /// Invoke action.
-    Invoke = b'k',
+    /// Invoke action ('i' from CC editor, 'k' from standard Sedona).
+    Invoke = b'i',
     /// Add component.
     Add = b'a',
     /// Delete component.
@@ -85,7 +85,7 @@ impl SoxCmd {
             b's' => Some(Self::Subscribe),
             b'u' => Some(Self::Unsubscribe),
             b'w' => Some(Self::Write),
-            b'k' => Some(Self::Invoke),
+            b'k' | b'i' => Some(Self::Invoke), // 'i' used by CC editor, 'k' by standard Sedona
             b'a' => Some(Self::Add),
             b'd' => Some(Self::Delete),
             b'n' => Some(Self::Rename),

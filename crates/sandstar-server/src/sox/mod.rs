@@ -213,8 +213,8 @@ async fn run_sox_server(
                             }
                         }
 
-                        // After FIRST subscribe: queue all channel components for COV push.
-                        if request.cmd as u8 == b's' && !force_full_cov && pending_cov.is_empty() {
+                        // After subscribe: queue all channel components for COV push.
+                        if request.cmd as u8 == b's' {
                             force_full_cov = true;
                         }
                     }
@@ -256,14 +256,16 @@ async fn run_sox_server(
                             }
                         }
 
-                        // Push COV events using unsolicited datagrams (seq=0xFFFF)
-                        // to avoid consuming seq_nums that responses need.
+                        // Push COV events with proper seq_nums (required for editor to process).
+                        // Limited to 1 per tick to stay within DASP receive window (31 msgs).
+                        // Client ACKs via keepalives (~15s), so max ~2/s is safe. 1/s is conservative.
+                        // 150 channels populate in ~2.5 minutes.
                         let mut sent = 0;
-                        while sent < 20 {
+                        while sent < 1 {
                             let Some(comp_id) = pending_cov.pop_front() else { break };
                             let events = subscriptions.build_events(&[comp_id], &tree);
                             for (session_id, event_bytes) in events {
-                                let _ = transport.send_event(session_id, &event_bytes);
+                                let _ = transport.send_to_session(session_id, &event_bytes);
                                 sent += 1;
                             }
                         }
