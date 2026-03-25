@@ -1272,7 +1272,43 @@ fn default_slots_for_type(kit_id: u8, type_id: u8) -> Vec<VirtualSlot> {
             VirtualSlot { name: "in2".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Float(0.0) },
             VirtualSlot { name: "div0".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Bool(false) },
         ],
-        // Default: minimal meta slot for any other type
+        // control::ConstBool (kit 2, type 13)
+        // Manifest: meta, out(Bool,config), setTrue(Void,action), setFalse(Void,action), setNull(Void,action)
+        (2, 13) => vec![
+            VirtualSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(1) },
+            VirtualSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Bool(false) },
+            VirtualSlot { name: "setTrue".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, value: SlotValue::Null },
+            VirtualSlot { name: "setFalse".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, value: SlotValue::Null },
+            VirtualSlot { name: "setNull".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, value: SlotValue::Null },
+        ],
+        // control::WriteBool (kit 2, type 56)
+        // Manifest: meta, in(Bool,config), out(Bool,runtime), setTrue/setFalse/setNull(actions)
+        (2, 56) => vec![
+            VirtualSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(1) },
+            VirtualSlot { name: "in".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Bool(false) },
+            VirtualSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Bool(false) },
+            VirtualSlot { name: "setTrue".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, value: SlotValue::Null },
+            VirtualSlot { name: "setFalse".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, value: SlotValue::Null },
+            VirtualSlot { name: "setNull".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, value: SlotValue::Null },
+        ],
+        // control::WriteFloat (kit 2, type 57)
+        // Manifest: meta, in(Float,config), out(Float,runtime), set(Float,action), setNull(Void,action)
+        (2, 57) => vec![
+            VirtualSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(1) },
+            VirtualSlot { name: "in".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(0.0) },
+            VirtualSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Float(0.0) },
+            VirtualSlot { name: "set".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_ACTION, value: SlotValue::Float(0.0) },
+            VirtualSlot { name: "setNull".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, value: SlotValue::Null },
+        ],
+        // control::WriteInt (kit 2, type 58)
+        // Manifest: meta, in(Int,config), out(Int,runtime), set(Int,action)
+        (2, 58) => vec![
+            VirtualSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(1) },
+            VirtualSlot { name: "in".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(0) },
+            VirtualSlot { name: "out".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Int(0) },
+            VirtualSlot { name: "set".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_ACTION, value: SlotValue::Int(0) },
+        ],
+        // Default: meta slot + auto-extend on write for unknown types
         _ => vec![
             VirtualSlot {
                 name: "meta".into(),
@@ -1380,32 +1416,53 @@ fn handle_invoke(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
     let comp_id = reader.read_u16().unwrap_or(0);
     let slot_id = reader.read_u8().unwrap_or(0);
 
-    // Determine the "out" slot type to know how to parse the argument
-    let out_type = tree.get(comp_id)
-        .and_then(|c| c.slots.iter().find(|s| s.name == "out"))
-        .map(|s| s.type_id)
-        .unwrap_or(SoxValueType::Float as u8);
-
-    // Parse argument based on the out slot type
-    let arg_value: Option<SlotValue> = if out_type == SoxValueType::Int as u8 {
-        reader.read_i32().map(SlotValue::Int)
-    } else {
-        reader.read_f32().map(SlotValue::Float)
+    // Look up the action slot name and the "out" (or "in") slot type
+    let (action_name, target_slot, target_type) = {
+        let comp = tree.get(comp_id);
+        let action = comp.and_then(|c| c.slots.get(slot_id as usize)).map(|s| s.name.clone());
+        // Find the writable output: "out" for Const*, "in" for Write*
+        let target = comp.and_then(|c| {
+            c.slots.iter().find(|s| s.name == "out" && s.flags & SLOT_FLAG_ACTION == 0)
+                .or_else(|| c.slots.iter().find(|s| s.name == "in" && s.flags & SLOT_FLAG_ACTION == 0))
+        });
+        let tname = target.map(|s| s.name.clone()).unwrap_or_default();
+        let ttype = target.map(|s| s.type_id).unwrap_or(SoxValueType::Float as u8);
+        (action.unwrap_or_default(), tname, ttype)
     };
 
-    if let Some(val) = arg_value {
-        tracing::info!(comp_id, slot_id, ?val, "SOX: invoke set action");
+    tracing::info!(comp_id, slot_id, action = %action_name, target = %target_slot, "SOX: invoke");
+
+    // Handle action based on name
+    let new_value = match action_name.as_str() {
+        "set" => {
+            // Parse argument based on target type
+            if target_type == SoxValueType::Int as u8 {
+                reader.read_i32().map(SlotValue::Int)
+            } else if target_type == SoxValueType::Bool as u8 {
+                reader.read_u8().map(|v| SlotValue::Bool(v != 0))
+            } else {
+                reader.read_f32().map(SlotValue::Float)
+            }
+        }
+        "setTrue" => Some(SlotValue::Bool(true)),
+        "setFalse" => Some(SlotValue::Bool(false)),
+        "setNull" => Some(SlotValue::Null),
+        _ => {
+            // Unknown action — try parsing as float
+            reader.read_f32().map(SlotValue::Float)
+        }
+    };
+
+    if let Some(val) = new_value {
         if let Some(comp) = tree.get_mut(comp_id) {
             for slot in comp.slots.iter_mut() {
-                if slot.name == "out" {
+                if slot.name == target_slot {
                     slot.value = val.clone();
-                    tracing::info!(comp_id, slot = %slot.name, ?val, "SOX: set action applied");
+                    tracing::info!(comp_id, slot = %slot.name, ?val, "SOX: action applied");
                     break;
                 }
             }
         }
-    } else {
-        tracing::info!(comp_id, slot_id, "SOX: invoke action (no arg)");
     }
 
     SoxResponse::success(SoxCmd::Invoke, req.req_id)
