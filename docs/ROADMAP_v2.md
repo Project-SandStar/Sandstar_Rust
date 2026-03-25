@@ -1,8 +1,8 @@
 # Sandstar Rust Migration -- Roadmap v2
 
-**Date:** 2026-03-22 (updated)
-**Status:** PRODUCTION DEPLOYED — Rust v1.1.0 on BeagleBone. **SOX protocol fully operational** — Sedona Application Editor connected to pure Rust engine (industry first). **Live sensor data visible in editor** via COV events and SOX 1.1 batch subscribe.
-**Version:** 1.1.0 (7 crates, 824+ tests, ~32,000+ lines of Rust)
+**Date:** 2026-03-25 (updated)
+**Status:** PRODUCTION DEPLOYED — Rust v1.2.0 on BeagleBone. **SOX protocol fully operational** — Sedona Application Editor connected to pure Rust engine (industry first). **Live sensor data visible in editor** via COV events and SOX 1.1 batch subscribe. **SOX write/invoke working** — ConstFloat, ConstInt, ConstBool, WriteFloat, WriteInt, WriteBool, Add2/Sub2/Mul2/Div2 all operational. **185 component types** loaded from manifest XML parser across all 15 kits.
+**Version:** 1.2.0 (7 crates, 1,518 tests, ~39,000+ lines of Rust)
 **Feature Parity:** ~99% (80/80 features vs C system + extras)
 **Research Documents:** 20 analysis docs (00-19) — deep gap analysis completed 2026-03-20
 **Research Coverage:** ~72% weighted (100% on core docs 00-11, deferred on future docs 12-19)
@@ -49,21 +49,29 @@
 - Manifest extraction from .kit ZIP files deployed to `/home/eacio/sandstar/etc/manifests/`
 - Cross-compile fix: `--sysroot` with 8.3 short path for zig linker on Windows with spaces in username
 - Live sensor data visible in editor: COV event format (lowercase 'e', runtime slot filtering), EacIo::AnalogInput slot schema aligned with kit manifest, SOX 1.1 batch subscribe, readComp config/runtime filtering
+- SOX Write/Invoke complete: ConstFloat, ConstInt, ConstBool, WriteFloat, WriteInt, WriteBool, Add2/Sub2/Mul2/Div2 all working
+- Manifest XML parser: 185 component types loaded from all 15 kit manifests at startup
+- ReadProp ('r') handler implemented
+- Command byte fixes: Invoke='i' (CC editor), ReadProp='r', Rename='n'
+- Sedona Str encoding: u2(size_including_null) + chars + 0x00
+- DASP rate-limited COV queue (10/tick) prevents window overflow
+- CONFIG COV events pushed after invoke/write for added components
+- Delete tree events use saved parent_id (before component removal)
 
-**Summary:** All core phases (0 through 10.0E + SOX) are complete. 800+ tests passing, 0 failures.
+**Summary:** All core phases (0 through 10.0E + SOX) are complete. 1,518 tests passing, 0 failures.
 
 ### Partially Complete
 
 | Phase | Description | Done | Remaining |
 |-------|-------------|------|-----------|
-| Phase 4 (SVM/Sedona) | Sedona FFI bridge | Bridge crate exists with ChannelSnapshot, SvmRunner, native method stubs (kit 4 + kit 100). **SOX protocol now implemented in pure Rust** — full DASP transport, readSchema, readVersion, readComp, subscribe, write, file transfer — all without needing the SVM or any C FFI. | Remaining SOX commands: invoke, add, delete, rename, reorder. VM binary compilation optional (config-driven control replaces VM for EacIo). |
-| Phase 5 (Integration) | Production deployment | **v1.1.0 DEPLOYED** (2026-03-20). C sandstar removed, Rust live on BeagleBone (192.168.1.102:1919). 824+ tests, CI/CD, diagnostics, health monitoring. | No longer blocked. Production validated. |
+| Phase 4 (SVM/Sedona) | Sedona FFI bridge | Bridge crate exists with ChannelSnapshot, SvmRunner, native method stubs (kit 4 + kit 100). **SOX protocol now implemented in pure Rust** — full DASP transport, readSchema, readVersion, readComp, subscribe, write, invoke, add, delete, rename, readProp, file transfer — all without needing the SVM or any C FFI. | Remaining SOX commands: reorder, readLink, fileWrite, fileRename. VM binary compilation optional (config-driven control replaces VM for EacIo). |
+| Phase 5 (Integration) | Production deployment | **v1.2.0 DEPLOYED**. C sandstar removed, Rust live on BeagleBone (192.168.1.102:1919). 1,518 tests, CI/CD, diagnostics, health monitoring. | No longer blocked. Production validated. |
 
 ### Not Started
 
 | Phase | Description | Complexity | Research Doc | Priority |
 |-------|-------------|-----------|--------------|----------|
-| Phase 8.0B | Full ROX Protocol — remaining SOX ops: invoke(k), add(a), delete(d), rename(r), reorder(o), fileWrite(h), fileRename(x), readProp(p), readLink(l). **Done:** readSchema(v), readVersion(y), readComp(c), subscribe(s), unsubscribe(u), write(w), fileOpen(f), fileRead(g), fileClose(q), event(e), readSchemaDetail(n). | L | 15 | Medium |
+| Phase 8.0B | Full ROX Protocol — remaining SOX ops: reorder(o), fileWrite(h), fileRename(x), readLink(l). **Done:** readSchema(v), readVersion(y), readComp(c), subscribe(s), unsubscribe(u), write(w), fileOpen(f), fileRead(g), fileClose(q), event(e), readSchemaDetail(n), readProp(r), invoke(i), add(a), delete(d), rename(n). | S | 15 | Low |
 | Phase 9.0 | Northbound clustering (roxWarp) | XL | 16 | Low |
 | Phase 11.0 | Sedona VM Rust port (bytecode interpreter, name interning) | XL | 12, 13, 17 | Very Low |
 | Phase 12.0 | Driver Framework v2 (Haxall-inspired, pure Rust) | XL | 18 | Very Low |
@@ -99,28 +107,34 @@
 | fileRead | `g` | Read file chunk (with path traversal protection) |
 | fileClose | `q` | Close file handle |
 | event | `e` | Server-push COV event to subscribed clients |
+| readProp | `r` | Read single property value |
+| invoke | `i` | Invoke component action (add/delete/rename via CC editor) |
+| add | `a` | Add component to tree at runtime |
+| delete | `d` | Delete component (with tree event using saved parent_id) |
+| rename | `n` | Rename component |
 
 ### Commands Not Yet Implemented
 
 | Command | Code | Description | Phase |
 |---------|------|-------------|-------|
-| readProp | `p` | Read single property value | 8.0B |
 | readLink | `l` | Read component links | 8.0B |
-| invoke | `k` | Invoke component action | 8.0B |
-| add | `a` | Add component to tree | 8.0B |
-| delete | `d` | Delete component from tree | 8.0B |
-| rename | `r` | Rename component | 8.0B |
 | reorder | `o` | Reorder component children | 8.0B |
 | fileWrite | `h` | Write file to device | 8.0B |
 | fileRename | `x` | Rename file on device | 8.0B |
 
 ### Key Implementation Details
 - 15 kit definitions with correct checksums + versions from production manifests
+- Manifest XML parser: 185 component types loaded from all 15 kit manifests at startup
 - Component tree: App, Folder, SoxService, UserService, PlatformService, 150 AnalogInput channels
 - Kit/type IDs verified against actual kit manifest XML (sys, sox, EacIo)
 - Manifest extraction from .kit ZIP files deployed to `/home/eacio/sandstar/etc/manifests/`
 - Path traversal protection (canonicalize + bounds check) on file transfer
 - Sedona Application Editor (Workbench) connects and operates against pure Rust engine
+- SOX write/invoke: ConstFloat, ConstInt, ConstBool, WriteFloat, WriteInt, WriteBool, Add2/Sub2/Mul2/Div2
+- Sedona Str encoding: u2(size_including_null) + chars + 0x00 (null-terminated)
+- DASP rate-limited COV queue (10/tick) prevents send window overflow
+- CONFIG COV events pushed after invoke/write for added components
+- Delete tree events use saved parent_id (before component removal)
 
 ---
 
@@ -179,7 +193,7 @@ The security audit identified issues across four severity levels. These MUST be 
 | VM binary execution | Compiles and runs vm.c | Config-driven control replaces VM for EacIo; SvmRunner exists for other apps | Low -- EacIo runs without VM | Optional |
 | Full native method table | All 3 kits + EacIo + shaystack | Kit 4 (22 Rust natives) + kit 100 (28 stubs) | Low -- only needed if VM used | Optional |
 | ~~SOX protocol~~ | ~~SVM talks to engine via SOX~~ | ~~Pure Rust SOX: DASP + readSchema/readComp/subscribe/write/file transfer~~ | ~~High~~ | **RESOLVED (8.0A-SOX)** |
-| SOX remaining ops | invoke, add, delete, rename, reorder | Not yet implemented | Low -- editor can read/write/subscribe | Phase 8.0B |
+| SOX remaining ops | reorder, readLink, fileWrite, fileRename | Not yet implemented | Very Low -- invoke/add/delete/rename/readProp all done | Phase 8.0B |
 
 ### Operations Gaps (5% missing)
 
@@ -374,16 +388,18 @@ The security audit identified issues across four severity levels. These MUST be 
 
 **Goal:** Complete the remaining SOX commands that are not yet needed for Sedona Application Editor read/write/subscribe workflows, but would be required for full component lifecycle management.
 
-**Already done (Phase 8.0A-SOX):** readSchema(v), readVersion(y), readSchemaDetail(n), readComp(c), subscribe(s), unsubscribe(u), write(w), fileOpen(f), fileRead(g), fileClose(q), event(e). Full DASP transport with ACK piggybacking, session management, null-terminated wire format. Pure Rust, no SVM needed.
+**Already done (Phase 8.0A-SOX):** readSchema(v), readVersion(y), readSchemaDetail(n), readComp(c), subscribe(s), unsubscribe(u), write(w), readProp(r), invoke(i), add(a), delete(d), rename(n), fileOpen(f), fileRead(g), fileClose(q), event(e). Full DASP transport with ACK piggybacking, session management, null-terminated wire format, rate-limited COV queue, manifest XML parser (185 component types). Pure Rust, no SVM needed.
 
 | Task | Description | Effort | Status |
 |------|-------------|--------|--------|
-| 8.0Ba | **invoke(k)**: Invoke component actions (e.g., timer reset, PID retune). Requires action dispatch table. | [M] | Not started |
-| 8.0Bb | **add(a) / delete(d)**: Add/remove components from tree at runtime. Requires mutable component tree. | [M] | Not started |
-| 8.0Bc | **rename(r) / reorder(o)**: Rename components and reorder children. | [S] | Not started |
-| 8.0Bd | **readProp(p) / readLink(l)**: Single-property reads and link enumeration. | [S] | Not started |
+| 8.0Ba | **invoke(i)**: Invoke component actions (add/delete/rename via CC editor). CONFIG COV events pushed after invoke/write. | [M] | DONE |
+| 8.0Bb | **add(a) / delete(d)**: Add/remove components from tree at runtime. Delete uses saved parent_id before removal for tree events. | [M] | DONE |
+| 8.0Bc | **rename(n)**: Rename components. Command byte='n' (CC editor convention). | [S] | DONE |
+| 8.0Bd-1 | **readProp(r)**: Single-property reads. | [S] | DONE |
+| 8.0Bd-2 | **readLink(l)**: Link enumeration. | [S] | Not started |
 | 8.0Be | **fileWrite(h) / fileRename(x)**: Write files to device, rename files. Requires write permissions + validation. | [S] | Not started |
 | 8.0Bf | **Trio encoder/decoder**: Binary Haystack encoding per Project Haystack spec (more efficient than Zinc). | [M] | Not started |
+| 8.0Bg | **reorder(o)**: Reorder component children. | [S] | Not started |
 
 **Total effort:** 2-3 days
 **Blocked by:** Nothing (pure Rust SOX infrastructure already exists)
@@ -501,7 +517,7 @@ The security audit identified issues across four severity levels. These MUST be 
 
 ```
 PRODUCTION DEPLOYED — Rust v1.1.0 live on BeagleBone (192.168.1.102)
-  824+ tests, 0 warnings, 0 security issues, CI/CD active
+  1,518 tests, 0 warnings, 0 security issues, CI/CD active
 
 COMPLETED production tracks:
   ✓ Phase 5.7:      Security hardening (6/6 tasks)
@@ -523,7 +539,7 @@ Remaining future tracks (post-production):
   └── Phase 13.0: Dynamic Slots            [L, needs 12.0]
 ```
 
-**Status:** PRODUCTION LIVE since 2026-03-18, v1.1.0 since 2026-03-20
+**Status:** PRODUCTION LIVE since 2026-03-18, v1.2.0 (SOX write/invoke, 185 manifest types, 1,518 tests)
 **BeagleBone:** 192.168.1.102 (Todd Air Flow), port 1919
 **Deployment guide:** `docs/DEPLOYMENT_CHECKLIST.md` (copy-paste ready)
 
@@ -547,8 +563,8 @@ Remaining future tracks (post-production):
 | 6.5 | TLS + advanced security | Medium | [M] | COMPLETE (5/5 tasks) | -- |
 | 7.0 | Engine core polish | Medium | [M] | COMPLETE (4/4 tasks) | 01, 02 |
 | 8.0A | Haystack-over-WebSocket | Medium | [M] | COMPLETE (ws.rs + 31 tests) | 15 |
-| 8.0A-SOX | SOX/DASP protocol (pure Rust) | Medium | [L] | COMPLETE (DASP + 11 commands) | 15 |
-| 8.0B | Remaining SOX ops (invoke/add/delete/rename) | Low | [M] | Not started (9 commands) | 15 |
+| 8.0A-SOX | SOX/DASP protocol (pure Rust) | Medium | [L] | COMPLETE (DASP + 16 commands, 185 manifest types) | 15 |
+| 8.0B | Remaining SOX ops (reorder/readLink/fileWrite/fileRename) | Low | [S] | Mostly complete (4 commands remaining) | 15 |
 | 9.0 | roxWarp clustering | Low | [XL] | Not started | 16 |
 | 10.0A-D | Config-driven control engine | Medium | [M] | COMPLETE | -- |
 | 10.0E | Additional components library | Low | [M] | COMPLETE (20 + converter) | -- |
@@ -565,7 +581,7 @@ Remaining future tracks (post-production):
 | Rust source lines | ~39,000 (~7,700 new VM + native methods) |
 | C/C++ replaced | ~27,000 lines engine + 6,839 lines SVM (pure-rust-vm feature) |
 | POCO eliminated | ~500,000 lines |
-| Test count | 1,382 passing, 0 failures (557 in SVM crate) |
+| Test count | 1,518 passing, 0 failures |
 | Pure Rust VM | 240 opcodes, 80 native methods, `--features pure-rust-vm` builds without C |
 | Crates | 7 (engine, hal, hal-linux, ipc, server, cli, svm) |
 | REST endpoints | 25 (14 Haystack + health + metrics + zinc + WebSocket + rate-limit + auth + 4 simulator) |
@@ -611,7 +627,7 @@ Deep gap analysis completed 2026-03-20 (3-agent, 20 documents vs full codebase).
 | 12 | SVM Architecture | 11.0 | 70% | VM stays C (by design); Kit 4 ported to Rust; config-driven control replaces VM |
 | 13 | SVM Porting Strategy | 11.0 | 25% | Intentionally deferred; FFI bridge is Priority 2 (done) |
 | 14 | Scalability Limits | 5.6, 7.0c | 80% | Rust engine fixes most; VM-internal limits unchanged |
-| 15 | SOX/WebSocket | 8.0A, 8.0A-SOX, 8.0B | 85% | WS + SCRAM + full SOX/DASP done (11 commands, pure Rust); remaining: invoke/add/delete/rename/reorder |
+| 15 | SOX/WebSocket | 8.0A, 8.0A-SOX, 8.0B | 95% | WS + SCRAM + full SOX/DASP done (16 commands, pure Rust, 185 manifest types); remaining: reorder/readLink/fileWrite/fileRename |
 | 16 | roxWarp Protocol | 9.0 | 0% | Entirely unimplemented (future Phase 9.0) |
 | 17 | Name Length Analysis | 11.0c | 40% | Unlimited names via String; interning unnecessary at scale |
 | 18 | Driver Framework v2 | 12.0 | 30% | HAL traits + Linux drivers done; no async Driver trait/DriverManager |
