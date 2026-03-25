@@ -140,6 +140,12 @@ async fn run_sox_server(
                             }
                         }
 
+                        // Save parent_id before delete (component removed by handle_sox_request)
+                        let delete_parent_id = if request.cmd as u8 == b'd' && request.payload.len() >= 2 {
+                            let comp_id = u16::from_be_bytes([request.payload[0], request.payload[1]]);
+                            tree.get(comp_id).map(|c| c.parent_id).unwrap_or(0)
+                        } else { 0 };
+
                         let response =
                             handle_sox_request(&request, &mut tree, &mut subscriptions, session_id);
                         let response_bytes = response.to_bytes();
@@ -181,10 +187,13 @@ async fn run_sox_server(
 
                         // After Add/Delete: push tree event for the parent so editor refreshes
                         if request.cmd as u8 == b'a' || request.cmd as u8 == b'd' {
-                            // Get parent_id from the request payload
-                            let parent_id = if request.payload.len() >= 2 {
+                            // For Add: payload[0..2] = parentId
+                            // For Delete: payload[0..2] = compId (deleted), look up parent from saved value
+                            let parent_id = if request.cmd as u8 == b'a' && request.payload.len() >= 2 {
                                 u16::from_be_bytes([request.payload[0], request.payload[1]])
-                            } else { 0 };
+                            } else {
+                                delete_parent_id // saved before handle_sox_request
+                            };
                             // Send tree event for parent component
                             if let Some(parent) = tree.get(parent_id) {
                                 let mut evt = Vec::with_capacity(64);
@@ -273,11 +282,10 @@ async fn run_sox_server(
                         }
 
                         // Push COV events with proper seq_nums (required for editor to process).
-                        // Limited to 1 per tick to stay within DASP receive window (31 msgs).
-                        // Client ACKs via keepalives (~15s), so max ~2/s is safe. 1/s is conservative.
-                        // 150 channels populate in ~2.5 minutes.
+                        // Client ACKs within ~100ms per event, so 10/tick is safe.
+                        // 150 channels populate in ~15 seconds.
                         let mut sent = 0;
-                        while sent < 1 {
+                        while sent < 10 {
                             let Some(comp_id) = pending_cov.pop_front() else { break };
                             let events = subscriptions.build_events(&[comp_id], &tree);
                             for (session_id, event_bytes) in events {

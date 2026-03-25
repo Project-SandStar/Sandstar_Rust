@@ -1248,6 +1248,30 @@ fn default_slots_for_type(kit_id: u8, type_id: u8) -> Vec<VirtualSlot> {
                 value: SlotValue::Null,
             },
         ],
+        // control::ConstInt (kit 2, type 15)
+        // Manifest: meta(Int,config), out(Int,config), set(Int,action)
+        (2, 15) => vec![
+            VirtualSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(1) },
+            VirtualSlot { name: "out".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(0) },
+            VirtualSlot { name: "set".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_ACTION, value: SlotValue::Int(0) },
+        ],
+        // control::Add2 (kit 2, type 3), Sub2 (49), Mul2 (37)
+        // Manifest: meta(Int,config), out(Float,runtime), in1(Float,runtime), in2(Float,runtime)
+        (2, 3) | (2, 49) | (2, 37) => vec![
+            VirtualSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(1) },
+            VirtualSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Float(0.0) },
+            VirtualSlot { name: "in1".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Float(0.0) },
+            VirtualSlot { name: "in2".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Float(0.0) },
+        ],
+        // control::Div2 (kit 2, type 18)
+        // Manifest: meta(Int,config), out(Float,runtime), in1(Float,runtime), in2(Float,runtime), div0(Bool,runtime)
+        (2, 18) => vec![
+            VirtualSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(1) },
+            VirtualSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Float(0.0) },
+            VirtualSlot { name: "in1".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Float(0.0) },
+            VirtualSlot { name: "in2".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Float(0.0) },
+            VirtualSlot { name: "div0".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Bool(false) },
+        ],
         // Default: minimal meta slot for any other type
         _ => vec![
             VirtualSlot {
@@ -1356,19 +1380,26 @@ fn handle_invoke(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
     let comp_id = reader.read_u16().unwrap_or(0);
     let slot_id = reader.read_u8().unwrap_or(0);
 
-    // Try to parse a float argument (common for "set" actions)
-    let arg_value = reader.read_f32();
+    // Determine the "out" slot type to know how to parse the argument
+    let out_type = tree.get(comp_id)
+        .and_then(|c| c.slots.iter().find(|s| s.name == "out"))
+        .map(|s| s.type_id)
+        .unwrap_or(SoxValueType::Float as u8);
+
+    // Parse argument based on the out slot type
+    let arg_value: Option<SlotValue> = if out_type == SoxValueType::Int as u8 {
+        reader.read_i32().map(SlotValue::Int)
+    } else {
+        reader.read_f32().map(SlotValue::Float)
+    };
 
     if let Some(val) = arg_value {
-        tracing::info!(comp_id, slot_id, value = val, "SOX: invoke set action");
-        // Update the component's slots — find a float slot named "out" or use slot 1
+        tracing::info!(comp_id, slot_id, ?val, "SOX: invoke set action");
         if let Some(comp) = tree.get_mut(comp_id) {
-            tracing::info!(comp_id, num_slots = comp.slots.len(), "SOX: invoke - comp found");
-            // Look for "out" slot or the first float slot after actions
             for slot in comp.slots.iter_mut() {
-                if slot.name == "out" || (matches!(slot.value, SlotValue::Float(_))) {
-                    slot.value = SlotValue::Float(val);
-                    tracing::info!(comp_id, slot = %slot.name, value = val, "SOX: set action applied");
+                if slot.name == "out" {
+                    slot.value = val.clone();
+                    tracing::info!(comp_id, slot = %slot.name, ?val, "SOX: set action applied");
                     break;
                 }
             }
