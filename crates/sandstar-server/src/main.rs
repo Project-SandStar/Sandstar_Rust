@@ -406,6 +406,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.sox_user.clone(),
             args.sox_pass.clone(),
             sox_engine_handle,
+            args.manifests_dir.clone(),
         ))
     } else {
         None

@@ -18,11 +18,15 @@ pub use sox_protocol::*;
 use crate::rest::EngineHandle;
 use crate::sox::dasp::DaspTransport;
 use crate::sox::sox_handlers::{
-    handle_sox_request, parse_write_request, ComponentTree, SubscriptionManager,
+    handle_sox_request, parse_write_request, ComponentTree, ManifestDb, SubscriptionManager,
 };
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
+
+/// Default manifest directory on the BeagleBone device.
+pub const DEFAULT_MANIFESTS_DIR: &str = "/home/eacio/sandstar/etc/manifests";
 
 /// Start the SOX/DASP server as a background tokio task.
 ///
@@ -30,15 +34,23 @@ use tracing::{debug, error, info, warn};
 /// incoming connections, and dispatches authenticated SOX datagrams.
 /// Channel data and writes are proxied through the `EngineHandle`.
 ///
+/// `manifests_dir` is the path to the kit manifest XML files. If `None`,
+/// uses the default path (`/home/eacio/sandstar/etc/manifests`).
+///
 /// Returns a `JoinHandle` that can be used to await or abort the task.
 pub fn spawn_sox_server(
     port: u16,
     username: String,
     password: String,
     engine_handle: EngineHandle,
+    manifests_dir: Option<String>,
 ) -> JoinHandle<()> {
+    // Load manifest database synchronously before spawning the async task.
+    let dir = manifests_dir.unwrap_or_else(|| DEFAULT_MANIFESTS_DIR.to_string());
+    let manifest_db = Arc::new(ManifestDb::load(&dir));
+
     tokio::spawn(async move {
-        run_sox_server(port, username, password, engine_handle).await;
+        run_sox_server(port, username, password, engine_handle, manifest_db).await;
     })
 }
 
@@ -57,6 +69,7 @@ async fn run_sox_server(
     username: String,
     password: String,
     engine_handle: EngineHandle,
+    manifest_db: Arc<ManifestDb>,
 ) {
     let mut transport = match DaspTransport::bind(port, &username, &password) {
         Ok(t) => t,
@@ -72,13 +85,13 @@ async fn run_sox_server(
     // Values will be corrected on the first `update_from_channels` tick.
     let mut tree = match engine_handle.list_channels().await {
         Ok(channels) => {
-            let t = ComponentTree::from_channels(&channels);
-            info!(components = t.len(), "SOX component tree built");
+            let t = ComponentTree::from_channels_with_manifest(&channels, manifest_db.clone());
+            info!(components = t.len(), manifest_types = manifest_db.type_count(), "SOX component tree built");
             t
         }
         Err(e) => {
             warn!("SOX: failed to get initial channels: {e}, starting with empty tree");
-            ComponentTree::new()
+            ComponentTree::new_with_manifest(manifest_db.clone())
         }
     };
 

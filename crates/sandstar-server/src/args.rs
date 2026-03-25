@@ -115,6 +115,12 @@ pub struct ServerArgs {
     /// SOX password (or env SANDSTAR_SOX_PASS, default "admin").
     #[arg(long, env = "SANDSTAR_SOX_PASS", default_value = "admin")]
     pub sox_pass: String,
+
+    /// Path to kit manifest XML directory for SOX component schemas.
+    /// On BeagleBone: /home/eacio/sandstar/etc/manifests
+    /// If not set, uses the default path.
+    #[arg(long, env = "SANDSTAR_MANIFESTS_DIR")]
+    pub manifests_dir: Option<String>,
 }
 
 fn default_socket() -> String {

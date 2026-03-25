@@ -21,6 +21,8 @@
 //! are forwarded to the engine via the `EngineHandle` command channel.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use std::sync::Arc;
 
 use sandstar_ipc::types::ChannelInfo;
 
@@ -109,15 +111,29 @@ pub struct ComponentTree {
     /// Components in [CHANNEL_COMP_BASE, channel_comp_end) are channels with valid schemas.
     /// Components >= channel_comp_end are dynamically added (no manifest schema).
     pub channel_comp_end: u16,
+    /// Manifest-based slot schema database (shared reference).
+    /// Loaded at startup from kit manifest XML files.
+    pub manifest_db: Arc<ManifestDb>,
 }
 
 impl ComponentTree {
-    /// Create an empty tree.
+    /// Create an empty tree (with no manifest database).
     pub fn new() -> Self {
         Self {
             components: HashMap::new(),
             next_id: 0,
             channel_comp_end: CHANNEL_COMP_BASE,
+            manifest_db: Arc::new(ManifestDb::new()),
+        }
+    }
+
+    /// Create an empty tree with a pre-loaded manifest database.
+    pub fn new_with_manifest(manifest_db: Arc<ManifestDb>) -> Self {
+        Self {
+            components: HashMap::new(),
+            next_id: 0,
+            channel_comp_end: CHANNEL_COMP_BASE,
+            manifest_db,
         }
     }
 
@@ -195,8 +211,17 @@ impl ComponentTree {
     ///
     /// Creates the standard Sedona tree structure with service nodes
     /// and maps each channel to a `control::NumericPoint` component.
+    /// Optionally accepts a pre-loaded manifest database.
     pub fn from_channels(channels: &[ChannelInfo]) -> Self {
-        let mut tree = Self::new();
+        Self::from_channels_with_manifest(channels, Arc::new(ManifestDb::new()))
+    }
+
+    /// Build a virtual component tree with a manifest database.
+    pub fn from_channels_with_manifest(
+        channels: &[ChannelInfo],
+        manifest_db: Arc<ManifestDb>,
+    ) -> Self {
+        let mut tree = Self::new_with_manifest(manifest_db);
 
         // Root: App (compId=0)
         tree.add(VirtualComponent {
@@ -611,6 +636,375 @@ pub const DEFAULT_KITS: &[KitInfo] = &[
     KitInfo { name: "types",     checksum: 0x10936551, version: "1.2.28" },
     KitInfo { name: "web",       checksum: 0x0d0dd007, version: "1.2.29" },
 ];
+
+// ---- Manifest database ----
+
+/// A slot definition parsed from a kit manifest XML.
+#[derive(Debug, Clone)]
+pub struct ManifestSlot {
+    pub name: String,
+    pub type_id: u8,
+    pub flags: u8,
+    pub default_value: SlotValue,
+}
+
+/// Database of all component types and their slots, parsed from kit manifest XML files.
+///
+/// Maps `(kit_index, type_id)` to the full slot list (including inherited `meta` slot).
+/// This replaces the hardcoded `default_slots_for_type` function.
+#[derive(Debug, Clone, Default)]
+pub struct ManifestDb {
+    /// (kit_index, type_id) -> ordered list of slots for that component type.
+    types: HashMap<(u8, u8), Vec<ManifestSlot>>,
+}
+
+impl ManifestDb {
+    /// Create an empty manifest database.
+    pub fn new() -> Self {
+        Self {
+            types: HashMap::new(),
+        }
+    }
+
+    /// Load manifest XML files from a directory.
+    ///
+    /// For each kit in `DEFAULT_KITS`, looks for `{manifests_dir}/{kit_name}/{kit_name}-{checksum}.xml`
+    /// or `{manifests_dir}/{kit_name}.xml` (flat layout). Missing files are silently skipped
+    /// (the hardcoded fallback in `default_slots_for_type` will be used instead).
+    ///
+    /// On the BeagleBone: `/home/eacio/sandstar/etc/manifests/`
+    /// In the repo:       `SedonaRepo/.../manifests/`
+    pub fn load(manifests_dir: &str) -> Self {
+        let mut db = Self::new();
+        let dir = Path::new(manifests_dir);
+
+        for (kit_index, kit) in DEFAULT_KITS.iter().enumerate() {
+            let kit_index = kit_index as u8;
+            // Try subdirectory layout first: {dir}/{kitName}/{kitName}-{checksum}.xml
+            let subdir_path = dir
+                .join(kit.name)
+                .join(format!("{}-{:08x}.xml", kit.name, kit.checksum));
+            // Then flat layout: {dir}/{kitName}.xml
+            let flat_path = dir.join(format!("{}.xml", kit.name));
+            // Also try flat with checksum: {dir}/{kitName}-{checksum}.xml
+            let flat_checksum_path = dir.join(format!("{}-{:08x}.xml", kit.name, kit.checksum));
+
+            let xml_path = if subdir_path.exists() {
+                subdir_path
+            } else if flat_path.exists() {
+                flat_path
+            } else if flat_checksum_path.exists() {
+                flat_checksum_path
+            } else {
+                tracing::debug!(kit = kit.name, "manifest XML not found, using hardcoded fallback");
+                continue;
+            };
+
+            match std::fs::read_to_string(&xml_path) {
+                Ok(xml) => {
+                    let count = db.parse_kit_manifest(&xml, kit_index);
+                    tracing::info!(
+                        kit = kit.name,
+                        kit_index,
+                        types = count,
+                        path = %xml_path.display(),
+                        "loaded manifest"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        kit = kit.name,
+                        path = %xml_path.display(),
+                        err = %e,
+                        "failed to read manifest XML"
+                    );
+                }
+            }
+        }
+
+        tracing::info!(
+            total_types = db.types.len(),
+            "ManifestDb loaded"
+        );
+        db
+    }
+
+    /// Parse a single kit manifest XML and insert types into the database.
+    /// Returns the number of types parsed.
+    fn parse_kit_manifest(&mut self, xml: &str, kit_index: u8) -> usize {
+        use quick_xml::events::Event;
+        use quick_xml::Reader;
+
+        let mut reader = Reader::from_str(xml);
+        let mut count = 0;
+
+        // Track current type being parsed
+        let mut current_type_id: Option<u8> = None;
+        let mut current_base: Option<String> = None;
+        let mut current_slots: Vec<ManifestSlot> = Vec::new();
+
+        loop {
+            let event = reader.read_event();
+            // Determine if this is a self-closing element (no End event will follow)
+            let is_empty = matches!(&event, Ok(Event::Empty(_)));
+
+            match event {
+                Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                    let local_name = e.local_name();
+                    let tag = std::str::from_utf8(local_name.as_ref()).unwrap_or("");
+
+                    if tag == "type" {
+                        // Starting a new type definition
+                        let mut id: Option<u8> = None;
+                        let mut base: Option<String> = None;
+
+                        for attr in e.attributes().flatten() {
+                            let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            let val = std::str::from_utf8(&attr.value).unwrap_or("");
+                            match key {
+                                "id" => id = val.parse().ok(),
+                                "base" => base = Some(val.to_string()),
+                                _ => {}
+                            }
+                        }
+
+                        if let Some(type_id) = id {
+                            // Flush previous type if any
+                            if let Some(prev_type_id) = current_type_id.take() {
+                                self.insert_type(kit_index, prev_type_id, &current_base, &current_slots);
+                                count += 1;
+                            }
+                            current_type_id = Some(type_id);
+                            current_base = base;
+                            current_slots.clear();
+
+                            // Self-closing <type .../> has no slots, flush immediately
+                            if is_empty {
+                                self.insert_type(kit_index, type_id, &current_base, &current_slots);
+                                count += 1;
+                                current_type_id = None;
+                                current_base = None;
+                            }
+                        }
+                    }
+
+                    if tag == "slot" && current_type_id.is_some() {
+                        // Parse slot attributes
+                        let mut name = String::new();
+                        let mut slot_type = String::new();
+                        let mut flags_str = String::new();
+                        let mut default_str: Option<String> = None;
+
+                        for attr in e.attributes().flatten() {
+                            let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            let val = std::str::from_utf8(&attr.value).unwrap_or("");
+                            match key {
+                                "name" => name = val.to_string(),
+                                "type" => slot_type = val.to_string(),
+                                "flags" => flags_str = val.to_string(),
+                                "default" => default_str = Some(val.to_string()),
+                                _ => {}
+                            }
+                        }
+
+                        let type_id = sedona_type_to_sox(&slot_type);
+                        let flags = sedona_flags_to_slot_flags(&flags_str);
+                        let default_value = parse_default_value(type_id, default_str.as_deref());
+
+                        current_slots.push(ManifestSlot {
+                            name,
+                            type_id,
+                            flags,
+                            default_value,
+                        });
+                    }
+                }
+                Ok(Event::End(ref e)) => {
+                    let local_name = e.local_name();
+                    let tag = std::str::from_utf8(local_name.as_ref()).unwrap_or("");
+                    if tag == "type" {
+                        // Flush current type
+                        if let Some(type_id) = current_type_id.take() {
+                            self.insert_type(kit_index, type_id, &current_base, &current_slots);
+                            count += 1;
+                        }
+                        current_base = None;
+                        current_slots.clear();
+                    }
+                }
+                Ok(Event::Eof) => break,
+                Err(e) => {
+                    tracing::warn!(kit_index, err = %e, "XML parse error in manifest");
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        // Flush any remaining type
+        if let Some(type_id) = current_type_id {
+            self.insert_type(kit_index, type_id, &current_base, &current_slots);
+            count += 1;
+        }
+
+        count
+    }
+
+    /// Insert a parsed type into the database, prepending inherited `meta` slot
+    /// for types that extend `sys::Component`.
+    fn insert_type(
+        &mut self,
+        kit_index: u8,
+        type_id: u8,
+        base: &Option<String>,
+        own_slots: &[ManifestSlot],
+    ) {
+        let mut slots = Vec::new();
+
+        // If this type extends sys::Component (directly or transitively),
+        // prepend the inherited `meta` slot.
+        let has_base = base.as_ref().is_some_and(|b| !b.is_empty());
+        if has_base {
+            // Check if own_slots already includes a `meta` slot (some manifests redefine it)
+            let has_meta = own_slots.iter().any(|s| s.name == "meta");
+            if !has_meta {
+                slots.push(ManifestSlot {
+                    name: "meta".into(),
+                    type_id: SoxValueType::Int as u8,
+                    flags: SLOT_FLAG_CONFIG,
+                    default_value: SlotValue::Int(1),
+                });
+            }
+        }
+
+        slots.extend_from_slice(own_slots);
+        self.types.insert((kit_index, type_id), slots);
+    }
+
+    /// Look up the slot schema for a component type.
+    ///
+    /// Returns `None` if no manifest was loaded for this (kit_id, type_id).
+    pub fn get_slots(&self, kit_id: u8, type_id: u8) -> Option<&Vec<ManifestSlot>> {
+        self.types.get(&(kit_id, type_id))
+    }
+
+    /// Get the total number of types in the database.
+    pub fn type_count(&self) -> usize {
+        self.types.len()
+    }
+
+    /// Convert manifest slots to virtual slots (with default values).
+    pub fn slots_to_virtual(slots: &[ManifestSlot]) -> Vec<VirtualSlot> {
+        slots
+            .iter()
+            .map(|ms| VirtualSlot {
+                name: ms.name.clone(),
+                type_id: ms.type_id,
+                flags: ms.flags,
+                value: ms.default_value.clone(),
+            })
+            .collect()
+    }
+}
+
+/// Map a Sedona type string from manifest XML to a SOX value type ID.
+fn sedona_type_to_sox(sedona_type: &str) -> u8 {
+    match sedona_type {
+        "int" => SoxValueType::Int as u8,
+        "float" => SoxValueType::Float as u8,
+        "bool" => SoxValueType::Bool as u8,
+        "void" => SoxValueType::Void as u8,
+        "sys::Buf" => SoxValueType::Buf as u8,
+        "byte" => SoxValueType::Byte as u8,
+        "short" => SoxValueType::Short as u8,
+        "long" => SoxValueType::Long as u8,
+        "double" => SoxValueType::Double as u8,
+        // Unknown types default to Int (safest for unknown wire format)
+        _ => SoxValueType::Int as u8,
+    }
+}
+
+/// Map Sedona flag characters from manifest XML to slot flag bitmask.
+///
+/// - 'c' = config (0x01)
+/// - 'a' = action (0x02)
+/// - 's' = string display hint (affects Buf rendering, not flag bits)
+/// - 'o' = operator
+/// - no 'c' or 'a' = runtime (0x04)
+fn sedona_flags_to_slot_flags(flags_str: &str) -> u8 {
+    let mut flags: u8 = 0;
+    if flags_str.contains('c') {
+        flags |= SLOT_FLAG_CONFIG;
+    }
+    if flags_str.contains('a') {
+        flags |= SLOT_FLAG_ACTION;
+    }
+    if flags_str.contains('o') {
+        flags |= SLOT_FLAG_OPERATOR;
+    }
+    // If neither config nor action, it's a runtime slot
+    if flags & (SLOT_FLAG_CONFIG | SLOT_FLAG_ACTION) == 0 {
+        flags |= SLOT_FLAG_RUNTIME;
+    }
+    flags
+}
+
+/// Parse a default value string from manifest XML into a `SlotValue`.
+fn parse_default_value(type_id: u8, default_str: Option<&str>) -> SlotValue {
+    match default_str {
+        None => default_for_type(type_id),
+        Some(s) if s.is_empty() => {
+            // Empty default: for Buf/Str types means empty string, otherwise zero
+            if type_id == SoxValueType::Buf as u8 {
+                SlotValue::Str(String::new())
+            } else {
+                default_for_type(type_id)
+            }
+        }
+        Some(s) => {
+            match type_id {
+                t if t == SoxValueType::Bool as u8 => {
+                    SlotValue::Bool(s == "true" || s == "1")
+                }
+                t if t == SoxValueType::Int as u8 => {
+                    SlotValue::Int(s.parse().unwrap_or(0))
+                }
+                t if t == SoxValueType::Float as u8 => {
+                    SlotValue::Float(s.parse().unwrap_or(0.0))
+                }
+                t if t == SoxValueType::Double as u8 => {
+                    SlotValue::Double(s.parse().unwrap_or(0.0))
+                }
+                t if t == SoxValueType::Long as u8 => {
+                    SlotValue::Long(s.parse().unwrap_or(0))
+                }
+                t if t == SoxValueType::Byte as u8 || t == SoxValueType::Short as u8 => {
+                    SlotValue::Int(s.parse().unwrap_or(0))
+                }
+                t if t == SoxValueType::Buf as u8 => {
+                    SlotValue::Str(s.to_string())
+                }
+                t if t == SoxValueType::Void as u8 => SlotValue::Null,
+                _ => default_for_type(type_id),
+            }
+        }
+    }
+}
+
+/// Return the zero/default value for a given SOX type.
+fn default_for_type(type_id: u8) -> SlotValue {
+    match type_id {
+        t if t == SoxValueType::Bool as u8 => SlotValue::Bool(false),
+        t if t == SoxValueType::Int as u8 => SlotValue::Int(0),
+        t if t == SoxValueType::Float as u8 => SlotValue::Float(0.0),
+        t if t == SoxValueType::Double as u8 => SlotValue::Double(0.0),
+        t if t == SoxValueType::Long as u8 => SlotValue::Long(0),
+        t if t == SoxValueType::Byte as u8 => SlotValue::Int(0),
+        t if t == SoxValueType::Short as u8 => SlotValue::Int(0),
+        t if t == SoxValueType::Buf as u8 => SlotValue::Str(String::new()),
+        _ => SlotValue::Null,
+    }
+}
 
 // ---- Subscription manager ----
 
@@ -1340,7 +1734,12 @@ fn handle_add(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
     }
 
     let new_id = tree.next_comp_id();
-    let slots = default_slots_for_type(kit_id, type_id);
+    // Try manifest database first, fall back to hardcoded defaults
+    let slots = if let Some(manifest_slots) = tree.manifest_db.get_slots(kit_id, type_id) {
+        ManifestDb::slots_to_virtual(manifest_slots)
+    } else {
+        default_slots_for_type(kit_id, type_id)
+    };
     let comp = VirtualComponent {
         comp_id: new_id,
         parent_id,
@@ -2416,5 +2815,372 @@ mod tests {
         // pointQuery: u2(1) + 0x00 (empty string with null terminator)
         assert_eq!(r.read_u16(), Some(1)); // size=1 (just the null)
         assert_eq!(r.read_u8(), Some(0x00)); // null terminator
+    }
+
+    // ---- ManifestDb tests ----
+
+    #[test]
+    fn manifest_db_new_is_empty() {
+        let db = ManifestDb::new();
+        assert_eq!(db.type_count(), 0);
+        assert!(db.get_slots(0, 0).is_none());
+    }
+
+    #[test]
+    fn manifest_db_parse_sys_component() {
+        // Minimal sys manifest with Component type (id=9, has meta slot)
+        let xml = r#"<?xml version='1.0'?>
+<kitManifest name="sys" checksum="d3984c51" version="1.2.28">
+<type id="9" name="Component" sizeof="60">
+  <slot id="0" name="meta" type="int" flags="c" default="1"/>
+</type>
+</kitManifest>"#;
+
+        let mut db = ManifestDb::new();
+        let count = db.parse_kit_manifest(xml, 0); // kit_index=0 for sys
+        assert_eq!(count, 1);
+        let slots = db.get_slots(0, 9).unwrap();
+        // Component has no base, so no inherited meta — just its own meta slot
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].name, "meta");
+        assert_eq!(slots[0].type_id, SoxValueType::Int as u8);
+        assert_eq!(slots[0].flags, SLOT_FLAG_CONFIG);
+        assert_eq!(slots[0].default_value, SlotValue::Int(1));
+    }
+
+    #[test]
+    fn manifest_db_parse_type_with_base() {
+        // Type with base="sys::Component" should get inherited meta slot prepended
+        let xml = r#"<?xml version='1.0'?>
+<kitManifest name="control" checksum="808b7db3" version="1.2.28">
+<type id="14" name="ConstFloat" sizeof="64" base="sys::Component">
+  <slot id="0" name="out" type="float" flags="c"/>
+  <slot id="1" name="set" type="float" flags="a"/>
+</type>
+</kitManifest>"#;
+
+        let mut db = ManifestDb::new();
+        let count = db.parse_kit_manifest(xml, 2); // kit_index=2 for control
+        assert_eq!(count, 1);
+        let slots = db.get_slots(2, 14).unwrap();
+        // Should have: meta (inherited) + out + set = 3 slots
+        assert_eq!(slots.len(), 3);
+        assert_eq!(slots[0].name, "meta");
+        assert_eq!(slots[0].flags, SLOT_FLAG_CONFIG);
+        assert_eq!(slots[1].name, "out");
+        assert_eq!(slots[1].type_id, SoxValueType::Float as u8);
+        assert_eq!(slots[1].flags, SLOT_FLAG_CONFIG);
+        assert_eq!(slots[2].name, "set");
+        assert_eq!(slots[2].type_id, SoxValueType::Float as u8);
+        assert_eq!(slots[2].flags, SLOT_FLAG_ACTION);
+    }
+
+    #[test]
+    fn manifest_db_parse_self_closing_type() {
+        // Self-closing type (no slots, like sys::void)
+        let xml = r#"<?xml version='1.0'?>
+<kitManifest name="sys" checksum="d3984c51" version="1.2.28">
+<type id="0" name="void" sizeof="0"/>
+<type id="1" name="bool" sizeof="1"/>
+</kitManifest>"#;
+
+        let mut db = ManifestDb::new();
+        let count = db.parse_kit_manifest(xml, 0);
+        assert_eq!(count, 2);
+        // void (no base, no slots)
+        let slots = db.get_slots(0, 0).unwrap();
+        assert_eq!(slots.len(), 0);
+        // bool (no base, no slots)
+        let slots = db.get_slots(0, 1).unwrap();
+        assert_eq!(slots.len(), 0);
+    }
+
+    #[test]
+    fn manifest_db_parse_eacio_analog_input() {
+        let xml = r#"<?xml version='1.0'?>
+<kitManifest name="EacIo" checksum="6f9da65b" version="1.2.30">
+<type id="0" name="AnalogInput" sizeof="368" base="sys::Component">
+  <slot id="0" name="channelName" type="sys::Buf" flags="s" default=""/>
+  <slot id="1" name="channel" type="int"/>
+  <slot id="2" name="pointQuery" type="sys::Buf" flags="cs"/>
+  <slot id="3" name="pointQuerySize" type="int"/>
+  <slot id="4" name="pointQueryStatus" type="bool"/>
+  <slot id="5" name="out" type="float" default="0.0"/>
+  <slot id="6" name="curStatus" type="sys::Buf" flags="s" default="na"/>
+  <slot id="7" name="enabled" type="bool"/>
+  <slot id="8" name="query" type="void" flags="a"/>
+</type>
+</kitManifest>"#;
+
+        let mut db = ManifestDb::new();
+        let count = db.parse_kit_manifest(xml, 1); // kit_index=1 for EacIo
+        assert_eq!(count, 1);
+        let slots = db.get_slots(1, 0).unwrap();
+        // meta (inherited) + 9 own slots = 10
+        assert_eq!(slots.len(), 10);
+        assert_eq!(slots[0].name, "meta");
+        assert_eq!(slots[1].name, "channelName");
+        assert_eq!(slots[1].type_id, SoxValueType::Buf as u8);
+        assert_eq!(slots[1].flags, SLOT_FLAG_RUNTIME); // 's' flag alone = runtime
+        assert_eq!(slots[6].name, "out");
+        assert_eq!(slots[6].type_id, SoxValueType::Float as u8);
+        assert_eq!(slots[6].default_value, SlotValue::Float(0.0));
+        assert_eq!(slots[7].name, "curStatus");
+        assert_eq!(slots[7].default_value, SlotValue::Str("na".into()));
+        assert_eq!(slots[9].name, "query");
+        assert_eq!(slots[9].flags, SLOT_FLAG_ACTION);
+    }
+
+    #[test]
+    fn manifest_db_sedona_type_mapping() {
+        assert_eq!(sedona_type_to_sox("int"), SoxValueType::Int as u8);
+        assert_eq!(sedona_type_to_sox("float"), SoxValueType::Float as u8);
+        assert_eq!(sedona_type_to_sox("bool"), SoxValueType::Bool as u8);
+        assert_eq!(sedona_type_to_sox("void"), SoxValueType::Void as u8);
+        assert_eq!(sedona_type_to_sox("sys::Buf"), SoxValueType::Buf as u8);
+        assert_eq!(sedona_type_to_sox("byte"), SoxValueType::Byte as u8);
+        assert_eq!(sedona_type_to_sox("short"), SoxValueType::Short as u8);
+        assert_eq!(sedona_type_to_sox("long"), SoxValueType::Long as u8);
+        assert_eq!(sedona_type_to_sox("double"), SoxValueType::Double as u8);
+        // Unknown type defaults to Int
+        assert_eq!(sedona_type_to_sox("somethingElse"), SoxValueType::Int as u8);
+    }
+
+    #[test]
+    fn manifest_db_sedona_flags_mapping() {
+        assert_eq!(sedona_flags_to_slot_flags("c"), SLOT_FLAG_CONFIG);
+        assert_eq!(sedona_flags_to_slot_flags("a"), SLOT_FLAG_ACTION);
+        assert_eq!(sedona_flags_to_slot_flags("cs"), SLOT_FLAG_CONFIG); // config + string hint
+        assert_eq!(sedona_flags_to_slot_flags("s"), SLOT_FLAG_RUNTIME); // string hint alone = runtime
+        assert_eq!(sedona_flags_to_slot_flags(""), SLOT_FLAG_RUNTIME);  // no flags = runtime
+        assert_eq!(sedona_flags_to_slot_flags("o"), SLOT_FLAG_OPERATOR | SLOT_FLAG_RUNTIME);
+    }
+
+    #[test]
+    fn manifest_db_default_value_parsing() {
+        let int_type = SoxValueType::Int as u8;
+        let float_type = SoxValueType::Float as u8;
+        let bool_type = SoxValueType::Bool as u8;
+        let buf_type = SoxValueType::Buf as u8;
+
+        assert_eq!(parse_default_value(int_type, Some("42")), SlotValue::Int(42));
+        assert_eq!(parse_default_value(float_type, Some("3.14")), SlotValue::Float(3.14));
+        assert_eq!(parse_default_value(bool_type, Some("true")), SlotValue::Bool(true));
+        assert_eq!(parse_default_value(bool_type, Some("false")), SlotValue::Bool(false));
+        assert_eq!(parse_default_value(buf_type, Some("hello")), SlotValue::Str("hello".into()));
+        assert_eq!(parse_default_value(buf_type, Some("")), SlotValue::Str(String::new()));
+        assert_eq!(parse_default_value(int_type, None), SlotValue::Int(0));
+        assert_eq!(parse_default_value(float_type, None), SlotValue::Float(0.0));
+    }
+
+    #[test]
+    fn manifest_db_slots_to_virtual() {
+        let manifest_slots = vec![
+            ManifestSlot {
+                name: "meta".into(),
+                type_id: SoxValueType::Int as u8,
+                flags: SLOT_FLAG_CONFIG,
+                default_value: SlotValue::Int(1),
+            },
+            ManifestSlot {
+                name: "out".into(),
+                type_id: SoxValueType::Float as u8,
+                flags: SLOT_FLAG_CONFIG,
+                default_value: SlotValue::Float(0.0),
+            },
+        ];
+        let virtual_slots = ManifestDb::slots_to_virtual(&manifest_slots);
+        assert_eq!(virtual_slots.len(), 2);
+        assert_eq!(virtual_slots[0].name, "meta");
+        assert_eq!(virtual_slots[0].value, SlotValue::Int(1));
+        assert_eq!(virtual_slots[1].name, "out");
+        assert_eq!(virtual_slots[1].value, SlotValue::Float(0.0));
+    }
+
+    #[test]
+    fn manifest_db_handle_add_uses_manifest() {
+        // Load a manifest with ConstFloat, then verify handle_add uses it
+        let xml = r#"<?xml version='1.0'?>
+<kitManifest name="control" checksum="808b7db3" version="1.2.28">
+<type id="14" name="ConstFloat" sizeof="64" base="sys::Component">
+  <slot id="0" name="out" type="float" flags="c"/>
+  <slot id="1" name="set" type="float" flags="a"/>
+</type>
+</kitManifest>"#;
+
+        let mut db = ManifestDb::new();
+        db.parse_kit_manifest(xml, 2);
+        let manifest_db = Arc::new(db);
+
+        let mut tree = ComponentTree::new_with_manifest(manifest_db);
+        // Add root and a parent folder
+        tree.add(VirtualComponent {
+            comp_id: 0,
+            parent_id: NO_PARENT,
+            name: "app".into(),
+            type_name: "sys::App".into(),
+            kit_id: 0,
+            type_id: 10,
+            children: Vec::new(),
+            slots: Vec::new(),
+        });
+        tree.add(VirtualComponent {
+            comp_id: 6,
+            parent_id: 0,
+            name: "control".into(),
+            type_name: "sys::Folder".into(),
+            kit_id: 0,
+            type_id: 11,
+            children: Vec::new(),
+            slots: Vec::new(),
+        });
+
+        // Add a ConstFloat (kit=2, type=14) under control folder
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&6u16.to_be_bytes()); // parentId=6
+        payload.push(2);  // kitId=2 (control)
+        payload.push(14); // typeId=14 (ConstFloat)
+        // name (null-terminated)
+        payload.extend_from_slice(b"myConst\0");
+
+        let req = SoxRequest {
+            cmd: SoxCmd::Add,
+            req_id: 1,
+            payload,
+        };
+        let resp = handle_add(&req, &mut tree);
+        assert_eq!(resp.cmd, b'A');
+
+        // Check the new component has manifest-derived slots
+        let new_id = u16::from_be_bytes([resp.payload[0], resp.payload[1]]);
+        let comp = tree.get(new_id).unwrap();
+        assert_eq!(comp.slots.len(), 3); // meta + out + set
+        assert_eq!(comp.slots[0].name, "meta");
+        assert_eq!(comp.slots[1].name, "out");
+        assert_eq!(comp.slots[1].type_id, SoxValueType::Float as u8);
+        assert_eq!(comp.slots[2].name, "set");
+        assert_eq!(comp.slots[2].flags, SLOT_FLAG_ACTION);
+    }
+
+    #[test]
+    fn manifest_db_handle_add_falls_back_to_hardcoded() {
+        // With empty manifest db, handle_add should use hardcoded defaults
+        let mut tree = ComponentTree::new(); // no manifest
+        tree.add(VirtualComponent {
+            comp_id: 0,
+            parent_id: NO_PARENT,
+            name: "app".into(),
+            type_name: "sys::App".into(),
+            kit_id: 0,
+            type_id: 10,
+            children: Vec::new(),
+            slots: Vec::new(),
+        });
+
+        // Add a ConstFloat without manifest — should use hardcoded fallback
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&0u16.to_be_bytes()); // parentId=0
+        payload.push(2);  // kitId=2 (control)
+        payload.push(14); // typeId=14 (ConstFloat)
+        payload.extend_from_slice(b"c\0");
+
+        let req = SoxRequest {
+            cmd: SoxCmd::Add,
+            req_id: 1,
+            payload,
+        };
+        let resp = handle_add(&req, &mut tree);
+        assert_eq!(resp.cmd, b'A');
+
+        let new_id = u16::from_be_bytes([resp.payload[0], resp.payload[1]]);
+        let comp = tree.get(new_id).unwrap();
+        // Hardcoded ConstFloat has 4 slots: meta, out, set, setNull
+        assert_eq!(comp.slots.len(), 4);
+        assert_eq!(comp.slots[0].name, "meta");
+        assert_eq!(comp.slots[1].name, "out");
+    }
+
+    #[test]
+    fn manifest_db_load_from_repo_manifests() {
+        // Test loading from the actual SedonaRepo manifests in the workspace
+        let manifests_dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../SedonaRepo/2026-03-11_21-56-18/manifests"
+        );
+        let path = std::path::Path::new(manifests_dir);
+        if !path.exists() {
+            // Skip test if manifests not available (CI, etc.)
+            return;
+        }
+        let db = ManifestDb::load(manifests_dir);
+        // Should have loaded types from multiple kits
+        assert!(db.type_count() > 20, "Expected >20 types, got {}", db.type_count());
+
+        // Verify specific types we know exist
+        // sys::Component (kit=0, type=9)
+        let sys_comp = db.get_slots(0, 9);
+        assert!(sys_comp.is_some(), "sys::Component not found");
+        assert_eq!(sys_comp.unwrap()[0].name, "meta");
+
+        // control::ConstFloat (kit=2, type=14)
+        let const_float = db.get_slots(2, 14);
+        assert!(const_float.is_some(), "control::ConstFloat not found");
+        let cf_slots = const_float.unwrap();
+        assert_eq!(cf_slots[0].name, "meta"); // inherited
+        assert_eq!(cf_slots[1].name, "out");
+        assert_eq!(cf_slots[2].name, "set");
+
+        // EacIo::AnalogInput (kit=1, type=0)
+        let ai = db.get_slots(1, 0);
+        assert!(ai.is_some(), "EacIo::AnalogInput not found");
+        let ai_slots = ai.unwrap();
+        assert_eq!(ai_slots[0].name, "meta"); // inherited
+        assert_eq!(ai_slots[1].name, "channelName");
+
+        // control::Add2 (kit=2, type=3)
+        let add2 = db.get_slots(2, 3);
+        assert!(add2.is_some(), "control::Add2 not found");
+    }
+
+    #[test]
+    fn manifest_db_multiple_types_per_kit() {
+        let xml = r#"<?xml version='1.0'?>
+<kitManifest name="control" checksum="808b7db3" version="1.2.28">
+<type id="3" name="Add2" sizeof="72" base="sys::Component">
+  <slot id="0" name="out" type="float"/>
+  <slot id="1" name="in1" type="float"/>
+  <slot id="2" name="in2" type="float"/>
+</type>
+<type id="14" name="ConstFloat" sizeof="64" base="sys::Component">
+  <slot id="0" name="out" type="float" flags="c"/>
+  <slot id="1" name="set" type="float" flags="a"/>
+</type>
+<type id="18" name="Div2" sizeof="76" base="sys::Component">
+  <slot id="0" name="out" type="float"/>
+  <slot id="1" name="in1" type="float"/>
+  <slot id="2" name="in2" type="float"/>
+  <slot id="3" name="div0" type="bool"/>
+</type>
+</kitManifest>"#;
+
+        let mut db = ManifestDb::new();
+        let count = db.parse_kit_manifest(xml, 2);
+        assert_eq!(count, 3);
+
+        // Add2: meta + 3 slots = 4
+        let add2 = db.get_slots(2, 3).unwrap();
+        assert_eq!(add2.len(), 4);
+        assert_eq!(add2[0].name, "meta");
+        assert_eq!(add2[1].name, "out");
+
+        // ConstFloat: meta + 2 slots = 3
+        let cf = db.get_slots(2, 14).unwrap();
+        assert_eq!(cf.len(), 3);
+
+        // Div2: meta + 4 slots = 5
+        let div2 = db.get_slots(2, 18).unwrap();
+        assert_eq!(div2.len(), 5);
+        assert_eq!(div2[4].name, "div0");
+        assert_eq!(div2[4].type_id, SoxValueType::Bool as u8);
     }
 }
