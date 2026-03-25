@@ -492,7 +492,7 @@ mod tests {
         assert_eq!(SoxCmd::Subscribe as u8, 0x73);
         assert_eq!(SoxCmd::Unsubscribe as u8, 0x75);
         assert_eq!(SoxCmd::Write as u8, 0x77);
-        assert_eq!(SoxCmd::Invoke as u8, 0x6B);
+        assert_eq!(SoxCmd::Invoke as u8, 0x69); // 'i' — CC editor invoke byte
         assert_eq!(SoxCmd::Add as u8, 0x61);
         assert_eq!(SoxCmd::Delete as u8, 0x64);
         assert_eq!(SoxCmd::Rename as u8, 0x6E);

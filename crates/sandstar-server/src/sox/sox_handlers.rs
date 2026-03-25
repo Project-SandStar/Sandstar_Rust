@@ -750,6 +750,44 @@ impl SubscriptionManager {
         }
         events
     }
+
+    /// Build a CONFIG COV event for a single component.
+    ///
+    /// Returns `(session_id, event_bytes)` pairs for each subscriber.
+    /// The event contains only config-flagged slot values (what='c').
+    /// Action slots are never serialized.
+    pub fn build_config_events(
+        &self,
+        comp_id: u16,
+        tree: &ComponentTree,
+    ) -> Vec<(u16, Vec<u8>)> {
+        let mut events = Vec::new();
+        let Some(comp) = tree.get(comp_id) else {
+            return events;
+        };
+        let Some(watchers) = self.subscriptions.get(&comp_id) else {
+            return events;
+        };
+
+        // Build raw event bytes: ['e', 0xFF, comp_id, 'c', config_slot_values...]
+        let mut payload = Vec::with_capacity(64);
+        payload.push(b'e');
+        payload.push(0xFF);
+        payload.extend_from_slice(&comp_id.to_be_bytes());
+        payload.push(b'c'); // what = config
+
+        // Write only config-flagged slot values in schema order
+        for slot in &comp.slots {
+            if slot.flags & SLOT_FLAG_ACTION != 0 { continue; }
+            if slot.flags & SLOT_FLAG_CONFIG == 0 { continue; }
+            encode_slot_value_raw(&mut payload, &slot.value);
+        }
+
+        for &session_id in watchers {
+            events.push((session_id, payload.clone()));
+        }
+        events
+    }
 }
 
 impl Default for SubscriptionManager {
@@ -1176,6 +1214,52 @@ fn handle_unsubscribe(
     SoxResponse::success(SoxCmd::Unsubscribe, req.req_id)
 }
 
+/// Build default slots for a component based on its kit_id and type_id.
+///
+/// Known types get their full slot schema from the kit manifest.
+/// Unknown types get a minimal [meta] slot and can be auto-extended on write.
+fn default_slots_for_type(kit_id: u8, type_id: u8) -> Vec<VirtualSlot> {
+    match (kit_id, type_id) {
+        // control::ConstFloat (kit 2, type 14)
+        // Manifest slots: meta(Int,config), out(Float,config), set(Float,action), setNull(Void,action)
+        (2, 14) => vec![
+            VirtualSlot {
+                name: "meta".into(),
+                type_id: SoxValueType::Int as u8,
+                flags: SLOT_FLAG_CONFIG,
+                value: SlotValue::Int(1),
+            },
+            VirtualSlot {
+                name: "out".into(),
+                type_id: SoxValueType::Float as u8,
+                flags: SLOT_FLAG_CONFIG,
+                value: SlotValue::Float(0.0),
+            },
+            VirtualSlot {
+                name: "set".into(),
+                type_id: SoxValueType::Float as u8,
+                flags: SLOT_FLAG_ACTION,
+                value: SlotValue::Float(0.0),
+            },
+            VirtualSlot {
+                name: "setNull".into(),
+                type_id: SoxValueType::Void as u8,
+                flags: SLOT_FLAG_ACTION,
+                value: SlotValue::Null,
+            },
+        ],
+        // Default: minimal meta slot for any other type
+        _ => vec![
+            VirtualSlot {
+                name: "meta".into(),
+                type_id: SoxValueType::Int as u8,
+                flags: SLOT_FLAG_CONFIG,
+                value: SlotValue::Int(1),
+            },
+        ],
+    }
+}
+
 /// add ('a') — add a new component to the tree.
 ///
 /// Request: u2 parentId, u1 kitId, u1 typeId, str name, [configValues...]
@@ -1196,6 +1280,7 @@ fn handle_add(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
     }
 
     let new_id = tree.next_comp_id();
+    let slots = default_slots_for_type(kit_id, type_id);
     let comp = VirtualComponent {
         comp_id: new_id,
         parent_id,
@@ -1204,7 +1289,7 @@ fn handle_add(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
         kit_id,
         type_id,
         children: Vec::new(),
-        slots: Vec::new(), // config values could be parsed from remaining bytes
+        slots,
     };
     tree.add(comp);
 
@@ -1278,6 +1363,7 @@ fn handle_invoke(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
         tracing::info!(comp_id, slot_id, value = val, "SOX: invoke set action");
         // Update the component's slots — find a float slot named "out" or use slot 1
         if let Some(comp) = tree.get_mut(comp_id) {
+            tracing::info!(comp_id, num_slots = comp.slots.len(), "SOX: invoke - comp found");
             // Look for "out" slot or the first float slot after actions
             for slot in comp.slots.iter_mut() {
                 if slot.name == "out" || (matches!(slot.value, SlotValue::Float(_))) {

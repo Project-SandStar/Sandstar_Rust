@@ -163,6 +163,22 @@ async fn run_sox_server(
                             }
                         }
 
+                        // After invoke ('k') or write ('w') on a non-channel component:
+                        // push a CONFIG COV event so the editor updates displayed values.
+                        // This is needed for components like ConstFloat where "out" is a
+                        // config slot — the editor's applyProps for 'c' reads config slots.
+                        if (request.cmd as u8 == b'k' || request.cmd as u8 == b'w')
+                            && request.payload.len() >= 2
+                        {
+                            let target_comp = u16::from_be_bytes([request.payload[0], request.payload[1]]);
+                            if !tree.is_channel_comp(target_comp) {
+                                let events = subscriptions.build_config_events(target_comp, &tree);
+                                for (sid, evt) in events {
+                                    let _ = transport.send_to_session(sid, &evt);
+                                }
+                            }
+                        }
+
                         // After Add/Delete: push tree event for the parent so editor refreshes
                         if request.cmd as u8 == b'a' || request.cmd as u8 == b'd' {
                             // Get parent_id from the request payload
