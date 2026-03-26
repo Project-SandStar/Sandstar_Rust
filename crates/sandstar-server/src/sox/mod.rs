@@ -251,9 +251,56 @@ async fn run_sox_server(
                             }
                         }
 
+                        // After Link add/delete: push LINKS COV events for affected components.
+                        if request.cmd as u8 == b'l' && response_bytes[0] == b'L' && request.payload.len() >= 7 {
+                            // Parse the affected comp IDs from the link request payload
+                            // payload: u1 subcmd, u2 fromComp, u1 fromSlot, u2 toComp, u1 toSlot
+                            let from_comp = u16::from_be_bytes([request.payload[1], request.payload[2]]);
+                            let to_comp = u16::from_be_bytes([request.payload[4], request.payload[5]]);
+                            // Send links COV event for both affected components
+                            for &affected_id in &[from_comp, to_comp] {
+                                if let Some(comp) = tree.get(affected_id) {
+                                    let mut evt = Vec::with_capacity(64);
+                                    evt.push(b'e');
+                                    evt.push(0xFF);
+                                    evt.extend_from_slice(&affected_id.to_be_bytes());
+                                    evt.push(b'l'); // what = links
+                                    // Write links for this component + 0xFFFF terminator
+                                    for link in &comp.links {
+                                        evt.extend_from_slice(&link.from_comp.to_be_bytes());
+                                        evt.push(link.from_slot);
+                                        evt.extend_from_slice(&link.to_comp.to_be_bytes());
+                                        evt.push(link.to_slot);
+                                    }
+                                    evt.extend_from_slice(&0xFFFFu16.to_be_bytes());
+                                    let _ = transport.send_to_session(session_id, &evt);
+                                }
+                            }
+                        }
+
                         // After subscribe: queue all channel components for COV push.
                         if request.cmd as u8 == b's' {
                             force_full_cov = true;
+                            // Also push link events for all components that have links
+                            for comp_id in tree.comp_ids() {
+                                if let Some(comp) = tree.get(comp_id) {
+                                    if !comp.links.is_empty() {
+                                        let mut evt = Vec::with_capacity(64);
+                                        evt.push(b'e');
+                                        evt.push(0xFF);
+                                        evt.extend_from_slice(&comp_id.to_be_bytes());
+                                        evt.push(b'l');
+                                        for link in &comp.links {
+                                            evt.extend_from_slice(&link.from_comp.to_be_bytes());
+                                            evt.push(link.from_slot);
+                                            evt.extend_from_slice(&link.to_comp.to_be_bytes());
+                                            evt.push(link.to_slot);
+                                        }
+                                        evt.extend_from_slice(&0xFFFFu16.to_be_bytes());
+                                        let _ = transport.send_to_session(session_id, &evt);
+                                    }
+                                }
+                            }
                         }
                     }
                 }

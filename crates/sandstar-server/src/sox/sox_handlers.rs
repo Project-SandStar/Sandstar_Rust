@@ -222,29 +222,44 @@ impl ComponentTree {
     /// Add a link to the tree. Returns true if the link was added (not a duplicate).
     pub fn add_link(&mut self, from_comp: u16, from_slot: u8, to_comp: u16, to_slot: u8) -> bool {
         let link = Link { from_comp, from_slot, to_comp, to_slot };
-        // Store the link on the "to" component (the destination/input side),
-        // matching Sedona convention where links are read from the target component.
-        if let Some(comp) = self.components.get_mut(&to_comp) {
+        // Store the link on BOTH components so the editor can render wires
+        // from both the source and target sides.
+        if let Some(comp) = self.components.get(&to_comp) {
             if comp.links.contains(&link) {
                 return false;
             }
-            comp.links.push(link);
-            true
         } else {
-            false
+            return false;
         }
+        if let Some(comp) = self.components.get_mut(&to_comp) {
+            comp.links.push(link.clone());
+        }
+        if from_comp != to_comp {
+            if let Some(comp) = self.components.get_mut(&from_comp) {
+                if !comp.links.contains(&link) {
+                    comp.links.push(link);
+                }
+            }
+        }
+        true
     }
 
     /// Remove a link from the tree. Returns true if the link was found and removed.
     pub fn remove_link(&mut self, from_comp: u16, from_slot: u8, to_comp: u16, to_slot: u8) -> bool {
         let link = Link { from_comp, from_slot, to_comp, to_slot };
+        let mut removed = false;
+        // Remove from both components
         if let Some(comp) = self.components.get_mut(&to_comp) {
             let before = comp.links.len();
             comp.links.retain(|l| l != &link);
-            comp.links.len() < before
-        } else {
-            false
+            if comp.links.len() < before { removed = true; }
         }
+        if from_comp != to_comp {
+            if let Some(comp) = self.components.get_mut(&from_comp) {
+                comp.links.retain(|l| l != &link);
+            }
+        }
+        removed
     }
 
     /// Get all links where comp_id is involved (as source or destination).
