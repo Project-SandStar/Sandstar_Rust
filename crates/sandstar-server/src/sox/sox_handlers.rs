@@ -71,6 +71,17 @@ pub const SLOT_FLAG_RUNTIME: u8 = 0x04;
 #[allow(dead_code)]
 pub const SLOT_FLAG_OPERATOR: u8 = 0x08;
 
+// ---- Links ----
+
+/// A Sedona component link (wiring an output slot to an input slot).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Link {
+    pub from_comp: u16,
+    pub from_slot: u8,
+    pub to_comp: u16,
+    pub to_slot: u8,
+}
+
 // ---- Virtual component ----
 
 /// A virtual Sedona component mapped from engine data.
@@ -84,6 +95,7 @@ pub struct VirtualComponent {
     pub type_id: u8,
     pub children: Vec<u16>,
     pub slots: Vec<VirtualSlot>,
+    pub links: Vec<Link>,
 }
 
 /// A single slot on a virtual component.
@@ -207,6 +219,72 @@ impl ComponentTree {
         }
     }
 
+    /// Add a link to the tree. Returns true if the link was added (not a duplicate).
+    pub fn add_link(&mut self, from_comp: u16, from_slot: u8, to_comp: u16, to_slot: u8) -> bool {
+        let link = Link { from_comp, from_slot, to_comp, to_slot };
+        // Store the link on the "to" component (the destination/input side),
+        // matching Sedona convention where links are read from the target component.
+        if let Some(comp) = self.components.get_mut(&to_comp) {
+            if comp.links.contains(&link) {
+                return false;
+            }
+            comp.links.push(link);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove a link from the tree. Returns true if the link was found and removed.
+    pub fn remove_link(&mut self, from_comp: u16, from_slot: u8, to_comp: u16, to_slot: u8) -> bool {
+        let link = Link { from_comp, from_slot, to_comp, to_slot };
+        if let Some(comp) = self.components.get_mut(&to_comp) {
+            let before = comp.links.len();
+            comp.links.retain(|l| l != &link);
+            comp.links.len() < before
+        } else {
+            false
+        }
+    }
+
+    /// Get all links where comp_id is involved (as source or destination).
+    pub fn get_links(&self, comp_id: u16) -> Vec<&Link> {
+        let mut result = Vec::new();
+        // Links stored on this component (where it is the "to" target)
+        if let Some(comp) = self.components.get(&comp_id) {
+            result.extend(comp.links.iter());
+        }
+        // Links stored on other components where this comp is the "from" source
+        for comp in self.components.values() {
+            for link in &comp.links {
+                if link.from_comp == comp_id && link.to_comp != comp_id {
+                    result.push(link);
+                }
+            }
+        }
+        result
+    }
+
+    /// Reorder a parent's children to match the given order.
+    /// Returns true if the parent exists and the reorder succeeded.
+    /// All child IDs in the new order must be current children of the parent.
+    pub fn reorder_children(&mut self, parent_id: u16, child_ids: &[u16]) -> bool {
+        if let Some(parent) = self.components.get_mut(&parent_id) {
+            // Validate: new order must contain exactly the same children
+            let mut existing: Vec<u16> = parent.children.clone();
+            let mut proposed: Vec<u16> = child_ids.to_vec();
+            existing.sort();
+            proposed.sort();
+            if existing != proposed {
+                return false;
+            }
+            parent.children = child_ids.to_vec();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Build a virtual component tree from engine channel data.
     ///
     /// Creates the standard Sedona tree structure with service nodes
@@ -238,6 +316,7 @@ impl ComponentTree {
                 flags: SLOT_FLAG_CONFIG,
                 value: SlotValue::Str("sandstar".into()),
             }],
+            links: Vec::new(),
         });
 
         // Service folder (compId=1)
@@ -250,6 +329,7 @@ impl ComponentTree {
             type_id: 11, // Folder
             children: Vec::new(),
             slots: Vec::new(),
+            links: Vec::new(),
         });
 
         // SOX service (compId=2)
@@ -267,6 +347,7 @@ impl ComponentTree {
                 flags: SLOT_FLAG_CONFIG,
                 value: SlotValue::Int(1876),
             }],
+            links: Vec::new(),
         });
 
         // Users service (compId=3)
@@ -279,6 +360,7 @@ impl ComponentTree {
             type_id: 16, // UserService
             children: Vec::new(),
             slots: Vec::new(),
+            links: Vec::new(),
         });
 
         // Platform service (compId=4)
@@ -296,6 +378,7 @@ impl ComponentTree {
                 flags: SLOT_FLAG_PROPERTY,
                 value: SlotValue::Str("sandstar-rust".into()),
             }],
+            links: Vec::new(),
         });
 
         // IO folder (compId=5)
@@ -308,6 +391,7 @@ impl ComponentTree {
             type_id: 11, // Folder
             children: Vec::new(),
             slots: Vec::new(),
+            links: Vec::new(),
         });
 
         // Control folder (compId=6)
@@ -320,6 +404,7 @@ impl ComponentTree {
             type_id: 11, // Folder
             children: Vec::new(),
             slots: Vec::new(),
+            links: Vec::new(),
         });
 
         // Map each channel to a component under io (compId = 100 + index)
@@ -334,6 +419,7 @@ impl ComponentTree {
                 type_id: 0, // AnalogInput
                 children: Vec::new(),
                 slots: channel_slots(ch),
+                links: Vec::new(),
             });
         }
 
@@ -1210,6 +1296,8 @@ pub fn handle_sox_request(
         SoxCmd::Add => handle_add(request, tree),
         SoxCmd::Delete => handle_delete(request, tree),
         SoxCmd::Rename => handle_rename(request, tree),
+        SoxCmd::Link => handle_link(request, tree),
+        SoxCmd::Reorder => handle_reorder(request, tree),
         SoxCmd::Invoke => handle_invoke(request, tree),
         SoxCmd::FileOpen => handle_file_open(request),
         SoxCmd::FileRead => handle_file_read(request),
@@ -1437,8 +1525,14 @@ fn handle_read_comp(req: &SoxRequest, tree: &ComponentTree) -> SoxResponse {
             }
         }
         b'l' => {
-            // Links: u1 numLinks, then link data.
-            resp.write_u8(0); // no links
+            // Links: repeating [u2 fromComp, u1 fromSlot, u2 toComp, u1 toSlot] + u2 0xFFFF terminator
+            for link in &comp.links {
+                resp.write_u16(link.from_comp);
+                resp.write_u8(link.from_slot);
+                resp.write_u16(link.to_comp);
+                resp.write_u8(link.to_slot);
+            }
+            resp.write_u16(0xFFFF); // terminator
         }
         _ => {
             // Unknown what — return empty
@@ -1550,7 +1644,13 @@ fn handle_subscribe(
                     }
                 }
                 b'l' => {
-                    resp.write_u8(0);
+                    for link in &comp.links {
+                        resp.write_u16(link.from_comp);
+                        resp.write_u8(link.from_slot);
+                        resp.write_u16(link.to_comp);
+                        resp.write_u8(link.to_slot);
+                    }
+                    resp.write_u16(0xFFFF);
                 }
                 _ => {}
             }
@@ -1749,6 +1849,7 @@ fn handle_add(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
         type_id,
         children: Vec::new(),
         slots,
+        links: Vec::new(),
     };
     tree.add(comp);
 
@@ -1800,6 +1901,84 @@ fn handle_rename(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
         SoxResponse::success(SoxCmd::Rename, req.req_id)
     } else {
         error_msg(req.cmd, req.req_id, "bad compId")
+    }
+}
+
+/// link ('l') — add or delete a component link.
+///
+/// Request: u1 subcmd ('a'=add, 'd'=delete), u2 fromCompId, u1 fromSlotId, u2 toCompId, u1 toSlotId
+/// Response: 'L' + replyNum
+pub fn handle_link(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
+    let mut reader = SoxReader::new(&req.payload);
+    let subcmd = match reader.read_u8() {
+        Some(b) => b,
+        None => return error_msg(req.cmd, req.req_id, "missing subcmd"),
+    };
+    let from_comp = match reader.read_u16() {
+        Some(id) => id,
+        None => return error_msg(req.cmd, req.req_id, "missing fromCompId"),
+    };
+    let from_slot = match reader.read_u8() {
+        Some(id) => id,
+        None => return error_msg(req.cmd, req.req_id, "missing fromSlotId"),
+    };
+    let to_comp = match reader.read_u16() {
+        Some(id) => id,
+        None => return error_msg(req.cmd, req.req_id, "missing toCompId"),
+    };
+    let to_slot = match reader.read_u8() {
+        Some(id) => id,
+        None => return error_msg(req.cmd, req.req_id, "missing toSlotId"),
+    };
+
+    match subcmd {
+        b'a' => {
+            if tree.add_link(from_comp, from_slot, to_comp, to_slot) {
+                tracing::info!(from_comp, from_slot, to_comp, to_slot, "SOX: link added");
+                SoxResponse::success(SoxCmd::Link, req.req_id)
+            } else {
+                error_msg(req.cmd, req.req_id, "link add failed")
+            }
+        }
+        b'd' => {
+            if tree.remove_link(from_comp, from_slot, to_comp, to_slot) {
+                tracing::info!(from_comp, from_slot, to_comp, to_slot, "SOX: link removed");
+                SoxResponse::success(SoxCmd::Link, req.req_id)
+            } else {
+                error_msg(req.cmd, req.req_id, "link not found")
+            }
+        }
+        _ => error_msg(req.cmd, req.req_id, "unknown link subcmd"),
+    }
+}
+
+/// reorder ('o') — reorder a parent component's children.
+///
+/// Request: u2 parentCompId, u1 childCount, u2[] childIds
+/// Response: 'O' + replyNum
+pub fn handle_reorder(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
+    let mut reader = SoxReader::new(&req.payload);
+    let parent_id = match reader.read_u16() {
+        Some(id) => id,
+        None => return error_msg(req.cmd, req.req_id, "missing parentId"),
+    };
+    let count = match reader.read_u8() {
+        Some(c) => c,
+        None => return error_msg(req.cmd, req.req_id, "missing childCount"),
+    };
+    let mut child_ids = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        match reader.read_u16() {
+            Some(id) => child_ids.push(id),
+            None => return error_msg(req.cmd, req.req_id, "missing childId"),
+        }
+    }
+
+    if tree.reorder_children(parent_id, &child_ids) {
+        tracing::info!(parent_id, count, "SOX: children reordered");
+        SoxResponse::success(SoxCmd::Reorder, req.req_id)
+    } else {
+        error_msg(req.cmd, req.req_id, "reorder failed")
     }
 }
 
@@ -2045,6 +2224,7 @@ mod tests {
             type_id: 0,
             children: Vec::new(),
             slots: Vec::new(),
+            links: Vec::new(),
         });
         assert_eq!(tree.len(), 1);
         assert!(!tree.is_empty());
@@ -2065,6 +2245,7 @@ mod tests {
             type_id: 0,
             children: Vec::new(),
             slots: Vec::new(),
+            links: Vec::new(),
         });
         tree.add(VirtualComponent {
             comp_id: 1,
@@ -2075,6 +2256,7 @@ mod tests {
             type_id: 1,
             children: Vec::new(),
             slots: Vec::new(),
+            links: Vec::new(),
         });
         let root = tree.get(0).unwrap();
         assert_eq!(root.children, vec![1]);
@@ -2453,8 +2635,12 @@ mod tests {
         };
         let resp = handle_read_comp(&req, &tree);
         assert_eq!(resp.cmd, b'C');
-        // Last byte of payload should be 0 (no links)
-        assert_eq!(*resp.payload.last().unwrap(), 0);
+        // No links — payload should contain compId(0) + what('l') + 0xFFFF terminator
+        // Payload: [0x00, 0x00, b'l', 0xFF, 0xFF]
+        let payload = &resp.payload;
+        assert_eq!(payload.len(), 5); // u2 compId + u1 what + u2 terminator
+        assert_eq!(payload[3], 0xFF);
+        assert_eq!(payload[4], 0xFF);
     }
 
     // ---- Subscription tests ----
@@ -3023,6 +3209,7 @@ mod tests {
             type_id: 10,
             children: Vec::new(),
             slots: Vec::new(),
+            links: Vec::new(),
         });
         tree.add(VirtualComponent {
             comp_id: 6,
@@ -3033,6 +3220,7 @@ mod tests {
             type_id: 11,
             children: Vec::new(),
             slots: Vec::new(),
+            links: Vec::new(),
         });
 
         // Add a ConstFloat (kit=2, type=14) under control folder
@@ -3075,6 +3263,7 @@ mod tests {
             type_id: 10,
             children: Vec::new(),
             slots: Vec::new(),
+            links: Vec::new(),
         });
 
         // Add a ConstFloat without manifest — should use hardcoded fallback
@@ -3182,5 +3371,186 @@ mod tests {
         assert_eq!(div2.len(), 5);
         assert_eq!(div2[4].name, "div0");
         assert_eq!(div2[4].type_id, SoxValueType::Bool as u8);
+    }
+
+    // ---- Link tests ----
+
+    #[test]
+    fn handle_link_add() {
+        let mut tree = ComponentTree::from_channels(&sample_channels());
+        // Add a link: from comp 100 slot 6 -> to comp 101 slot 1
+        let mut payload = Vec::new();
+        payload.push(b'a'); // subcmd = add
+        payload.extend_from_slice(&100u16.to_be_bytes()); // fromCompId
+        payload.push(6); // fromSlotId
+        payload.extend_from_slice(&101u16.to_be_bytes()); // toCompId
+        payload.push(1); // toSlotId
+        let req = SoxRequest { cmd: SoxCmd::Link, req_id: 10, payload };
+        let resp = handle_link(&req, &mut tree);
+        assert_eq!(resp.cmd, b'L');
+        assert_eq!(resp.req_id, 10);
+        // Verify link is stored on the destination component
+        let comp = tree.get(101).unwrap();
+        assert_eq!(comp.links.len(), 1);
+        assert_eq!(comp.links[0].from_comp, 100);
+        assert_eq!(comp.links[0].from_slot, 6);
+        assert_eq!(comp.links[0].to_comp, 101);
+        assert_eq!(comp.links[0].to_slot, 1);
+    }
+
+    #[test]
+    fn handle_link_delete() {
+        let mut tree = ComponentTree::from_channels(&sample_channels());
+        // First add a link
+        tree.add_link(100, 6, 101, 1);
+        assert_eq!(tree.get(101).unwrap().links.len(), 1);
+        // Now delete it via handler
+        let mut payload = Vec::new();
+        payload.push(b'd'); // subcmd = delete
+        payload.extend_from_slice(&100u16.to_be_bytes());
+        payload.push(6);
+        payload.extend_from_slice(&101u16.to_be_bytes());
+        payload.push(1);
+        let req = SoxRequest { cmd: SoxCmd::Link, req_id: 11, payload };
+        let resp = handle_link(&req, &mut tree);
+        assert_eq!(resp.cmd, b'L');
+        assert_eq!(tree.get(101).unwrap().links.len(), 0);
+    }
+
+    #[test]
+    fn handle_link_add_duplicate_fails() {
+        let mut tree = ComponentTree::from_channels(&sample_channels());
+        tree.add_link(100, 6, 101, 1);
+        // Try adding the same link again — should fail
+        let mut payload = Vec::new();
+        payload.push(b'a');
+        payload.extend_from_slice(&100u16.to_be_bytes());
+        payload.push(6);
+        payload.extend_from_slice(&101u16.to_be_bytes());
+        payload.push(1);
+        let req = SoxRequest { cmd: SoxCmd::Link, req_id: 12, payload };
+        let resp = handle_link(&req, &mut tree);
+        assert_eq!(resp.cmd, b'!'); // error
+    }
+
+    #[test]
+    fn handle_link_delete_nonexistent_fails() {
+        let mut tree = ComponentTree::from_channels(&sample_channels());
+        let mut payload = Vec::new();
+        payload.push(b'd');
+        payload.extend_from_slice(&100u16.to_be_bytes());
+        payload.push(6);
+        payload.extend_from_slice(&101u16.to_be_bytes());
+        payload.push(1);
+        let req = SoxRequest { cmd: SoxCmd::Link, req_id: 13, payload };
+        let resp = handle_link(&req, &mut tree);
+        assert_eq!(resp.cmd, b'!'); // error — link not found
+    }
+
+    #[test]
+    fn handle_link_unknown_subcmd_fails() {
+        let mut tree = ComponentTree::from_channels(&sample_channels());
+        let mut payload = Vec::new();
+        payload.push(b'x'); // unknown subcmd
+        payload.extend_from_slice(&100u16.to_be_bytes());
+        payload.push(6);
+        payload.extend_from_slice(&101u16.to_be_bytes());
+        payload.push(1);
+        let req = SoxRequest { cmd: SoxCmd::Link, req_id: 14, payload };
+        let resp = handle_link(&req, &mut tree);
+        assert_eq!(resp.cmd, b'!');
+    }
+
+    #[test]
+    fn read_comp_links_with_data() {
+        let mut tree = ComponentTree::from_channels(&sample_channels());
+        // Add two links to component 101
+        tree.add_link(100, 6, 101, 1);
+        tree.add_link(100, 7, 101, 2);
+        // Read links for comp 101
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&101u16.to_be_bytes());
+        payload.push(b'l');
+        let req = SoxRequest { cmd: SoxCmd::ReadComp, req_id: 15, payload };
+        let resp = handle_read_comp(&req, &tree);
+        assert_eq!(resp.cmd, b'C');
+        // Payload: u2 compId(101) + u1 what('l') + 2 links + u2 terminator
+        // Each link: u2 fromComp + u1 fromSlot + u2 toComp + u1 toSlot = 6 bytes
+        // Total: 3 + 12 + 2 = 17 bytes
+        let p = &resp.payload;
+        assert_eq!(p.len(), 17);
+        // First link: from=100, slot=6, to=101, slot=1
+        assert_eq!(u16::from_be_bytes([p[3], p[4]]), 100); // fromComp
+        assert_eq!(p[5], 6); // fromSlot
+        assert_eq!(u16::from_be_bytes([p[6], p[7]]), 101); // toComp
+        assert_eq!(p[8], 1); // toSlot
+        // Second link
+        assert_eq!(u16::from_be_bytes([p[9], p[10]]), 100);
+        assert_eq!(p[11], 7);
+        assert_eq!(u16::from_be_bytes([p[12], p[13]]), 101);
+        assert_eq!(p[14], 2);
+        // Terminator
+        assert_eq!(u16::from_be_bytes([p[15], p[16]]), 0xFFFF);
+    }
+
+    // ---- Reorder tests ----
+
+    #[test]
+    fn handle_reorder_success() {
+        let mut tree = ComponentTree::from_channels(&sample_channels());
+        // The io folder (comp 5) has children from sample_channels
+        let io = tree.get(5).unwrap();
+        let original_children = io.children.clone();
+        assert!(original_children.len() >= 2, "need at least 2 children to reorder");
+        // Reverse the children order
+        let mut reversed = original_children.clone();
+        reversed.reverse();
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&5u16.to_be_bytes()); // parentId
+        payload.push(reversed.len() as u8); // count
+        for &id in &reversed {
+            payload.extend_from_slice(&id.to_be_bytes());
+        }
+        let req = SoxRequest { cmd: SoxCmd::Reorder, req_id: 20, payload };
+        let resp = handle_reorder(&req, &mut tree);
+        assert_eq!(resp.cmd, b'O');
+        assert_eq!(tree.get(5).unwrap().children, reversed);
+    }
+
+    #[test]
+    fn handle_reorder_wrong_children_fails() {
+        let mut tree = ComponentTree::from_channels(&sample_channels());
+        // Try reordering with a child that doesn't belong
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&5u16.to_be_bytes()); // parentId = io folder
+        payload.push(1); // count
+        payload.extend_from_slice(&999u16.to_be_bytes()); // bogus child
+        let req = SoxRequest { cmd: SoxCmd::Reorder, req_id: 21, payload };
+        let resp = handle_reorder(&req, &mut tree);
+        assert_eq!(resp.cmd, b'!');
+    }
+
+    #[test]
+    fn handle_reorder_nonexistent_parent_fails() {
+        let mut tree = ComponentTree::from_channels(&sample_channels());
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&999u16.to_be_bytes()); // nonexistent parent
+        payload.push(0); // count=0
+        let req = SoxRequest { cmd: SoxCmd::Reorder, req_id: 22, payload };
+        let resp = handle_reorder(&req, &mut tree);
+        assert_eq!(resp.cmd, b'!');
+    }
+
+    #[test]
+    fn get_links_returns_both_directions() {
+        let mut tree = ComponentTree::from_channels(&sample_channels());
+        tree.add_link(100, 6, 101, 1);
+        tree.add_link(101, 6, 100, 2);
+        // Links for comp 100: one as source (from=100), one as destination (to=100)
+        let links = tree.get_links(100);
+        assert_eq!(links.len(), 2);
+        // Links for comp 101: one as destination (to=101), one as source (from=101)
+        let links = tree.get_links(101);
+        assert_eq!(links.len(), 2);
     }
 }
