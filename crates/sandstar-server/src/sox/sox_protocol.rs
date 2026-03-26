@@ -33,8 +33,8 @@ pub enum SoxCmd {
     ReadComp = b'c',
     /// Read single property ('r' request, 'R' response).
     ReadProp = b'r',
-    /// Read link.
-    ReadLink = b'l',
+    /// Link add/delete.
+    Link = b'l',
 
     // -- Subscriptions --
     /// Register for COV (change-of-value) events.
@@ -81,7 +81,7 @@ impl SoxCmd {
             b'y' => Some(Self::ReadVersion),
             b'c' => Some(Self::ReadComp),
             b'r' => Some(Self::ReadProp),
-            b'l' => Some(Self::ReadLink),
+            b'l' => Some(Self::Link),
             b's' => Some(Self::Subscribe),
             b'u' => Some(Self::Unsubscribe),
             b'w' => Some(Self::Write),
@@ -438,7 +438,7 @@ mod tests {
             (b'n', SoxCmd::Rename),
             (b'c', SoxCmd::ReadComp),
             (b'r', SoxCmd::ReadProp),
-            (b'l', SoxCmd::ReadLink),
+            (b'l', SoxCmd::Link),
             (b's', SoxCmd::Subscribe),
             (b'u', SoxCmd::Unsubscribe),
             (b'w', SoxCmd::Write),

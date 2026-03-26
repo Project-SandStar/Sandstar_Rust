@@ -324,12 +324,25 @@ async fn run_sox_server(
                     Ok(channels) => {
                         let changed = tree.update_from_channels(&channels);
 
+                        // Execute link propagation and component logic
+                        let link_changed = tree.execute_links();
+                        let comp_changed = tree.execute_components();
+                        if !link_changed.is_empty() || !comp_changed.is_empty() {
+                            info!(links = link_changed.len(), comps = comp_changed.len(), "SOX: dataflow executed");
+                        }
+
                         // On first tick after subscribe, queue ALL channel comps for gradual push
                         if force_full_cov {
                             force_full_cov = false;
                             pending_cov.clear();
                             for id in sox_handlers::CHANNEL_COMP_BASE..tree.channel_comp_end {
                                 pending_cov.push_back(id);
+                            }
+                            // Also queue non-channel components
+                            for &id in link_changed.iter().chain(comp_changed.iter()) {
+                                if !pending_cov.contains(&id) {
+                                    pending_cov.push_back(id);
+                                }
                             }
                             info!(count = pending_cov.len(), "SOX: queued full COV after subscribe");
                         }
@@ -338,6 +351,41 @@ async fn run_sox_server(
                         for id in &changed {
                             if !pending_cov.contains(id) {
                                 pending_cov.push_back(*id);
+                            }
+                        }
+
+                        // Push BOTH config AND runtime COV events for non-channel components
+                        // that changed (link propagation or component execution results).
+                        // Config events update config slots (meta, out for ConstFloat).
+                        // Runtime events update runtime slots (in1, in2, out for Add2).
+                        for &id in link_changed.iter().chain(comp_changed.iter()) {
+                            if !tree.is_channel_comp(id) {
+                                // Config COV
+                                let events = subscriptions.build_config_events(id, &tree);
+                                for (session_id, event_bytes) in events {
+                                    let _ = transport.send_to_session(session_id, &event_bytes);
+                                }
+                                // Runtime COV (for slots like in1, in2 on Add2)
+                                if let Some(comp) = tree.get(id) {
+                                    let watchers: Vec<u16> = subscriptions.get_watchers(id)
+                                        .map(|w| w.iter().copied().collect())
+                                        .unwrap_or_default();
+                                    if !watchers.is_empty() {
+                                        let mut evt = Vec::with_capacity(64);
+                                        evt.push(b'e');
+                                        evt.push(0xFF);
+                                        evt.extend_from_slice(&id.to_be_bytes());
+                                        evt.push(b'r'); // runtime
+                                        for slot in &comp.slots {
+                                            if slot.flags & sox_handlers::SLOT_FLAG_ACTION != 0 { continue; }
+                                            if slot.flags & sox_handlers::SLOT_FLAG_CONFIG != 0 { continue; }
+                                            sox_handlers::encode_slot_value_raw(&mut evt, &slot.value);
+                                        }
+                                        for sid in &watchers {
+                                            let _ = transport.send_to_session(*sid, &evt);
+                                        }
+                                    }
+                                }
                             }
                         }
 

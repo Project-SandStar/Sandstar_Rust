@@ -1,0 +1,8 @@
+-- Logs begin at Thu 2026-03-26 16:44:34 EDT, end at Thu 2026-03-26 19:08:44 EDT. --
+Mar 26 19:06:50 EAC-0C1C57FA1BBF sandstar-engine-server[31662]: 2026-03-26T23:06:50.663408Z  INFO sandstar_hal_linux::i2c: i2c: reinit_sensor device=2 address=37 protocol=Sdp810Dp
+Mar 26 19:06:50 EAC-0C1C57FA1BBF sandstar-engine-server[31662]: 2026-03-26T23:06:50.798669Z  WARN sandstar_hal_linux::i2c: reinit: failed to start continuous mode device=2 address=37
+Mar 26 19:06:50 EAC-0C1C57FA1BBF sandstar-engine-server[31662]: 2026-03-26T23:06:50.801643Z  WARN sandstar_engine::engine: i2c: reinit failed device=2 address=37 retry_in_s=60
+Mar 26 19:06:50 EAC-0C1C57FA1BBF sandstar-engine-server[31662]: 2026-03-26T23:06:50.801774Z  INFO sandstar_engine::engine: i2c: backing off reinit device=2 address=37 interval=60
+Mar 26 19:07:20 EAC-0C1C57FA1BBF sandstar-engine-server[31662]: 2026-03-26T23:07:20.663765Z  INFO sandstar_hal_linux::i2c: i2c: reinit_sensor device=2 address=37 protocol=Sdp810Temp
+Mar 26 19:07:20 EAC-0C1C57FA1BBF sandstar-engine-server[31662]: 2026-03-26T23:07:20.798919Z  WARN sandstar_hal_linux::i2c: reinit: failed to start continuous mode device=2 address=37
+Mar 26 19:07:20 EAC-0C1C57FA1BBF sandstar-engine-server[31662]: 2026-03-26T23:07:20.801882Z  INFO sandstar_engine::engine: i2c: backing off reinit device=2 address=37 interval=120

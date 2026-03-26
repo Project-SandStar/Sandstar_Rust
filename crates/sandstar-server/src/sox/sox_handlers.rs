@@ -263,21 +263,15 @@ impl ComponentTree {
     }
 
     /// Get all links where comp_id is involved (as source or destination).
+    ///
+    /// Since `add_link` stores each link on both the source and target components,
+    /// the comp's own `.links` list already contains all relevant links.
     pub fn get_links(&self, comp_id: u16) -> Vec<&Link> {
-        let mut result = Vec::new();
-        // Links stored on this component (where it is the "to" target)
         if let Some(comp) = self.components.get(&comp_id) {
-            result.extend(comp.links.iter());
+            comp.links.iter().collect()
+        } else {
+            Vec::new()
         }
-        // Links stored on other components where this comp is the "from" source
-        for comp in self.components.values() {
-            for link in &comp.links {
-                if link.from_comp == comp_id && link.to_comp != comp_id {
-                    result.push(link);
-                }
-            }
-        }
-        result
     }
 
     /// Reorder a parent's children to match the given order.
@@ -460,6 +454,122 @@ impl ComponentTree {
                 let new_slots = channel_slots(ch);
                 if slots_differ(&comp.slots, &new_slots) {
                     comp.slots = new_slots;
+                    changed.push(comp_id);
+                }
+            }
+        }
+        changed
+    }
+
+    /// Execute all links in the component tree: propagate values from source slots to target slots.
+    ///
+    /// Collects all link transfers first (to avoid borrow conflicts), then applies them.
+    /// Returns the list of comp_ids whose slot values changed.
+    pub fn execute_links(&mut self) -> Vec<u16> {
+        // Phase 1: collect all transfers (source_value, target_comp, target_slot)
+        let mut transfers: Vec<(SlotValue, u16, u8)> = Vec::new();
+        for comp in self.components.values() {
+            for link in &comp.links {
+                // Only process each link once: use the copy stored on the target component
+                if comp.comp_id != link.to_comp {
+                    continue;
+                }
+                // Read source slot value
+                if let Some(src_comp) = self.components.get(&link.from_comp) {
+                    if let Some(slot) = src_comp.slots.get(link.from_slot as usize) {
+                        transfers.push((slot.value.clone(), link.to_comp, link.to_slot));
+                    }
+                }
+            }
+        }
+
+        // Phase 2: apply transfers, track which comp_ids changed
+        let mut changed_set: HashSet<u16> = HashSet::new();
+        for (value, to_comp, to_slot) in transfers {
+            if let Some(comp) = self.components.get_mut(&to_comp) {
+                if let Some(slot) = comp.slots.get_mut(to_slot as usize) {
+                    if slot.value != value {
+                        slot.value = value;
+                        changed_set.insert(to_comp);
+                    }
+                }
+            }
+        }
+        changed_set.into_iter().collect()
+    }
+
+    /// Execute component-specific logic (math operations) after link propagation.
+    ///
+    /// Evaluates: Add2, Sub2, Mul2, Div2 — reads input slots, computes output, writes result.
+    /// Returns the list of comp_ids whose output slot values changed.
+    pub fn execute_components(&mut self) -> Vec<u16> {
+        // Phase 1: collect comp_ids that need evaluation and their current inputs
+        let mut evaluations: Vec<(u16, u8, u8)> = Vec::new(); // (comp_id, kit_id, type_id)
+        for comp in self.components.values() {
+            match (comp.kit_id, comp.type_id) {
+                (2, 3) | (2, 49) | (2, 37) | (2, 18) => {
+                    evaluations.push((comp.comp_id, comp.kit_id, comp.type_id));
+                }
+                _ => {}
+            }
+        }
+
+        // Phase 2: compute outputs
+        let mut updates: Vec<(u16, Vec<(usize, SlotValue)>)> = Vec::new();
+        for (comp_id, _kit_id, type_id) in &evaluations {
+            if let Some(comp) = self.components.get(comp_id) {
+                let in1 = match comp.slots.get(2) {
+                    Some(VirtualSlot { value: SlotValue::Float(v), .. }) => *v,
+                    _ => 0.0,
+                };
+                let in2 = match comp.slots.get(3) {
+                    Some(VirtualSlot { value: SlotValue::Float(v), .. }) => *v,
+                    _ => 0.0,
+                };
+
+                let mut slot_updates: Vec<(usize, SlotValue)> = Vec::new();
+                match type_id {
+                    3 => {
+                        // Add2: out = in1 + in2
+                        slot_updates.push((1, SlotValue::Float(in1 + in2)));
+                    }
+                    49 => {
+                        // Sub2: out = in1 - in2
+                        slot_updates.push((1, SlotValue::Float(in1 - in2)));
+                    }
+                    37 => {
+                        // Mul2: out = in1 * in2
+                        slot_updates.push((1, SlotValue::Float(in1 * in2)));
+                    }
+                    18 => {
+                        // Div2: out = in1 / in2, div0 flag
+                        let div0 = in2 == 0.0;
+                        let out = if div0 { 0.0 } else { in1 / in2 };
+                        slot_updates.push((1, SlotValue::Float(out)));
+                        slot_updates.push((4, SlotValue::Bool(div0)));
+                    }
+                    _ => {}
+                }
+                if !slot_updates.is_empty() {
+                    updates.push((*comp_id, slot_updates));
+                }
+            }
+        }
+
+        // Phase 3: apply updates, track changes
+        let mut changed: Vec<u16> = Vec::new();
+        for (comp_id, slot_updates) in updates {
+            if let Some(comp) = self.components.get_mut(&comp_id) {
+                let mut comp_changed = false;
+                for (slot_idx, new_value) in slot_updates {
+                    if let Some(slot) = comp.slots.get_mut(slot_idx) {
+                        if slot.value != new_value {
+                            slot.value = new_value;
+                            comp_changed = true;
+                        }
+                    }
+                }
+                if comp_changed {
                     changed.push(comp_id);
                 }
             }
@@ -3567,5 +3677,291 @@ mod tests {
         // Links for comp 101: one as destination (to=101), one as source (from=101)
         let links = tree.get_links(101);
         assert_eq!(links.len(), 2);
+    }
+
+    // ---- execute_links tests ----
+
+    /// Helper: create an Add2 component (kit_id=2, type_id=3) with standard slots:
+    /// slot 0 = meta (Int), slot 1 = out (Float), slot 2 = in1 (Float), slot 3 = in2 (Float)
+    fn make_math_comp(comp_id: u16, parent_id: u16, name: &str, kit_id: u8, type_id: u8) -> VirtualComponent {
+        VirtualComponent {
+            comp_id,
+            parent_id,
+            name: name.into(),
+            type_name: format!("math::{name}"),
+            kit_id,
+            type_id,
+            children: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "out".into(), type_id: 4, flags: 0, value: SlotValue::Float(0.0) },
+                VirtualSlot { name: "in1".into(), type_id: 4, flags: 0, value: SlotValue::Float(0.0) },
+                VirtualSlot { name: "in2".into(), type_id: 4, flags: 0, value: SlotValue::Float(0.0) },
+            ],
+            links: Vec::new(),
+        }
+    }
+
+    /// Helper: create a simple component with a single float output slot at index 1
+    fn make_source_comp(comp_id: u16, parent_id: u16, name: &str, out_value: f32) -> VirtualComponent {
+        VirtualComponent {
+            comp_id,
+            parent_id,
+            name: name.into(),
+            type_name: "func::ConstFloat".into(),
+            kit_id: 2,
+            type_id: 10, // arbitrary non-math type
+            children: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "out".into(), type_id: 4, flags: 0, value: SlotValue::Float(out_value) },
+            ],
+            links: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn execute_links_propagates_value() {
+        let mut tree = ComponentTree::new();
+        // Source component with out=42.0 at slot 1
+        tree.add(make_source_comp(200, NO_PARENT, "src", 42.0));
+        // Target Add2 component with in1 at slot 2
+        tree.add(make_math_comp(201, NO_PARENT, "add", 2, 3));
+        // Link: src.out(slot 1) -> add.in1(slot 2)
+        tree.add_link(200, 1, 201, 2);
+
+        let changed = tree.execute_links();
+        assert!(changed.contains(&201), "target should be in changed list");
+
+        let target = tree.get(201).unwrap();
+        match &target.slots[2].value {
+            SlotValue::Float(v) => assert_eq!(*v, 42.0),
+            other => panic!("expected Float, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn execute_links_no_change_returns_empty() {
+        let mut tree = ComponentTree::new();
+        tree.add(make_source_comp(200, NO_PARENT, "src", 0.0));
+        tree.add(make_math_comp(201, NO_PARENT, "add", 2, 3));
+        // Link src.out(0.0) -> add.in1 (already 0.0)
+        tree.add_link(200, 1, 201, 2);
+
+        let changed = tree.execute_links();
+        assert!(changed.is_empty(), "no value change should mean empty list");
+    }
+
+    #[test]
+    fn execute_links_chain_propagation() {
+        // Test: src(42.0) -> add1.in1, then add1.out -> add2.in1
+        // After one execute_links call, add1.in1=42.0 but add1.out is still 0.0
+        // (execute_components hasn't run yet), so add2.in1 should get 0.0
+        let mut tree = ComponentTree::new();
+        tree.add(make_source_comp(200, NO_PARENT, "src", 42.0));
+        tree.add(make_math_comp(201, NO_PARENT, "add1", 2, 3));
+        tree.add(make_math_comp(202, NO_PARENT, "add2", 2, 3));
+        tree.add_link(200, 1, 201, 2); // src.out -> add1.in1
+        tree.add_link(201, 1, 202, 2); // add1.out -> add2.in1
+
+        let changed = tree.execute_links();
+        // add1.in1 changed from 0.0 to 42.0
+        assert!(changed.contains(&201));
+        // add1.out is still 0.0 so add2.in1 stays 0.0 — no change
+        let add2 = tree.get(202).unwrap();
+        match &add2.slots[2].value {
+            SlotValue::Float(v) => assert_eq!(*v, 0.0),
+            other => panic!("expected Float, got {:?}", other),
+        }
+    }
+
+    // ---- execute_components tests ----
+
+    #[test]
+    fn execute_components_add2() {
+        let mut tree = ComponentTree::new();
+        let mut add = make_math_comp(200, NO_PARENT, "add", 2, 3);
+        add.slots[2].value = SlotValue::Float(10.0); // in1
+        add.slots[3].value = SlotValue::Float(20.0); // in2
+        tree.add(add);
+
+        let changed = tree.execute_components();
+        assert!(changed.contains(&200));
+        let comp = tree.get(200).unwrap();
+        match &comp.slots[1].value {
+            SlotValue::Float(v) => assert_eq!(*v, 30.0),
+            other => panic!("expected Float(30.0), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn execute_components_sub2() {
+        let mut tree = ComponentTree::new();
+        let mut sub = make_math_comp(200, NO_PARENT, "sub", 2, 49);
+        sub.slots[2].value = SlotValue::Float(50.0);
+        sub.slots[3].value = SlotValue::Float(20.0);
+        tree.add(sub);
+
+        let changed = tree.execute_components();
+        assert!(changed.contains(&200));
+        let comp = tree.get(200).unwrap();
+        match &comp.slots[1].value {
+            SlotValue::Float(v) => assert_eq!(*v, 30.0),
+            other => panic!("expected Float(30.0), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn execute_components_mul2() {
+        let mut tree = ComponentTree::new();
+        let mut mul = make_math_comp(200, NO_PARENT, "mul", 2, 37);
+        mul.slots[2].value = SlotValue::Float(6.0);
+        mul.slots[3].value = SlotValue::Float(7.0);
+        tree.add(mul);
+
+        let changed = tree.execute_components();
+        assert!(changed.contains(&200));
+        let comp = tree.get(200).unwrap();
+        match &comp.slots[1].value {
+            SlotValue::Float(v) => assert_eq!(*v, 42.0),
+            other => panic!("expected Float(42.0), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn execute_components_div2_normal() {
+        let mut tree = ComponentTree::new();
+        let mut div = make_math_comp(200, NO_PARENT, "div", 2, 18);
+        // Add div0 slot at index 4
+        div.slots.push(VirtualSlot { name: "div0".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) });
+        div.slots[2].value = SlotValue::Float(100.0);
+        div.slots[3].value = SlotValue::Float(4.0);
+        tree.add(div);
+
+        let changed = tree.execute_components();
+        assert!(changed.contains(&200));
+        let comp = tree.get(200).unwrap();
+        match &comp.slots[1].value {
+            SlotValue::Float(v) => assert_eq!(*v, 25.0),
+            other => panic!("expected Float(25.0), got {:?}", other),
+        }
+        match &comp.slots[4].value {
+            SlotValue::Bool(v) => assert!(!v, "div0 should be false"),
+            other => panic!("expected Bool(false), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn execute_components_div2_by_zero() {
+        let mut tree = ComponentTree::new();
+        let mut div = make_math_comp(200, NO_PARENT, "div", 2, 18);
+        div.slots.push(VirtualSlot { name: "div0".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) });
+        div.slots[2].value = SlotValue::Float(100.0);
+        div.slots[3].value = SlotValue::Float(0.0); // divide by zero
+        tree.add(div);
+
+        let changed = tree.execute_components();
+        assert!(changed.contains(&200));
+        let comp = tree.get(200).unwrap();
+        match &comp.slots[1].value {
+            SlotValue::Float(v) => assert_eq!(*v, 0.0, "div by zero should produce 0.0"),
+            other => panic!("expected Float(0.0), got {:?}", other),
+        }
+        match &comp.slots[4].value {
+            SlotValue::Bool(v) => assert!(v, "div0 flag should be true"),
+            other => panic!("expected Bool(true), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn execute_components_no_change_when_already_computed() {
+        let mut tree = ComponentTree::new();
+        let mut add = make_math_comp(200, NO_PARENT, "add", 2, 3);
+        add.slots[2].value = SlotValue::Float(10.0);
+        add.slots[3].value = SlotValue::Float(20.0);
+        add.slots[1].value = SlotValue::Float(30.0); // already correct
+        tree.add(add);
+
+        let changed = tree.execute_components();
+        assert!(changed.is_empty(), "no change when output already correct");
+    }
+
+    #[test]
+    fn execute_components_ignores_unknown_types() {
+        let mut tree = ComponentTree::new();
+        // kit_id=2, type_id=10 is not a math component — should be ignored
+        tree.add(make_source_comp(200, NO_PARENT, "const", 99.0));
+
+        let changed = tree.execute_components();
+        assert!(changed.is_empty());
+    }
+
+    // ---- Combined link + component execution ----
+
+    #[test]
+    fn links_then_components_end_to_end() {
+        let mut tree = ComponentTree::new();
+        // Two ConstFloat sources
+        tree.add(make_source_comp(200, NO_PARENT, "a", 10.0));
+        tree.add(make_source_comp(201, NO_PARENT, "b", 20.0));
+        // Add2 component
+        tree.add(make_math_comp(202, NO_PARENT, "add", 2, 3));
+        // Wire: a.out -> add.in1, b.out -> add.in2
+        tree.add_link(200, 1, 202, 2);
+        tree.add_link(201, 1, 202, 3);
+
+        // Step 1: propagate links
+        let link_changed = tree.execute_links();
+        assert!(link_changed.contains(&202));
+
+        // Step 2: execute components
+        let comp_changed = tree.execute_components();
+        assert!(comp_changed.contains(&202));
+
+        // Verify output: 10.0 + 20.0 = 30.0
+        let add = tree.get(202).unwrap();
+        match &add.slots[1].value {
+            SlotValue::Float(v) => assert_eq!(*v, 30.0),
+            other => panic!("expected Float(30.0), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn two_cycle_chain_propagation() {
+        // src(5.0) -> mul.in1, const(3.0) -> mul.in2, mul.out -> add.in1, const2(7.0) -> add.in2
+        // After cycle 1: mul computes 5*3=15, but add gets stale mul.out
+        // After cycle 2: add gets 15 and computes 15+7=22
+        let mut tree = ComponentTree::new();
+        tree.add(make_source_comp(200, NO_PARENT, "src", 5.0));
+        tree.add(make_source_comp(201, NO_PARENT, "c3", 3.0));
+        tree.add(make_source_comp(203, NO_PARENT, "c7", 7.0));
+        tree.add(make_math_comp(202, NO_PARENT, "mul", 2, 37)); // Mul2
+        tree.add(make_math_comp(204, NO_PARENT, "add", 2, 3));  // Add2
+
+        tree.add_link(200, 1, 202, 2); // src -> mul.in1
+        tree.add_link(201, 1, 202, 3); // c3 -> mul.in2
+        tree.add_link(202, 1, 204, 2); // mul.out -> add.in1
+        tree.add_link(203, 1, 204, 3); // c7 -> add.in2
+
+        // Cycle 1
+        tree.execute_links();
+        tree.execute_components();
+
+        // Cycle 2
+        tree.execute_links();
+        tree.execute_components();
+
+        // mul.out = 5*3 = 15
+        let mul = tree.get(202).unwrap();
+        match &mul.slots[1].value {
+            SlotValue::Float(v) => assert_eq!(*v, 15.0),
+            other => panic!("expected 15.0, got {:?}", other),
+        }
+        // add.out = 15 + 7 = 22
+        let add = tree.get(204).unwrap();
+        match &add.slots[1].value {
+            SlotValue::Float(v) => assert_eq!(*v, 22.0),
+            other => panic!("expected 22.0, got {:?}", other),
+        }
     }
 }

@@ -1,0 +1,110 @@
+-- Logs begin at Thu 2026-03-26 16:19:04 EDT, end at Thu 2026-03-26 18:58:33 EDT. --
+Mar 26 18:48:52 EAC-0C1C57FA1BBF sandstar-engine-server[28583]: 2026-03-26T22:48:52.459606Z  INFO sandstar_hal_linux::i2c: i2c: reinit_sensor device=2 address=37 protocol=Sdp810Temp
+Mar 26 18:48:52 EAC-0C1C57FA1BBF sandstar-engine-server[28583]: 2026-03-26T22:48:52.595114Z  WARN sandstar_hal_linux::i2c: reinit: failed to start continuous mode device=2 address=37
+Mar 26 18:49:57 EAC-0C1C57FA1BBF systemd[1]: Stopping Sandstar Engine Server (Rust)...
+Mar 26 18:49:57 EAC-0C1C57FA1BBF systemd[1]: Stopped Sandstar Engine Server (Rust).
+Mar 26 18:50:02 EAC-0C1C57FA1BBF systemd[1]: Starting Sandstar Engine Server (Rust)...
+Mar 26 18:50:04 EAC-0C1C57FA1BBF initialize.sh[29937]: /home/eacio/sandstar/etc/init/initialize.sh: 30: /home/eacio/sandstar/etc/init/initialize.sh: cannot create /sys/class/pwm/pwmchip4/export: Directory nonexistent
+Mar 26 18:50:04 EAC-0C1C57FA1BBF initialize.sh[29937]: /home/eacio/sandstar/etc/init/initialize.sh: 31: /home/eacio/sandstar/etc/init/initialize.sh: cannot create /sys/class/pwm/pwmchip4/export: Directory nonexistent
+Mar 26 18:50:04 EAC-0C1C57FA1BBF initialize.sh[29937]: /home/eacio/sandstar/etc/init/initialize.sh: 32: /home/eacio/sandstar/etc/init/initialize.sh: cannot create /sys/class/pwm/pwmchip7/export: Directory nonexistent
+Mar 26 18:50:04 EAC-0C1C57FA1BBF initialize.sh[29937]: /home/eacio/sandstar/etc/init/initialize.sh: 33: /home/eacio/sandstar/etc/init/initialize.sh: cannot create /sys/class/pwm/pwmchip7/export: Directory nonexistent
+Mar 26 18:50:05 EAC-0C1C57FA1BBF systemd[1]: Started Sandstar Engine Server (Rust).
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: core dumps enabled (RLIMIT_CORE=unlimited)
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.694386Z  INFO sandstar_engine_server: core dump pattern pattern=core
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.701044Z  INFO sandstar_engine_server: sandstar engine server starting poll_ms=1000 socket=/tmp/sandstar-engine.sock read_only=false
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.707445Z  INFO sandstar_server::pid: PID file created pid=30126 path=/var/run/sandstar/sandstar-engine.pid
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.717771Z  INFO sandstar_engine_server: I2C bus detected subsystem=i2c
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.717951Z  INFO sandstar_engine_server: IIO ADC device detected subsystem=adc
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.718015Z  INFO sandstar_engine_server: GPIO sysfs available subsystem=gpio
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.718068Z  INFO sandstar_engine_server: PWM chips available subsystem=pwm
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.718120Z  INFO sandstar_engine_server: UART devices detected subsystem=uart
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.718186Z  INFO sandstar_engine_server: loading real configuration dir=/home/eacio/sandstar/etc/EacIo
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.746605Z  INFO sandstar_server::loader: loaded channels from points.csv count=138 path=/home/eacio/sandstar/etc/EacIo/points.csv
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.752806Z  INFO sandstar_engine_server: channels loaded count=138
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.770544Z  WARN sandstar_server::loader: table data file not found table=Thermistor10K2_WTS path=/home/eacio/sandstar/etc/EacIo/thermistor10K2_wts.txt
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.776800Z  INFO sandstar_server::loader: loaded tables count=16 path=/home/eacio/sandstar/etc/EacIo/tables.csv
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.784841Z  INFO sandstar_engine_server: tables loaded count=16
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.790684Z  INFO sandstar_server::loader: loaded channel config from database.zinc count=16 path=/home/eacio/sandstar/etc/EacIo/database.zinc
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.805120Z  INFO sandstar_engine_server: database.zinc channels configured count=16
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.805641Z  INFO sandstar_engine_server: engine initialized channels=150 polls=16
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.810132Z  INFO sandstar_server::control: control configuration loaded loops=1 components=5 path=/home/eacio/sandstar/etc/EacIo/control.toml
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.816965Z  INFO sandstar_engine_server: control engine loaded loops=1
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.817658Z  INFO sandstar_server::watchdog: watchdog: GPIO60 (TPL5010) opened
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.823802Z  INFO sandstar_engine_server: IPC listener ready socket=/tmp/sandstar-engine.sock
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.836112Z  INFO sandstar_engine_server: REST API listening on http://0.0.0.0:8085 (rate limit: 100 req/s) port=8085 rate_limit=100
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.836892Z  INFO sandstar_engine_server: SOX/DASP server starting port=1876
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.873017Z  INFO sandstar_server::sox::sox_handlers: loaded manifest kit="sys" kit_index=0 types=26 path=/home/eacio/sandstar/etc/manifests/sys.xml
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.887283Z  INFO sandstar_server::sox::sox_handlers: loaded manifest kit="EacIo" kit_index=1 types=10 path=/home/eacio/sandstar/etc/manifests/EacIo.xml
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.911516Z  INFO sandstar_server::sox::sox_handlers: loaded manifest kit="control" kit_index=2 types=60 path=/home/eacio/sandstar/etc/manifests/control.xml
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.929102Z  INFO sandstar_server::sox::sox_handlers: loaded manifest kit="driver" kit_index=3 types=7 path=/home/eacio/sandstar/etc/manifests/driver.xml
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.936214Z  INFO sandstar_server::sox::sox_handlers: loaded manifest kit="func" kit_index=4 types=12 path=/home/eacio/sandstar/etc/manifests/func.xml
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.952082Z  INFO sandstar_server::sox::sox_handlers: loaded manifest kit="hvac" kit_index=5 types=4 path=/home/eacio/sandstar/etc/manifests/hvac.xml
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.957030Z  INFO sandstar_server::sox::sox_handlers: loaded manifest kit="inet" kit_index=6 types=0 path=/home/eacio/sandstar/etc/manifests/inet.xml
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.962781Z  INFO sandstar_server::sox::sox_handlers: loaded manifest kit="logic" kit_index=7 types=13 path=/home/eacio/sandstar/etc/manifests/logic.xml
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.976299Z  INFO sandstar_server::sox::sox_handlers: loaded manifest kit="math" kit_index=8 types=16 path=/home/eacio/sandstar/etc/manifests/math.xml
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.978778Z  INFO sandstar_server::sox::sox_handlers: loaded manifest kit="platUnix" kit_index=9 types=1 path=/home/eacio/sandstar/etc/manifests/platUnix.xml
+Mar 26 18:50:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:05.988978Z  INFO sandstar_server::sox::sox_handlers: loaded manifest kit="pricomp" kit_index=10 types=4 path=/home/eacio/sandstar/etc/manifests/pricomp.xml
+Mar 26 18:50:06 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:06.000146Z  INFO sandstar_server::sox::sox_handlers: loaded manifest kit="shaystack" kit_index=11 types=13 path=/home/eacio/sandstar/etc/manifests/shaystack.xml
+Mar 26 18:50:06 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:06.007203Z  INFO sandstar_server::sox::sox_handlers: loaded manifest kit="sox" kit_index=12 types=3 path=/home/eacio/sandstar/etc/manifests/sox.xml
+Mar 26 18:50:06 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:06.010349Z  INFO sandstar_server::sox::sox_handlers: loaded manifest kit="types" kit_index=13 types=11 path=/home/eacio/sandstar/etc/manifests/types.xml
+Mar 26 18:50:06 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:06.022932Z  INFO sandstar_server::sox::sox_handlers: loaded manifest kit="web" kit_index=14 types=5 path=/home/eacio/sandstar/etc/manifests/web.xml
+Mar 26 18:50:06 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:06.024947Z  INFO sandstar_server::sox::sox_handlers: ManifestDb loaded total_types=185
+Mar 26 18:50:06 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:06.030259Z  INFO sandstar_engine_server: engine running — press Ctrl+C to stop
+Mar 26 18:50:06 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:06.032121Z  INFO sandstar_server::sox::dasp: DASP transport bound port=1876
+Mar 26 18:50:06 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:06.041935Z  INFO sandstar_server::sox: SOX/DASP server listening port=1876
+Mar 26 18:50:06 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:06.050610Z  INFO sandstar_server::sox: SOX component tree built components=157 manifest_types=185
+Mar 26 18:50:06 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:06.100011Z  WARN sandstar_hal_linux::i2c: i2c: all retries exhausted device=2 address=37 retries=3
+Mar 26 18:50:06 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:06.139803Z  WARN sandstar_hal_linux::i2c: i2c: all retries exhausted device=2 address=37 retries=3
+Mar 26 18:50:36 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:36.818842Z  INFO sandstar_hal_linux::i2c: i2c: reinit_sensor device=2 address=37 protocol=Sdp810Temp
+Mar 26 18:50:36 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:36.953921Z  WARN sandstar_hal_linux::i2c: reinit: failed to start continuous mode device=2 address=37
+Mar 26 18:50:36 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:36.956941Z  WARN sandstar_engine::engine: i2c: reinit failed device=2 address=37 retry_in_s=60
+Mar 26 18:50:36 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:36.957080Z  INFO sandstar_engine::engine: i2c: backing off reinit device=2 address=37 interval=60
+Mar 26 18:50:39 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:39.818103Z  INFO sandstar_server::sox::dasp: DASP: HELLO from 192.168.1.5:63166, assigned session 0x0001, remote 0x7dc8
+Mar 26 18:50:39 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:39.833145Z  INFO sandstar_server::sox::dasp: DASP: session 0x0001 authenticated (user=Some("admin"))
+Mar 26 18:50:40 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:40.078585Z  INFO sandstar_server::sox::sox_handlers: SOX: batchSubscribe session=1 mask=15 requested=1 total=157
+Mar 26 18:50:41 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:41.065621Z  INFO sandstar_server::sox: SOX: queued full COV after subscribe count=150
+Mar 26 18:50:50 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:50.320829Z  INFO sandstar_server::sox::sox_handlers: SOX: batchSubscribe session=1 mask=15 requested=3 total=156
+Mar 26 18:50:50 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:50.336008Z  INFO sandstar_server::sox::sox_handlers: SOX: batchSubscribe session=1 mask=15 requested=3 total=3
+Mar 26 18:50:51 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:50:51.065606Z  INFO sandstar_server::sox: SOX: queued full COV after subscribe count=150
+Mar 26 18:51:06 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:51:06.819270Z  INFO sandstar_hal_linux::i2c: i2c: reinit_sensor device=2 address=37 protocol=Sdp810Dp
+Mar 26 18:51:06 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:51:06.954176Z  WARN sandstar_hal_linux::i2c: reinit: failed to start continuous mode device=2 address=37
+Mar 26 18:51:06 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:51:06.957110Z  INFO sandstar_engine::engine: i2c: backing off reinit device=2 address=37 interval=120
+Mar 26 18:51:08 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:51:08.360326Z  INFO sandstar_server::sox::sox_handlers: SOX: component added new_id=250 parent_id=6 kit_id=2 type_id=14
+Mar 26 18:51:08 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:51:08.375862Z  INFO sandstar_server::sox::sox_handlers: SOX: batchSubscribe session=1 mask=15 requested=1 total=1
+Mar 26 18:51:09 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:51:09.065654Z  INFO sandstar_server::sox: SOX: queued full COV after subscribe count=150
+Mar 26 18:51:22 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:51:22.339899Z  INFO sandstar_server::sox::sox_handlers: SOX: invoke comp_id=250 slot_id=2 action=set target=out
+Mar 26 18:51:22 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:51:22.343182Z  INFO sandstar_server::sox::sox_handlers: SOX: action applied comp_id=250 slot=out val=Float(5.0)
+Mar 26 18:51:36 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:51:36.283290Z  INFO sandstar_server::sox::sox_handlers: SOX: component added new_id=251 parent_id=6 kit_id=2 type_id=3
+Mar 26 18:51:36 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:51:36.298904Z  INFO sandstar_server::sox::sox_handlers: SOX: batchSubscribe session=1 mask=15 requested=1 total=1
+Mar 26 18:51:37 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:51:37.066297Z  INFO sandstar_server::sox: SOX: queued full COV after subscribe count=150
+Mar 26 18:52:05 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:52:05.958388Z  INFO sandstar_server::sox: SOX write/invoke received session=1 cmd=119 req_id=0
+Mar 26 18:52:17 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:52:17.376274Z  INFO sandstar_server::sox: SOX write/invoke received session=1 cmd=119 req_id=0
+Mar 26 18:52:17 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:52:17.379838Z  INFO sandstar_server::sox: SOX: write parsed comp_id=251 slot_id=0
+Mar 26 18:52:17 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:52:17.382704Z  INFO sandstar_server::sox::sox_handlers: SOX: slot value updated comp_id=251 slot_id=0 name=meta value=Int(554172417)
+Mar 26 18:52:37 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:52:37.819142Z  INFO sandstar_hal_linux::i2c: i2c: reinit_sensor device=2 address=37 protocol=Sdp810Temp
+Mar 26 18:52:37 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:52:37.954144Z  WARN sandstar_hal_linux::i2c: reinit: failed to start continuous mode device=2 address=37
+Mar 26 18:52:37 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:52:37.957047Z  INFO sandstar_engine::engine: i2c: backing off reinit device=2 address=37 interval=240
+Mar 26 18:53:09 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:53:09.238692Z  INFO sandstar_server::sox::sox_handlers: SOX: batchSubscribe session=1 mask=15 requested=3 total=158
+Mar 26 18:53:10 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:53:10.065922Z  INFO sandstar_server::sox: SOX: queued full COV after subscribe count=150
+Mar 26 18:53:11 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:53:11.216525Z  INFO sandstar_server::sox::sox_handlers: SOX: batchSubscribe session=1 mask=15 requested=2 total=2
+Mar 26 18:53:12 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:53:12.065672Z  INFO sandstar_server::sox: SOX: queued full COV after subscribe count=150
+Mar 26 18:53:13 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:53:13.692126Z  INFO sandstar_server::sox::sox_handlers: SOX: batchSubscribe session=1 mask=15 requested=2 total=2
+Mar 26 18:53:14 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:53:14.065555Z  INFO sandstar_server::sox: SOX: queued full COV after subscribe count=150
+Mar 26 18:53:16 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:53:16.513278Z  INFO sandstar_server::sox: SOX write/invoke received session=1 cmd=119 req_id=0
+Mar 26 18:53:16 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:53:16.516374Z  INFO sandstar_server::sox: SOX: write parsed comp_id=250 slot_id=0
+Mar 26 18:53:16 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:53:16.519302Z  INFO sandstar_server::sox::sox_handlers: SOX: slot value updated comp_id=250 slot_id=0 name=meta value=Int(117768193)
+Mar 26 18:53:21 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:53:21.981821Z  INFO sandstar_server::sox: SOX write/invoke received session=1 cmd=119 req_id=0
+Mar 26 18:53:21 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:53:21.985473Z  INFO sandstar_server::sox: SOX: write parsed comp_id=251 slot_id=0
+Mar 26 18:53:21 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:53:21.988097Z  INFO sandstar_server::sox::sox_handlers: SOX: slot value updated comp_id=251 slot_id=0 name=meta value=Int(537395201)
+Mar 26 18:53:24 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:53:24.914015Z  INFO sandstar_server::sox::sox_handlers: SOX: link added from_comp=250 from_slot=1 to_comp=251 to_slot=2
+Mar 26 18:53:25 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:53:25.065399Z  INFO sandstar_server::sox: SOX: dataflow executed links=1 comps=1
+Mar 26 18:54:24 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:54:24.430824Z  INFO sandstar_server::sox: SOX write/invoke received session=1 cmd=119 req_id=0
+Mar 26 18:54:24 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:54:24.434390Z  INFO sandstar_server::sox: SOX: write parsed comp_id=250 slot_id=0
+Mar 26 18:54:24 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:54:24.437326Z  INFO sandstar_server::sox::sox_handlers: SOX: slot value updated comp_id=250 slot_id=0 name=meta value=Int(100990977)
+Mar 26 18:55:07 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:55:07.819054Z  INFO sandstar_hal_linux::i2c: i2c: reinit_sensor device=2 address=37 protocol=Sdp810Dp
+Mar 26 18:55:07 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:55:07.953753Z  WARN sandstar_hal_linux::i2c: reinit: failed to start continuous mode device=2 address=37
+Mar 26 18:55:07 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:55:07.956760Z  INFO sandstar_engine::engine: i2c: backing off reinit device=2 address=37 interval=300
+Mar 26 18:56:11 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:56:11.940898Z  INFO sandstar_server::sox::sox_handlers: SOX: batchSubscribe session=1 mask=15 requested=2 total=2
+Mar 26 18:56:12 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:56:12.065996Z  INFO sandstar_server::sox: SOX: queued full COV after subscribe count=150
+Mar 26 18:57:38 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:57:38.819790Z  INFO sandstar_hal_linux::i2c: i2c: reinit_sensor device=2 address=37 protocol=Sdp810Temp
+Mar 26 18:57:38 EAC-0C1C57FA1BBF sandstar-engine-server[30126]: 2026-03-26T22:57:38.954750Z  WARN sandstar_hal_linux::i2c: reinit: failed to start continuous mode device=2 address=37
