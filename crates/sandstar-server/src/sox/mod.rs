@@ -18,7 +18,8 @@ pub use sox_protocol::*;
 use crate::rest::EngineHandle;
 use crate::sox::dasp::DaspTransport;
 use crate::sox::sox_handlers::{
-    handle_sox_request, parse_write_request, ComponentTree, ManifestDb, SubscriptionManager,
+    handle_sox_request, handle_put_chunk, is_put_transfer_active,
+    parse_write_request, ComponentTree, ManifestDb, SubscriptionManager,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -105,6 +106,7 @@ async fn run_sox_server(
     tree_refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let mut force_full_cov = false;
+    let mut first_cov_burst = false; // true on the tick immediately after subscribe
     let mut pending_cov: std::collections::VecDeque<u16> = std::collections::VecDeque::new();
 
     loop {
@@ -115,6 +117,18 @@ async fn run_sox_server(
             match transport.poll() {
                 Some((session_id, payload)) => {
                     packets_this_round += 1;
+
+                    // Intercept 'k' (0x6B) during active PUT transfer — route to
+                    // chunk handler instead of the normal Invoke handler.
+                    // In Sedona, 'k' is used for both invoke and file chunk transfer.
+                    // During a put, chunks are received silently (no response).
+                    if payload.len() >= 2 && payload[0] == b'k' && is_put_transfer_active() {
+                        debug!(session = session_id, "SOX: routing 'k' to put chunk handler");
+                        let chunk_payload = &payload[2..]; // skip cmd + replyNum
+                        handle_put_chunk(chunk_payload);
+                        continue; // no response for put chunks
+                    }
+
                     if let Some(request) = SoxRequest::parse(&payload) {
                         // Log write/invoke at info level, everything else at debug
                         if request.cmd as u8 == b'w' || request.cmd as u8 == b'k' {
@@ -331,9 +345,10 @@ async fn run_sox_server(
                             info!(links = link_changed.len(), comps = comp_changed.len(), "SOX: dataflow executed");
                         }
 
-                        // On first tick after subscribe, queue ALL channel comps for gradual push
+                        // On first tick after subscribe, queue ALL channel comps for burst push
                         if force_full_cov {
                             force_full_cov = false;
+                            first_cov_burst = true;
                             pending_cov.clear();
                             for id in sox_handlers::CHANNEL_COMP_BASE..tree.channel_comp_end {
                                 pending_cov.push_back(id);
@@ -344,7 +359,7 @@ async fn run_sox_server(
                                     pending_cov.push_back(id);
                                 }
                             }
-                            info!(count = pending_cov.len(), "SOX: queued full COV after subscribe");
+                            info!(count = pending_cov.len(), "SOX: queued full COV after subscribe (burst mode)");
                         }
 
                         // Add newly changed comps to pending queue
@@ -390,10 +405,18 @@ async fn run_sox_server(
                         }
 
                         // Push COV events with proper seq_nums (required for editor to process).
-                        // Client ACKs within ~100ms per event, so 10/tick is safe.
-                        // 150 channels populate in ~15 seconds.
+                        // First tick after subscribe: burst up to 200 events to populate
+                        // the editor immediately (~150 channels sent in one shot).
+                        // Normal ticks: 50 events per 1-second tick. DASP ACKs return
+                        // within ~100ms, so 50/tick is well within the send window.
+                        let batch_limit = if first_cov_burst {
+                            first_cov_burst = false;
+                            200
+                        } else {
+                            50
+                        };
                         let mut sent = 0;
-                        while sent < 10 {
+                        while sent < batch_limit {
                             let Some(comp_id) = pending_cov.pop_front() else { break };
                             let events = subscriptions.build_events(&[comp_id], &tree);
                             for (session_id, event_bytes) in events {

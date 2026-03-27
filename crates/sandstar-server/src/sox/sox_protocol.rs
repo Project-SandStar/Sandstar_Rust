@@ -63,10 +63,10 @@ pub enum SoxCmd {
     FileRead = b'g',
     /// Write file chunk.
     FileWrite = b'h',
-    /// Close file transfer.
-    FileClose = b'q',
-    /// Rename file.
-    FileRename = b'x',
+    /// Close file transfer ('z' request, 'Z' response — also accepts 'q').
+    FileClose = b'z',
+    /// Rename file on device ('b' request, 'B' response).
+    FileRename = b'b',
 
     // -- Events (server -> client) --
     /// Changed-value notification (server push, no reply expected).
@@ -93,8 +93,8 @@ impl SoxCmd {
             b'f' => Some(Self::FileOpen),
             b'g' => Some(Self::FileRead),
             b'h' => Some(Self::FileWrite),
-            b'q' => Some(Self::FileClose),
-            b'x' => Some(Self::FileRename),
+            b'z' | b'q' => Some(Self::FileClose),
+            b'b' => Some(Self::FileRename),
             b'e' => Some(Self::Event),
             _ => None,
         }
@@ -450,8 +450,9 @@ mod tests {
             (b'f', SoxCmd::FileOpen),
             (b'g', SoxCmd::FileRead),
             (b'h', SoxCmd::FileWrite),
+            (b'z', SoxCmd::FileClose),
             (b'q', SoxCmd::FileClose),
-            (b'x', SoxCmd::FileRename),
+            (b'b', SoxCmd::FileRename),
             (b'e', SoxCmd::Event),
         ];
         for &(byte, expected) in cases {
@@ -465,7 +466,7 @@ mod tests {
 
     #[test]
     fn cmd_from_byte_unknown_returns_none() {
-        assert_eq!(SoxCmd::from_byte(b'z'), None);
+        assert_eq!(SoxCmd::from_byte(b'j'), None);
         assert_eq!(SoxCmd::from_byte(0x00), None);
         assert_eq!(SoxCmd::from_byte(0xFF), None);
     }
@@ -501,8 +502,8 @@ mod tests {
         assert_eq!(SoxCmd::FileOpen as u8, 0x66);
         assert_eq!(SoxCmd::FileRead as u8, 0x67);
         assert_eq!(SoxCmd::FileWrite as u8, 0x68);
-        assert_eq!(SoxCmd::FileClose as u8, 0x71);
-        assert_eq!(SoxCmd::FileRename as u8, 0x78);
+        assert_eq!(SoxCmd::FileClose as u8, 0x7A); // 'z'
+        assert_eq!(SoxCmd::FileRename as u8, 0x62); // 'b'
         assert_eq!(SoxCmd::Event as u8, 0x65);
     }
 
