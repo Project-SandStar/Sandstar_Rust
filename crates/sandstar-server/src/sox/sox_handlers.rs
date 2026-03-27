@@ -500,14 +500,32 @@ impl ComponentTree {
 
     /// Execute component-specific logic (math operations) after link propagation.
     ///
-    /// Evaluates: Add2, Sub2, Mul2, Div2 — reads input slots, computes output, writes result.
+    /// Evaluates arithmetic, boolean, comparator, conversion, and multiplexer components.
     /// Returns the list of comp_ids whose output slot values changed.
     pub fn execute_components(&mut self) -> Vec<u16> {
         // Phase 1: collect comp_ids that need evaluation and their current inputs
         let mut evaluations: Vec<(u16, u8, u8)> = Vec::new(); // (comp_id, kit_id, type_id)
         for comp in self.components.values() {
             match (comp.kit_id, comp.type_id) {
-                (2, 3) | (2, 49) | (2, 37) | (2, 18) => {
+                // Arithmetic
+                (2, 3) | (2, 49) | (2, 37) | (2, 18) |
+                (2, 4) | (2, 50) | (2, 38) |
+                // Unary Math
+                (2, 39) | (2, 23) | (2, 34) | (2, 35) | (2, 32) | (2, 47) |
+                // Boolean Logic
+                (2, 5) | (2, 6) | (2, 42) | (2, 43) | (2, 40) | (2, 59) |
+                // Comparator
+                (2, 12) |
+                // Type Conversion
+                (2, 10) | (2, 22) | (2, 26) |
+                // Multiplexers
+                (2, 1) | (2, 11) | (2, 28) |
+                // Hysteresis, SRLatch, Reset
+                (2, 25) | (2, 48) | (2, 46) |
+                // WriteFloat/WriteBool/WriteInt passthrough
+                (2, 57) | (2, 56) | (2, 58) |
+                // LSeq (linear sequencer)
+                (2, 31) => {
                     evaluations.push((comp.comp_id, comp.kit_id, comp.type_id));
                 }
                 _ => {}
@@ -518,36 +536,280 @@ impl ComponentTree {
         let mut updates: Vec<(u16, Vec<(usize, SlotValue)>)> = Vec::new();
         for (comp_id, _kit_id, type_id) in &evaluations {
             if let Some(comp) = self.components.get(comp_id) {
-                let in1 = match comp.slots.get(2) {
-                    Some(VirtualSlot { value: SlotValue::Float(v), .. }) => *v,
-                    _ => 0.0,
-                };
-                let in2 = match comp.slots.get(3) {
-                    Some(VirtualSlot { value: SlotValue::Float(v), .. }) => *v,
-                    _ => 0.0,
-                };
-
                 let mut slot_updates: Vec<(usize, SlotValue)> = Vec::new();
+
                 match type_id {
+                    // --- Original Arithmetic (2-input) ---
                     3 => {
                         // Add2: out = in1 + in2
+                        let in1 = get_float(&comp.slots, 2);
+                        let in2 = get_float(&comp.slots, 3);
                         slot_updates.push((1, SlotValue::Float(in1 + in2)));
                     }
                     49 => {
                         // Sub2: out = in1 - in2
+                        let in1 = get_float(&comp.slots, 2);
+                        let in2 = get_float(&comp.slots, 3);
                         slot_updates.push((1, SlotValue::Float(in1 - in2)));
                     }
                     37 => {
                         // Mul2: out = in1 * in2
+                        let in1 = get_float(&comp.slots, 2);
+                        let in2 = get_float(&comp.slots, 3);
                         slot_updates.push((1, SlotValue::Float(in1 * in2)));
                     }
                     18 => {
                         // Div2: out = in1 / in2, div0 flag
+                        let in1 = get_float(&comp.slots, 2);
+                        let in2 = get_float(&comp.slots, 3);
                         let div0 = in2 == 0.0;
                         let out = if div0 { 0.0 } else { in1 / in2 };
                         slot_updates.push((1, SlotValue::Float(out)));
                         slot_updates.push((4, SlotValue::Bool(div0)));
                     }
+
+                    // --- New Arithmetic (4-input) ---
+                    4 => {
+                        // Add4: out = in1 + in2 + in3 + in4
+                        let in1 = get_float(&comp.slots, 2);
+                        let in2 = get_float(&comp.slots, 3);
+                        let in3 = get_float(&comp.slots, 4);
+                        let in4 = get_float(&comp.slots, 5);
+                        slot_updates.push((1, SlotValue::Float(in1 + in2 + in3 + in4)));
+                    }
+                    50 => {
+                        // Sub4: out = in1 - in2 - in3 - in4
+                        let in1 = get_float(&comp.slots, 2);
+                        let in2 = get_float(&comp.slots, 3);
+                        let in3 = get_float(&comp.slots, 4);
+                        let in4 = get_float(&comp.slots, 5);
+                        slot_updates.push((1, SlotValue::Float(in1 - in2 - in3 - in4)));
+                    }
+                    38 => {
+                        // Mul4: out = in1 * in2 * in3 * in4
+                        let in1 = get_float(&comp.slots, 2);
+                        let in2 = get_float(&comp.slots, 3);
+                        let in3 = get_float(&comp.slots, 4);
+                        let in4 = get_float(&comp.slots, 5);
+                        slot_updates.push((1, SlotValue::Float(in1 * in2 * in3 * in4)));
+                    }
+
+                    // --- Unary Math ---
+                    39 => {
+                        // Neg: out = -in
+                        let inv = get_float(&comp.slots, 2);
+                        slot_updates.push((1, SlotValue::Float(-inv)));
+                    }
+                    23 => {
+                        // FloatOffset: out = in + offset
+                        let inv = get_float(&comp.slots, 2);
+                        let offset = get_float(&comp.slots, 3);
+                        slot_updates.push((1, SlotValue::Float(inv + offset)));
+                    }
+                    34 => {
+                        // Max: out = max(in1, in2)
+                        let in1 = get_float(&comp.slots, 2);
+                        let in2 = get_float(&comp.slots, 3);
+                        slot_updates.push((1, SlotValue::Float(if in1 > in2 { in1 } else { in2 })));
+                    }
+                    35 => {
+                        // Min: out = min(in1, in2)
+                        let in1 = get_float(&comp.slots, 2);
+                        let in2 = get_float(&comp.slots, 3);
+                        slot_updates.push((1, SlotValue::Float(if in1 < in2 { in1 } else { in2 })));
+                    }
+                    32 => {
+                        // Limiter: out = clamp(in, lowLmt, highLmt)
+                        let inv = get_float(&comp.slots, 2);
+                        let low = get_float(&comp.slots, 3);
+                        let high = get_float(&comp.slots, 4);
+                        let clamped = if inv < low { low } else if inv > high { high } else { inv };
+                        slot_updates.push((1, SlotValue::Float(clamped)));
+                    }
+                    47 => {
+                        // Round: out = round(in, decimalPlaces)
+                        let inv = get_float(&comp.slots, 2);
+                        let dp = get_int(&comp.slots, 3);
+                        let factor = 10.0_f32.powi(dp);
+                        let rounded = (inv * factor).round() / factor;
+                        slot_updates.push((1, SlotValue::Float(rounded)));
+                    }
+
+                    // --- Boolean Logic ---
+                    5 => {
+                        // And2: out = in1 && in2
+                        let in1 = get_bool(&comp.slots, 2);
+                        let in2 = get_bool(&comp.slots, 3);
+                        slot_updates.push((1, SlotValue::Bool(in1 && in2)));
+                    }
+                    6 => {
+                        // And4: out = in1 && in2 && in3 && in4
+                        let in1 = get_bool(&comp.slots, 2);
+                        let in2 = get_bool(&comp.slots, 3);
+                        let in3 = get_bool(&comp.slots, 4);
+                        let in4 = get_bool(&comp.slots, 5);
+                        slot_updates.push((1, SlotValue::Bool(in1 && in2 && in3 && in4)));
+                    }
+                    42 => {
+                        // Or2: out = in1 || in2
+                        let in1 = get_bool(&comp.slots, 2);
+                        let in2 = get_bool(&comp.slots, 3);
+                        slot_updates.push((1, SlotValue::Bool(in1 || in2)));
+                    }
+                    43 => {
+                        // Or4: out = in1 || in2 || in3 || in4
+                        let in1 = get_bool(&comp.slots, 2);
+                        let in2 = get_bool(&comp.slots, 3);
+                        let in3 = get_bool(&comp.slots, 4);
+                        let in4 = get_bool(&comp.slots, 5);
+                        slot_updates.push((1, SlotValue::Bool(in1 || in2 || in3 || in4)));
+                    }
+                    40 => {
+                        // Not: out = !in
+                        let inv = get_bool(&comp.slots, 2);
+                        slot_updates.push((1, SlotValue::Bool(!inv)));
+                    }
+                    59 => {
+                        // Xor: out = in1 ^ in2
+                        let in1 = get_bool(&comp.slots, 2);
+                        let in2 = get_bool(&comp.slots, 3);
+                        slot_updates.push((1, SlotValue::Bool(in1 ^ in2)));
+                    }
+
+                    // --- Comparator ---
+                    12 => {
+                        // Cmpr: xgy = (x > y), xey = (x == y), xly = (x < y)
+                        // slots: meta=0, xgy=1, xey=2, xly=3, x=4, y=5
+                        let x = get_float(&comp.slots, 4);
+                        let y = get_float(&comp.slots, 5);
+                        slot_updates.push((1, SlotValue::Bool(x > y)));
+                        slot_updates.push((2, SlotValue::Bool(x == y)));
+                        slot_updates.push((3, SlotValue::Bool(x < y)));
+                    }
+
+                    // --- Type Conversion ---
+                    10 => {
+                        // B2P: out(bool) = in(bool) — pass-through
+                        let inv = get_bool(&comp.slots, 2);
+                        slot_updates.push((1, SlotValue::Bool(inv)));
+                    }
+                    22 => {
+                        // F2I: out(int) = in(float) as i32
+                        let inv = get_float(&comp.slots, 2);
+                        slot_updates.push((1, SlotValue::Int(inv as i32)));
+                    }
+                    26 => {
+                        // I2F: out(float) = in(int) as f64
+                        let inv = get_int(&comp.slots, 2);
+                        slot_updates.push((1, SlotValue::Float(inv as f32)));
+                    }
+
+                    // --- Multiplexers ---
+                    1 => {
+                        // ASW: out = if sel then in2 else in1
+                        // slots: meta=0, out=1, sel=2(bool), in1=3, in2=4
+                        let sel = get_bool(&comp.slots, 2);
+                        let in1 = get_float(&comp.slots, 3);
+                        let in2 = get_float(&comp.slots, 4);
+                        slot_updates.push((1, SlotValue::Float(if sel { in2 } else { in1 })));
+                    }
+                    11 => {
+                        // BSW: out(bool) = if sel then in2 else in1
+                        let sel = get_bool(&comp.slots, 2);
+                        let in1 = get_bool(&comp.slots, 3);
+                        let in2 = get_bool(&comp.slots, 4);
+                        slot_updates.push((1, SlotValue::Bool(if sel { in2 } else { in1 })));
+                    }
+                    28 => {
+                        // ISW: out(int) = if sel then in2 else in1
+                        let sel = get_bool(&comp.slots, 2);
+                        let in1 = get_int(&comp.slots, 3);
+                        let in2 = get_int(&comp.slots, 4);
+                        slot_updates.push((1, SlotValue::Int(if sel { in2 } else { in1 })));
+                    }
+
+                    // --- Hysteresis ---
+                    25 => {
+                        // Hysteresis: out(bool) based on in vs rising/falling thresholds
+                        // slots: meta=0, out=1, in=2, rising=3(config), falling=4(config)
+                        let inv = get_float(&comp.slots, 2);
+                        let rising = get_float(&comp.slots, 3);
+                        let falling = get_float(&comp.slots, 4);
+                        let current_out = get_bool(&comp.slots, 1);
+                        let new_out = if current_out {
+                            inv >= falling // stay true until below falling
+                        } else {
+                            inv >= rising // switch to true when above rising
+                        };
+                        slot_updates.push((1, SlotValue::Bool(new_out)));
+                    }
+
+                    // --- SRLatch ---
+                    48 => {
+                        // SRLatch: set/reset latch
+                        // slots: meta=0, out=1, set=2(bool), reset=3(bool)
+                        let set = get_bool(&comp.slots, 2);
+                        let reset = get_bool(&comp.slots, 3);
+                        let current = get_bool(&comp.slots, 1);
+                        let new_out = if reset { false } else if set { true } else { current };
+                        slot_updates.push((1, SlotValue::Bool(new_out)));
+                    }
+
+                    // --- Reset (range remapping) ---
+                    46 => {
+                        // Reset: remap input from one range to another
+                        // slots: meta=0, out=1, in=2, inLow=3(config), inHigh=4(config),
+                        //        outLow=5(config), outHigh=6(config)
+                        let inv = get_float(&comp.slots, 2);
+                        let in_low = get_float(&comp.slots, 3);
+                        let in_high = get_float(&comp.slots, 4);
+                        let out_low = get_float(&comp.slots, 5);
+                        let out_high = get_float(&comp.slots, 6);
+                        let range = in_high - in_low;
+                        let out = if range == 0.0 {
+                            out_low
+                        } else {
+                            let pct = (inv - in_low) / range;
+                            out_low + pct * (out_high - out_low)
+                        };
+                        slot_updates.push((1, SlotValue::Float(out)));
+                    }
+
+                    // --- WriteFloat passthrough ---
+                    57 => {
+                        // WriteFloat: out = in (runtime passthrough)
+                        // slots: meta=0, out=1, in=2 (+ override slots)
+                        let inv = get_float(&comp.slots, 2);
+                        slot_updates.push((1, SlotValue::Float(inv)));
+                    }
+
+                    // --- WriteBool passthrough ---
+                    56 => {
+                        // WriteBool: out = in
+                        let inv = get_bool(&comp.slots, 2);
+                        slot_updates.push((1, SlotValue::Bool(inv)));
+                    }
+
+                    // --- WriteInt passthrough ---
+                    58 => {
+                        // WriteInt: out = in
+                        let inv = get_int(&comp.slots, 2);
+                        slot_updates.push((1, SlotValue::Int(inv)));
+                    }
+
+                    // --- LSeq (Linear Sequencer) ---
+                    31 => {
+                        // LSeq: divides input range into N stages
+                        // slots: meta=0, out=1, in=2, numStages=3(config), rampTime=4(config)
+                        let inv = get_float(&comp.slots, 2);
+                        let num_stages = get_int(&comp.slots, 3);
+                        if num_stages > 0 {
+                            let stage = (inv * num_stages as f32).floor() as i32;
+                            let clamped = stage.max(0).min(num_stages);
+                            slot_updates.push((1, SlotValue::Int(clamped)));
+                        }
+                    }
+
                     _ => {}
                 }
                 if !slot_updates.is_empty() {
@@ -576,6 +838,32 @@ impl ComponentTree {
         }
         changed
     }
+}
+
+/// Extract a float value from a slot, coercing Int to f32 if needed.
+fn get_float(slots: &[VirtualSlot], idx: usize) -> f32 {
+    slots.get(idx).and_then(|s| match &s.value {
+        SlotValue::Float(v) => Some(*v),
+        SlotValue::Int(v) => Some(*v as f32),
+        _ => None,
+    }).unwrap_or(0.0)
+}
+
+/// Extract a bool value from a slot.
+fn get_bool(slots: &[VirtualSlot], idx: usize) -> bool {
+    slots.get(idx).and_then(|s| match &s.value {
+        SlotValue::Bool(v) => Some(*v),
+        _ => None,
+    }).unwrap_or(false)
+}
+
+/// Extract an int value from a slot, coercing Float to i32 if needed.
+fn get_int(slots: &[VirtualSlot], idx: usize) -> i32 {
+    slots.get(idx).and_then(|s| match &s.value {
+        SlotValue::Int(v) => Some(*v),
+        SlotValue::Float(v) => Some(*v as i32),
+        _ => None,
+    }).unwrap_or(0)
 }
 
 impl Default for ComponentTree {
@@ -3710,7 +3998,7 @@ mod tests {
             name: name.into(),
             type_name: "func::ConstFloat".into(),
             kit_id: 2,
-            type_id: 10, // arbitrary non-math type
+            type_id: 255, // arbitrary non-executable type
             children: Vec::new(),
             slots: vec![
                 VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
@@ -3889,11 +4177,637 @@ mod tests {
     #[test]
     fn execute_components_ignores_unknown_types() {
         let mut tree = ComponentTree::new();
-        // kit_id=2, type_id=10 is not a math component — should be ignored
+        // kit_id=2, type_id=255 is not an executable component — should be ignored
         tree.add(make_source_comp(200, NO_PARENT, "const", 99.0));
 
         let changed = tree.execute_components();
         assert!(changed.is_empty());
+    }
+
+    // ---- Helper: create a math component with N float input slots ----
+    fn make_math_comp_n(comp_id: u16, parent_id: u16, name: &str, kit_id: u8, type_id: u8, num_inputs: usize) -> VirtualComponent {
+        let mut slots = vec![
+            VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+            VirtualSlot { name: "out".into(), type_id: 4, flags: 0, value: SlotValue::Float(0.0) },
+        ];
+        for i in 0..num_inputs {
+            slots.push(VirtualSlot { name: format!("in{}", i + 1), type_id: 4, flags: 0, value: SlotValue::Float(0.0) });
+        }
+        VirtualComponent {
+            comp_id, parent_id, name: name.into(), type_name: format!("math::{name}"),
+            kit_id, type_id, children: Vec::new(), slots, links: Vec::new(),
+        }
+    }
+
+    /// Helper: create a bool-logic component with N bool input slots
+    fn make_bool_comp(comp_id: u16, name: &str, kit_id: u8, type_id: u8, num_inputs: usize) -> VirtualComponent {
+        let mut slots = vec![
+            VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+            VirtualSlot { name: "out".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
+        ];
+        for i in 0..num_inputs {
+            slots.push(VirtualSlot { name: format!("in{}", i + 1), type_id: 0, flags: 0, value: SlotValue::Bool(false) });
+        }
+        VirtualComponent {
+            comp_id, parent_id: NO_PARENT, name: name.into(), type_name: format!("logic::{name}"),
+            kit_id, type_id, children: Vec::new(), slots, links: Vec::new(),
+        }
+    }
+
+    // ---- Arithmetic (4-input) tests ----
+
+    #[test]
+    fn execute_add4() {
+        let mut tree = ComponentTree::new();
+        let mut c = make_math_comp_n(200, NO_PARENT, "add4", 2, 4, 4);
+        c.slots[2].value = SlotValue::Float(1.0);
+        c.slots[3].value = SlotValue::Float(2.0);
+        c.slots[4].value = SlotValue::Float(3.0);
+        c.slots[5].value = SlotValue::Float(4.0);
+        tree.add(c);
+        let changed = tree.execute_components();
+        assert!(changed.contains(&200));
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(10.0));
+    }
+
+    #[test]
+    fn execute_sub4() {
+        let mut tree = ComponentTree::new();
+        let mut c = make_math_comp_n(200, NO_PARENT, "sub4", 2, 50, 4);
+        c.slots[2].value = SlotValue::Float(100.0);
+        c.slots[3].value = SlotValue::Float(10.0);
+        c.slots[4].value = SlotValue::Float(20.0);
+        c.slots[5].value = SlotValue::Float(30.0);
+        tree.add(c);
+        let changed = tree.execute_components();
+        assert!(changed.contains(&200));
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(40.0));
+    }
+
+    #[test]
+    fn execute_mul4() {
+        let mut tree = ComponentTree::new();
+        let mut c = make_math_comp_n(200, NO_PARENT, "mul4", 2, 38, 4);
+        c.slots[2].value = SlotValue::Float(2.0);
+        c.slots[3].value = SlotValue::Float(3.0);
+        c.slots[4].value = SlotValue::Float(4.0);
+        c.slots[5].value = SlotValue::Float(5.0);
+        tree.add(c);
+        let changed = tree.execute_components();
+        assert!(changed.contains(&200));
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(120.0));
+    }
+
+    // ---- Unary Math tests ----
+
+    #[test]
+    fn execute_neg() {
+        let mut tree = ComponentTree::new();
+        let mut c = make_math_comp_n(200, NO_PARENT, "neg", 2, 39, 1);
+        c.slots[2].value = SlotValue::Float(42.5);
+        tree.add(c);
+        let changed = tree.execute_components();
+        assert!(changed.contains(&200));
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(-42.5));
+    }
+
+    #[test]
+    fn execute_float_offset() {
+        let mut tree = ComponentTree::new();
+        let mut c = make_math_comp_n(200, NO_PARENT, "foff", 2, 23, 2);
+        c.slots[2].value = SlotValue::Float(10.0);
+        c.slots[3].value = SlotValue::Float(5.5);
+        tree.add(c);
+        let changed = tree.execute_components();
+        assert!(changed.contains(&200));
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(15.5));
+    }
+
+    #[test]
+    fn execute_max() {
+        let mut tree = ComponentTree::new();
+        let mut c = make_math_comp_n(200, NO_PARENT, "max", 2, 34, 2);
+        c.slots[2].value = SlotValue::Float(3.0);
+        c.slots[3].value = SlotValue::Float(7.0);
+        tree.add(c);
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(7.0));
+    }
+
+    #[test]
+    fn execute_min() {
+        let mut tree = ComponentTree::new();
+        let mut c = make_math_comp_n(200, NO_PARENT, "min", 2, 35, 2);
+        c.slots[2].value = SlotValue::Float(3.0);
+        c.slots[3].value = SlotValue::Float(7.0);
+        tree.add(c);
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(3.0));
+    }
+
+    #[test]
+    fn execute_limiter_clamps_low() {
+        let mut tree = ComponentTree::new();
+        let mut c = make_math_comp_n(200, NO_PARENT, "lim", 2, 32, 3);
+        c.slots[2].value = SlotValue::Float(-5.0); // in
+        c.slots[3].value = SlotValue::Float(0.0);  // lowLmt
+        c.slots[4].value = SlotValue::Float(100.0); // highLmt
+        tree.add(c);
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(0.0));
+    }
+
+    #[test]
+    fn execute_limiter_clamps_high() {
+        let mut tree = ComponentTree::new();
+        let mut c = make_math_comp_n(200, NO_PARENT, "lim", 2, 32, 3);
+        c.slots[2].value = SlotValue::Float(150.0);
+        c.slots[3].value = SlotValue::Float(0.0);
+        c.slots[4].value = SlotValue::Float(100.0);
+        tree.add(c);
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(100.0));
+    }
+
+    #[test]
+    fn execute_limiter_passthrough() {
+        let mut tree = ComponentTree::new();
+        let mut c = make_math_comp_n(200, NO_PARENT, "lim", 2, 32, 3);
+        c.slots[2].value = SlotValue::Float(50.0);
+        c.slots[3].value = SlotValue::Float(0.0);
+        c.slots[4].value = SlotValue::Float(100.0);
+        tree.add(c);
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(50.0));
+    }
+
+    #[test]
+    fn execute_round() {
+        let mut tree = ComponentTree::new();
+        let mut c = make_math_comp_n(200, NO_PARENT, "rnd", 2, 47, 1);
+        // Add decimalPlaces config slot at index 3
+        c.slots.push(VirtualSlot { name: "decimalPlaces".into(), type_id: 1, flags: 0, value: SlotValue::Int(2) });
+        c.slots[2].value = SlotValue::Float(3.14159);
+        tree.add(c);
+        tree.execute_components();
+        let out = match tree.get(200).unwrap().slots[1].value {
+            SlotValue::Float(v) => v,
+            _ => panic!("expected Float"),
+        };
+        assert!((out - 3.14).abs() < 0.005, "expected ~3.14, got {out}");
+    }
+
+    // ---- Boolean Logic tests ----
+
+    #[test]
+    fn execute_and2_true() {
+        let mut tree = ComponentTree::new();
+        let mut c = make_bool_comp(200, "and2", 2, 5, 2);
+        c.slots[2].value = SlotValue::Bool(true);
+        c.slots[3].value = SlotValue::Bool(true);
+        tree.add(c);
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(true));
+    }
+
+    #[test]
+    fn execute_and2_false() {
+        let mut tree = ComponentTree::new();
+        let mut c = make_bool_comp(200, "and2", 2, 5, 2);
+        c.slots[2].value = SlotValue::Bool(true);
+        c.slots[3].value = SlotValue::Bool(false);
+        tree.add(c);
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false));
+    }
+
+    #[test]
+    fn execute_and4() {
+        let mut tree = ComponentTree::new();
+        let mut c = make_bool_comp(200, "and4", 2, 6, 4);
+        c.slots[2].value = SlotValue::Bool(true);
+        c.slots[3].value = SlotValue::Bool(true);
+        c.slots[4].value = SlotValue::Bool(true);
+        c.slots[5].value = SlotValue::Bool(false);
+        tree.add(c);
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false));
+    }
+
+    #[test]
+    fn execute_or2() {
+        let mut tree = ComponentTree::new();
+        let mut c = make_bool_comp(200, "or2", 2, 42, 2);
+        c.slots[2].value = SlotValue::Bool(false);
+        c.slots[3].value = SlotValue::Bool(true);
+        tree.add(c);
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(true));
+    }
+
+    #[test]
+    fn execute_or4_all_false() {
+        let mut tree = ComponentTree::new();
+        let c = make_bool_comp(200, "or4", 2, 43, 4);
+        tree.add(c);
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false));
+    }
+
+    #[test]
+    fn execute_not() {
+        let mut tree = ComponentTree::new();
+        let mut c = make_bool_comp(200, "not", 2, 40, 1);
+        c.slots[2].value = SlotValue::Bool(false);
+        tree.add(c);
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(true));
+    }
+
+    #[test]
+    fn execute_xor_diff() {
+        let mut tree = ComponentTree::new();
+        let mut c = make_bool_comp(200, "xor", 2, 59, 2);
+        c.slots[2].value = SlotValue::Bool(true);
+        c.slots[3].value = SlotValue::Bool(false);
+        tree.add(c);
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(true));
+    }
+
+    #[test]
+    fn execute_xor_same() {
+        let mut tree = ComponentTree::new();
+        let mut c = make_bool_comp(200, "xor", 2, 59, 2);
+        c.slots[2].value = SlotValue::Bool(true);
+        c.slots[3].value = SlotValue::Bool(true);
+        tree.add(c);
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false));
+    }
+
+    // ---- Comparator test ----
+
+    #[test]
+    fn execute_cmpr() {
+        let mut tree = ComponentTree::new();
+        // Cmpr: meta=0, xgy=1, xey=2, xly=3, x=4, y=5
+        let c = VirtualComponent {
+            comp_id: 200, parent_id: NO_PARENT, name: "cmpr".into(),
+            type_name: "math::Cmpr".into(), kit_id: 2, type_id: 12,
+            children: Vec::new(), links: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "xgy".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
+                VirtualSlot { name: "xey".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
+                VirtualSlot { name: "xly".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
+                VirtualSlot { name: "x".into(), type_id: 4, flags: 0, value: SlotValue::Float(10.0) },
+                VirtualSlot { name: "y".into(), type_id: 4, flags: 0, value: SlotValue::Float(5.0) },
+            ],
+        };
+        tree.add(c);
+        tree.execute_components();
+        let comp = tree.get(200).unwrap();
+        assert_eq!(comp.slots[1].value, SlotValue::Bool(true),  "x > y");
+        assert_eq!(comp.slots[2].value, SlotValue::Bool(false), "x == y");
+        assert_eq!(comp.slots[3].value, SlotValue::Bool(false), "x < y");
+    }
+
+    #[test]
+    fn execute_cmpr_equal() {
+        let mut tree = ComponentTree::new();
+        let c = VirtualComponent {
+            comp_id: 200, parent_id: NO_PARENT, name: "cmpr".into(),
+            type_name: "math::Cmpr".into(), kit_id: 2, type_id: 12,
+            children: Vec::new(), links: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "xgy".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
+                VirtualSlot { name: "xey".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
+                VirtualSlot { name: "xly".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
+                VirtualSlot { name: "x".into(), type_id: 4, flags: 0, value: SlotValue::Float(7.0) },
+                VirtualSlot { name: "y".into(), type_id: 4, flags: 0, value: SlotValue::Float(7.0) },
+            ],
+        };
+        tree.add(c);
+        tree.execute_components();
+        let comp = tree.get(200).unwrap();
+        assert_eq!(comp.slots[1].value, SlotValue::Bool(false), "x > y");
+        assert_eq!(comp.slots[2].value, SlotValue::Bool(true),  "x == y");
+        assert_eq!(comp.slots[3].value, SlotValue::Bool(false), "x < y");
+    }
+
+    // ---- Type Conversion tests ----
+
+    #[test]
+    fn execute_b2p() {
+        let mut tree = ComponentTree::new();
+        let mut c = make_bool_comp(200, "b2p", 2, 10, 1);
+        c.slots[2].value = SlotValue::Bool(true);
+        tree.add(c);
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(true));
+    }
+
+    #[test]
+    fn execute_f2i() {
+        let mut tree = ComponentTree::new();
+        let mut c = VirtualComponent {
+            comp_id: 200, parent_id: NO_PARENT, name: "f2i".into(),
+            type_name: "math::F2I".into(), kit_id: 2, type_id: 22,
+            children: Vec::new(), links: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "out".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "in".into(), type_id: 4, flags: 0, value: SlotValue::Float(42.7) },
+            ],
+        };
+        tree.add(c);
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Int(42));
+    }
+
+    #[test]
+    fn execute_i2f() {
+        let mut tree = ComponentTree::new();
+        let c = VirtualComponent {
+            comp_id: 200, parent_id: NO_PARENT, name: "i2f".into(),
+            type_name: "math::I2F".into(), kit_id: 2, type_id: 26,
+            children: Vec::new(), links: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "out".into(), type_id: 4, flags: 0, value: SlotValue::Float(0.0) },
+                VirtualSlot { name: "in".into(), type_id: 1, flags: 0, value: SlotValue::Int(99) },
+            ],
+        };
+        tree.add(c);
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(99.0));
+    }
+
+    // ---- Multiplexer tests ----
+
+    #[test]
+    fn execute_asw_sel_false() {
+        let mut tree = ComponentTree::new();
+        let c = VirtualComponent {
+            comp_id: 200, parent_id: NO_PARENT, name: "asw".into(),
+            type_name: "math::ASW".into(), kit_id: 2, type_id: 1,
+            children: Vec::new(), links: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "out".into(), type_id: 4, flags: 0, value: SlotValue::Float(0.0) },
+                VirtualSlot { name: "sel".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
+                VirtualSlot { name: "in1".into(), type_id: 4, flags: 0, value: SlotValue::Float(10.0) },
+                VirtualSlot { name: "in2".into(), type_id: 4, flags: 0, value: SlotValue::Float(20.0) },
+            ],
+        };
+        tree.add(c);
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(10.0));
+    }
+
+    #[test]
+    fn execute_asw_sel_true() {
+        let mut tree = ComponentTree::new();
+        let c = VirtualComponent {
+            comp_id: 200, parent_id: NO_PARENT, name: "asw".into(),
+            type_name: "math::ASW".into(), kit_id: 2, type_id: 1,
+            children: Vec::new(), links: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "out".into(), type_id: 4, flags: 0, value: SlotValue::Float(0.0) },
+                VirtualSlot { name: "sel".into(), type_id: 0, flags: 0, value: SlotValue::Bool(true) },
+                VirtualSlot { name: "in1".into(), type_id: 4, flags: 0, value: SlotValue::Float(10.0) },
+                VirtualSlot { name: "in2".into(), type_id: 4, flags: 0, value: SlotValue::Float(20.0) },
+            ],
+        };
+        tree.add(c);
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(20.0));
+    }
+
+    #[test]
+    fn execute_bsw() {
+        let mut tree = ComponentTree::new();
+        let c = VirtualComponent {
+            comp_id: 200, parent_id: NO_PARENT, name: "bsw".into(),
+            type_name: "logic::BSW".into(), kit_id: 2, type_id: 11,
+            children: Vec::new(), links: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "out".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
+                VirtualSlot { name: "sel".into(), type_id: 0, flags: 0, value: SlotValue::Bool(true) },
+                VirtualSlot { name: "in1".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
+                VirtualSlot { name: "in2".into(), type_id: 0, flags: 0, value: SlotValue::Bool(true) },
+            ],
+        };
+        tree.add(c);
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(true));
+    }
+
+    #[test]
+    fn execute_isw() {
+        let mut tree = ComponentTree::new();
+        let c = VirtualComponent {
+            comp_id: 200, parent_id: NO_PARENT, name: "isw".into(),
+            type_name: "math::ISW".into(), kit_id: 2, type_id: 28,
+            children: Vec::new(), links: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "out".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "sel".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
+                VirtualSlot { name: "in1".into(), type_id: 1, flags: 0, value: SlotValue::Int(42) },
+                VirtualSlot { name: "in2".into(), type_id: 1, flags: 0, value: SlotValue::Int(99) },
+            ],
+        };
+        tree.add(c);
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Int(42));
+    }
+
+    // ---- Hysteresis, SRLatch, Reset, Write*, LSeq tests ----
+
+    #[test]
+    fn execute_hysteresis_rising() {
+        let mut tree = ComponentTree::new();
+        let c = VirtualComponent {
+            comp_id: 200, parent_id: NO_PARENT, name: "hyst".into(),
+            type_name: "control::Hysteresis".into(), kit_id: 2, type_id: 25,
+            children: Vec::new(), links: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "out".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
+                VirtualSlot { name: "in".into(), type_id: 2, flags: 0, value: SlotValue::Float(75.0) },
+                VirtualSlot { name: "rising".into(), type_id: 2, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(72.0) },
+                VirtualSlot { name: "falling".into(), type_id: 2, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(68.0) },
+            ],
+        };
+        tree.add(c);
+        tree.execute_components();
+        // in=75 > rising=72, out was false → switches to true
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(true));
+    }
+
+    #[test]
+    fn execute_hysteresis_deadband() {
+        let mut tree = ComponentTree::new();
+        let c = VirtualComponent {
+            comp_id: 200, parent_id: NO_PARENT, name: "hyst".into(),
+            type_name: "control::Hysteresis".into(), kit_id: 2, type_id: 25,
+            children: Vec::new(), links: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "out".into(), type_id: 0, flags: 0, value: SlotValue::Bool(true) },
+                VirtualSlot { name: "in".into(), type_id: 2, flags: 0, value: SlotValue::Float(70.0) },
+                VirtualSlot { name: "rising".into(), type_id: 2, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(72.0) },
+                VirtualSlot { name: "falling".into(), type_id: 2, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(68.0) },
+            ],
+        };
+        tree.add(c);
+        tree.execute_components();
+        // in=70, out=true, 70 >= falling(68) → stays true (in deadband)
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(true));
+    }
+
+    #[test]
+    fn execute_hysteresis_falling() {
+        let mut tree = ComponentTree::new();
+        let c = VirtualComponent {
+            comp_id: 200, parent_id: NO_PARENT, name: "hyst".into(),
+            type_name: "control::Hysteresis".into(), kit_id: 2, type_id: 25,
+            children: Vec::new(), links: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "out".into(), type_id: 0, flags: 0, value: SlotValue::Bool(true) },
+                VirtualSlot { name: "in".into(), type_id: 2, flags: 0, value: SlotValue::Float(65.0) },
+                VirtualSlot { name: "rising".into(), type_id: 2, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(72.0) },
+                VirtualSlot { name: "falling".into(), type_id: 2, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(68.0) },
+            ],
+        };
+        tree.add(c);
+        tree.execute_components();
+        // in=65, out=true, 65 < falling(68) → switches to false
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false));
+    }
+
+    #[test]
+    fn execute_sr_latch_set() {
+        let mut tree = ComponentTree::new();
+        let c = VirtualComponent {
+            comp_id: 200, parent_id: NO_PARENT, name: "sr".into(),
+            type_name: "control::SRLatch".into(), kit_id: 2, type_id: 48,
+            children: Vec::new(), links: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "out".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
+                VirtualSlot { name: "set".into(), type_id: 0, flags: 0, value: SlotValue::Bool(true) },
+                VirtualSlot { name: "reset".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
+            ],
+        };
+        tree.add(c);
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(true));
+    }
+
+    #[test]
+    fn execute_sr_latch_reset_wins() {
+        let mut tree = ComponentTree::new();
+        let c = VirtualComponent {
+            comp_id: 200, parent_id: NO_PARENT, name: "sr".into(),
+            type_name: "control::SRLatch".into(), kit_id: 2, type_id: 48,
+            children: Vec::new(), links: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "out".into(), type_id: 0, flags: 0, value: SlotValue::Bool(true) },
+                VirtualSlot { name: "set".into(), type_id: 0, flags: 0, value: SlotValue::Bool(true) },
+                VirtualSlot { name: "reset".into(), type_id: 0, flags: 0, value: SlotValue::Bool(true) },
+            ],
+        };
+        tree.add(c);
+        tree.execute_components();
+        // reset wins over set
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false));
+    }
+
+    #[test]
+    fn execute_reset_remap() {
+        let mut tree = ComponentTree::new();
+        let c = VirtualComponent {
+            comp_id: 200, parent_id: NO_PARENT, name: "rst".into(),
+            type_name: "control::Reset".into(), kit_id: 2, type_id: 46,
+            children: Vec::new(), links: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "out".into(), type_id: 2, flags: 0, value: SlotValue::Float(0.0) },
+                VirtualSlot { name: "in".into(), type_id: 2, flags: 0, value: SlotValue::Float(50.0) },
+                VirtualSlot { name: "inLow".into(), type_id: 2, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(0.0) },
+                VirtualSlot { name: "inHigh".into(), type_id: 2, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(100.0) },
+                VirtualSlot { name: "outLow".into(), type_id: 2, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(55.0) },
+                VirtualSlot { name: "outHigh".into(), type_id: 2, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(85.0) },
+            ],
+        };
+        tree.add(c);
+        tree.execute_components();
+        // 50% of [0,100] → 50% of [55,85] = 70.0
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(70.0));
+    }
+
+    #[test]
+    fn execute_write_float_passthrough() {
+        let mut tree = ComponentTree::new();
+        let c = VirtualComponent {
+            comp_id: 200, parent_id: NO_PARENT, name: "wf".into(),
+            type_name: "control::WriteFloat".into(), kit_id: 2, type_id: 57,
+            children: Vec::new(), links: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "out".into(), type_id: 2, flags: 0, value: SlotValue::Float(0.0) },
+                VirtualSlot { name: "in".into(), type_id: 2, flags: 0, value: SlotValue::Float(42.5) },
+            ],
+        };
+        tree.add(c);
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(42.5));
+    }
+
+    #[test]
+    fn execute_write_bool_passthrough() {
+        let mut tree = ComponentTree::new();
+        let c = VirtualComponent {
+            comp_id: 200, parent_id: NO_PARENT, name: "wb".into(),
+            type_name: "control::WriteBool".into(), kit_id: 2, type_id: 56,
+            children: Vec::new(), links: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "out".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
+                VirtualSlot { name: "in".into(), type_id: 0, flags: 0, value: SlotValue::Bool(true) },
+            ],
+        };
+        tree.add(c);
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(true));
+    }
+
+    #[test]
+    fn execute_lseq() {
+        let mut tree = ComponentTree::new();
+        let c = VirtualComponent {
+            comp_id: 200, parent_id: NO_PARENT, name: "seq".into(),
+            type_name: "control::LSeq".into(), kit_id: 2, type_id: 31,
+            children: Vec::new(), links: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "out".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "in".into(), type_id: 2, flags: 0, value: SlotValue::Float(0.6) },
+                VirtualSlot { name: "numStages".into(), type_id: 1, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(4) },
+            ],
+        };
+        tree.add(c);
+        tree.execute_components();
+        // 0.6 * 4 = 2.4, floor = 2
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Int(2));
     }
 
     // ---- Combined link + component execution ----
