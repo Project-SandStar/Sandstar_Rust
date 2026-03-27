@@ -1,8 +1,8 @@
 # Sandstar Rust Migration -- Roadmap v2
 
-**Date:** 2026-03-25 (updated)
-**Status:** PRODUCTION DEPLOYED — Rust v1.2.0 on BeagleBone. **SOX protocol fully operational** — Sedona Application Editor connected to pure Rust engine (industry first). **Live sensor data visible in editor** via COV events and SOX 1.1 batch subscribe. **SOX write/invoke working** — ConstFloat, ConstInt, ConstBool, WriteFloat, WriteInt, WriteBool, Add2/Sub2/Mul2/Div2 all operational. **185 component types** loaded from manifest XML parser across all 15 kits.
-**Version:** 1.2.0 (7 crates, 1,518 tests, ~39,000+ lines of Rust)
+**Date:** 2026-03-27 (updated)
+**Status:** PRODUCTION DEPLOYED — Rust v1.3.0 on BeagleBone. **Visual DDC programming working** — components can be wired together in the Sedona Application Editor and values propagate through links in real-time (industry first: pure Rust dataflow engine). **SOX protocol fully operational** — editor connected, live sensor data visible via COV events, write/invoke working, link/wiring working with visual wire lines on canvas. **Dataflow engine** executes link propagation + component math (Add2/Sub2/Mul2/Div2) every tick. **185 component types** loaded from manifest XML parser across all 15 kits.
+**Version:** 1.3.0 (7 crates, 1,540 tests, ~40,000+ lines of Rust)
 **Feature Parity:** ~99% (80/80 features vs C system + extras)
 **Research Documents:** 20 analysis docs (00-19) — deep gap analysis completed 2026-03-20
 **Research Coverage:** ~72% weighted (100% on core docs 00-11, deferred on future docs 12-19)
@@ -57,8 +57,14 @@
 - DASP rate-limited COV queue (10/tick) prevents window overflow
 - CONFIG COV events pushed after invoke/write for added components
 - Delete tree events use saved parent_id (before component removal)
+- **Visual wiring (2026-03-27):** Link add/delete ('l' command), bidirectional link storage, wire lines render on editor canvas
+- **Dataflow engine (2026-03-27):** execute_links() propagates values through wires, execute_components() computes Add2/Sub2/Mul2/Div2 math
+- **Runtime COV events (2026-03-27):** Both config AND runtime COV pushed for non-channel components after dataflow execution
+- **Reorder command (2026-03-27):** handle_reorder('o') reorders parent's children list
+- **readComp what='l' (2026-03-27):** Returns component links with 0xFFFF terminator
+- **Link COV on subscribe (2026-03-27):** Push link events for all components with links after batchSubscribe
 
-**Summary:** All core phases (0 through 10.0E + SOX) are complete. 1,518 tests passing, 0 failures.
+**Summary:** All core phases (0 through 10.0E + SOX + Dataflow) are complete. 1,540 tests passing, 0 failures.
 
 ### Partially Complete
 
@@ -71,7 +77,7 @@
 
 | Phase | Description | Complexity | Research Doc | Priority |
 |-------|-------------|-----------|--------------|----------|
-| Phase 8.0B | Full ROX Protocol — remaining SOX ops: reorder(o), fileWrite(h), fileRename(x), readLink(l). **Done:** readSchema(v), readVersion(y), readComp(c), subscribe(s), unsubscribe(u), write(w), fileOpen(f), fileRead(g), fileClose(q), event(e), readSchemaDetail(n), readProp(r), invoke(i), add(a), delete(d), rename(n). | S | 15 | Low |
+| Phase 8.0B | Full ROX Protocol — remaining SOX ops: fileWrite(h), fileRename(x). **Done:** readSchema(v), readVersion(y), readComp(c), subscribe(s), unsubscribe(u), write(w), fileOpen(f), fileRead(g), fileClose(q), event(e), readSchemaDetail(n), readProp(r), invoke(i), add(a), delete(d), rename(n), link(l), reorder(o). **18/20 commands complete.** | S | 15 | Low |
 | Phase 9.0 | Northbound clustering (roxWarp) | XL | 16 | Low |
 | Phase 11.0 | Sedona VM Rust port (bytecode interpreter, name interning) | XL | 12, 13, 17 | Very Low |
 | Phase 12.0 | Driver Framework v2 (Haxall-inspired, pure Rust) | XL | 18 | Very Low |
@@ -113,14 +119,24 @@
 | delete | `d` | Delete component (with tree event using saved parent_id) |
 | rename | `n` | Rename component |
 
+| link | `l` | Add/delete component links (wiring), readComp what='l' for link data |
+| reorder | `o` | Reorder component children |
+
 ### Commands Not Yet Implemented
 
 | Command | Code | Description | Phase |
 |---------|------|-------------|-------|
-| readLink | `l` | Read component links | 8.0B |
-| reorder | `o` | Reorder component children | 8.0B |
 | fileWrite | `h` | Write file to device | 8.0B |
 | fileRename | `x` | Rename file on device | 8.0B |
+
+### Dataflow Engine (2026-03-27)
+
+Pure Rust link execution engine — values propagate through wired connections:
+- `execute_links()`: Every tick, copies values from source slots to destination slots through links
+- `execute_components()`: Computes math operations (Add2, Sub2, Mul2, Div2) after link propagation
+- Bidirectional link storage: Links stored on both source and target components for editor wire rendering
+- Runtime + Config COV events pushed for non-channel components that change
+- Verified working: ConstFloat(5.0) → Add2.In1 = 5.0 → Add2.Out = 5.0
 
 ### Key Implementation Details
 - 15 kit definitions with correct checksums + versions from production manifests
