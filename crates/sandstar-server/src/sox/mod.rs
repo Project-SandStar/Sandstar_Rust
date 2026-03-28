@@ -96,6 +96,13 @@ async fn run_sox_server(
         }
     };
 
+    // Load persisted user-added components from disk (survives restarts).
+    match tree.load_user_components() {
+        Ok(0) => debug!("SOX: no persisted components to load"),
+        Ok(n) => info!(count = n, "SOX: restored persisted user components"),
+        Err(e) => warn!("SOX: failed to load persisted components: {e}"),
+    }
+
     let mut subscriptions = SubscriptionManager::new();
 
     // Timers
@@ -104,6 +111,10 @@ async fn run_sox_server(
 
     let mut tree_refresh_interval = tokio::time::interval(Duration::from_secs(1));
     tree_refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    // Persistence save timer: check dirty flag every 5 seconds.
+    let mut persist_interval = tokio::time::interval(Duration::from_secs(5));
+    persist_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let mut force_full_cov = false;
     let mut first_cov_burst = false; // true on the tick immediately after subscribe
@@ -427,6 +438,14 @@ async fn run_sox_server(
                     }
                     Err(e) => {
                         debug!("SOX: failed to refresh channels: {e}");
+                    }
+                }
+            }
+            _ = persist_interval.tick() => {
+                // Save user-added components to disk if dirty.
+                if tree.take_dirty() {
+                    if let Err(e) = tree.save_user_components() {
+                        warn!("SOX: failed to save user components: {e}");
                     }
                 }
             }

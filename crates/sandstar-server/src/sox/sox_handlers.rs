@@ -24,6 +24,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use sandstar_ipc::types::ChannelInfo;
 
 use super::sox_protocol::{SoxCmd, SoxReader, SoxRequest, SoxResponse, SoxValueType};
@@ -31,7 +32,7 @@ use super::sox_protocol::{SoxCmd, SoxReader, SoxRequest, SoxResponse, SoxValueTy
 // ---- Slot values ----
 
 /// A slot value in the virtual component tree.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SlotValue {
     Bool(bool),
     Int(i32),
@@ -74,7 +75,7 @@ pub const SLOT_FLAG_OPERATOR: u8 = 0x08;
 // ---- Links ----
 
 /// A Sedona component link (wiring an output slot to an input slot).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Link {
     pub from_comp: u16,
     pub from_slot: u8,
@@ -85,7 +86,7 @@ pub struct Link {
 // ---- Virtual component ----
 
 /// A virtual Sedona component mapped from engine data.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VirtualComponent {
     pub comp_id: u16,
     pub parent_id: u16,
@@ -99,12 +100,28 @@ pub struct VirtualComponent {
 }
 
 /// A single slot on a virtual component.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VirtualSlot {
     pub name: String,
     pub type_id: u8,
     pub flags: u8,
     pub value: SlotValue,
+}
+
+// ---- Component state (for stateful execution types) ----
+
+/// Per-component execution state for stateful components (timers, counters, ramps).
+///
+/// Stored in a HashMap on ComponentTree, keyed by comp_id.
+/// Initialized lazily on first execution tick.
+#[derive(Debug, Clone, Default)]
+pub struct ComponentState {
+    /// Tick counter (used by DlyOn/DlyOff for delay counting).
+    pub counter: i32,
+    /// Direction flag (used by Ramp: 1=up, -1=down).
+    pub direction: i32,
+    /// Previous boolean input value (used by Count for edge detection).
+    pub prev_bool: bool,
 }
 
 // ---- Component tree ----
@@ -126,6 +143,27 @@ pub struct ComponentTree {
     /// Manifest-based slot schema database (shared reference).
     /// Loaded at startup from kit manifest XML files.
     pub manifest_db: Arc<ManifestDb>,
+    /// Component IDs that were added by the editor (not from channel config).
+    /// These are persisted to disk so they survive restarts.
+    user_added_ids: HashSet<u16>,
+    /// Whether the tree has unsaved changes to user-added components.
+    dirty: bool,
+    /// File path for persisting user-added components.
+    /// Defaults to `sox_components.json` in the config directory.
+    persist_path: Option<String>,
+    /// Per-component execution state for stateful components (timers, counters, ramps).
+    component_state: HashMap<u16, ComponentState>,
+}
+
+/// JSON persistence format for user-added SOX components.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PersistData {
+    /// User-added components (not channel-mapped or system).
+    pub components: Vec<VirtualComponent>,
+    /// The set of component IDs that are user-added.
+    pub user_added_ids: Vec<u16>,
+    /// The next available component ID counter.
+    pub next_comp_id: u16,
 }
 
 impl ComponentTree {
@@ -136,6 +174,10 @@ impl ComponentTree {
             next_id: 0,
             channel_comp_end: CHANNEL_COMP_BASE,
             manifest_db: Arc::new(ManifestDb::new()),
+            user_added_ids: HashSet::new(),
+            dirty: false,
+            persist_path: None,
+            component_state: HashMap::new(),
         }
     }
 
@@ -146,6 +188,10 @@ impl ComponentTree {
             next_id: 0,
             channel_comp_end: CHANNEL_COMP_BASE,
             manifest_db,
+            user_added_ids: HashSet::new(),
+            dirty: false,
+            persist_path: None,
+            component_state: HashMap::new(),
         }
     }
 
@@ -219,6 +265,44 @@ impl ComponentTree {
         }
     }
 
+    /// Check if adding a link from `from_comp` to `to_comp` would create a cycle.
+    /// Uses DFS from `to_comp` following existing links to see if we can reach `from_comp`.
+    /// Self-loops (from_comp == to_comp) are allowed — the editor uses these.
+    pub(crate) fn would_create_cycle(&self, from_comp: u16, to_comp: u16) -> bool {
+        // Self-loops are allowed (editor uses them for internal wiring).
+        if from_comp == to_comp {
+            return false;
+        }
+        // DFS from to_comp: follow outgoing links (where to_comp is the source)
+        // to see if we ever reach from_comp.
+        let mut stack = vec![to_comp];
+        let mut visited = std::collections::HashSet::new();
+        let mut depth = 0u32;
+        const MAX_DEPTH: u32 = 100;
+        while let Some(current) = stack.pop() {
+            if current == from_comp {
+                return true;
+            }
+            if depth >= MAX_DEPTH {
+                // Bail out on pathologically deep graphs — treat as cycle.
+                return true;
+            }
+            if !visited.insert(current) {
+                continue;
+            }
+            depth += 1;
+            // Follow all outgoing links from `current` (where current is from_comp of the link).
+            if let Some(comp) = self.components.get(&current) {
+                for link in &comp.links {
+                    if link.from_comp == current && !visited.contains(&link.to_comp) {
+                        stack.push(link.to_comp);
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Add a link to the tree. Returns true if the link was added (not a duplicate).
     pub fn add_link(&mut self, from_comp: u16, from_slot: u8, to_comp: u16, to_slot: u8) -> bool {
         let link = Link { from_comp, from_slot, to_comp, to_slot };
@@ -229,6 +313,11 @@ impl ComponentTree {
                 return false;
             }
         } else {
+            return false;
+        }
+        // Reject if the link would create a cycle in the dataflow graph.
+        if self.would_create_cycle(from_comp, to_comp) {
+            tracing::warn!(from_comp, to_comp, "SOX: link rejected — would create cycle");
             return false;
         }
         if let Some(comp) = self.components.get_mut(&to_comp) {
@@ -443,6 +532,142 @@ impl ComponentTree {
         comp_id >= CHANNEL_COMP_BASE && comp_id < self.channel_comp_end
     }
 
+    /// Check if a comp_id was added by the editor (user-added, not from channel config).
+    pub fn is_user_added(&self, comp_id: u16) -> bool {
+        self.user_added_ids.contains(&comp_id)
+    }
+
+    /// Mark a component as user-added (persisted across restarts).
+    pub fn mark_user_added(&mut self, comp_id: u16) {
+        self.user_added_ids.insert(comp_id);
+        self.dirty = true;
+    }
+
+    /// Mark the tree as dirty (needs saving).
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Check and clear the dirty flag. Returns true if the tree had unsaved changes.
+    pub fn take_dirty(&mut self) -> bool {
+        let was_dirty = self.dirty;
+        self.dirty = false;
+        was_dirty
+    }
+
+    /// Set the file path for persistence.
+    pub fn set_persist_path(&mut self, path: String) {
+        self.persist_path = Some(path);
+    }
+
+    /// Resolve the persistence file path.
+    ///
+    /// Priority: environment variable > explicit path > default Linux path > current dir fallback.
+    pub fn resolve_persist_path(&self) -> String {
+        if let Ok(env_path) = std::env::var("SANDSTAR_SOX_PERSIST_PATH") {
+            return env_path;
+        }
+        if let Some(ref path) = self.persist_path {
+            return path.clone();
+        }
+        // Default: Linux config dir, or current dir fallback
+        let default_linux = "/home/eacio/sandstar/etc/config/sox_components.json";
+        if Path::new("/home/eacio/sandstar/etc/config").exists() {
+            default_linux.to_string()
+        } else {
+            "sox_components.json".to_string()
+        }
+    }
+
+    /// Save user-added components to disk as JSON.
+    ///
+    /// Only components tracked in `user_added_ids` are saved.
+    /// Channel-mapped and system components are excluded.
+    pub fn save_user_components(&self) -> Result<(), String> {
+        let path = self.resolve_persist_path();
+        let user_comps: Vec<&VirtualComponent> = self.user_added_ids.iter()
+            .filter_map(|id| self.components.get(id))
+            .collect();
+
+        // Also collect all links that involve user-added components
+        // (already stored on the components themselves, so they serialize with the comp)
+
+        let data = PersistData {
+            components: user_comps.into_iter().cloned().collect(),
+            user_added_ids: self.user_added_ids.iter().copied().collect(),
+            next_comp_id: self.next_id,
+        };
+
+        let json = serde_json::to_string_pretty(&data)
+            .map_err(|e| format!("serialize error: {e}"))?;
+
+        // Write atomically: write to tmp file then rename
+        let tmp_path = format!("{path}.tmp");
+        std::fs::write(&tmp_path, &json)
+            .map_err(|e| format!("write error ({tmp_path}): {e}"))?;
+        std::fs::rename(&tmp_path, &path)
+            .map_err(|e| format!("rename error ({tmp_path} -> {path}): {e}"))?;
+
+        tracing::info!(path, components = data.components.len(), "SOX: saved user components to disk");
+        Ok(())
+    }
+
+    /// Load user-added components from disk.
+    ///
+    /// Restores components, user_added_ids, and next_comp_id counter.
+    /// If the file doesn't exist, this is a no-op (fresh start).
+    pub fn load_user_components(&mut self) -> Result<usize, String> {
+        let path = self.resolve_persist_path();
+        let path_ref = Path::new(&path);
+        if !path_ref.exists() {
+            tracing::debug!(path, "SOX: no persistence file found, starting fresh");
+            return Ok(0);
+        }
+
+        let json = std::fs::read_to_string(&path)
+            .map_err(|e| format!("read error ({path}): {e}"))?;
+
+        let data: PersistData = serde_json::from_str(&json)
+            .map_err(|e| format!("deserialize error ({path}): {e}"))?;
+
+        let count = data.components.len();
+
+        // Restore user_added_ids
+        for &id in &data.user_added_ids {
+            self.user_added_ids.insert(id);
+        }
+
+        // Restore components into the tree
+        for comp in data.components {
+            let comp_id = comp.comp_id;
+            let parent_id = comp.parent_id;
+            // Insert the component
+            self.components.insert(comp_id, comp);
+            // Register as child of parent
+            if parent_id != NO_PARENT && parent_id != comp_id {
+                if let Some(parent) = self.components.get_mut(&parent_id) {
+                    if !parent.children.contains(&comp_id) {
+                        parent.children.push(comp_id);
+                    }
+                }
+            }
+        }
+
+        // Restore next_comp_id (ensure it's at least as high as loaded value)
+        if data.next_comp_id > self.next_id {
+            self.next_id = data.next_comp_id;
+        }
+        // Also check against max existing comp_id
+        if let Some(&max_id) = self.components.keys().max() {
+            if max_id >= self.next_id {
+                self.next_id = max_id + 1;
+            }
+        }
+
+        tracing::info!(path, count, next_id = self.next_id, "SOX: loaded user components from disk");
+        Ok(count)
+    }
+
     /// Update slot values for channel-mapped components from fresh channel data.
     ///
     /// Returns the list of comp_ids that had value changes (for COV events).
@@ -525,7 +750,9 @@ impl ComponentTree {
                 // WriteFloat/WriteBool/WriteInt passthrough
                 (2, 57) | (2, 56) | (2, 58) |
                 // LSeq (linear sequencer)
-                (2, 31) => {
+                (2, 31) |
+                // Stateful: DlyOff, DlyOn, Count, Ramp, Tstat, UpDn
+                (2, 19) | (2, 20) | (2, 16) | (2, 44) | (2, 54) | (2, 55) => {
                     evaluations.push((comp.comp_id, comp.kit_id, comp.type_id));
                 }
                 _ => {}
@@ -533,10 +760,12 @@ impl ComponentTree {
         }
 
         // Phase 2: compute outputs
-        let mut updates: Vec<(u16, Vec<(usize, SlotValue)>)> = Vec::new();
+        // state_update: optional new ComponentState to write back after computation
+        let mut updates: Vec<(u16, Vec<(usize, SlotValue)>, Option<ComponentState>)> = Vec::new();
         for (comp_id, _kit_id, type_id) in &evaluations {
             if let Some(comp) = self.components.get(comp_id) {
                 let mut slot_updates: Vec<(usize, SlotValue)> = Vec::new();
+                let mut state_update: Option<ComponentState> = None;
 
                 match type_id {
                     // --- Original Arithmetic (2-input) ---
@@ -810,17 +1039,143 @@ impl ComponentTree {
                         }
                     }
 
+                    // --- DlyOn (Delay-on timer, type 20) ---
+                    20 => {
+                        // slots: meta=0, out=1(bool), in=2(bool), delay=3(float, seconds)
+                        // When in=true, count ticks. After delay seconds (1 tick/s), set out=true.
+                        // When in=false, reset counter, out=false immediately.
+                        let input = get_bool(&comp.slots, 2);
+                        let delay = get_float(&comp.slots, 3);
+                        let mut st = self.component_state.get(comp_id).cloned().unwrap_or_default();
+                        if input {
+                            st.counter += 1;
+                            let out = st.counter >= delay as i32;
+                            slot_updates.push((1, SlotValue::Bool(out)));
+                        } else {
+                            st.counter = 0;
+                            slot_updates.push((1, SlotValue::Bool(false)));
+                        }
+                        state_update = Some(st);
+                    }
+
+                    // --- DlyOff (Delay-off timer, type 19) ---
+                    19 => {
+                        // slots: meta=0, out=1(bool), in=2(bool), delay=3(float, seconds)
+                        // When in=false, count ticks. After delay seconds, set out=false.
+                        // When in=true, reset counter, out=true immediately.
+                        let input = get_bool(&comp.slots, 2);
+                        let delay = get_float(&comp.slots, 3);
+                        let mut st = self.component_state.get(comp_id).cloned().unwrap_or_default();
+                        if !input {
+                            st.counter += 1;
+                            let out = st.counter < delay as i32;
+                            slot_updates.push((1, SlotValue::Bool(out)));
+                        } else {
+                            st.counter = 0;
+                            slot_updates.push((1, SlotValue::Bool(true)));
+                        }
+                        state_update = Some(st);
+                    }
+
+                    // --- Count (Edge-triggered counter, type 16) ---
+                    16 => {
+                        // slots: meta=0, out=1(int), in=2(bool), preset=3(int, config)
+                        // Count rising edges of in. If preset>0, reset to 0 at preset.
+                        let input = get_bool(&comp.slots, 2);
+                        let preset = get_int(&comp.slots, 3);
+                        let mut st = self.component_state.get(comp_id).cloned().unwrap_or_default();
+                        let current_out = get_int(&comp.slots, 1);
+                        let mut new_out = current_out;
+                        // Detect rising edge: prev=false, current=true
+                        if input && !st.prev_bool {
+                            new_out += 1;
+                            if preset > 0 && new_out >= preset {
+                                new_out = 0;
+                            }
+                        }
+                        st.prev_bool = input;
+                        slot_updates.push((1, SlotValue::Int(new_out)));
+                        state_update = Some(st);
+                    }
+
+                    // --- Ramp (Triangle wave, type 44) ---
+                    44 => {
+                        // slots: meta=0, out=1(float), min=2(float), max=3(float), step=4(float)
+                        // Each tick, increment/decrement out by step. Reverse at boundaries.
+                        let min_val = get_float(&comp.slots, 2);
+                        let max_val = get_float(&comp.slots, 3);
+                        let step = get_float(&comp.slots, 4);
+                        let current_out = get_float(&comp.slots, 1);
+                        let mut st = self.component_state.get(comp_id).cloned().unwrap_or_default();
+                        // Initialize direction if not set (0 means uninitialized)
+                        if st.direction == 0 {
+                            st.direction = 1; // start going up
+                        }
+                        let mut new_out = current_out + step * st.direction as f32;
+                        if new_out >= max_val {
+                            new_out = max_val;
+                            st.direction = -1;
+                        } else if new_out <= min_val {
+                            new_out = min_val;
+                            st.direction = 1;
+                        }
+                        slot_updates.push((1, SlotValue::Float(new_out)));
+                        state_update = Some(st);
+                    }
+
+                    // --- Tstat (Thermostat with deadband, type 54) ---
+                    54 => {
+                        // slots: meta=0, heating=1(bool), cooling=2(bool), sp=3(float),
+                        //        pv=4(float), deadband=5(float, config)
+                        let sp = get_float(&comp.slots, 3);
+                        let pv = get_float(&comp.slots, 4);
+                        let deadband = get_float(&comp.slots, 5);
+                        let half_db = deadband / 2.0;
+                        let current_heating = get_bool(&comp.slots, 1);
+                        let current_cooling = get_bool(&comp.slots, 2);
+                        let (heating, cooling) = if pv < sp - half_db {
+                            (true, false)
+                        } else if pv > sp + half_db {
+                            (false, true)
+                        } else {
+                            (current_heating, current_cooling) // deadband: keep current state
+                        };
+                        slot_updates.push((1, SlotValue::Bool(heating)));
+                        slot_updates.push((2, SlotValue::Bool(cooling)));
+                    }
+
+                    // --- UpDn (Up/down accumulator, type 55) ---
+                    55 => {
+                        // slots: meta=0, out=1(float), up=2(bool), dn=3(bool),
+                        //        step=4(float, config), min=5(float, config), max=6(float, config)
+                        let up = get_bool(&comp.slots, 2);
+                        let dn = get_bool(&comp.slots, 3);
+                        let step = get_float(&comp.slots, 4);
+                        let min_val = get_float(&comp.slots, 5);
+                        let max_val = get_float(&comp.slots, 6);
+                        let mut out = get_float(&comp.slots, 1);
+                        if up {
+                            out += step;
+                            if out > max_val { out = max_val; }
+                        }
+                        if dn {
+                            out -= step;
+                            if out < min_val { out = min_val; }
+                        }
+                        slot_updates.push((1, SlotValue::Float(out)));
+                    }
+
                     _ => {}
                 }
-                if !slot_updates.is_empty() {
-                    updates.push((*comp_id, slot_updates));
+                if !slot_updates.is_empty() || state_update.is_some() {
+                    updates.push((*comp_id, slot_updates, state_update));
                 }
             }
         }
 
         // Phase 3: apply updates, track changes
         let mut changed: Vec<u16> = Vec::new();
-        for (comp_id, slot_updates) in updates {
+        for (comp_id, slot_updates, state_update) in updates {
             if let Some(comp) = self.components.get_mut(&comp_id) {
                 let mut comp_changed = false;
                 for (slot_idx, new_value) in slot_updates {
@@ -834,6 +1189,10 @@ impl ComponentTree {
                 if comp_changed {
                     changed.push(comp_id);
                 }
+            }
+            // Apply component state updates (timers, counters, ramp direction)
+            if let Some(st) = state_update {
+                self.component_state.insert(comp_id, st);
             }
         }
         changed
@@ -2664,6 +3023,7 @@ fn handle_add(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
         links: Vec::new(),
     };
     tree.add(comp);
+    tree.mark_user_added(new_id);
 
     tracing::info!(new_id, parent_id, kit_id, type_id, "SOX: component added");
 
@@ -2688,7 +3048,12 @@ fn handle_delete(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
         return error_msg(req.cmd, req.req_id, "cannot delete system component");
     }
 
+    let was_user_added = tree.is_user_added(comp_id);
     if tree.remove(comp_id).is_some() {
+        if was_user_added {
+            tree.user_added_ids.remove(&comp_id);
+            tree.mark_dirty();
+        }
         tracing::info!(comp_id, "SOX: component deleted");
         SoxResponse::success(SoxCmd::Delete, req.req_id)
     } else {
@@ -2709,6 +3074,9 @@ fn handle_rename(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
     let new_name = reader.read_str().unwrap_or_default();
 
     if tree.rename(comp_id, new_name.clone()) {
+        if tree.is_user_added(comp_id) {
+            tree.mark_dirty();
+        }
         tracing::info!(comp_id, name = %new_name, "SOX: component renamed");
         SoxResponse::success(SoxCmd::Rename, req.req_id)
     } else {
@@ -2745,7 +3113,14 @@ pub fn handle_link(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
 
     match subcmd {
         b'a' => {
+            // Check for cycles before attempting to add.
+            if tree.would_create_cycle(from_comp, to_comp) {
+                return error_msg(req.cmd, req.req_id, "link rejected: would create cycle");
+            }
             if tree.add_link(from_comp, from_slot, to_comp, to_slot) {
+                if tree.is_user_added(from_comp) || tree.is_user_added(to_comp) {
+                    tree.mark_dirty();
+                }
                 tracing::info!(from_comp, from_slot, to_comp, to_slot, "SOX: link added");
                 SoxResponse::success(SoxCmd::Link, req.req_id)
             } else {
@@ -2754,6 +3129,9 @@ pub fn handle_link(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
         }
         b'd' => {
             if tree.remove_link(from_comp, from_slot, to_comp, to_slot) {
+                if tree.is_user_added(from_comp) || tree.is_user_added(to_comp) {
+                    tree.mark_dirty();
+                }
                 tracing::info!(from_comp, from_slot, to_comp, to_slot, "SOX: link removed");
                 SoxResponse::success(SoxCmd::Link, req.req_id)
             } else {
@@ -2853,6 +3231,9 @@ fn handle_invoke(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
                 }
             }
         }
+        if tree.is_user_added(comp_id) {
+            tree.mark_dirty();
+        }
     }
 
     SoxResponse::success(SoxCmd::Invoke, req.req_id)
@@ -2907,6 +3288,11 @@ fn handle_write(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
         slot.type_id = type_id;
         tracing::info!(comp_id, slot_id, name = %slot.name, ?value, "SOX: slot value updated");
         slot.value = value;
+    }
+
+    // Mark dirty if this is a user-added component
+    if tree.is_user_added(comp_id) {
+        tree.mark_dirty();
     }
 
     // Response: just 'W' + replyNum (no extra data — Java client only reads these 2 bytes)
@@ -4356,14 +4742,19 @@ mod tests {
     #[test]
     fn get_links_returns_both_directions() {
         let mut tree = ComponentTree::from_channels(&sample_channels());
+        // Use non-cyclic links: 100→101 and 102→100
+        // (102 has no path to 100 via outgoing links, so 102→100 is not a cycle)
         tree.add_link(100, 6, 101, 1);
-        tree.add_link(101, 6, 100, 2);
-        // Links for comp 100: one as source (from=100), one as destination (to=100)
+        tree.add_link(102, 6, 100, 2);
+        // Links for comp 100: one as source (from=100→101), one as destination (102→to=100)
         let links = tree.get_links(100);
         assert_eq!(links.len(), 2);
-        // Links for comp 101: one as destination (to=101), one as source (from=101)
+        // Links for comp 101: one as destination (to=101)
         let links = tree.get_links(101);
-        assert_eq!(links.len(), 2);
+        assert_eq!(links.len(), 1);
+        // Links for comp 102: one as source (from=102→100)
+        let links = tree.get_links(102);
+        assert_eq!(links.len(), 1);
     }
 
     // ---- execute_links tests ----
@@ -5209,6 +5600,367 @@ mod tests {
         assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Int(2));
     }
 
+    // ---- Stateful component tests ----
+
+    /// Helper: create a DlyOn component (kit_id=2, type_id=20)
+    fn make_dlyon(comp_id: u16, input: bool, delay: f32) -> VirtualComponent {
+        VirtualComponent {
+            comp_id, parent_id: NO_PARENT, name: "dlyon".into(),
+            type_name: "control::DlyOn".into(), kit_id: 2, type_id: 20,
+            children: Vec::new(), links: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "out".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
+                VirtualSlot { name: "in".into(), type_id: 0, flags: 0, value: SlotValue::Bool(input) },
+                VirtualSlot { name: "delay".into(), type_id: 4, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(delay) },
+            ],
+        }
+    }
+
+    /// Helper: create a DlyOff component (kit_id=2, type_id=19)
+    fn make_dlyoff(comp_id: u16, input: bool, delay: f32) -> VirtualComponent {
+        VirtualComponent {
+            comp_id, parent_id: NO_PARENT, name: "dlyoff".into(),
+            type_name: "control::DlyOff".into(), kit_id: 2, type_id: 19,
+            children: Vec::new(), links: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "out".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
+                VirtualSlot { name: "in".into(), type_id: 0, flags: 0, value: SlotValue::Bool(input) },
+                VirtualSlot { name: "delay".into(), type_id: 4, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(delay) },
+            ],
+        }
+    }
+
+    /// Helper: create a Count component (kit_id=2, type_id=16)
+    fn make_count(comp_id: u16, input: bool, preset: i32) -> VirtualComponent {
+        VirtualComponent {
+            comp_id, parent_id: NO_PARENT, name: "count".into(),
+            type_name: "control::Count".into(), kit_id: 2, type_id: 16,
+            children: Vec::new(), links: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "out".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "in".into(), type_id: 0, flags: 0, value: SlotValue::Bool(input) },
+                VirtualSlot { name: "preset".into(), type_id: 1, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(preset) },
+            ],
+        }
+    }
+
+    /// Helper: create a Ramp component (kit_id=2, type_id=44)
+    fn make_ramp(comp_id: u16, min: f32, max: f32, step: f32) -> VirtualComponent {
+        VirtualComponent {
+            comp_id, parent_id: NO_PARENT, name: "ramp".into(),
+            type_name: "control::Ramp".into(), kit_id: 2, type_id: 44,
+            children: Vec::new(), links: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "out".into(), type_id: 4, flags: 0, value: SlotValue::Float(min) },
+                VirtualSlot { name: "min".into(), type_id: 4, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(min) },
+                VirtualSlot { name: "max".into(), type_id: 4, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(max) },
+                VirtualSlot { name: "step".into(), type_id: 4, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(step) },
+            ],
+        }
+    }
+
+    /// Helper: create a Tstat component (kit_id=2, type_id=54)
+    fn make_tstat(comp_id: u16, sp: f32, pv: f32, deadband: f32) -> VirtualComponent {
+        VirtualComponent {
+            comp_id, parent_id: NO_PARENT, name: "tstat".into(),
+            type_name: "control::Tstat".into(), kit_id: 2, type_id: 54,
+            children: Vec::new(), links: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "heating".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
+                VirtualSlot { name: "cooling".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
+                VirtualSlot { name: "sp".into(), type_id: 4, flags: 0, value: SlotValue::Float(sp) },
+                VirtualSlot { name: "pv".into(), type_id: 4, flags: 0, value: SlotValue::Float(pv) },
+                VirtualSlot { name: "deadband".into(), type_id: 4, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(deadband) },
+            ],
+        }
+    }
+
+    /// Helper: create an UpDn component (kit_id=2, type_id=55)
+    fn make_updn(comp_id: u16, out: f32, up: bool, dn: bool, step: f32, min: f32, max: f32) -> VirtualComponent {
+        VirtualComponent {
+            comp_id, parent_id: NO_PARENT, name: "updn".into(),
+            type_name: "control::UpDn".into(), kit_id: 2, type_id: 55,
+            children: Vec::new(), links: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "out".into(), type_id: 4, flags: 0, value: SlotValue::Float(out) },
+                VirtualSlot { name: "up".into(), type_id: 0, flags: 0, value: SlotValue::Bool(up) },
+                VirtualSlot { name: "dn".into(), type_id: 0, flags: 0, value: SlotValue::Bool(dn) },
+                VirtualSlot { name: "step".into(), type_id: 4, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(step) },
+                VirtualSlot { name: "min".into(), type_id: 4, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(min) },
+                VirtualSlot { name: "max".into(), type_id: 4, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(max) },
+            ],
+        }
+    }
+
+    // --- DlyOn tests ---
+
+    #[test]
+    fn dlyon_stays_false_before_delay() {
+        let mut tree = ComponentTree::new();
+        tree.add(make_dlyon(200, true, 3.0)); // delay=3 seconds
+        // Tick 1: counter=1, delay=3 -> out=false
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false));
+        // Tick 2: counter=2 -> still false
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false));
+    }
+
+    #[test]
+    fn dlyon_goes_true_after_delay() {
+        let mut tree = ComponentTree::new();
+        tree.add(make_dlyon(200, true, 3.0));
+        tree.execute_components(); // tick 1
+        tree.execute_components(); // tick 2
+        tree.execute_components(); // tick 3: counter=3 >= delay=3 -> out=true
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(true));
+    }
+
+    #[test]
+    fn dlyon_resets_when_input_goes_false() {
+        let mut tree = ComponentTree::new();
+        tree.add(make_dlyon(200, true, 3.0));
+        tree.execute_components(); // tick 1
+        tree.execute_components(); // tick 2
+        // Now set input to false
+        tree.get_mut(200).unwrap().slots[2].value = SlotValue::Bool(false);
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false));
+        // Set back to true — counter should have reset, so need 3 more ticks
+        tree.get_mut(200).unwrap().slots[2].value = SlotValue::Bool(true);
+        tree.execute_components(); // tick 1 after reset
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false));
+    }
+
+    #[test]
+    fn dlyon_input_false_means_out_false() {
+        let mut tree = ComponentTree::new();
+        tree.add(make_dlyon(200, false, 1.0));
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false));
+    }
+
+    // --- DlyOff tests ---
+
+    #[test]
+    fn dlyoff_stays_true_during_delay() {
+        let mut tree = ComponentTree::new();
+        // Start with input=true, then switch to false
+        tree.add(make_dlyoff(200, true, 3.0));
+        tree.execute_components(); // in=true -> out=true, counter reset
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(true));
+        // Switch input to false
+        tree.get_mut(200).unwrap().slots[2].value = SlotValue::Bool(false);
+        tree.execute_components(); // tick 1: counter=1 < 3 -> out=true still
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(true));
+        tree.execute_components(); // tick 2: counter=2 < 3 -> out=true still
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(true));
+    }
+
+    #[test]
+    fn dlyoff_goes_false_after_delay() {
+        let mut tree = ComponentTree::new();
+        tree.add(make_dlyoff(200, false, 3.0));
+        tree.execute_components(); // tick 1
+        tree.execute_components(); // tick 2
+        tree.execute_components(); // tick 3: counter=3 >= 3 -> out=false
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false));
+    }
+
+    #[test]
+    fn dlyoff_resets_when_input_goes_true() {
+        let mut tree = ComponentTree::new();
+        tree.add(make_dlyoff(200, false, 3.0));
+        tree.execute_components(); // tick 1 with in=false
+        tree.execute_components(); // tick 2
+        // Set input back to true
+        tree.get_mut(200).unwrap().slots[2].value = SlotValue::Bool(true);
+        tree.execute_components(); // in=true -> out=true, counter reset
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(true));
+    }
+
+    // --- Count tests ---
+
+    #[test]
+    fn count_increments_on_rising_edge() {
+        let mut tree = ComponentTree::new();
+        tree.add(make_count(200, false, 0)); // start with in=false, no preset
+        tree.execute_components(); // no edge yet
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Int(0));
+        // Rising edge: false -> true
+        tree.get_mut(200).unwrap().slots[2].value = SlotValue::Bool(true);
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Int(1));
+        // Staying true: no edge, no increment
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Int(1));
+    }
+
+    #[test]
+    fn count_multiple_edges() {
+        let mut tree = ComponentTree::new();
+        tree.add(make_count(200, false, 0));
+        for _ in 0..5 {
+            tree.get_mut(200).unwrap().slots[2].value = SlotValue::Bool(true);
+            tree.execute_components(); // rising edge
+            tree.get_mut(200).unwrap().slots[2].value = SlotValue::Bool(false);
+            tree.execute_components(); // falling edge (no count)
+        }
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Int(5));
+    }
+
+    #[test]
+    fn count_resets_at_preset() {
+        let mut tree = ComponentTree::new();
+        tree.add(make_count(200, false, 3)); // preset=3
+        for _ in 0..3 {
+            tree.get_mut(200).unwrap().slots[2].value = SlotValue::Bool(true);
+            tree.execute_components();
+            tree.get_mut(200).unwrap().slots[2].value = SlotValue::Bool(false);
+            tree.execute_components();
+        }
+        // After 3 rising edges with preset=3, should reset to 0
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Int(0));
+    }
+
+    // --- Ramp tests ---
+
+    #[test]
+    fn ramp_goes_up_then_reverses() {
+        let mut tree = ComponentTree::new();
+        tree.add(make_ramp(200, 0.0, 10.0, 3.0)); // min=0, max=10, step=3
+        // Start at 0.0, direction=up
+        tree.execute_components(); // 0 + 3 = 3.0
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(3.0));
+        tree.execute_components(); // 3 + 3 = 6.0
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(6.0));
+        tree.execute_components(); // 6 + 3 = 9.0
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(9.0));
+        tree.execute_components(); // 9 + 3 = 12.0 >= 10 -> clamped to 10.0, direction reverses
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(10.0));
+        tree.execute_components(); // 10 - 3 = 7.0 (now going down)
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(7.0));
+    }
+
+    #[test]
+    fn ramp_reverses_at_min() {
+        let mut tree = ComponentTree::new();
+        // Start at min, going down initially won't happen since direction defaults to up
+        // Let's set it up already going down by first reaching the top
+        tree.add(make_ramp(200, 0.0, 5.0, 6.0)); // step=6, overshoots max immediately
+        tree.execute_components(); // 0 + 6 = 6 >= 5 -> clamp to 5, reverse to down
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(5.0));
+        tree.execute_components(); // 5 - 6 = -1 <= 0 -> clamp to 0, reverse to up
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(0.0));
+        tree.execute_components(); // 0 + 6 = 6 >= 5 -> clamp to 5, reverse
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(5.0));
+    }
+
+    // --- Tstat tests ---
+
+    #[test]
+    fn tstat_heating_when_cold() {
+        let mut tree = ComponentTree::new();
+        // sp=72, pv=65, deadband=4 -> half=2 -> pv < 72-2=70 -> heating
+        tree.add(make_tstat(200, 72.0, 65.0, 4.0));
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(true));  // heating
+        assert_eq!(tree.get(200).unwrap().slots[2].value, SlotValue::Bool(false)); // not cooling
+    }
+
+    #[test]
+    fn tstat_cooling_when_hot() {
+        let mut tree = ComponentTree::new();
+        // sp=72, pv=80, deadband=4 -> half=2 -> pv > 72+2=74 -> cooling
+        tree.add(make_tstat(200, 72.0, 80.0, 4.0));
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false)); // not heating
+        assert_eq!(tree.get(200).unwrap().slots[2].value, SlotValue::Bool(true));  // cooling
+    }
+
+    #[test]
+    fn tstat_deadband_holds_state() {
+        let mut tree = ComponentTree::new();
+        // sp=72, pv=71, deadband=4 -> half=2 -> 70 <= pv <= 74 -> deadband
+        // Initial state: both false, should stay in deadband
+        tree.add(make_tstat(200, 72.0, 71.0, 4.0));
+        tree.execute_components();
+        // Within deadband, keeps initial state (both false)
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false));
+        assert_eq!(tree.get(200).unwrap().slots[2].value, SlotValue::Bool(false));
+    }
+
+    #[test]
+    fn tstat_heating_stays_in_deadband() {
+        let mut tree = ComponentTree::new();
+        // Start cold to trigger heating
+        tree.add(make_tstat(200, 72.0, 65.0, 4.0));
+        tree.execute_components(); // heating=true
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(true));
+        // Now warm up into deadband zone: pv=71 (within 70-74)
+        tree.get_mut(200).unwrap().slots[4].value = SlotValue::Float(71.0);
+        tree.execute_components();
+        // Should keep heating (deadband holds)
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(true));
+    }
+
+    // --- UpDn tests ---
+
+    #[test]
+    fn updn_increments_on_up() {
+        let mut tree = ComponentTree::new();
+        tree.add(make_updn(200, 5.0, true, false, 1.0, 0.0, 10.0));
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(6.0));
+    }
+
+    #[test]
+    fn updn_decrements_on_dn() {
+        let mut tree = ComponentTree::new();
+        tree.add(make_updn(200, 5.0, false, true, 1.0, 0.0, 10.0));
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(4.0));
+    }
+
+    #[test]
+    fn updn_clamps_to_max() {
+        let mut tree = ComponentTree::new();
+        tree.add(make_updn(200, 9.5, true, false, 1.0, 0.0, 10.0));
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(10.0));
+    }
+
+    #[test]
+    fn updn_clamps_to_min() {
+        let mut tree = ComponentTree::new();
+        tree.add(make_updn(200, 0.5, false, true, 1.0, 0.0, 10.0));
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(0.0));
+    }
+
+    #[test]
+    fn updn_both_up_and_dn_cancel_out() {
+        let mut tree = ComponentTree::new();
+        // up and dn both true with same step -> net zero change
+        tree.add(make_updn(200, 5.0, true, true, 1.0, 0.0, 10.0));
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(5.0));
+    }
+
+    #[test]
+    fn updn_no_change_when_neither() {
+        let mut tree = ComponentTree::new();
+        tree.add(make_updn(200, 5.0, false, false, 1.0, 0.0, 10.0));
+        tree.execute_components();
+        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(5.0));
+    }
+
     // ---- Combined link + component execution ----
 
     #[test]
@@ -5749,5 +6501,418 @@ mod tests {
         assert_eq!(contents, file_data);
 
         let _ = std::fs::remove_file(&test_path);
+    }
+
+    // ---- Persistence tests ----
+
+    #[test]
+    fn persist_save_load_round_trip() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let persist_path = dir.path().join("sox_components.json");
+        let persist_str = persist_path.to_str().unwrap().to_string();
+
+        // Build a tree with channel components and user-added components
+        let channels = sample_channels();
+        let mut tree = ComponentTree::from_channels(&channels);
+        tree.set_persist_path(persist_str.clone());
+
+        // Add two user-added components under control (comp_id=6)
+        let id1 = tree.next_comp_id();
+        tree.add(VirtualComponent {
+            comp_id: id1,
+            parent_id: 6,
+            name: "myConst".into(),
+            type_name: "control::ConstFloat".into(),
+            kit_id: 5,
+            type_id: 1,
+            children: Vec::new(),
+            slots: vec![
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: SoxValueType::Float as u8,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Float(72.5),
+                },
+            ],
+            links: Vec::new(),
+        });
+        tree.mark_user_added(id1);
+
+        let id2 = tree.next_comp_id();
+        tree.add(VirtualComponent {
+            comp_id: id2,
+            parent_id: 6,
+            name: "myAdd".into(),
+            type_name: "control::Add2".into(),
+            kit_id: 5,
+            type_id: 2,
+            children: Vec::new(),
+            slots: vec![
+                VirtualSlot {
+                    name: "in1".into(),
+                    type_id: SoxValueType::Float as u8,
+                    flags: SLOT_FLAG_RUNTIME,
+                    value: SlotValue::Float(0.0),
+                },
+                VirtualSlot {
+                    name: "in2".into(),
+                    type_id: SoxValueType::Float as u8,
+                    flags: SLOT_FLAG_RUNTIME,
+                    value: SlotValue::Float(0.0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: SoxValueType::Float as u8,
+                    flags: SLOT_FLAG_RUNTIME,
+                    value: SlotValue::Float(0.0),
+                },
+            ],
+            links: Vec::new(),
+        });
+        tree.mark_user_added(id2);
+
+        // Add a link between them
+        tree.add_link(id1, 0, id2, 0);
+        tree.mark_dirty();
+
+        // Save
+        tree.save_user_components().expect("save should succeed");
+        assert!(persist_path.exists(), "persist file should be created");
+
+        // Load into a new tree built from the same channels
+        let mut tree2 = ComponentTree::from_channels(&channels);
+        tree2.set_persist_path(persist_str);
+        let loaded = tree2.load_user_components().expect("load should succeed");
+        assert_eq!(loaded, 2);
+
+        // Verify components restored
+        let comp1 = tree2.get(id1).expect("user comp 1 should exist");
+        assert_eq!(comp1.name, "myConst");
+        assert_eq!(comp1.parent_id, 6);
+        assert_eq!(comp1.slots.len(), 1);
+        assert_eq!(comp1.slots[0].value, SlotValue::Float(72.5));
+
+        let comp2 = tree2.get(id2).expect("user comp 2 should exist");
+        assert_eq!(comp2.name, "myAdd");
+        assert_eq!(comp2.slots.len(), 3);
+
+        // Verify link restored
+        assert!(!comp2.links.is_empty(), "links should be restored");
+        assert_eq!(comp2.links[0].from_comp, id1);
+        assert_eq!(comp2.links[0].to_comp, id2);
+
+        // Verify user_added_ids restored
+        assert!(tree2.is_user_added(id1));
+        assert!(tree2.is_user_added(id2));
+
+        // Verify next_comp_id is correct (no collisions)
+        let id3 = tree2.next_comp_id();
+        assert!(id3 > id2, "next_comp_id should be beyond loaded components");
+
+        // Verify parent registered children
+        let control = tree2.get(6).expect("control folder should exist");
+        assert!(control.children.contains(&id1), "control should contain user comp 1");
+        assert!(control.children.contains(&id2), "control should contain user comp 2");
+    }
+
+    #[test]
+    fn persist_channel_comps_not_saved() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let persist_path = dir.path().join("sox_components.json");
+        let persist_str = persist_path.to_str().unwrap().to_string();
+
+        let channels = sample_channels();
+        let mut tree = ComponentTree::from_channels(&channels);
+        tree.set_persist_path(persist_str);
+
+        // No user-added components — save should produce empty list
+        tree.mark_dirty();
+        tree.save_user_components().expect("save should succeed");
+
+        let json = std::fs::read_to_string(&persist_path).expect("read");
+        let data: PersistData = serde_json::from_str(&json).expect("parse");
+        assert_eq!(data.components.len(), 0, "channel components should NOT be saved");
+        assert_eq!(data.user_added_ids.len(), 0);
+    }
+
+    #[test]
+    fn persist_user_comps_are_saved() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let persist_path = dir.path().join("sox_components.json");
+        let persist_str = persist_path.to_str().unwrap().to_string();
+
+        let mut tree = ComponentTree::from_channels(&[]);
+        tree.set_persist_path(persist_str);
+
+        let id = tree.next_comp_id();
+        tree.add(VirtualComponent {
+            comp_id: id,
+            parent_id: 6,
+            name: "userComp".into(),
+            type_name: "test::Thing".into(),
+            kit_id: 99,
+            type_id: 1,
+            children: Vec::new(),
+            slots: vec![
+                VirtualSlot {
+                    name: "val".into(),
+                    type_id: SoxValueType::Int as u8,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Int(42),
+                },
+            ],
+            links: Vec::new(),
+        });
+        tree.mark_user_added(id);
+
+        tree.save_user_components().expect("save should succeed");
+
+        let json = std::fs::read_to_string(&persist_path).expect("read");
+        let data: PersistData = serde_json::from_str(&json).expect("parse");
+        assert_eq!(data.components.len(), 1);
+        assert_eq!(data.components[0].name, "userComp");
+        assert_eq!(data.user_added_ids, vec![id]);
+    }
+
+    #[test]
+    fn persist_dirty_flag_behavior() {
+        let mut tree = ComponentTree::new();
+
+        // Initially not dirty
+        assert!(!tree.take_dirty());
+
+        // Mark dirty
+        tree.mark_dirty();
+        assert!(tree.take_dirty());
+
+        // take_dirty clears the flag
+        assert!(!tree.take_dirty());
+
+        // mark_user_added sets dirty
+        tree.mark_user_added(999);
+        assert!(tree.take_dirty());
+    }
+
+    #[test]
+    fn persist_load_nonexistent_file_is_noop() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let persist_path = dir.path().join("does_not_exist.json");
+        let persist_str = persist_path.to_str().unwrap().to_string();
+
+        let mut tree = ComponentTree::new();
+        tree.set_persist_path(persist_str);
+
+        let loaded = tree.load_user_components().expect("load should succeed even with no file");
+        assert_eq!(loaded, 0);
+    }
+
+    #[test]
+    fn persist_delete_removes_from_user_added_ids() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let persist_path = dir.path().join("sox_components.json");
+        let persist_str = persist_path.to_str().unwrap().to_string();
+
+        let mut tree = ComponentTree::from_channels(&[]);
+        tree.set_persist_path(persist_str.clone());
+
+        let id = tree.next_comp_id();
+        tree.add(VirtualComponent {
+            comp_id: id,
+            parent_id: 6,
+            name: "toDelete".into(),
+            type_name: "test::Thing".into(),
+            kit_id: 99,
+            type_id: 1,
+            children: Vec::new(),
+            slots: Vec::new(),
+            links: Vec::new(),
+        });
+        tree.mark_user_added(id);
+        assert!(tree.is_user_added(id));
+
+        // Remove it (simulating handle_delete behavior)
+        tree.remove(id);
+        tree.user_added_ids.remove(&id);
+        tree.mark_dirty();
+
+        assert!(!tree.is_user_added(id));
+
+        // Save and verify it's gone
+        tree.save_user_components().expect("save");
+        let json = std::fs::read_to_string(&persist_path).expect("read");
+        let data: PersistData = serde_json::from_str(&json).expect("parse");
+        assert_eq!(data.components.len(), 0);
+    }
+
+    #[test]
+    fn persist_slot_value_types_round_trip() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let persist_path = dir.path().join("sox_components.json");
+        let persist_str = persist_path.to_str().unwrap().to_string();
+
+        let mut tree = ComponentTree::from_channels(&[]);
+        tree.set_persist_path(persist_str.clone());
+
+        let id = tree.next_comp_id();
+        tree.add(VirtualComponent {
+            comp_id: id,
+            parent_id: 6,
+            name: "allTypes".into(),
+            type_name: "test::AllTypes".into(),
+            kit_id: 99,
+            type_id: 1,
+            children: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "b".into(), type_id: 1, flags: 0, value: SlotValue::Bool(true) },
+                VirtualSlot { name: "i".into(), type_id: 2, flags: 0, value: SlotValue::Int(-42) },
+                VirtualSlot { name: "l".into(), type_id: 3, flags: 0, value: SlotValue::Long(123456789) },
+                VirtualSlot { name: "f".into(), type_id: 4, flags: 0, value: SlotValue::Float(3.14) },
+                VirtualSlot { name: "d".into(), type_id: 5, flags: 0, value: SlotValue::Double(2.71828) },
+                VirtualSlot { name: "s".into(), type_id: 7, flags: 0, value: SlotValue::Str("hello".into()) },
+                VirtualSlot { name: "buf".into(), type_id: 8, flags: 0, value: SlotValue::Buf(vec![1,2,3]) },
+                VirtualSlot { name: "n".into(), type_id: 0, flags: 0, value: SlotValue::Null },
+            ],
+            links: Vec::new(),
+        });
+        tree.mark_user_added(id);
+
+        tree.save_user_components().expect("save");
+
+        let mut tree2 = ComponentTree::from_channels(&[]);
+        tree2.set_persist_path(persist_str);
+        tree2.load_user_components().expect("load");
+
+        let comp = tree2.get(id).expect("comp should exist");
+        assert_eq!(comp.slots[0].value, SlotValue::Bool(true));
+        assert_eq!(comp.slots[1].value, SlotValue::Int(-42));
+        assert_eq!(comp.slots[2].value, SlotValue::Long(123456789));
+        assert_eq!(comp.slots[3].value, SlotValue::Float(3.14));
+        assert_eq!(comp.slots[4].value, SlotValue::Double(2.71828));
+        assert_eq!(comp.slots[5].value, SlotValue::Str("hello".into()));
+        assert_eq!(comp.slots[6].value, SlotValue::Buf(vec![1,2,3]));
+        assert_eq!(comp.slots[7].value, SlotValue::Null);
+    }
+
+    #[test]
+    fn persist_next_comp_id_restored_correctly() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let persist_path = dir.path().join("sox_components.json");
+        let persist_str = persist_path.to_str().unwrap().to_string();
+
+        let mut tree = ComponentTree::from_channels(&sample_channels());
+        tree.set_persist_path(persist_str.clone());
+
+        // Add a component with a high ID
+        let id = tree.next_comp_id();
+        tree.add(VirtualComponent {
+            comp_id: id,
+            parent_id: 6,
+            name: "highId".into(),
+            type_name: "test::Thing".into(),
+            kit_id: 99,
+            type_id: 1,
+            children: Vec::new(),
+            slots: Vec::new(),
+            links: Vec::new(),
+        });
+        tree.mark_user_added(id);
+        tree.save_user_components().expect("save");
+
+        // Load into a fresh tree — next_comp_id should not collide
+        let mut tree2 = ComponentTree::from_channels(&sample_channels());
+        tree2.set_persist_path(persist_str);
+        tree2.load_user_components().expect("load");
+
+        let new_id = tree2.next_comp_id();
+        assert!(new_id > id, "next_comp_id ({new_id}) should be > loaded id ({id})");
+    }
+
+    // ---- Cycle detection tests ----
+
+    #[test]
+    fn cycle_detection_simple_no_cycle() {
+        // A→B should be allowed (no cycle)
+        let mut tree = ComponentTree::from_channels(&sample_channels());
+        assert!(tree.add_link(100, 0, 101, 0));
+    }
+
+    #[test]
+    fn cycle_detection_direct_cycle_rejected() {
+        // A→B then B→A should be rejected (direct cycle)
+        let mut tree = ComponentTree::from_channels(&sample_channels());
+        assert!(tree.add_link(100, 0, 101, 0));
+        assert!(!tree.add_link(101, 0, 100, 0));
+    }
+
+    #[test]
+    fn cycle_detection_longer_chain_rejected() {
+        // A→B→C then C→A should be rejected (3-node cycle)
+        let mut tree = ComponentTree::from_channels(&sample_channels());
+        assert!(tree.add_link(100, 0, 101, 0));
+        assert!(tree.add_link(101, 0, 102, 0));
+        assert!(!tree.add_link(102, 0, 100, 0));
+    }
+
+    #[test]
+    fn cycle_detection_self_loop_allowed() {
+        // A→A self-loop should be allowed (editor uses these)
+        let mut tree = ComponentTree::from_channels(&sample_channels());
+        assert!(tree.add_link(100, 0, 100, 1));
+    }
+
+    #[test]
+    fn cycle_detection_chain_then_cycle() {
+        // A→B→C, then C→A via different slots — still a cycle
+        let mut tree = ComponentTree::from_channels(&sample_channels());
+        assert!(tree.add_link(100, 1, 101, 2));
+        assert!(tree.add_link(101, 3, 102, 4));
+        // C→A would close the cycle
+        assert!(!tree.add_link(102, 5, 100, 6));
+    }
+
+    #[test]
+    fn cycle_detection_large_chain_no_cycle() {
+        // Build a long chain of components without a cycle — all should be allowed.
+        // Use dynamically-added components beyond the channel range.
+        let mut tree = ComponentTree::from_channels(&sample_channels());
+        // Add extra components (IDs 200..209)
+        for id in 200..210u16 {
+            tree.add(VirtualComponent {
+                comp_id: id,
+                parent_id: 1,
+                name: format!("Comp{id}"),
+                type_name: "sys::Component".into(),
+                kit_id: 0,
+                type_id: 5,
+                children: vec![],
+                slots: vec![],
+                links: vec![],
+            });
+        }
+        // Chain: 200→201→202→…→209 (no cycle)
+        for id in 200..209u16 {
+            assert!(tree.add_link(id, 0, id + 1, 0), "link {id}->{} should succeed", id + 1);
+        }
+        // Adding 209→200 would create a cycle — rejected
+        assert!(!tree.add_link(209, 0, 200, 0));
+        // Adding 209→100 (not in chain) should be fine
+        assert!(tree.add_link(209, 0, 100, 0));
+    }
+
+    #[test]
+    fn handle_link_cycle_rejected_error() {
+        // Verify handle_link returns error for cyclic links
+        let mut tree = ComponentTree::from_channels(&sample_channels());
+        tree.add_link(100, 0, 101, 0);
+        // Try adding 101→100 via handler — should fail with cycle error
+        let mut payload = Vec::new();
+        payload.push(b'a'); // subcmd = add
+        payload.extend_from_slice(&101u16.to_be_bytes()); // fromCompId
+        payload.push(0); // fromSlotId
+        payload.extend_from_slice(&100u16.to_be_bytes()); // toCompId
+        payload.push(0); // toSlotId
+        let req = SoxRequest { cmd: SoxCmd::Link, req_id: 50, payload };
+        let resp = handle_link(&req, &mut tree);
+        assert_eq!(resp.cmd, b'!'); // error response
     }
 }
