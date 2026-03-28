@@ -1197,6 +1197,65 @@ impl ComponentTree {
         }
         changed
     }
+
+    /// Collect channel write commands produced by logic→channel dataflow.
+    ///
+    /// After `execute_links` and `execute_components`, some link targets may be
+    /// channel components (comp_id in [CHANNEL_COMP_BASE, channel_comp_end)).
+    /// When a logic component output is wired to a channel component's writable
+    /// slot (slot 6 = "out"), the value should be forwarded to the engine as a
+    /// channel write so it reaches real hardware.
+    ///
+    /// `changed_ids` is the union of comp_ids changed by execute_links and
+    /// execute_components.
+    ///
+    /// Returns a list of (channel_id, value) pairs to send to the engine.
+    pub fn collect_channel_writes(&self, changed_ids: &[u16]) -> Vec<(u32, f64)> {
+        let mut writes: Vec<(u32, f64)> = Vec::new();
+        for &comp_id in changed_ids {
+            if !self.is_channel_comp(comp_id) {
+                continue;
+            }
+            let comp = match self.components.get(&comp_id) {
+                Some(c) => c,
+                None => continue,
+            };
+            // Check if any link targets this channel component
+            // (i.e., a logic component output is wired into this channel).
+            let has_incoming_link = comp.links.iter().any(|link| link.to_comp == comp_id);
+            if !has_incoming_link {
+                continue;
+            }
+            // Find the link(s) targeting this channel comp and check which slots were written.
+            // We care about slot 6 ("out") — the primary writable float value.
+            let targets_out_slot = comp.links.iter().any(|link| {
+                link.to_comp == comp_id && link.to_slot == 6
+            });
+            if !targets_out_slot {
+                continue;
+            }
+            // Extract the engine channel_id from slot 2 ("channel").
+            let channel_id = match comp.slots.get(2) {
+                Some(slot) => match &slot.value {
+                    SlotValue::Int(id) => *id as u32,
+                    _ => continue,
+                },
+                None => continue,
+            };
+            // Read the current "out" slot value (slot 6).
+            let value = match comp.slots.get(6) {
+                Some(slot) => match &slot.value {
+                    SlotValue::Float(v) => *v as f64,
+                    SlotValue::Double(v) => *v,
+                    SlotValue::Int(v) => *v as f64,
+                    _ => continue,
+                },
+                None => continue,
+            };
+            writes.push((channel_id, value));
+        }
+        writes
+    }
 }
 
 /// Extract a float value from a slot, coercing Int to f32 if needed.
@@ -6946,5 +7005,149 @@ mod tests {
         let req = SoxRequest { cmd: SoxCmd::Link, req_id: 50, payload };
         let resp = handle_link(&req, &mut tree);
         assert_eq!(resp.cmd, b'!'); // error response
+    }
+
+    // ---- collect_channel_writes tests ----
+
+    /// Helper: create a channel component with the standard slot layout.
+    /// Slot 2 = channel ID (Int), Slot 6 = out (Float).
+    fn make_channel_comp(comp_id: u16, parent_id: u16, name: &str, channel_id: i32, out_value: f32) -> VirtualComponent {
+        VirtualComponent {
+            comp_id,
+            parent_id,
+            name: name.into(),
+            type_name: "EacIo::AnalogInput".into(),
+            kit_id: 15, // EacIo kit
+            type_id: 0,
+            children: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(1) },
+                VirtualSlot { name: "channelName".into(), type_id: 8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Str(name.into()) },
+                VirtualSlot { name: "channel".into(), type_id: 1, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Int(channel_id) },
+                VirtualSlot { name: "pointQuery".into(), type_id: 8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Str(String::new()) },
+                VirtualSlot { name: "pointQuerySize".into(), type_id: 1, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Int(0) },
+                VirtualSlot { name: "pointQueryStatus".into(), type_id: 0, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Bool(false) },
+                VirtualSlot { name: "out".into(), type_id: 4, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Float(out_value) },
+                VirtualSlot { name: "curStatus".into(), type_id: 8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Str("ok".into()) },
+                VirtualSlot { name: "enabled".into(), type_id: 0, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Bool(true) },
+            ],
+            links: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn collect_channel_writes_logic_to_channel() {
+        // Setup: Add2 component (comp 200) wired to channel comp (comp 100)
+        let mut tree = ComponentTree::new();
+        let ch = make_channel_comp(CHANNEL_COMP_BASE, 5, "ch_1113", 1113, 0.0);
+        tree.add(ch);
+        tree.channel_comp_end = CHANNEL_COMP_BASE + 1;
+
+        let mut add = make_math_comp(200, 6, "add", 2, 3);
+        add.slots[1].value = SlotValue::Float(42.5); // out = 42.5
+        tree.add(add);
+
+        // Link: add.out(slot 1) -> channel.out(slot 6)
+        tree.add_link(200, 1, CHANNEL_COMP_BASE, 6);
+
+        // Simulate execute_links: propagate add.out to channel.out
+        let link_changed = tree.execute_links();
+        assert!(link_changed.contains(&CHANNEL_COMP_BASE));
+
+        // Now collect channel writes
+        let writes = tree.collect_channel_writes(&link_changed);
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].0, 1113); // channel_id
+        assert!((writes[0].1 - 42.5).abs() < 0.001); // value
+    }
+
+    #[test]
+    fn collect_channel_writes_no_link_no_write() {
+        // Channel comp changed but has no incoming link — should NOT produce a write.
+        let mut tree = ComponentTree::new();
+        let ch = make_channel_comp(CHANNEL_COMP_BASE, 5, "ch_1113", 1113, 72.5);
+        tree.add(ch);
+        tree.channel_comp_end = CHANNEL_COMP_BASE + 1;
+
+        let writes = tree.collect_channel_writes(&[CHANNEL_COMP_BASE]);
+        assert!(writes.is_empty(), "no incoming link means no write");
+    }
+
+    #[test]
+    fn collect_channel_writes_link_to_non_out_slot_ignored() {
+        // Link targets slot 0 (meta) on a channel comp, not slot 6 (out).
+        let mut tree = ComponentTree::new();
+        let ch = make_channel_comp(CHANNEL_COMP_BASE, 5, "ch_1113", 1113, 0.0);
+        tree.add(ch);
+        tree.channel_comp_end = CHANNEL_COMP_BASE + 1;
+
+        let src = make_source_comp(200, 6, "src", 99.0);
+        tree.add(src);
+
+        // Link to slot 0 (meta), not slot 6 (out)
+        tree.add_link(200, 1, CHANNEL_COMP_BASE, 0);
+
+        let writes = tree.collect_channel_writes(&[CHANNEL_COMP_BASE]);
+        assert!(writes.is_empty(), "link to non-out slot should not produce channel write");
+    }
+
+    #[test]
+    fn collect_channel_writes_non_channel_comp_ignored() {
+        // Changed comp_id is NOT a channel comp — should be ignored.
+        let mut tree = ComponentTree::new();
+        tree.channel_comp_end = CHANNEL_COMP_BASE; // no channel comps
+
+        let src = make_source_comp(200, 6, "src", 50.0);
+        tree.add(src);
+
+        let writes = tree.collect_channel_writes(&[200]);
+        assert!(writes.is_empty(), "non-channel comp should not produce channel write");
+    }
+
+    #[test]
+    fn collect_channel_writes_full_dataflow() {
+        // End-to-end: ConstFloat(78.0) → Add2 → channel comp
+        // Simulates sensor value flowing through logic and back to a channel.
+        let mut tree = ComponentTree::new();
+
+        // Channel comp 100: channel 2001, initial out=0.0
+        let ch = make_channel_comp(CHANNEL_COMP_BASE, 5, "ch_2001", 2001, 0.0);
+        tree.add(ch);
+        tree.channel_comp_end = CHANNEL_COMP_BASE + 1;
+
+        // ConstFloat source: out=78.0
+        let src = make_source_comp(200, 6, "const", 78.0);
+        tree.add(src);
+
+        // Add2: in1 wired from const, in2=2.0 (manual offset)
+        let mut add = make_math_comp(201, 6, "add", 2, 3);
+        add.slots[3].value = SlotValue::Float(2.0); // in2 = 2.0
+        tree.add(add);
+
+        // Wire: const.out(1) -> add.in1(2)
+        tree.add_link(200, 1, 201, 2);
+        // Wire: add.out(1) -> channel.out(6)
+        tree.add_link(201, 1, CHANNEL_COMP_BASE, 6);
+
+        // Execute dataflow
+        let link_changed = tree.execute_links();
+        let comp_changed = tree.execute_components();
+
+        // After execute_links: add.in1 = 78.0
+        // After execute_components: add.out = 78.0 + 2.0 = 80.0
+
+        // Second round of link propagation to push add.out to channel.out
+        let link_changed2 = tree.execute_links();
+
+        let all_changed: Vec<u16> = link_changed.iter()
+            .chain(comp_changed.iter())
+            .chain(link_changed2.iter())
+            .copied()
+            .collect();
+
+        let writes = tree.collect_channel_writes(&all_changed);
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].0, 2001);
+        assert!((writes[0].1 - 80.0).abs() < 0.001, "expected 80.0, got {}", writes[0].1);
     }
 }

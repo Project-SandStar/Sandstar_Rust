@@ -356,6 +356,36 @@ async fn run_sox_server(
                             info!(links = link_changed.len(), comps = comp_changed.len(), "SOX: dataflow executed");
                         }
 
+                        // Logic→Channel bridge: when a logic component output is
+                        // wired to a channel component's "out" slot, forward the
+                        // value to the engine so it reaches real hardware.
+                        let all_changed: Vec<u16> = link_changed.iter()
+                            .chain(comp_changed.iter())
+                            .copied()
+                            .collect();
+                        let channel_writes = tree.collect_channel_writes(&all_changed);
+                        for (channel_id, value) in channel_writes {
+                            info!(channel_id, value, "SOX: logic→channel write");
+                            let handle = engine_handle.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = handle
+                                    .write_channel(
+                                        channel_id,
+                                        Some(value),
+                                        8, // priority level 8 (operator)
+                                        "sox-logic".to_string(),
+                                        0.0,
+                                    )
+                                    .await
+                                {
+                                    warn!(
+                                        channel = channel_id,
+                                        "SOX logic→channel write failed: {e}"
+                                    );
+                                }
+                            });
+                        }
+
                         // On first tick after subscribe, queue ALL channel comps for burst push
                         if force_full_cov {
                             force_full_cov = false;
