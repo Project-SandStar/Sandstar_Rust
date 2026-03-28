@@ -1514,6 +1514,8 @@ pub struct ManifestSlot {
 pub struct ManifestDb {
     /// (kit_index, type_id) -> ordered list of slots for that component type.
     types: HashMap<(u8, u8), Vec<ManifestSlot>>,
+    /// (kit_index, type_name) -> type_id for resolving base type inheritance.
+    type_name_lookup: HashMap<(u8, String), u8>,
 }
 
 impl ManifestDb {
@@ -1521,6 +1523,7 @@ impl ManifestDb {
     pub fn new() -> Self {
         Self {
             types: HashMap::new(),
+            type_name_lookup: HashMap::new(),
         }
     }
 
@@ -1615,6 +1618,7 @@ impl ManifestDb {
                         // Starting a new type definition
                         let mut id: Option<u8> = None;
                         let mut base: Option<String> = None;
+                        let mut type_name = String::new();
 
                         for attr in e.attributes().flatten() {
                             let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
@@ -1622,11 +1626,16 @@ impl ManifestDb {
                             match key {
                                 "id" => id = val.parse().ok(),
                                 "base" => base = Some(val.to_string()),
+                                "name" => type_name = val.to_string(),
                                 _ => {}
                             }
                         }
 
                         if let Some(type_id) = id {
+                            // Register name → type_id for base type resolution
+                            if !type_name.is_empty() {
+                                self.type_name_lookup.insert((kit_index, type_name), type_id);
+                            }
                             // Flush previous type if any
                             if let Some(prev_type_id) = current_type_id.take() {
                                 self.insert_type(kit_index, prev_type_id, &current_base, &current_slots);
@@ -1719,24 +1728,47 @@ impl ManifestDb {
     ) {
         let mut slots = Vec::new();
 
-        // If this type extends sys::Component (directly or transitively),
-        // prepend the inherited `meta` slot.
         let has_base = base.as_ref().is_some_and(|b| !b.is_empty());
         if has_base {
-            // Check if own_slots already includes a `meta` slot (some manifests redefine it)
-            let has_meta = own_slots.iter().any(|s| s.name == "meta");
-            if !has_meta {
-                slots.push(ManifestSlot {
-                    name: "meta".into(),
-                    type_id: SoxValueType::Int as u8,
-                    flags: SLOT_FLAG_CONFIG,
-                    default_value: SlotValue::Int(1),
-                });
+            // Resolve parent type slots by looking up the base type in the manifest DB.
+            // e.g., Add4 base="control::Add2" → inherit Add2's slots (meta, out, in1, in2)
+            if let Some(base_str) = base.as_ref() {
+                if let Some(parent_slots) = self.resolve_base_slots(base_str, kit_index) {
+                    slots.extend(parent_slots);
+                } else {
+                    // Fallback: just prepend meta if parent not found
+                    let has_meta = own_slots.iter().any(|s| s.name == "meta");
+                    if !has_meta {
+                        slots.push(ManifestSlot {
+                            name: "meta".into(),
+                            type_id: SoxValueType::Int as u8,
+                            flags: SLOT_FLAG_CONFIG,
+                            default_value: SlotValue::Int(1),
+                        });
+                    }
+                }
             }
         }
 
-        slots.extend_from_slice(own_slots);
+        // Append own slots, skipping any that were already inherited from parent
+        for slot in own_slots {
+            if !slots.iter().any(|s| s.name == slot.name) {
+                slots.push(slot.clone());
+            }
+        }
         self.types.insert((kit_index, type_id), slots);
+    }
+
+    /// Resolve base type slots from a "kit::Type" string like "control::Add2".
+    fn resolve_base_slots(&self, base: &str, _current_kit: u8) -> Option<Vec<ManifestSlot>> {
+        let parts: Vec<&str> = base.split("::").collect();
+        if parts.len() != 2 { return None; }
+        let kit_name = parts[0];
+        let type_name = parts[1];
+
+        let kit_idx = DEFAULT_KITS.iter().position(|k| k.name == kit_name)? as u8;
+        let tid = self.type_name_lookup.get(&(kit_idx, type_name.to_string()))?;
+        self.types.get(&(kit_idx, *tid)).cloned()
     }
 
     /// Look up the slot schema for a component type.
