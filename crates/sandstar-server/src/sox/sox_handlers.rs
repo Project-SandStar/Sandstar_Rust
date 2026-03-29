@@ -1241,9 +1241,10 @@ impl ComponentTree {
                 // ChannelRead: channelId in slot 1, out in slot 2
                 let ch_id = get_int(&comp.slots, 1);
                 if ch_id > 0 { channel_reads.push((comp.comp_id, ch_id, 2)); }
-            } else if self.user_added_ids.contains(&comp.comp_id) && comp.name.starts_with("ch_") {
-                // ConstFloat/WriteFloat named "ch_XXXX": auto-bridge from channel XXXX
-                if let Ok(ch_id) = comp.name[3..].parse::<i32>() {
+            } else if self.user_added_ids.contains(&comp.comp_id) && comp.name.starts_with("ch") {
+                // ConstFloat/WriteFloat named "ch_XXXX" or "chXXXX": auto-bridge from channel
+                let num_str = comp.name.trim_start_matches("ch").trim_start_matches('_');
+                if let Ok(ch_id) = num_str.parse::<i32>() {
                     if ch_id > 0 { channel_reads.push((comp.comp_id, ch_id, 1)); } // out=slot 1
                 }
             }
