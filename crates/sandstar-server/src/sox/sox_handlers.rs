@@ -506,8 +506,13 @@ impl ComponentTree {
         });
 
         // Map each channel to a component under io (compId = 100 + index)
+        // Auto-layout: grid of 6 columns, spaced 30 units apart
         for (i, ch) in channels.iter().enumerate() {
             let comp_id = CHANNEL_COMP_BASE + i as u16;
+            let col = (i % 6) as u8;
+            let row = (i / 6) as u8;
+            let x = 2 + col * 30; // grid x position
+            let y = 2 + row * 12; // grid y position
             tree.add(VirtualComponent {
                 comp_id,
                 parent_id: 5, // io folder
@@ -516,7 +521,7 @@ impl ComponentTree {
                 kit_id: 1, // EacIo kit (index 1 in DEFAULT_KITS)
                 type_id: 0, // AnalogInput
                 children: Vec::new(),
-                slots: channel_slots(ch),
+                slots: channel_slots_with_pos(ch, x, y),
                 links: Vec::new(),
             });
         }
@@ -676,7 +681,13 @@ impl ComponentTree {
         for (i, ch) in channels.iter().enumerate() {
             let comp_id = CHANNEL_COMP_BASE + i as u16;
             if let Some(comp) = self.components.get_mut(&comp_id) {
-                let new_slots = channel_slots(ch);
+                let mut new_slots = channel_slots(ch);
+                // Preserve existing meta value (contains canvas position coordinates)
+                if let (Some(existing_meta), Some(new_meta)) = (comp.slots.first(), new_slots.first_mut()) {
+                    if existing_meta.name == "meta" && new_meta.name == "meta" {
+                        new_meta.value = existing_meta.value.clone();
+                    }
+                }
                 if slots_differ(&comp.slots, &new_slots) {
                     comp.slots = new_slots;
                     changed.push(comp_id);
@@ -1344,6 +1355,21 @@ fn channel_type_name(direction: &str) -> String {
 ///   6: curStatus   (Buf, runtime)
 ///   7: enabled     (bool, runtime)
 ///   8: query       (void, action — not serialized)
+/// Encode canvas position into meta slot value.
+/// Meta bit layout: bits 0-3 = security, bits 16-23 = x, bits 24-31 = y
+fn encode_meta_with_pos(x: u8, y: u8) -> i32 {
+    0x01 | ((x as i32) << 16) | ((y as i32) << 24)
+}
+
+fn channel_slots_with_pos(ch: &ChannelInfo, x: u8, y: u8) -> Vec<VirtualSlot> {
+    let mut slots = channel_slots(ch);
+    // Set canvas position in meta slot
+    if let Some(meta) = slots.first_mut() {
+        meta.value = SlotValue::Int(encode_meta_with_pos(x, y));
+    }
+    slots
+}
+
 fn channel_slots(ch: &ChannelInfo) -> Vec<VirtualSlot> {
     vec![
         // Inherited from sys::Component
@@ -1351,7 +1377,7 @@ fn channel_slots(ch: &ChannelInfo) -> Vec<VirtualSlot> {
             name: "meta".into(),
             type_id: SoxValueType::Int as u8,
             flags: SLOT_FLAG_CONFIG,
-            value: SlotValue::Int(1), // default meta value
+            value: SlotValue::Int(1), // default meta value (no position)
         },
         // EacIo::AnalogInput slots in manifest order
         VirtualSlot {
@@ -3655,7 +3681,8 @@ mod tests {
         assert_eq!(ch.slots[7].name, "curStatus");
         assert_eq!(ch.slots[8].name, "enabled");
 
-        assert_eq!(ch.slots[0].value, SlotValue::Int(1)); // meta
+        // meta encodes canvas position: x=2, y=2 for first channel (index 0)
+        assert_eq!(ch.slots[0].value, SlotValue::Int(encode_meta_with_pos(2, 2))); // meta with position
         assert_eq!(ch.slots[2].value, SlotValue::Int(1113)); // channel
         assert_eq!(ch.slots[6].value, SlotValue::Float(72.5)); // out
         assert_eq!(ch.slots[8].value, SlotValue::Bool(true)); // enabled
@@ -4300,9 +4327,9 @@ mod tests {
         let mut r = SoxReader::new(&resp.payload);
         assert_eq!(r.read_u16(), Some(100)); // comp_id
         assert_eq!(r.read_u8(), Some(b'c')); // what byte echoed back
-        // Config slots: meta (Int=1) and pointQuery (Str="")
-        // meta: i4(1)
-        assert_eq!(r.read_i32(), Some(1));
+        // Config slots: meta (Int with position encoding) and pointQuery (Str="")
+        // meta: i4(encode_meta_with_pos(2, 2)) for first channel (index 0)
+        assert_eq!(r.read_i32(), Some(encode_meta_with_pos(2, 2)));
         // pointQuery: u2(1) + 0x00 (empty string with null terminator)
         assert_eq!(r.read_u16(), Some(1)); // size=1 (just the null)
         assert_eq!(r.read_u8(), Some(0x00)); // null terminator
