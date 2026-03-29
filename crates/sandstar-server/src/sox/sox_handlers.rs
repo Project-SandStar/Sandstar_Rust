@@ -763,7 +763,9 @@ impl ComponentTree {
                 // LSeq (linear sequencer)
                 (2, 31) |
                 // Stateful: DlyOff, DlyOn, Count, Ramp, Tstat, UpDn
-                (2, 19) | (2, 20) | (2, 16) | (2, 44) | (2, 54) | (2, 55) => {
+                (2, 19) | (2, 20) | (2, 16) | (2, 44) | (2, 54) | (2, 55) |
+                // ChannelRead: reads sensor value from a channel component
+                (1, 100) => {
                     evaluations.push((comp.comp_id, comp.kit_id, comp.type_id));
                 }
                 _ => {}
@@ -1037,6 +1039,10 @@ impl ComponentTree {
                         slot_updates.push((1, SlotValue::Int(inv)));
                     }
 
+                    // --- ChannelRead (kit 1, type 100): reads sensor value from channel ---
+                    // Handled separately below (needs cross-component lookup)
+                    _ if comp.kit_id == 1 && *type_id == 100 => {}
+
                     // --- LSeq (Linear Sequencer) ---
                     31 => {
                         // LSeq: divides input range into N stages
@@ -1222,6 +1228,37 @@ impl ComponentTree {
                 self.component_state.insert(comp_id, st);
             }
         }
+
+        // Phase 4: ChannelRead components — read sensor value from channel components
+        // Slots: meta=0, channelId=1(Int,config), out=2(Float), status=3(Str)
+        // Reads the "out" slot (index 6) from the channel component matching channelId.
+        let channel_reads: Vec<(u16, i32)> = self.components.values()
+            .filter(|c| c.kit_id == 1 && c.type_id == 100)
+            .map(|c| (c.comp_id, get_int(&c.slots, 1))) // (comp_id, channelId)
+            .collect();
+
+        for (comp_id, channel_id) in channel_reads {
+            // Find the channel component by scanning for matching channel slot (index 2)
+            let sensor_value = self.components.values()
+                .find(|c| {
+                    self.is_channel_comp(c.comp_id) &&
+                    c.slots.get(2).map(|s| s.value == SlotValue::Int(channel_id)).unwrap_or(false)
+                })
+                .and_then(|c| c.slots.get(6)) // slot 6 = "out" (sensor value)
+                .map(|s| s.value.clone());
+
+            if let Some(value) = sensor_value {
+                if let Some(comp) = self.components.get_mut(&comp_id) {
+                    if let Some(out_slot) = comp.slots.get_mut(2) {
+                        if out_slot.value != value {
+                            out_slot.value = value;
+                            changed.push(comp_id);
+                        }
+                    }
+                }
+            }
+        }
+
         changed
     }
 
@@ -1683,6 +1720,16 @@ impl ManifestDb {
                 }
             }
         }
+
+        // Register custom ChannelRead type (EacIo kit, type 100)
+        // This allows users to bridge real sensor values into control logic
+        db.types.insert((1, 100), vec![
+            ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+            ManifestSlot { name: "channelId".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(0) },
+            ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+            ManifestSlot { name: "status".into(), type_id: SoxValueType::Buf as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Str(String::new()) },
+        ]);
+        db.type_name_lookup.insert((1, "ChannelRead".to_string()), 100);
 
         tracing::info!(
             total_types = db.types.len(),
@@ -3105,6 +3152,14 @@ fn default_slots_for_type(kit_id: u8, type_id: u8) -> Vec<VirtualSlot> {
             VirtualSlot { name: "in".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(0) },
             VirtualSlot { name: "out".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Int(0) },
             VirtualSlot { name: "set".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_ACTION, value: SlotValue::Int(0) },
+        ],
+        // EacIo::ChannelRead (kit 1, type 100) — bridge sensor values to control logic
+        // User sets channelId (config), out auto-updates with live sensor value every tick
+        (1, 100) => vec![
+            VirtualSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(1) },
+            VirtualSlot { name: "channelId".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(0) },
+            VirtualSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Float(0.0) },
+            VirtualSlot { name: "status".into(), type_id: SoxValueType::Buf as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Str(String::new()) },
         ],
         // Default: meta slot + auto-extend on write for unknown types
         _ => vec![
