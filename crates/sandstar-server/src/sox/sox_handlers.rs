@@ -1229,15 +1229,27 @@ impl ComponentTree {
             }
         }
 
-        // Phase 4: ChannelRead components — read sensor value from channel components
-        // Slots: meta=0, channelId=1(Int,config), out=2(Float), status=3(Str)
-        // Reads the "out" slot (index 6) from the channel component matching channelId.
-        let channel_reads: Vec<(u16, i32)> = self.components.values()
-            .filter(|c| c.kit_id == 1 && c.type_id == 100)
-            .map(|c| (c.comp_id, get_int(&c.slots, 1))) // (comp_id, channelId)
-            .collect();
+        // Phase 4: Sensor bridge — read sensor value from channel components.
+        // Supports two mechanisms:
+        // A) ChannelRead (kit 1, type 100): channelId in slot 1
+        // B) Any ConstFloat/WriteFloat whose "out" slot (index 1) has a channel link:
+        //    if the component NAME is "ch_XXXX" (e.g., "ch_1713"), auto-pull from channel XXXX
+        let mut channel_reads: Vec<(u16, i32, usize)> = Vec::new(); // (comp_id, channel_id, out_slot)
 
-        for (comp_id, channel_id) in channel_reads {
+        for comp in self.components.values() {
+            if comp.kit_id == 1 && comp.type_id == 100 {
+                // ChannelRead: channelId in slot 1, out in slot 2
+                let ch_id = get_int(&comp.slots, 1);
+                if ch_id > 0 { channel_reads.push((comp.comp_id, ch_id, 2)); }
+            } else if self.user_added_ids.contains(&comp.comp_id) && comp.name.starts_with("ch_") {
+                // ConstFloat/WriteFloat named "ch_XXXX": auto-bridge from channel XXXX
+                if let Ok(ch_id) = comp.name[3..].parse::<i32>() {
+                    if ch_id > 0 { channel_reads.push((comp.comp_id, ch_id, 1)); } // out=slot 1
+                }
+            }
+        }
+
+        for (comp_id, channel_id, out_slot_idx) in channel_reads {
             // Find the channel component by scanning for matching channel slot (index 2)
             let sensor_value = self.components.values()
                 .find(|c| {
@@ -1249,7 +1261,7 @@ impl ComponentTree {
 
             if let Some(value) = sensor_value {
                 if let Some(comp) = self.components.get_mut(&comp_id) {
-                    if let Some(out_slot) = comp.slots.get_mut(2) {
+                    if let Some(out_slot) = comp.slots.get_mut(out_slot_idx) {
                         if out_slot.value != value {
                             out_slot.value = value;
                             changed.push(comp_id);
