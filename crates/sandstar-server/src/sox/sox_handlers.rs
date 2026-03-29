@@ -1125,23 +1125,39 @@ impl ComponentTree {
 
                     // --- Tstat (Thermostat with deadband, type 54) ---
                     54 => {
-                        // slots: meta=0, heating=1(bool), cooling=2(bool), sp=3(float),
-                        //        pv=4(float), deadband=5(float, config)
-                        let sp = get_float(&comp.slots, 3);
-                        let pv = get_float(&comp.slots, 4);
-                        let deadband = get_float(&comp.slots, 5);
-                        let half_db = deadband / 2.0;
-                        let current_heating = get_bool(&comp.slots, 1);
-                        let current_cooling = get_bool(&comp.slots, 2);
-                        let (heating, cooling) = if pv < sp - half_db {
-                            (true, false)
-                        } else if pv > sp + half_db {
-                            (false, true)
+                        // Real manifest slots:
+                        //   meta=0, diff=1(float,config=deadband), isHeating=2(bool,config),
+                        //   sp=3(float,config), cv=4(float,runtime=process variable),
+                        //   out=5(bool,readonly), raise=6(bool,readonly), lower=7(bool,readonly)
+                        let diff = get_float(&comp.slots, 1);   // deadband
+                        let is_heating = get_bool(&comp.slots, 2); // heating mode
+                        let sp = get_float(&comp.slots, 3);     // setpoint
+                        let cv = get_float(&comp.slots, 4);     // current value (PV)
+                        let current_out = get_bool(&comp.slots, 5);
+                        let half_db = diff / 2.0;
+
+                        let (out, raise, lower) = if is_heating {
+                            // Heating mode: turn on when cold, off when warm
+                            if cv < sp - half_db {
+                                (true, true, false)  // need heat
+                            } else if cv > sp + half_db {
+                                (false, false, true)  // warm enough
+                            } else {
+                                (current_out, false, false) // deadband
+                            }
                         } else {
-                            (current_heating, current_cooling) // deadband: keep current state
+                            // Cooling mode: turn on when hot, off when cool
+                            if cv > sp + half_db {
+                                (true, false, true)  // need cooling
+                            } else if cv < sp - half_db {
+                                (false, true, false)  // cool enough
+                            } else {
+                                (current_out, false, false) // deadband
+                            }
                         };
-                        slot_updates.push((1, SlotValue::Bool(heating)));
-                        slot_updates.push((2, SlotValue::Bool(cooling)));
+                        slot_updates.push((5, SlotValue::Bool(out)));
+                        slot_updates.push((6, SlotValue::Bool(raise)));
+                        slot_updates.push((7, SlotValue::Bool(lower)));
                     }
 
                     // --- UpDn (Up/down accumulator, type 55) ---
@@ -5755,18 +5771,21 @@ mod tests {
     }
 
     /// Helper: create a Tstat component (kit_id=2, type_id=54)
-    fn make_tstat(comp_id: u16, sp: f32, pv: f32, deadband: f32) -> VirtualComponent {
+    /// Real manifest: meta=0, diff=1(deadband), isHeating=2, sp=3, cv=4, out=5, raise=6, lower=7
+    fn make_tstat(comp_id: u16, sp: f32, cv: f32, diff: f32) -> VirtualComponent {
         VirtualComponent {
             comp_id, parent_id: NO_PARENT, name: "tstat".into(),
             type_name: "control::Tstat".into(), kit_id: 2, type_id: 54,
             children: Vec::new(), links: Vec::new(),
             slots: vec![
                 VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "heating".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
-                VirtualSlot { name: "cooling".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
-                VirtualSlot { name: "sp".into(), type_id: 4, flags: 0, value: SlotValue::Float(sp) },
-                VirtualSlot { name: "pv".into(), type_id: 4, flags: 0, value: SlotValue::Float(pv) },
-                VirtualSlot { name: "deadband".into(), type_id: 4, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(deadband) },
+                VirtualSlot { name: "diff".into(), type_id: 4, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(diff) },
+                VirtualSlot { name: "isHeating".into(), type_id: 0, flags: SLOT_FLAG_CONFIG, value: SlotValue::Bool(true) },
+                VirtualSlot { name: "sp".into(), type_id: 4, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(sp) },
+                VirtualSlot { name: "cv".into(), type_id: 4, flags: 0, value: SlotValue::Float(cv) },
+                VirtualSlot { name: "out".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
+                VirtualSlot { name: "raise".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
+                VirtualSlot { name: "lower".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
             ],
         }
     }
@@ -5954,37 +5973,37 @@ mod tests {
     }
 
     // --- Tstat tests ---
+    // Real manifest: meta=0, diff=1(deadband), isHeating=2, sp=3, cv=4, out=5, raise=6, lower=7
 
     #[test]
     fn tstat_heating_when_cold() {
         let mut tree = ComponentTree::new();
-        // sp=72, pv=65, deadband=4 -> half=2 -> pv < 72-2=70 -> heating
+        // isHeating=true, sp=72, cv=65, diff=4 -> half=2 -> cv < 72-2=70 -> out=true (need heat)
         tree.add(make_tstat(200, 72.0, 65.0, 4.0));
         tree.execute_components();
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(true));  // heating
-        assert_eq!(tree.get(200).unwrap().slots[2].value, SlotValue::Bool(false)); // not cooling
+        assert_eq!(tree.get(200).unwrap().slots[5].value, SlotValue::Bool(true));  // out=on
+        assert_eq!(tree.get(200).unwrap().slots[6].value, SlotValue::Bool(true));  // raise
+        assert_eq!(tree.get(200).unwrap().slots[7].value, SlotValue::Bool(false)); // not lower
     }
 
     #[test]
     fn tstat_cooling_when_hot() {
         let mut tree = ComponentTree::new();
-        // sp=72, pv=80, deadband=4 -> half=2 -> pv > 72+2=74 -> cooling
+        // isHeating=true, sp=72, cv=80, diff=4 -> half=2 -> cv > 72+2=74 -> out=false (warm enough)
         tree.add(make_tstat(200, 72.0, 80.0, 4.0));
         tree.execute_components();
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false)); // not heating
-        assert_eq!(tree.get(200).unwrap().slots[2].value, SlotValue::Bool(true));  // cooling
+        assert_eq!(tree.get(200).unwrap().slots[5].value, SlotValue::Bool(false)); // out=off
+        assert_eq!(tree.get(200).unwrap().slots[7].value, SlotValue::Bool(true));  // lower
     }
 
     #[test]
     fn tstat_deadband_holds_state() {
         let mut tree = ComponentTree::new();
-        // sp=72, pv=71, deadband=4 -> half=2 -> 70 <= pv <= 74 -> deadband
-        // Initial state: both false, should stay in deadband
+        // isHeating=true, sp=72, cv=71, diff=4 -> half=2 -> 70 <= cv <= 74 -> deadband
         tree.add(make_tstat(200, 72.0, 71.0, 4.0));
         tree.execute_components();
-        // Within deadband, keeps initial state (both false)
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false));
-        assert_eq!(tree.get(200).unwrap().slots[2].value, SlotValue::Bool(false));
+        // Within deadband, keeps initial state (out=false)
+        assert_eq!(tree.get(200).unwrap().slots[5].value, SlotValue::Bool(false));
     }
 
     #[test]
@@ -5992,13 +6011,13 @@ mod tests {
         let mut tree = ComponentTree::new();
         // Start cold to trigger heating
         tree.add(make_tstat(200, 72.0, 65.0, 4.0));
-        tree.execute_components(); // heating=true
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(true));
+        tree.execute_components(); // out=true
+        assert_eq!(tree.get(200).unwrap().slots[5].value, SlotValue::Bool(true));
         // Now warm up into deadband zone: pv=71 (within 70-74)
         tree.get_mut(200).unwrap().slots[4].value = SlotValue::Float(71.0);
         tree.execute_components();
-        // Should keep heating (deadband holds)
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(true));
+        // Should keep out=true (deadband holds)
+        assert_eq!(tree.get(200).unwrap().slots[5].value, SlotValue::Bool(true));
     }
 
     // --- UpDn tests ---
