@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 use std::pin::pin;
+#[cfg(feature = "svm")]
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -26,9 +27,12 @@ use sandstar_hal::{HalControl, HalDiagnostics, HalRead, HalWrite};
 use sandstar_server::{args, cmd_handler, config, control, dispatch, history, ipc, loader, logging, metrics, pid, reload, rest, sd_notify, signal, tls, watchdog};
 use sandstar_server::control::ControlRunner;
 use sandstar_server::history::HistoryPoint;
+#[cfg(feature = "svm")]
 use sandstar_svm::{ChannelInfo, ChannelSnapshot, SvmRunner};
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+#[cfg(feature = "svm")]
+use tracing::debug;
+use tracing::{error, info, warn};
 
 // Compile-time assertions: types moved into spawn_blocking must be Send.
 fn _assert_send<T: Send>() {}
@@ -277,12 +281,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 5b. Set up history store (in-memory ring buffer, 1000 points per channel)
     let mut history_store = history::HistoryStore::new(1000);
 
-    // 5c. Set up Sedona VM (optional)
+    // 5c. Set up Sedona VM (optional, requires `svm` feature)
+    #[cfg(feature = "svm")]
     let svm_snapshot = Arc::new(RwLock::new(ChannelSnapshot::new()));
+    #[cfg(feature = "svm")]
     let svm_write_queue = Arc::new(Mutex::new(Vec::new()));
+    #[cfg(feature = "svm")]
     let svm_tag_write_queue: Arc<Mutex<Vec<sandstar_svm::SvmTagWrite>>> =
         Arc::new(Mutex::new(Vec::new()));
+    #[cfg(feature = "svm")]
     let mut svm_runner: Option<SvmRunner> = None;
+    #[cfg(feature = "svm")]
     if args.sedona {
         let scode_path = args.scode_path.clone().unwrap_or_else(|| {
             // Default: look for kits.scode next to config dir
@@ -305,6 +314,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 error!(err = %e, "failed to start Sedona VM (continuing without SVM)");
             }
         }
+    }
+    #[cfg(not(feature = "svm"))]
+    if args.sedona {
+        error!("--sedona flag requires the `svm` feature (rebuild with --features svm)");
+        return Err("SVM feature not enabled — rebuild with --features svm".into());
     }
 
     // 6. Set up poll interval
@@ -503,6 +517,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 // Update SVM channel snapshot after each poll
+                #[cfg(feature = "svm")]
                 if svm_runner.is_some() {
                     if let Some(ref eng) = engine {
                         let channels: Vec<ChannelInfo> = eng.channels.iter().map(|(_, ch)| {
@@ -749,6 +764,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Stop Sedona VM if running
+    #[cfg(feature = "svm")]
     if let Some(ref mut runner) = svm_runner {
         runner.stop();
     }

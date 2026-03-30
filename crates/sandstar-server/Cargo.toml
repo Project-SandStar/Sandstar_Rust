@@ -19,6 +19,7 @@ default = ["mock-hal"]
 mock-hal = []
 linux-hal = ["dep:sandstar-hal-linux", "dep:libc"]
 simulator-hal = ["sandstar-hal/simulator"]
+svm = ["dep:sandstar-svm"]
 tls = ["dep:axum-server", "dep:rustls", "dep:rustls-pemfile"]
 
 [dependencies]
@@ -26,7 +27,7 @@ sandstar-engine = { path = "../sandstar-engine" }
 sandstar-hal = { path = "../sandstar-hal" }
 sandstar-hal-linux = { path = "../sandstar-hal-linux", optional = true }
 sandstar-ipc = { path = "../sandstar-ipc" }
-sandstar-svm = { path = "../sandstar-svm" }
+sandstar-svm = { path = "../sandstar-svm", optional = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 bincode = { workspace = true }

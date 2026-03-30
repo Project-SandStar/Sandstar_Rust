@@ -7270,4 +7270,417 @@ mod tests {
         assert_eq!(writes[0].0, 2001);
         assert!((writes[0].1 - 80.0).abs() < 0.001, "expected 80.0, got {}", writes[0].1);
     }
+
+    // ---- Sensor bridge (chXXXX naming) tests ----
+
+    #[test]
+    fn sensor_bridge_ch1713_matching_channel_updates_out() {
+        // A user-added ConstFloat named "ch1713" should auto-bridge from channel 1713.
+        let mut tree = ComponentTree::new();
+
+        // Channel comp for channel 1713 with sensor value 78.0
+        let ch = make_channel_comp(CHANNEL_COMP_BASE, 5, "ch_1713", 1713, 78.0);
+        tree.add(ch);
+        tree.channel_comp_end = CHANNEL_COMP_BASE + 1;
+
+        // User-added ConstFloat named "ch1713" — out is slot 1, initially 0.0
+        let src = make_source_comp(200, 6, "ch1713", 0.0);
+        tree.add(src);
+        tree.user_added_ids.insert(200);
+
+        let changed = tree.execute_components();
+
+        // The bridge should have updated slot 1 (out) to 78.0
+        let comp = tree.get(200).unwrap();
+        match &comp.slots[1].value {
+            SlotValue::Float(v) => assert!((*v - 78.0).abs() < 0.001, "expected 78.0, got {v}"),
+            other => panic!("expected Float, got {other:?}"),
+        }
+        assert!(changed.contains(&200), "comp 200 should be in changed list");
+    }
+
+    #[test]
+    fn sensor_bridge_ch9999_no_matching_channel_stays_zero() {
+        // "ch9999" has no matching channel comp — out should stay 0.0.
+        let mut tree = ComponentTree::new();
+
+        // Only channel 1113 exists
+        let ch = make_channel_comp(CHANNEL_COMP_BASE, 5, "ch_1113", 1113, 72.5);
+        tree.add(ch);
+        tree.channel_comp_end = CHANNEL_COMP_BASE + 1;
+
+        let src = make_source_comp(200, 6, "ch9999", 0.0);
+        tree.add(src);
+        tree.user_added_ids.insert(200);
+
+        let changed = tree.execute_components();
+
+        let comp = tree.get(200).unwrap();
+        match &comp.slots[1].value {
+            SlotValue::Float(v) => assert!((*v - 0.0).abs() < 0.001, "out should stay 0.0, got {v}"),
+            other => panic!("expected Float, got {other:?}"),
+        }
+        assert!(!changed.contains(&200), "no change expected for unmatched channel");
+    }
+
+    #[test]
+    fn sensor_bridge_cheese_not_a_channel_number() {
+        // "cheese" starts with "ch" but the remainder is not a number — no bridge.
+        let mut tree = ComponentTree::new();
+
+        let ch = make_channel_comp(CHANNEL_COMP_BASE, 5, "ch_1113", 1113, 72.5);
+        tree.add(ch);
+        tree.channel_comp_end = CHANNEL_COMP_BASE + 1;
+
+        let src = make_source_comp(200, 6, "cheese", 0.0);
+        tree.add(src);
+        tree.user_added_ids.insert(200);
+
+        let changed = tree.execute_components();
+
+        let comp = tree.get(200).unwrap();
+        match &comp.slots[1].value {
+            SlotValue::Float(v) => assert!((*v - 0.0).abs() < 0.001, "out should stay 0.0, got {v}"),
+            other => panic!("expected Float, got {other:?}"),
+        }
+        assert!(!changed.contains(&200), "cheese should not trigger sensor bridge");
+    }
+
+    #[test]
+    fn sensor_bridge_ch0_invalid_channel_no_bridge() {
+        // "ch0" parses to channel 0 which is invalid (ch_id > 0 required) — no bridge.
+        let mut tree = ComponentTree::new();
+
+        let ch = make_channel_comp(CHANNEL_COMP_BASE, 5, "ch_1113", 1113, 72.5);
+        tree.add(ch);
+        tree.channel_comp_end = CHANNEL_COMP_BASE + 1;
+
+        let src = make_source_comp(200, 6, "ch0", 0.0);
+        tree.add(src);
+        tree.user_added_ids.insert(200);
+
+        let changed = tree.execute_components();
+
+        let comp = tree.get(200).unwrap();
+        match &comp.slots[1].value {
+            SlotValue::Float(v) => assert!((*v - 0.0).abs() < 0.001, "out should stay 0.0 for ch0, got {v}"),
+            other => panic!("expected Float, got {other:?}"),
+        }
+        assert!(!changed.contains(&200), "ch0 should not trigger sensor bridge");
+    }
+
+    // ---- Save/Hibernate invoke tests ----
+
+    #[test]
+    fn invoke_save_action_on_app_calls_persist() {
+        // Invoke "save" on comp 0 (App) should trigger save_user_components.
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let persist_path = dir.path().join("sox_components.json");
+        let persist_str = persist_path.to_str().unwrap().to_string();
+
+        let channels = sample_channels();
+        let mut tree = ComponentTree::from_channels(&channels);
+        tree.set_persist_path(persist_str.clone());
+
+        // Add a user component so save has something to write
+        let id1 = tree.next_comp_id();
+        tree.add(VirtualComponent {
+            comp_id: id1,
+            parent_id: 6,
+            name: "saveTest".into(),
+            type_name: "control::ConstFloat".into(),
+            kit_id: 5,
+            type_id: 1,
+            children: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "out".into(), type_id: 4, flags: 0, value: SlotValue::Float(42.0) },
+                VirtualSlot { name: "save".into(), type_id: 4, flags: SLOT_FLAG_ACTION, value: SlotValue::Null },
+            ],
+            links: Vec::new(),
+        });
+        tree.mark_user_added(id1);
+
+        // Build invoke request: comp_id=0, slot_id for "save" action
+        // App comp (0) has slots; we need to find a slot named "save".
+        // For simplicity, invoke on the user comp that has a "save" slot at index 2.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&id1.to_be_bytes()); // comp_id
+        payload.push(2); // slot_id = index 2 ("save")
+        let req = SoxRequest { cmd: SoxCmd::Invoke, req_id: 99, payload };
+        let resp = handle_invoke(&req, &mut tree);
+
+        // Should succeed
+        assert_ne!(resp.cmd, b'!', "invoke save should not return error");
+        // Persistence file should exist
+        assert!(persist_path.exists(), "save action should create persistence file");
+    }
+
+    #[test]
+    fn invoke_hibernate_action_persists() {
+        // Invoke "hibernate" should also trigger save_user_components.
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let persist_path = dir.path().join("sox_components.json");
+        let persist_str = persist_path.to_str().unwrap().to_string();
+
+        let channels = sample_channels();
+        let mut tree = ComponentTree::from_channels(&channels);
+        tree.set_persist_path(persist_str.clone());
+
+        let id1 = tree.next_comp_id();
+        tree.add(VirtualComponent {
+            comp_id: id1,
+            parent_id: 6,
+            name: "hibTest".into(),
+            type_name: "control::ConstFloat".into(),
+            kit_id: 5,
+            type_id: 1,
+            children: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "out".into(), type_id: 4, flags: 0, value: SlotValue::Float(10.0) },
+                VirtualSlot { name: "hibernate".into(), type_id: 4, flags: SLOT_FLAG_ACTION, value: SlotValue::Null },
+            ],
+            links: Vec::new(),
+        });
+        tree.mark_user_added(id1);
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&id1.to_be_bytes()); // comp_id
+        payload.push(2); // slot_id = index 2 ("hibernate")
+        let req = SoxRequest { cmd: SoxCmd::Invoke, req_id: 98, payload };
+        let resp = handle_invoke(&req, &mut tree);
+
+        assert_ne!(resp.cmd, b'!', "invoke hibernate should not return error");
+        assert!(persist_path.exists(), "hibernate action should create persistence file");
+    }
+
+    // ---- Manifest slot inheritance tests ----
+
+    #[test]
+    fn manifest_inherit_add4_from_add2_gets_6_slots() {
+        // Add4 (base=control::Add2) should inherit Add2's slots (meta, out, in1, in2)
+        // plus its own (in3, in4) = 6 total.
+        let xml_control = r#"<?xml version='1.0'?>
+<kitManifest name="control" checksum="808b7db3" version="1.2.28">
+<type id="3" name="Add2" sizeof="64" base="sys::Component">
+  <slot id="0" name="out" type="float" flags="r"/>
+  <slot id="1" name="in1" type="float" flags="c"/>
+  <slot id="2" name="in2" type="float" flags="c"/>
+</type>
+<type id="49" name="Add4" sizeof="80" base="control::Add2">
+  <slot id="0" name="in3" type="float" flags="c"/>
+  <slot id="1" name="in4" type="float" flags="c"/>
+</type>
+</kitManifest>"#;
+
+        let mut db = ManifestDb::new();
+        db.parse_kit_manifest(xml_control, 2); // kit_index=2 for control
+
+        let slots = db.get_slots(2, 49).expect("Add4 should be in manifest");
+        assert_eq!(slots.len(), 6, "Add4 should have 6 slots: meta, out, in1, in2, in3, in4");
+        assert_eq!(slots[0].name, "meta");
+        assert_eq!(slots[1].name, "out");
+        assert_eq!(slots[2].name, "in1");
+        assert_eq!(slots[3].name, "in2");
+        assert_eq!(slots[4].name, "in3");
+        assert_eq!(slots[5].name, "in4");
+    }
+
+    #[test]
+    fn manifest_inherit_sub4_from_sub2() {
+        // Sub4 (base=control::Sub2) inherits Sub2's slots.
+        let xml_control = r#"<?xml version='1.0'?>
+<kitManifest name="control" checksum="808b7db3" version="1.2.28">
+<type id="37" name="Sub2" sizeof="64" base="sys::Component">
+  <slot id="0" name="out" type="float" flags="r"/>
+  <slot id="1" name="in1" type="float" flags="c"/>
+  <slot id="2" name="in2" type="float" flags="c"/>
+</type>
+<type id="50" name="Sub4" sizeof="80" base="control::Sub2">
+  <slot id="0" name="in3" type="float" flags="c"/>
+  <slot id="1" name="in4" type="float" flags="c"/>
+</type>
+</kitManifest>"#;
+
+        let mut db = ManifestDb::new();
+        db.parse_kit_manifest(xml_control, 2);
+
+        let slots = db.get_slots(2, 50).expect("Sub4 should be in manifest");
+        assert_eq!(slots.len(), 6, "Sub4 should have 6 slots: meta, out, in1, in2, in3, in4");
+        assert_eq!(slots[0].name, "meta");
+        assert_eq!(slots[1].name, "out");
+        assert_eq!(slots[2].name, "in1");
+        assert_eq!(slots[3].name, "in2");
+        assert_eq!(slots[4].name, "in3");
+        assert_eq!(slots[5].name, "in4");
+    }
+
+    #[test]
+    fn manifest_type_with_sys_component_base_gets_meta_prepended() {
+        // A type with base="sys::Component" and no meta in its own slots
+        // should get meta prepended.
+        let xml = r#"<?xml version='1.0'?>
+<kitManifest name="control" checksum="808b7db3" version="1.2.28">
+<type id="99" name="CustomComp" sizeof="32" base="sys::Component">
+  <slot id="0" name="value" type="float" flags="c"/>
+</type>
+</kitManifest>"#;
+
+        let mut db = ManifestDb::new();
+        db.parse_kit_manifest(xml, 2);
+
+        let slots = db.get_slots(2, 99).expect("CustomComp should be in manifest");
+        assert!(slots.len() >= 2, "should have at least meta + value");
+        assert_eq!(slots[0].name, "meta", "meta should be prepended");
+        assert_eq!(slots[1].name, "value");
+    }
+
+    // ---- collect_channel_writes additional edge-case tests ----
+
+    #[test]
+    fn collect_channel_writes_double_value_coerced() {
+        // Channel comp with Double value in slot 6 should still produce a write.
+        let mut tree = ComponentTree::new();
+        let mut ch = make_channel_comp(CHANNEL_COMP_BASE, 5, "ch_1113", 1113, 0.0);
+        ch.slots[6].value = SlotValue::Double(99.9);
+        ch.slots[6].type_id = SoxValueType::Double as u8;
+        tree.add(ch);
+        tree.channel_comp_end = CHANNEL_COMP_BASE + 1;
+
+        let src = make_source_comp(200, 6, "src", 99.9);
+        tree.add(src);
+        tree.add_link(200, 1, CHANNEL_COMP_BASE, 6);
+
+        let writes = tree.collect_channel_writes(&[CHANNEL_COMP_BASE]);
+        assert_eq!(writes.len(), 1);
+        assert!((writes[0].1 - 99.9).abs() < 0.001, "Double should coerce to f64");
+    }
+
+    #[test]
+    fn collect_channel_writes_int_value_coerced() {
+        // Channel comp with Int value in slot 6 should coerce to f64.
+        let mut tree = ComponentTree::new();
+        let mut ch = make_channel_comp(CHANNEL_COMP_BASE, 5, "ch_1113", 1113, 0.0);
+        ch.slots[6].value = SlotValue::Int(42);
+        ch.slots[6].type_id = SoxValueType::Int as u8;
+        tree.add(ch);
+        tree.channel_comp_end = CHANNEL_COMP_BASE + 1;
+
+        let src = make_source_comp(200, 6, "src", 42.0);
+        tree.add(src);
+        tree.add_link(200, 1, CHANNEL_COMP_BASE, 6);
+
+        let writes = tree.collect_channel_writes(&[CHANNEL_COMP_BASE]);
+        assert_eq!(writes.len(), 1);
+        assert!((writes[0].1 - 42.0).abs() < 0.001, "Int should coerce to f64");
+    }
+
+    // ---- Persistence round-trip with links ----
+
+    #[test]
+    fn persist_round_trip_with_links_preserved() {
+        // Create comps with links, save, load into new tree — verify links survive.
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let persist_path = dir.path().join("sox_links.json");
+        let persist_str = persist_path.to_str().unwrap().to_string();
+
+        let channels = sample_channels();
+        let mut tree = ComponentTree::from_channels(&channels);
+        tree.set_persist_path(persist_str.clone());
+
+        // Add a ConstFloat source
+        let src_id = tree.next_comp_id();
+        tree.add(VirtualComponent {
+            comp_id: src_id,
+            parent_id: 6,
+            name: "linkSrc".into(),
+            type_name: "control::ConstFloat".into(),
+            kit_id: 2,
+            type_id: 14,
+            children: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "out".into(), type_id: 4, flags: 0, value: SlotValue::Float(55.5) },
+            ],
+            links: Vec::new(),
+        });
+        tree.mark_user_added(src_id);
+
+        // Add an Add2 target
+        let tgt_id = tree.next_comp_id();
+        tree.add(VirtualComponent {
+            comp_id: tgt_id,
+            parent_id: 6,
+            name: "linkTgt".into(),
+            type_name: "control::Add2".into(),
+            kit_id: 2,
+            type_id: 3,
+            children: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
+                VirtualSlot { name: "out".into(), type_id: 4, flags: 0, value: SlotValue::Float(0.0) },
+                VirtualSlot { name: "in1".into(), type_id: 4, flags: 0, value: SlotValue::Float(0.0) },
+                VirtualSlot { name: "in2".into(), type_id: 4, flags: 0, value: SlotValue::Float(0.0) },
+            ],
+            links: Vec::new(),
+        });
+        tree.mark_user_added(tgt_id);
+
+        // Wire: src.out(1) -> tgt.in1(2)
+        tree.add_link(src_id, 1, tgt_id, 2);
+        // Wire: src.out(1) -> tgt.in2(3) (second link)
+        tree.add_link(src_id, 1, tgt_id, 3);
+        tree.mark_dirty();
+
+        // Save
+        tree.save_user_components().expect("save should succeed");
+
+        // Load into a fresh tree
+        let mut tree2 = ComponentTree::from_channels(&channels);
+        tree2.set_persist_path(persist_str);
+        let loaded = tree2.load_user_components().expect("load should succeed");
+        assert_eq!(loaded, 2);
+
+        // Verify source component
+        let src_loaded = tree2.get(src_id).expect("source should exist");
+        assert_eq!(src_loaded.name, "linkSrc");
+        assert_eq!(src_loaded.slots[1].value, SlotValue::Float(55.5));
+
+        // Verify target component has links restored
+        let tgt_loaded = tree2.get(tgt_id).expect("target should exist");
+        assert_eq!(tgt_loaded.name, "linkTgt");
+        assert!(tgt_loaded.links.len() >= 2, "target should have 2 links, got {}", tgt_loaded.links.len());
+
+        // Check specific link details
+        let link1 = tgt_loaded.links.iter().find(|l| l.to_slot == 2);
+        assert!(link1.is_some(), "link to in1 (slot 2) should exist");
+        let link1 = link1.unwrap();
+        assert_eq!(link1.from_comp, src_id);
+        assert_eq!(link1.from_slot, 1);
+
+        let link2 = tgt_loaded.links.iter().find(|l| l.to_slot == 3);
+        assert!(link2.is_some(), "link to in2 (slot 3) should exist");
+        let link2 = link2.unwrap();
+        assert_eq!(link2.from_comp, src_id);
+        assert_eq!(link2.from_slot, 1);
+
+        // Verify user_added_ids restored
+        assert!(tree2.is_user_added(src_id));
+        assert!(tree2.is_user_added(tgt_id));
+
+        // Verify execute_links works after load (links are functional, not just serialized)
+        let changed = tree2.execute_links();
+        // src.out(55.5) should propagate to tgt.in1 and tgt.in2
+        let tgt_after = tree2.get(tgt_id).unwrap();
+        match &tgt_after.slots[2].value {
+            SlotValue::Float(v) => assert!((*v - 55.5).abs() < 0.001, "in1 should be 55.5 after link exec"),
+            other => panic!("expected Float for in1, got {other:?}"),
+        }
+        match &tgt_after.slots[3].value {
+            SlotValue::Float(v) => assert!((*v - 55.5).abs() < 0.001, "in2 should be 55.5 after link exec"),
+            other => panic!("expected Float for in2, got {other:?}"),
+        }
+        assert!(changed.contains(&tgt_id), "target should be in changed list after link exec");
+    }
 }
