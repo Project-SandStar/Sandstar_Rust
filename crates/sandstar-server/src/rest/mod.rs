@@ -652,6 +652,18 @@ async fn rate_limit_middleware(
     Ok(next.run(request).await)
 }
 
+/// Embedded web dashboard served at GET /.
+const DASHBOARD_HTML: &str = include_str!("dashboard.html");
+
+async fn dashboard() -> Response {
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        DASHBOARD_HTML,
+    )
+        .into_response()
+}
+
 /// Build the Axum router for the Haystack REST API.
 ///
 /// `rate_limit` is the maximum requests per second (0 = unlimited).
@@ -677,6 +689,7 @@ pub fn router_with_auth(
 ) -> Router {
     // Public read-only routes (no auth required)
     let public = Router::new()
+        .route("/", get(dashboard))
         .route("/api/about", get(handlers::about))
         .route("/api/ops", get(handlers::ops))
         .route("/api/formats", get(handlers::formats))

@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sandstar Engine</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#1a1a2e;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;min-height:100vh;display:flex;flex-direction:column}
+a{color:#4fc3f7}
+header{background:linear-gradient(135deg,#0f3460,#16213e);padding:16px 24px;display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid #0f0}
+header h1{font-size:1.4rem;color:#0f0;letter-spacing:1px}
+header .meta{font-size:.8rem;color:#aaa;text-align:right}
+header .meta span{display:block}
+#error-banner{display:none;background:#f44;color:#fff;text-align:center;padding:8px;font-weight:bold;font-size:.9rem}
+.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;padding:16px 24px}
+.card{background:linear-gradient(135deg,#16213e,#1a1a2e);border:1px solid #2a2a4a;border-radius:10px;padding:18px;text-align:center;box-shadow:0 4px 12px rgba(0,0,0,.4)}
+.card .val{font-size:2rem;font-weight:bold;font-family:'Courier New',monospace}
+.card .lbl{font-size:.75rem;color:#888;margin-top:4px;text-transform:uppercase;letter-spacing:1px}
+.card.green .val{color:#0f0}.card.red .val{color:#f44}.card.yellow .val{color:#ff0}.card.blue .val{color:#4fc3f7}
+.panel{margin:0 24px 14px;background:#16213e;border-radius:10px;border:1px solid #2a2a4a;overflow:hidden}
+.panel-hdr{padding:12px 16px;font-weight:bold;font-size:.9rem;border-bottom:1px solid #2a2a4a;display:flex;justify-content:space-between;align-items:center}
+.alarm-hdr{background:#3a1020;color:#f44}
+.sensor-hdr{background:#102030}
+#alarm-panel{display:none}
+#alarm-body{max-height:200px;overflow-y:auto}
+.controls{display:flex;gap:10px;align-items:center}
+#search{background:#1a1a2e;border:1px solid #2a2a4a;border-radius:6px;padding:6px 12px;color:#e0e0e0;font-size:.85rem;width:220px}
+#search::placeholder{color:#555}
+table{width:100%;border-collapse:collapse;font-size:.85rem}
+th{background:#0f3460;padding:10px 12px;text-align:left;cursor:pointer;user-select:none;position:sticky;top:0;white-space:nowrap}
+th:hover{background:#1a4a80}
+th .arrow{font-size:.65rem;margin-left:4px;color:#4fc3f7}
+td{padding:8px 12px;border-bottom:1px solid #1a1a2e}
+tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+tr:hover td{background:rgba(79,195,247,.08)}
+.tbl-wrap{max-height:60vh;overflow-y:auto}
+.s-ok{color:#0f0}.s-fault{color:#f44}.s-down{color:#f80}.s-unknown{color:#ff0}
+.val-cell{font-family:'Courier New',monospace;text-align:right}
+.alarm-row td{background:rgba(255,68,68,.1)!important;border-left:3px solid #f44}
+footer{margin-top:auto;padding:14px 24px;text-align:center;font-size:.75rem;color:#555;border-top:1px solid #2a2a4a}
+@media(max-width:768px){
+  .cards{grid-template-columns:repeat(2,1fr);padding:10px 12px}
+  header{flex-direction:column;gap:8px;text-align:center}
+  .panel{margin:0 12px 10px}
+  #search{width:140px}
+  .tbl-wrap{max-height:50vh}
+}
+@media(max-width:480px){
+  .cards{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>&#9670; Sandstar Engine</h1>
+  <div class="meta">
+    <span id="version">v--</span>
+    <span id="uptime">Uptime: --</span>
+    <span id="updated">Last updated: --</span>
+  </div>
+</header>
+<div id="error-banner">Connection lost — retrying...</div>
+
+<div class="cards">
+  <div class="card blue"><div class="val" id="c-total">--</div><div class="lbl">Total Channels</div></div>
+  <div class="card green"><div class="val" id="c-ok">--</div><div class="lbl">Active (Ok)</div></div>
+  <div class="card red"><div class="val" id="c-fault">--</div><div class="lbl">Faults</div></div>
+  <div class="card yellow"><div class="val" id="c-unknown">--</div><div class="lbl">Unknown</div></div>
+</div>
+
+<div class="panel" id="alarm-panel">
+  <div class="panel-hdr alarm-hdr">Alarms</div>
+  <div id="alarm-body"><table id="alarm-table"><thead><tr>
+    <th>ID</th><th>Name</th><th>Value</th><th>Status</th><th>Type</th>
+  </tr></thead><tbody></tbody></table></div>
+</div>
+
+<div class="panel">
+  <div class="panel-hdr sensor-hdr">
+    <span>Channels</span>
+    <div class="controls">
+      <input id="search" type="text" placeholder="Filter channels...">
+    </div>
+  </div>
+  <div class="tbl-wrap"><table id="sensor-table"><thead><tr>
+    <th data-col="id">ID <span class="arrow"></span></th>
+    <th data-col="label">Name <span class="arrow"></span></th>
+    <th data-col="cur">Value <span class="arrow"></span></th>
+    <th data-col="status">Status <span class="arrow"></span></th>
+    <th data-col="type">Type <span class="arrow"></span></th>
+    <th data-col="direction">Dir <span class="arrow"></span></th>
+  </tr></thead><tbody></tbody></table></div>
+</div>
+
+<footer>Sandstar Engine v1.5.0 &mdash; Pure Rust DDC Controller</footer>
+
+<script>
+(function(){
+  let channels=[], sortCol='id', sortAsc=true, filter='';
+  const $=id=>document.getElementById(id);
+  const statusCls=s=>{s=(s||'').toLowerCase();return s==='ok'?'s-ok':s==='fault'?'s-fault':s==='down'?'s-down':'s-unknown'};
+  const fmtVal=v=>typeof v==='number'?v.toFixed(2):String(v??'--');
+  const fmtUptime=s=>{if(!s&&s!==0)return'--';const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return(d?d+'d ':'')+(h?h+'h ':'')+(m?m+'m':'<1m')};
+  const now=()=>new Date().toLocaleTimeString();
+
+  async function fetchAbout(){
+    try{
+      const r=await fetch('/api/about');const d=await r.json();
+      $('version').textContent='v'+d.product_version+(d.build_info?' ('+d.build_info+')':'');
+    }catch(e){console.warn('about fetch failed',e)}
+  }
+
+  async function fetchData(){
+    try{
+      const [rr,sr]=await Promise.all([
+        fetch('/api/read?filter=point&limit=9999'),
+        fetch('/api/status')
+      ]);
+      if(!rr.ok||!sr.ok)throw new Error('HTTP '+rr.status);
+      channels=await rr.json();
+      const st=await sr.json();
+      $('error-banner').style.display='none';
+      $('uptime').textContent='Uptime: '+fmtUptime(st.uptimeSecs);
+      $('updated').textContent='Last updated: '+now();
+      updateCards();renderAlarms();renderTable();
+    }catch(e){
+      console.warn('fetch error',e);
+      $('error-banner').style.display='block';
+    }
+  }
+
+  function updateCards(){
+    let ok=0,fault=0,unk=0;
+    channels.forEach(c=>{
+      const s=(c.status||'').toLowerCase();
+      if(s==='ok')ok++;else if(s==='fault'||s==='down')fault++;else unk++;
+    });
+    $('c-total').textContent=channels.length;
+    $('c-ok').textContent=ok;
+    $('c-fault').textContent=fault;
+    $('c-unknown').textContent=unk;
+  }
+
+  function renderAlarms(){
+    const alarms=channels.filter(c=>{const s=(c.status||'').toLowerCase();return s==='fault'||s==='down'});
+    const panel=$('alarm-panel');
+    if(!alarms.length){panel.style.display='none';return}
+    panel.style.display='block';
+    const tb=$('alarm-table').querySelector('tbody');
+    tb.innerHTML=alarms.map(c=>`<tr class="alarm-row">
+      <td>${c.id}</td><td>${c.label||'--'}</td><td class="val-cell">${fmtVal(c.cur)}</td>
+      <td class="${statusCls(c.status)}">${c.status}</td><td>${c.type||c.channel_type||'--'}</td>
+    </tr>`).join('');
+  }
+
+  function sortedFiltered(){
+    let list=[...channels];
+    if(filter){const f=filter.toLowerCase();list=list.filter(c=>
+      String(c.id).includes(f)||(c.label||'').toLowerCase().includes(f)||
+      (c.status||'').toLowerCase().includes(f)||(c.type||c.channel_type||'').toLowerCase().includes(f)||
+      (c.direction||'').toLowerCase().includes(f)
+    )}
+    list.sort((a,b)=>{
+      let va=a[sortCol],vb=b[sortCol];
+      if(sortCol==='cur'||sortCol==='id'){va=Number(va)||0;vb=Number(vb)||0}
+      else{va=String(va||'').toLowerCase();vb=String(vb||'').toLowerCase()}
+      if(va<vb)return sortAsc?-1:1;if(va>vb)return sortAsc?1:-1;return 0;
+    });
+    return list;
+  }
+
+  function renderTable(){
+    const list=sortedFiltered();
+    const tb=$('sensor-table').querySelector('tbody');
+    tb.innerHTML=list.map(c=>{
+      const sc=statusCls(c.status);
+      const typ=c.type||c.channel_type||'--';
+      return`<tr><td>${c.id}</td><td>${c.label||'--'}</td><td class="val-cell">${fmtVal(c.cur)}</td>
+        <td class="${sc}">${c.status||'--'}</td><td>${typ}</td><td>${c.direction||'--'}</td></tr>`;
+    }).join('');
+    document.querySelectorAll('#sensor-table th .arrow').forEach(a=>a.textContent='');
+    const active=document.querySelector(`#sensor-table th[data-col="${sortCol}"] .arrow`);
+    if(active)active.textContent=sortAsc?' ▲':' ▼';
+  }
+
+  document.querySelectorAll('#sensor-table th[data-col]').forEach(th=>{
+    th.addEventListener('click',()=>{
+      const col=th.dataset.col;
+      if(col===sortCol)sortAsc=!sortAsc;else{sortCol=col;sortAsc=true}
+      renderTable();
+    });
+  });
+
+  $('search').addEventListener('input',e=>{filter=e.target.value;renderTable()});
+
+  fetchAbout();fetchData();
+  setInterval(fetchData,5000);
+})();
+</script>
+</body>
+</html>
