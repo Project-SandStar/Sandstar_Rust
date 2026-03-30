@@ -354,6 +354,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("TLS feature not enabled — rebuild with --features tls".into());
     }
 
+    // 8. Create shared DynSlotStore (dynamic tags for components).
+    let dyn_store: sandstar_server::sox::DynSlotStoreHandle = {
+        use sandstar_server::sox::dyn_slots::DynSlotStore;
+        let mut store = DynSlotStore::with_defaults();
+        let config_dir = std::env::var("SANDSTAR_CONFIG_DIR")
+            .unwrap_or_else(|_| "/home/eacio/sandstar/etc/config".to_string());
+        let path = format!("{config_dir}/dyn_slots.json");
+        match store.load(&path) {
+            Ok(0) => {}
+            Ok(n) => info!(total_tags = n, "dyn_slots: loaded dynamic tags"),
+            Err(e) => warn!("dyn_slots: failed to load from {path}: {e}"),
+        }
+        std::sync::Arc::new(std::sync::RwLock::new(store))
+    };
+
     // 8a. Set up REST API (Axum HTTP server, with optional TLS)
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<EngineCmd>(64);
     if !args.no_rest {
@@ -366,6 +381,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config.auth_token.clone(),
             config.rate_limit,
         );
+
+        // Merge dynamic tags REST endpoints
+        app = app.merge(rest::tags::router(dyn_store.clone()));
 
         // Merge simulator REST endpoints when built with simulator-hal
         #[cfg(feature = "simulator-hal")]
@@ -421,6 +439,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.sox_pass.clone(),
             sox_engine_handle,
             args.manifests_dir.clone(),
+            Some(dyn_store.clone()),
         ))
     } else {
         None

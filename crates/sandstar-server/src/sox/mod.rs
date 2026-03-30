@@ -10,6 +10,7 @@
 //! - [`sox_handlers`] — SOX command dispatch
 
 pub mod dasp;
+pub mod dyn_slots;
 pub mod sox_handlers;
 pub mod sox_protocol;
 
@@ -17,6 +18,7 @@ pub use sox_protocol::*;
 
 use crate::rest::EngineHandle;
 use crate::sox::dasp::DaspTransport;
+use crate::sox::dyn_slots::DynSlotStore;
 use crate::sox::sox_handlers::{
     handle_sox_request, handle_put_chunk, is_put_transfer_active,
     parse_write_request, ComponentTree, ManifestDb, SubscriptionManager,
@@ -39,19 +41,23 @@ pub const DEFAULT_MANIFESTS_DIR: &str = "/home/eacio/sandstar/etc/manifests";
 /// uses the default path (`/home/eacio/sandstar/etc/manifests`).
 ///
 /// Returns a `JoinHandle` that can be used to await or abort the task.
+/// Thread-safe handle to a shared [`DynSlotStore`].
+pub type DynSlotStoreHandle = Arc<std::sync::RwLock<DynSlotStore>>;
+
 pub fn spawn_sox_server(
     port: u16,
     username: String,
     password: String,
     engine_handle: EngineHandle,
     manifests_dir: Option<String>,
+    dyn_store: Option<DynSlotStoreHandle>,
 ) -> JoinHandle<()> {
     // Load manifest database synchronously before spawning the async task.
     let dir = manifests_dir.unwrap_or_else(|| DEFAULT_MANIFESTS_DIR.to_string());
     let manifest_db = Arc::new(ManifestDb::load(&dir));
 
     tokio::spawn(async move {
-        run_sox_server(port, username, password, engine_handle, manifest_db).await;
+        run_sox_server(port, username, password, engine_handle, manifest_db, dyn_store).await;
     })
 }
 
@@ -71,6 +77,7 @@ async fn run_sox_server(
     password: String,
     engine_handle: EngineHandle,
     manifest_db: Arc<ManifestDb>,
+    dyn_store_handle: Option<DynSlotStoreHandle>,
 ) {
     let mut transport = match DaspTransport::bind(port, &username, &password) {
         Ok(t) => t,
@@ -102,6 +109,17 @@ async fn run_sox_server(
         Ok(n) => info!(count = n, "SOX: restored persisted user components"),
         Err(e) => warn!("SOX: failed to load persisted components: {e}"),
     }
+
+    // Dynamic slot store (side-car tag dictionaries for components).
+    // If a shared handle was provided, use it; otherwise create a local one.
+    let dyn_store_handle = dyn_store_handle.unwrap_or_else(|| {
+        Arc::new(std::sync::RwLock::new(DynSlotStore::with_defaults()))
+    });
+    let dyn_persist_path = {
+        let config_dir = std::env::var("SANDSTAR_CONFIG_DIR")
+            .unwrap_or_else(|_| "/home/eacio/sandstar/etc/config".to_string());
+        format!("{config_dir}/dyn_slots.json")
+    };
 
     let mut subscriptions = SubscriptionManager::new();
 
@@ -178,10 +196,12 @@ async fn run_sox_server(
                             }
                         }
 
-                        // Save parent_id before delete (component removed by handle_sox_request)
-                        let delete_parent_id = if request.cmd as u8 == b'd' && request.payload.len() >= 2 {
-                            let comp_id = u16::from_be_bytes([request.payload[0], request.payload[1]]);
-                            tree.get(comp_id).map(|c| c.parent_id).unwrap_or(0)
+                        // Save comp_id + parent_id before delete (component removed by handle_sox_request)
+                        let delete_comp_id = if request.cmd as u8 == b'd' && request.payload.len() >= 2 {
+                            Some(u16::from_be_bytes([request.payload[0], request.payload[1]]))
+                        } else { None };
+                        let delete_parent_id = if let Some(cid) = delete_comp_id {
+                            tree.get(cid).map(|c| c.parent_id).unwrap_or(0)
                         } else { 0 };
 
                         let response =
@@ -194,6 +214,16 @@ async fn run_sox_server(
                                 session = session_id,
                                 "SOX: failed to send response: {e}"
                             );
+                        }
+
+                        // After Delete: clean up dynamic tags for the deleted component.
+                        if let Some(cid) = delete_comp_id {
+                            if let Ok(mut ds) = dyn_store_handle.write() {
+                                if ds.tag_count(cid) > 0 {
+                                    info!(comp_id = cid, "dyn_slots: cleaning up tags for deleted component");
+                                    ds.remove_all(cid);
+                                }
+                            }
                         }
 
                         // After Write to a channel component: push COV event.
@@ -476,6 +506,14 @@ async fn run_sox_server(
                 if tree.take_dirty() {
                     if let Err(e) = tree.save_user_components() {
                         warn!("SOX: failed to save user components: {e}");
+                    }
+                }
+                // Save dynamic slot store to disk if dirty.
+                if let Ok(mut ds) = dyn_store_handle.write() {
+                    if ds.take_dirty() {
+                        if let Err(e) = ds.save(&dyn_persist_path) {
+                            warn!("dyn_slots: failed to save: {e}");
+                        }
                     }
                 }
             }

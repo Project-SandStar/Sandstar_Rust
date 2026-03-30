@@ -12,6 +12,7 @@ pub mod filter;
 pub mod handlers;
 #[cfg(feature = "simulator-hal")]
 pub mod sim;
+pub mod tags;
 mod types;
 pub mod ws;
 pub mod zinc_format;
