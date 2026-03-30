@@ -3416,6 +3416,12 @@ fn handle_invoke(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
         "setTrue" => Some(SlotValue::Bool(true)),
         "setFalse" => Some(SlotValue::Bool(false)),
         "setNull" => Some(SlotValue::Null),
+        "save" | "hibernate" => {
+            // Save/Hibernate: explicitly persist all user components to disk
+            tracing::info!(action = %action_name, "SOX: saving user components");
+            let _ = tree.save_user_components();
+            None // no slot value change
+        }
         _ => {
             // Unknown action — try parsing as float
             reader.read_f32().map(SlotValue::Float)

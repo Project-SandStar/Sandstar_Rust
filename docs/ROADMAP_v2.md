@@ -1,8 +1,8 @@
 # Sandstar Rust Migration -- Roadmap v2
 
-**Date:** 2026-03-27 (updated)
-**Status:** PRODUCTION DEPLOYED — Rust v1.3.0 on BeagleBone. **Visual DDC programming working** — components can be wired together in the Sedona Application Editor and values propagate through links in real-time (industry first: pure Rust dataflow engine). **SOX protocol fully operational** — editor connected, live sensor data visible via COV events, write/invoke working, link/wiring working with visual wire lines on canvas. **Dataflow engine** executes link propagation + component math (Add2/Sub2/Mul2/Div2) every tick. **185 component types** loaded from manifest XML parser across all 15 kits.
-**Version:** 1.3.0 (7 crates, 1,540 tests, ~40,000+ lines of Rust)
+**Date:** 2026-03-30 (updated)
+**Status:** PRODUCTION DEPLOYED — Rust v1.4.0 on BeagleBone. **Visual DDC programming working** — 35 executable component types with dataflow engine, components wired in Sedona Application Editor with wire lines on canvas, values propagate through links in real-time. **20/20 SOX commands complete** — all SOX ops implemented including fileWrite/fileRename. **Component persistence** via sox_components.json with auto-save every 5s. **Channel-to-logic bridge** using "chXXXX" naming convention for sensor proxy. **Full DDC loop verified with real hardware** — real sensor (121F) through Tstat to heating output. **Cycle detection** in link graph (DFS). **Faster COV** — 200 burst on subscribe, 50/tick normal. **185 component types** loaded from manifest XML parser across all 15 kits.
+**Version:** 1.4.0 (7 crates, 1,637 tests, ~40,000+ lines of Rust)
 **Feature Parity:** ~99% (80/80 features vs C system + extras)
 **Research Documents:** 20 analysis docs (00-19) — deep gap analysis completed 2026-03-20
 **Research Coverage:** ~72% weighted (100% on core docs 00-11, deferred on future docs 12-19)
@@ -63,21 +63,29 @@
 - **Reorder command (2026-03-27):** handle_reorder('o') reorders parent's children list
 - **readComp what='l' (2026-03-27):** Returns component links with 0xFFFF terminator
 - **Link COV on subscribe (2026-03-27):** Push link events for all components with links after batchSubscribe
+- **20/20 SOX commands (2026-03-30):** All SOX commands complete including fileWrite('h') and fileRename('x')
+- **35 executable component types (2026-03-30):** Full dataflow engine with Tstat, Add2, Sub2, Mul2, Div2, ConstFloat, and more
+- **Component persistence (2026-03-30):** sox_components.json auto-saved every 5s, restored on startup
+- **Cycle detection (2026-03-30):** DFS-based cycle detection in link graph prevents infinite loops
+- **Channel-to-logic bridge (2026-03-30):** "chXXXX" naming convention — rename ConstFloat to "ch1713" to proxy live sensor data into logic components
+- **Full DDC loop verified (2026-03-30):** Real sensor (121F) flows through Tstat component to heating output on actual hardware
+- **Faster COV (2026-03-30):** 200 burst events on subscribe, 50/tick normal operation
+- **FileWrite + FileRename (2026-03-30):** Both implemented, completing Phase 8.0B
 
-**Summary:** All core phases (0 through 10.0E + SOX + Dataflow) are complete. 1,540 tests passing, 0 failures.
+**Summary:** All core phases (0 through 10.0E + SOX + Dataflow + DDC loop) are complete. 1,637 tests passing, 0 failures.
 
 ### Partially Complete
 
 | Phase | Description | Done | Remaining |
 |-------|-------------|------|-----------|
-| Phase 4 (SVM/Sedona) | Sedona FFI bridge | Bridge crate exists with ChannelSnapshot, SvmRunner, native method stubs (kit 4 + kit 100). **SOX protocol now implemented in pure Rust** — full DASP transport, readSchema, readVersion, readComp, subscribe, write, invoke, add, delete, rename, readProp, file transfer — all without needing the SVM or any C FFI. | Remaining SOX commands: reorder, readLink, fileWrite, fileRename. VM binary compilation optional (config-driven control replaces VM for EacIo). |
-| Phase 5 (Integration) | Production deployment | **v1.2.0 DEPLOYED**. C sandstar removed, Rust live on BeagleBone (192.168.1.102:1919). 1,518 tests, CI/CD, diagnostics, health monitoring. | No longer blocked. Production validated. |
+| Phase 4 (SVM/Sedona) | Sedona FFI bridge | Bridge crate exists with ChannelSnapshot, SvmRunner, native method stubs (kit 4 + kit 100). **SOX protocol fully implemented in pure Rust** — all 20/20 SOX commands complete including fileWrite/fileRename. No SVM or C FFI needed. | VM binary compilation optional (config-driven control replaces VM for EacIo). |
+| Phase 5 (Integration) | Production deployment | **v1.4.0 DEPLOYED**. C sandstar removed, Rust live on BeagleBone (192.168.1.3:1919). 1,637 tests, CI/CD, diagnostics, health monitoring. | No longer blocked. Production validated. |
 
 ### Not Started
 
 | Phase | Description | Complexity | Research Doc | Priority |
 |-------|-------------|-----------|--------------|----------|
-| Phase 8.0B | Full ROX Protocol — remaining SOX ops: fileWrite(h), fileRename(x). **Done:** readSchema(v), readVersion(y), readComp(c), subscribe(s), unsubscribe(u), write(w), fileOpen(f), fileRead(g), fileClose(q), event(e), readSchemaDetail(n), readProp(r), invoke(i), add(a), delete(d), rename(n), link(l), reorder(o). **18/20 commands complete.** | S | 15 | Low |
+| ~~Phase 8.0B~~ | ~~Full ROX Protocol~~ — **COMPLETE.** All 20/20 SOX commands implemented: readSchema(v), readVersion(y), readComp(c), subscribe(s), unsubscribe(u), write(w), fileOpen(f), fileRead(g), fileClose(q), event(e), readSchemaDetail(n), readProp(r), invoke(i), add(a), delete(d), rename(n), link(l), reorder(o), fileWrite(h), fileRename(x). | S | 15 | **COMPLETE** |
 | Phase 9.0 | Northbound clustering (roxWarp) | XL | 16 | Low |
 | Phase 11.0 | Sedona VM Rust port (bytecode interpreter, name interning) | XL | 12, 13, 17 | Very Low |
 | Phase 12.0 | Driver Framework v2 (Haxall-inspired, pure Rust) | XL | 18 | Very Low |
@@ -122,12 +130,14 @@
 | link | `l` | Add/delete component links (wiring), readComp what='l' for link data |
 | reorder | `o` | Reorder component children |
 
-### Commands Not Yet Implemented
+### Commands Completed (formerly "Not Yet Implemented")
 
-| Command | Code | Description | Phase |
-|---------|------|-------------|-------|
-| fileWrite | `h` | Write file to device | 8.0B |
-| fileRename | `x` | Rename file on device | 8.0B |
+| Command | Code | Description | Phase | Status |
+|---------|------|-------------|-------|--------|
+| fileWrite | `h` | Write file to device | 8.0B | **DONE** |
+| fileRename | `x` | Rename file on device | 8.0B | **DONE** |
+
+**All 20/20 SOX commands are now implemented.**
 
 ### Dataflow Engine (2026-03-27)
 
@@ -209,7 +219,7 @@ The security audit identified issues across four severity levels. These MUST be 
 | VM binary execution | Compiles and runs vm.c | Config-driven control replaces VM for EacIo; SvmRunner exists for other apps | Low -- EacIo runs without VM | Optional |
 | Full native method table | All 3 kits + EacIo + shaystack | Kit 4 (22 Rust natives) + kit 100 (28 stubs) | Low -- only needed if VM used | Optional |
 | ~~SOX protocol~~ | ~~SVM talks to engine via SOX~~ | ~~Pure Rust SOX: DASP + readSchema/readComp/subscribe/write/file transfer~~ | ~~High~~ | **RESOLVED (8.0A-SOX)** |
-| SOX remaining ops | reorder, readLink, fileWrite, fileRename | Not yet implemented | Very Low -- invoke/add/delete/rename/readProp all done | Phase 8.0B |
+| ~~SOX remaining ops~~ | ~~reorder, readLink, fileWrite, fileRename~~ | All 20/20 SOX commands implemented | ~~Very Low~~ | **RESOLVED (8.0B)** |
 
 ### Operations Gaps (5% missing)
 
@@ -400,11 +410,11 @@ The security audit identified issues across four severity levels. These MUST be 
 
 ---
 
-### Phase 8.0B: Full ROX Protocol -- Remaining SOX Operations (Low) [M]
+### Phase 8.0B: Full ROX Protocol -- Remaining SOX Operations (Low) [M] -- COMPLETE
 
-**Goal:** Complete the remaining SOX commands that are not yet needed for Sedona Application Editor read/write/subscribe workflows, but would be required for full component lifecycle management.
+**Goal:** Complete all SOX commands for full component lifecycle management via Sedona Application Editor.
 
-**Already done (Phase 8.0A-SOX):** readSchema(v), readVersion(y), readSchemaDetail(n), readComp(c), subscribe(s), unsubscribe(u), write(w), readProp(r), invoke(i), add(a), delete(d), rename(n), fileOpen(f), fileRead(g), fileClose(q), event(e). Full DASP transport with ACK piggybacking, session management, null-terminated wire format, rate-limited COV queue, manifest XML parser (185 component types). Pure Rust, no SVM needed.
+**All 20/20 SOX commands implemented.** Pure Rust, no SVM needed.
 
 | Task | Description | Effort | Status |
 |------|-------------|--------|--------|
@@ -412,13 +422,12 @@ The security audit identified issues across four severity levels. These MUST be 
 | 8.0Bb | **add(a) / delete(d)**: Add/remove components from tree at runtime. Delete uses saved parent_id before removal for tree events. | [M] | DONE |
 | 8.0Bc | **rename(n)**: Rename components. Command byte='n' (CC editor convention). | [S] | DONE |
 | 8.0Bd-1 | **readProp(r)**: Single-property reads. | [S] | DONE |
-| 8.0Bd-2 | **readLink(l)**: Link enumeration. | [S] | Not started |
-| 8.0Be | **fileWrite(h) / fileRename(x)**: Write files to device, rename files. Requires write permissions + validation. | [S] | Not started |
-| 8.0Bf | **Trio encoder/decoder**: Binary Haystack encoding per Project Haystack spec (more efficient than Zinc). | [M] | Not started |
-| 8.0Bg | **reorder(o)**: Reorder component children. | [S] | Not started |
+| 8.0Bd-2 | **link(l)**: Add/delete links, readComp what='l' for link data. | [S] | DONE |
+| 8.0Be | **fileWrite(h) / fileRename(x)**: Write files to device, rename files. | [S] | DONE |
+| 8.0Bf | **Trio encoder/decoder**: Binary Haystack encoding per Project Haystack spec (more efficient than Zinc). | [M] | Not started (optional) |
+| 8.0Bg | **reorder(o)**: Reorder component children. | [S] | DONE |
 
-**Total effort:** 2-3 days
-**Blocked by:** Nothing (pure Rust SOX infrastructure already exists)
+**Completed:** 2026-03-30 (all SOX commands done, only Trio encoding remains as optional enhancement)
 **Blocks:** Phase 9.0 (clustering)
 
 ---
@@ -532,8 +541,8 @@ The security audit identified issues across four severity levels. These MUST be 
 ## 5. Critical Path to Production
 
 ```
-PRODUCTION DEPLOYED — Rust v1.1.0 live on BeagleBone (192.168.1.102)
-  1,518 tests, 0 warnings, 0 security issues, CI/CD active
+PRODUCTION DEPLOYED — Rust v1.4.0 live on BeagleBone (192.168.1.3)
+  1,637 tests, 0 warnings, 0 security issues, CI/CD active
 
 COMPLETED production tracks:
   ✓ Phase 5.7:      Security hardening (6/6 tasks)
@@ -545,18 +554,19 @@ COMPLETED production tracks:
   ✓ Phase 7.0:      Engine core polish (4/4 tasks)
   ✓ Phase 8.0A:     Haystack-over-WebSocket (all tasks)
   ✓ Phase 8.0A-SOX: SOX/DASP protocol (pure Rust, Sedona Editor connected)
+  ✓ Phase 8.0B:     Full ROX Protocol (20/20 SOX commands, fileWrite+fileRename done)
   ✓ Phase 10.0:     Config-driven control (A-E complete + .sax converter)
+  ✓ DDC Loop:       Visual DDC programming, 35 component types, persistence, channel bridge
 
 Remaining future tracks (post-production):
-  ├── Phase 8.0B: Remaining SOX ops       [M, no blockers]
-  ├── Phase 9.0:  roxWarp clustering       [XL, needs 8.0B]
+  ├── Phase 9.0:  roxWarp clustering       [XL, no blockers]
   ├── Phase 11.0: Sedona VM Rust port      [XL, may be unnecessary]
   ├── Phase 12.0: Driver Framework v2      [XL, needs 11.0]
   └── Phase 13.0: Dynamic Slots            [L, needs 12.0]
 ```
 
-**Status:** PRODUCTION LIVE since 2026-03-18, v1.2.0 (SOX write/invoke, 185 manifest types, 1,518 tests)
-**BeagleBone:** 192.168.1.102 (Todd Air Flow), port 1919
+**Status:** PRODUCTION LIVE since 2026-03-18, v1.4.0 (20/20 SOX, 35 component types, visual DDC, full DDC loop verified, 1,637 tests)
+**BeagleBone:** 192.168.1.3 (Todd Air Flow), port 1919
 **Deployment guide:** `docs/DEPLOYMENT_CHECKLIST.md` (copy-paste ready)
 
 ---
@@ -579,8 +589,8 @@ Remaining future tracks (post-production):
 | 6.5 | TLS + advanced security | Medium | [M] | COMPLETE (5/5 tasks) | -- |
 | 7.0 | Engine core polish | Medium | [M] | COMPLETE (4/4 tasks) | 01, 02 |
 | 8.0A | Haystack-over-WebSocket | Medium | [M] | COMPLETE (ws.rs + 31 tests) | 15 |
-| 8.0A-SOX | SOX/DASP protocol (pure Rust) | Medium | [L] | COMPLETE (DASP + 16 commands, 185 manifest types) | 15 |
-| 8.0B | Remaining SOX ops (reorder/readLink/fileWrite/fileRename) | Low | [S] | Mostly complete (4 commands remaining) | 15 |
+| 8.0A-SOX | SOX/DASP protocol (pure Rust) | Medium | [L] | COMPLETE (DASP + 20/20 commands, 185 manifest types, dataflow engine) | 15 |
+| 8.0B | Full ROX Protocol (all SOX ops) | Low | [S] | **COMPLETE** (20/20 SOX commands, fileWrite+fileRename done) | 15 |
 | 9.0 | roxWarp clustering | Low | [XL] | Not started | 16 |
 | 10.0A-D | Config-driven control engine | Medium | [M] | COMPLETE | -- |
 | 10.0E | Additional components library | Low | [M] | COMPLETE (20 + converter) | -- |
@@ -597,15 +607,15 @@ Remaining future tracks (post-production):
 | Rust source lines | ~39,000 (~7,700 new VM + native methods) |
 | C/C++ replaced | ~27,000 lines engine + 6,839 lines SVM (pure-rust-vm feature) |
 | POCO eliminated | ~500,000 lines |
-| Test count | 1,518 passing, 0 failures |
+| Test count | 1,637 passing, 0 failures |
 | Pure Rust VM | 240 opcodes, 80 native methods, `--features pure-rust-vm` builds without C |
 | Crates | 7 (engine, hal, hal-linux, ipc, server, cli, svm) |
 | REST endpoints | 25 (14 Haystack + health + metrics + zinc + WebSocket + rate-limit + auth + 4 simulator) |
-| Control components | 22 (PID, sequencer + 20 library components) |
+| Control components | 35 executable types (PID, sequencer, Tstat, Add2/Sub2/Mul2/Div2, ConstFloat, and more) |
 | IPC commands | 13 |
 | CLI commands | 12 (status, channels, polls, tables, read, write, shutdown, reload, history, convert-sax, health, diagnostics) |
 | Feature parity | ~99% (80/80 features + extras) |
-| Production deployment | BeagleBone (Todd Air Flow, 192.168.1.102), 3.4MB RAM, 0.28% CPU |
+| Production deployment | BeagleBone (Todd Air Flow, 192.168.1.3), 3.4MB RAM, 0.28% CPU |
 | Live sensors | 1 — Solidyne 00-WTS-A (10K NTC, channel 1713, 78°F validated) |
 | CI/CD | GitHub Actions: fmt + clippy + test on push/PR, ARM cross-compile on master |
 | Monitoring | health-monitor.sh cron (5min), /api/diagnostics endpoint, CLI health + diagnostics |
@@ -614,10 +624,13 @@ Remaining future tracks (post-production):
 | Research documents | 20 (00-19) — deep gap analysis 2026-03-20 |
 | Research coverage | ~72% weighted (100% core, deferred on future phases) |
 | Simulation tools | SimulatorHal + BASemulator bridge + DataLogger + sim.sh |
-| Features surpassing C | 9 (WebSocket, SimulatorHal, data logging, ADC fault detect, I2C backoff, CLI health/diagnostics, poll overrun detect, CI/CD, pure Rust SOX) |
+| SOX commands | 20/20 complete (pure Rust, no SVM needed) |
+| Component persistence | sox_components.json, auto-save every 5s |
+| DDC loop | Verified: real sensor (121F) through Tstat to heating output |
+| Features surpassing C | 12 (WebSocket, SimulatorHal, data logging, ADC fault detect, I2C backoff, CLI health/diagnostics, poll overrun detect, CI/CD, pure Rust SOX, visual DDC programming, component persistence, channel-to-logic bridge) |
 | Clippy warnings | 0 |
 | Test coverage (est.) | ~80% public API |
-| Project health score | 9.5/10 (production validated, 2026-03-20) |
+| Project health score | 9.5/10 (production validated, full DDC loop verified, 2026-03-30) |
 | GitHub | https://github.com/TurkerMertkan/Sandstar_Rust (private) |
 
 ---
@@ -643,7 +656,7 @@ Deep gap analysis completed 2026-03-20 (3-agent, 20 documents vs full codebase).
 | 12 | SVM Architecture | 11.0 | 70% | VM stays C (by design); Kit 4 ported to Rust; config-driven control replaces VM |
 | 13 | SVM Porting Strategy | 11.0 | 25% | Intentionally deferred; FFI bridge is Priority 2 (done) |
 | 14 | Scalability Limits | 5.6, 7.0c | 80% | Rust engine fixes most; VM-internal limits unchanged |
-| 15 | SOX/WebSocket | 8.0A, 8.0A-SOX, 8.0B | 95% | WS + SCRAM + full SOX/DASP done (16 commands, pure Rust, 185 manifest types); remaining: reorder/readLink/fileWrite/fileRename |
+| 15 | SOX/WebSocket | 8.0A, 8.0A-SOX, 8.0B | 100% | WS + SCRAM + full SOX/DASP done (20/20 commands, pure Rust, 185 manifest types, dataflow engine, component persistence) |
 | 16 | roxWarp Protocol | 9.0 | 0% | Entirely unimplemented (future Phase 9.0) |
 | 17 | Name Length Analysis | 11.0c | 40% | Unlimited names via String; interning unnecessary at scale |
 | 18 | Driver Framework v2 | 12.0 | 30% | HAL traits + Linux drivers done; no async Driver trait/DriverManager |
