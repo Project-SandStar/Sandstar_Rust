@@ -41,6 +41,26 @@ tr:hover td{background:rgba(79,195,247,.08)}
 .val-cell{font-family:'Courier New',monospace;text-align:right}
 .alarm-row td{background:rgba(255,68,68,.1)!important;border-left:3px solid #f44}
 #sensor-table tbody tr{cursor:pointer}
+.modal-overlay{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.7);z-index:200;justify-content:center;align-items:center}
+.modal-overlay.show{display:flex}
+.modal{background:#16213e;border:1px solid #4fc3f7;border-radius:12px;padding:24px;width:340px;max-width:90vw;box-shadow:0 8px 32px rgba(0,0,0,.6)}
+.modal h3{color:#4fc3f7;margin-bottom:16px;font-size:1.1rem}
+.modal .cur{color:#888;font-size:.85rem;margin-bottom:12px}
+.modal .cur b{color:#0f0;font-family:'Courier New',monospace;font-size:1rem}
+.modal input[type=number]{width:100%;background:#1a1a2e;border:1px solid #2a2a4a;border-radius:6px;padding:10px;color:#e0e0e0;font-size:1rem;margin-bottom:16px;font-family:'Courier New',monospace}
+.modal .btn-row{display:flex;gap:10px;justify-content:flex-end}
+.modal .btn{padding:8px 18px;border:none;border-radius:6px;cursor:pointer;font-size:.85rem;font-weight:bold}
+.modal .btn-write{background:#0f0;color:#000}.modal .btn-write:hover{background:#0d0}
+.modal .btn-cancel{background:transparent;border:1px solid #555;color:#e0e0e0}.modal .btn-cancel:hover{border-color:#f44;color:#f44}
+.toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);padding:10px 24px;border-radius:8px;color:#fff;font-size:.85rem;z-index:300;opacity:0;transition:opacity .3s;pointer-events:none}
+.toast.show{opacity:1}.toast.ok{background:#2e7d32}.toast.err{background:#c62828}
+.live-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#0f0;margin-right:6px;vertical-align:middle}
+.live-dot.ok{animation:pulse 2s infinite}
+.live-dot.err{background:#f44;animation:none}
+@keyframes pulse{0%,100%{opacity:1;box-shadow:0 0 4px #0f0}50%{opacity:.4;box-shadow:0 0 8px #0f0}}
+.alarm-glow{animation:alarmPulse 2s infinite}
+@keyframes alarmPulse{0%,100%{box-shadow:0 0 8px rgba(255,68,68,.3)}50%{box-shadow:0 0 20px rgba(255,68,68,.6)}}
+tr.out-row td:first-child::before{content:'\270E ';color:#4fc3f7;font-size:.7rem}
 #chart-panel{display:none;margin:0 24px 14px;background:#16213e;border-radius:10px;border:1px solid #2a2a4a;overflow:hidden;animation:slideIn .3s ease}
 @keyframes slideIn{from{opacity:0;max-height:0}to{opacity:1;max-height:400px}}
 .chart-title{padding:12px 16px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #2a2a4a}
@@ -103,7 +123,7 @@ footer{margin-top:auto;padding:14px 24px;text-align:center;font-size:.75rem;colo
   <div class="meta">
     <span id="version">v--</span>
     <span id="uptime">Uptime: --</span>
-    <span id="updated">Last updated: --</span>
+    <span id="updated"><span class="live-dot" id="live-dot"></span>Last updated: --</span>
   </div>
 </header>
 <div id="error-banner">Connection lost — retrying...</div>
@@ -149,6 +169,19 @@ footer{margin-top:auto;padding:14px 24px;text-align:center;font-size:.75rem;colo
   </div>
 </div>
 
+<div class="modal-overlay" id="write-modal">
+  <div class="modal">
+    <h3 id="write-title">Write Channel</h3>
+    <div class="cur">Current: <b id="write-cur">--</b></div>
+    <input type="number" id="write-input" step="any" placeholder="Enter new value...">
+    <div class="btn-row">
+      <button class="btn btn-cancel" id="write-cancel">Cancel</button>
+      <button class="btn btn-write" id="write-send">Write</button>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
 <footer>Sandstar Engine v1.6.0 &mdash; Pure Rust DDC Controller</footer>
 
 <div id="mobile-nav">
@@ -186,12 +219,14 @@ footer{margin-top:auto;padding:14px 24px;text-align:center;font-size:.75rem;colo
       channels=await rr.json();
       const st=await sr.json();
       $('error-banner').style.display='none';
+      $('live-dot').className='live-dot ok';
       $('uptime').textContent='Uptime: '+fmtUptime(st.uptimeSecs);
       $('updated').textContent='Last updated: '+now();
       updateCards();renderAlarms();renderTable();
     }catch(e){
       console.warn('fetch error',e);
       $('error-banner').style.display='block';
+      $('live-dot').className='live-dot err';
     }
   }
 
@@ -397,13 +432,49 @@ footer{margin-top:auto;padding:14px 24px;text-align:center;font-size:.75rem;colo
   }
   window.addEventListener('resize',()=>{if(chartChannel&&chartData.length)drawChart()});
 
-  // Attach row click via event delegation on table body
+  // --- Write modal ---
+  let writeChannel=null;
+  function isOutput(ch){return(ch.direction||'').toLowerCase()==='out'}
+
+  function openWriteModal(ch){
+    writeChannel=ch;
+    $('write-title').textContent='Write: '+(ch.label||'Channel '+ch.id);
+    $('write-cur').textContent=fmtVal(ch.cur);
+    $('write-input').value='';
+    $('write-modal').classList.add('show');
+    setTimeout(()=>$('write-input').focus(),50);
+  }
+  function closeWriteModal(){$('write-modal').classList.remove('show');writeChannel=null}
+  $('write-cancel').addEventListener('click',closeWriteModal);
+  $('write-modal').addEventListener('click',e=>{if(e.target===$('write-modal'))closeWriteModal()});
+
+  async function doWrite(){
+    if(!writeChannel)return;
+    const val=parseFloat($('write-input').value);
+    if(isNaN(val)){showToast('Invalid number','err');return}
+    try{
+      const r=await fetch('/api/write',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({channel:writeChannel.id,value:val})});
+      if(!r.ok)throw new Error('HTTP '+r.status);
+      showToast('Wrote '+val+' to '+writeChannel.id,'ok');
+      closeWriteModal();fetchData();
+    }catch(e){showToast('Write failed: '+e.message,'err')}
+  }
+  $('write-send').addEventListener('click',doWrite);
+  $('write-input').addEventListener('keydown',e=>{if(e.key==='Enter')doWrite()});
+
+  function showToast(msg,type){
+    const t=$('toast');t.textContent=msg;t.className='toast '+type+' show';
+    setTimeout(()=>t.classList.remove('show'),3000);
+  }
+
+  // Attach row click — output channels get write modal, inputs get chart
   $('sensor-table').querySelector('tbody').addEventListener('click',function(e){
     const tr=e.target.closest('tr');
     if(!tr)return;
     const id=parseInt(tr.children[0].textContent,10);
     const ch=channels.find(c=>c.id===id);
-    if(ch)openChart(ch);
+    if(!ch)return;
+    if(isOutput(ch))openWriteModal(ch); else openChart(ch);
   });
 
   // Alert badge — show fault count in header
@@ -437,9 +508,30 @@ footer{margin-top:auto;padding:14px 24px;text-align:center;font-size:.75rem;colo
     },{passive:false});
   }
 
-  // Override fetchData to also update alert badge
+  // Override fetchData to also update alert badge, live dot, alarm glow
   const origUpdateCards=updateCards;
-  updateCards=function(){origUpdateCards();updateAlertBadge()};
+  updateCards=function(){
+    origUpdateCards();updateAlertBadge();
+    // Alarm glow
+    const ap=$('alarm-panel');
+    const hasFaults=channels.some(c=>{const s=(c.status||'').toLowerCase();return s==='fault'||s==='down'});
+    if(hasFaults)ap.classList.add('alarm-glow');else ap.classList.remove('alarm-glow');
+  };
+  // Mark output rows after render
+  const origRenderTable=renderTable;
+  renderTable=function(){
+    origRenderTable();
+    document.querySelectorAll('#sensor-table tbody tr').forEach(tr=>{
+      const id=parseInt(tr.children[0].textContent,10);
+      const ch=channels.find(c=>c.id===id);
+      if(ch&&isOutput(ch))tr.classList.add('out-row');
+    });
+  };
+  // Keyboard shortcuts
+  document.addEventListener('keydown',e=>{
+    if(e.key==='Escape'){closeChart();closeWriteModal()}
+    if(e.key==='/'&&document.activeElement.tagName!=='INPUT'){e.preventDefault();$('search').focus()}
+  });
 
   fetchAbout();fetchData();
   setInterval(fetchData,5000);
