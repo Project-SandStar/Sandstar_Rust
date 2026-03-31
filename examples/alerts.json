@@ -1,0 +1,17 @@
+{
+  "enabled": true,
+  "smtp_host": "smtp.gmail.com",
+  "smtp_port": 587,
+  "smtp_user": "alerts@example.com",
+  "smtp_password": "app-password-here",
+  "from_address": "alerts@example.com",
+  "recipients": [
+    "admin@example.com",
+    "tech@example.com"
+  ],
+  "cooldown_minutes": 15,
+  "alert_on_fault": true,
+  "alert_on_down": true,
+  "alert_on_recovery": true,
+  "subject_prefix": "[Sandstar Alert]"
+}

@@ -17,6 +17,8 @@
 
 use std::collections::HashMap;
 use std::pin::pin;
+#[cfg(not(feature = "svm"))]
+use std::sync::{Arc, Mutex};
 #[cfg(feature = "svm")]
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -24,7 +26,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use clap::Parser;
 use sandstar_engine::{Engine, Notification};
 use sandstar_hal::{HalControl, HalDiagnostics, HalRead, HalWrite};
-use sandstar_server::{args, cmd_handler, config, control, dispatch, history, ipc, loader, logging, metrics, pid, reload, rest, sd_notify, signal, tls, watchdog};
+use sandstar_server::{alerts, args, cmd_handler, config, control, dispatch, history, ipc, loader, logging, metrics, pid, reload, rest, sd_notify, signal, tls, watchdog};
 use sandstar_server::control::ControlRunner;
 use sandstar_server::history::HistoryPoint;
 #[cfg(feature = "svm")]
@@ -281,6 +283,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 5b. Set up history store (in-memory ring buffer, 1000 points per channel)
     let mut history_store = history::HistoryStore::new(1000);
 
+    // 5b2. Set up alert manager for channel fault/down notifications
+    let alerts_config_path = std::env::var("SANDSTAR_ALERTS_CONFIG")
+        .unwrap_or_else(|_| {
+            config.config_dir
+                .as_ref()
+                .map(|d| d.join("alerts.json").to_string_lossy().into_owned())
+                .unwrap_or_else(|| "alerts.json".to_string())
+        });
+    let alert_manager: alerts::SharedAlertManager = Arc::new(Mutex::new({
+        let mut mgr = alerts::AlertManager::load(std::path::Path::new(&alerts_config_path));
+        mgr.set_device_info(format!(
+            "Sandstar Engine v{} ({}:{})",
+            env!("CARGO_PKG_VERSION"),
+            args.http_bind,
+            args.http_port,
+        ));
+        mgr
+    }));
+
     // 5c. Set up Sedona VM (optional, requires `svm` feature)
     #[cfg(feature = "svm")]
     let svm_snapshot = Arc::new(RwLock::new(ChannelSnapshot::new()));
@@ -384,6 +405,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Merge dynamic tags REST endpoints
         app = app.merge(rest::tags::router(dyn_store.clone()));
+
+        // Merge alert management REST endpoints
+        app = app.merge(alerts::alert_router(alert_manager.clone()));
 
         // Merge simulator REST endpoints when built with simulator-hal
         #[cfg(feature = "simulator-hal")]
@@ -532,6 +556,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     if hal_err_count > 0 {
                         metrics::metrics().hal_errors.fetch_add(hal_err_count, std::sync::atomic::Ordering::Relaxed);
+                    }
+
+                    // Check channel statuses for alert transitions
+                    let snapshots: Vec<alerts::ChannelSnapshot> = eng
+                        .channels
+                        .iter()
+                        .filter(|(_, ch)| ch.enabled)
+                        .map(|(_, ch)| alerts::ChannelSnapshot {
+                            id: ch.id,
+                            name: ch.label.clone(),
+                            status: ch.value.status.as_str().to_string(),
+                            cur: ch.value.cur,
+                        })
+                        .collect();
+                    if let Ok(mut mgr) = alert_manager.lock() {
+                        mgr.check_channels(&snapshots);
                     }
                 }
 

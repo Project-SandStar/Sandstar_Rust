@@ -2,6 +2,7 @@
 //!
 //! Re-exports modules used by both the server binary and integration tests.
 
+pub mod alerts;
 pub mod args;
 pub mod auth;
 pub mod cmd_handler;
