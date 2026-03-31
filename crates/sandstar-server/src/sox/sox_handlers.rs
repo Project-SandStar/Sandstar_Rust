@@ -1234,30 +1234,55 @@ impl ComponentTree {
         // A) ChannelRead (kit 1, type 100): channelId in slot 1
         // B) Any ConstFloat/WriteFloat whose "out" slot (index 1) has a channel link:
         //    if the component NAME is "ch_XXXX" (e.g., "ch_1713"), auto-pull from channel XXXX
-        let mut channel_reads: Vec<(u16, i32, usize)> = Vec::new(); // (comp_id, channel_id, out_slot)
+        // Collect channel bridge info: (user_comp_id, channel_id, out_slot_idx, is_output_channel)
+        let mut channel_bridges: Vec<(u16, i32, usize)> = Vec::new();
+        let mut channel_writes: Vec<(u16, i32, usize)> = Vec::new(); // for output channels
 
         for comp in self.components.values() {
             if comp.kit_id == 1 && comp.type_id == 100 {
-                // ChannelRead: channelId in slot 1, out in slot 2
                 let ch_id = get_int(&comp.slots, 1);
-                if ch_id > 0 { channel_reads.push((comp.comp_id, ch_id, 2)); }
+                if ch_id > 0 { channel_bridges.push((comp.comp_id, ch_id, 2)); }
             } else if self.user_added_ids.contains(&comp.comp_id) && comp.name.starts_with("ch") {
-                // ConstFloat/WriteFloat named "ch_XXXX" or "chXXXX": auto-bridge from channel
                 let num_str = comp.name.trim_start_matches("ch").trim_start_matches('_');
                 if let Ok(ch_id) = num_str.parse::<i32>() {
-                    if ch_id > 0 { channel_reads.push((comp.comp_id, ch_id, 1)); } // out=slot 1
+                    if ch_id > 0 {
+                        // Check if this is an output channel (direction="Out")
+                        let _is_output = self.components.values()
+                            .find(|c| {
+                                self.is_channel_comp(c.comp_id) &&
+                                c.slots.get(2).map(|s| s.value == SlotValue::Int(ch_id)).unwrap_or(false)
+                            })
+                            .and_then(|c| c.slots.get(1)) // slot 1 = channelName... actually need direction
+                            .is_none(); // fallback: check channel info
+                        // Better: check if channel comp's type_name contains "Output" or direction
+                        let is_output_ch = self.components.values()
+                            .find(|c| {
+                                self.is_channel_comp(c.comp_id) &&
+                                c.slots.get(2).map(|s| s.value == SlotValue::Int(ch_id)).unwrap_or(false)
+                            })
+                            .map(|c| c.type_name.contains("Output") || c.type_name.contains("Pwm") || c.type_name.contains("Triac"))
+                            .unwrap_or(false);
+
+                        if is_output_ch {
+                            // Output channel: write FROM ConstFloat TO channel
+                            channel_writes.push((comp.comp_id, ch_id, 1));
+                        } else {
+                            // Input channel: read FROM channel TO ConstFloat
+                            channel_bridges.push((comp.comp_id, ch_id, 1));
+                        }
+                    }
                 }
             }
         }
 
-        for (comp_id, channel_id, out_slot_idx) in channel_reads {
-            // Find the channel component by scanning for matching channel slot (index 2)
+        // INPUT channels: copy sensor value → ConstFloat
+        for (comp_id, channel_id, out_slot_idx) in channel_bridges {
             let sensor_value = self.components.values()
                 .find(|c| {
                     self.is_channel_comp(c.comp_id) &&
                     c.slots.get(2).map(|s| s.value == SlotValue::Int(channel_id)).unwrap_or(false)
                 })
-                .and_then(|c| c.slots.get(6)) // slot 6 = "out" (sensor value)
+                .and_then(|c| c.slots.get(6))
                 .map(|s| s.value.clone());
 
             if let Some(value) = sensor_value {
@@ -1266,6 +1291,35 @@ impl ComponentTree {
                         if out_slot.value != value {
                             out_slot.value = value;
                             changed.push(comp_id);
+                        }
+                    }
+                }
+            }
+        }
+
+        // OUTPUT channels: copy ConstFloat value → channel component's out slot
+        // (The actual hardware write happens in collect_channel_writes via the engine)
+        for (comp_id, channel_id, slot_idx) in channel_writes {
+            let user_value = self.components.get(&comp_id)
+                .and_then(|c| c.slots.get(slot_idx))
+                .map(|s| s.value.clone());
+
+            if let Some(value) = user_value {
+                // Find the channel component and update its out slot (6)
+                let ch_comp_id = self.components.values()
+                    .find(|c| {
+                        self.is_channel_comp(c.comp_id) &&
+                        c.slots.get(2).map(|s| s.value == SlotValue::Int(channel_id)).unwrap_or(false)
+                    })
+                    .map(|c| c.comp_id);
+
+                if let Some(cid) = ch_comp_id {
+                    if let Some(comp) = self.components.get_mut(&cid) {
+                        if let Some(out_slot) = comp.slots.get_mut(6) {
+                            if out_slot.value != value {
+                                out_slot.value = value;
+                                changed.push(cid);
+                            }
                         }
                     }
                 }
