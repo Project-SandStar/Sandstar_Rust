@@ -402,7 +402,7 @@ async fn run_sox_server(
                                     .write_channel(
                                         channel_id,
                                         Some(value),
-                                        8, // priority level 8 (operator)
+                                        17, // priority level 17 (default) — same as browser writes
                                         "sox-logic".to_string(),
                                         0.0,
                                     )

@@ -153,6 +153,9 @@ pub struct ComponentTree {
     persist_path: Option<String>,
     /// Per-component execution state for stateful components (timers, counters, ramps).
     component_state: HashMap<u16, ComponentState>,
+    /// Channel IDs that are output channels (direction = "out"/"AO"/"DO"/"do"/"ao").
+    /// Populated at tree build time from ChannelInfo.direction.
+    output_channel_ids: HashSet<i32>,
 }
 
 /// JSON persistence format for user-added SOX components.
@@ -178,6 +181,7 @@ impl ComponentTree {
             dirty: false,
             persist_path: None,
             component_state: HashMap::new(),
+            output_channel_ids: HashSet::new(),
         }
     }
 
@@ -187,6 +191,7 @@ impl ComponentTree {
             components: HashMap::new(),
             next_id: 0,
             channel_comp_end: CHANNEL_COMP_BASE,
+            output_channel_ids: HashSet::new(),
             manifest_db,
             user_added_ids: HashSet::new(),
             dirty: false,
@@ -529,6 +534,14 @@ impl ComponentTree {
         // Record the upper bound of channel comp_ids
         tree.channel_comp_end = CHANNEL_COMP_BASE + channels.len() as u16;
 
+        // Record which channel IDs are outputs so the bridge can detect them at runtime.
+        for ch in channels {
+            let d = ch.direction.to_lowercase();
+            if d == "out" || d == "ao" || d == "do" {
+                tree.output_channel_ids.insert(ch.id as i32);
+            }
+        }
+
         tree
     }
 
@@ -678,6 +691,9 @@ impl ComponentTree {
     /// Returns the list of comp_ids that had value changes (for COV events).
     pub fn update_from_channels(&mut self, channels: &[ChannelInfo]) -> Vec<u16> {
         let mut changed = Vec::new();
+        // Track output channel value changes so we can sync them to ConstFloat bridges.
+        let mut output_ch_values: Vec<(i32, SlotValue)> = Vec::new();
+
         for (i, ch) in channels.iter().enumerate() {
             let comp_id = CHANNEL_COMP_BASE + i as u16;
             if let Some(comp) = self.components.get_mut(&comp_id) {
@@ -689,11 +705,39 @@ impl ComponentTree {
                     }
                 }
                 if slots_differ(&comp.slots, &new_slots) {
+                    // If this is an output channel, capture its new "out" value (slot 6)
+                    // so we can propagate it to the linked ConstFloat bridge.
+                    if self.output_channel_ids.contains(&(ch.id as i32)) {
+                        if let Some(out_slot) = new_slots.get(6) {
+                            output_ch_values.push((ch.id as i32, out_slot.value.clone()));
+                        }
+                    }
                     comp.slots = new_slots;
                     changed.push(comp_id);
                 }
             }
         }
+
+        // Sync output channel values → ConstFloat bridges ("chXXXX" components).
+        // When the browser writes to an output channel via the engine, the ConstFloat
+        // must pick up the new value so Sedona sees it and the bridge stays consistent.
+        for (ch_id, value) in output_ch_values {
+            let ch_name = format!("ch{ch_id}");
+            let cf_id = self.components.values()
+                .find(|c| self.user_added_ids.contains(&c.comp_id) && c.name == ch_name)
+                .map(|c| c.comp_id);
+            if let Some(cf_id) = cf_id {
+                if let Some(comp) = self.components.get_mut(&cf_id) {
+                    if let Some(out_slot) = comp.slots.get_mut(1) { // slot 1 = "out" for ConstFloat
+                        if out_slot.value != value {
+                            out_slot.value = value;
+                            changed.push(cf_id);
+                        }
+                    }
+                }
+            }
+        }
+
         changed
     }
 
@@ -1246,22 +1290,9 @@ impl ComponentTree {
                 let num_str = comp.name.trim_start_matches("ch").trim_start_matches('_');
                 if let Ok(ch_id) = num_str.parse::<i32>() {
                     if ch_id > 0 {
-                        // Check if this is an output channel (direction="Out")
-                        let _is_output = self.components.values()
-                            .find(|c| {
-                                self.is_channel_comp(c.comp_id) &&
-                                c.slots.get(2).map(|s| s.value == SlotValue::Int(ch_id)).unwrap_or(false)
-                            })
-                            .and_then(|c| c.slots.get(1)) // slot 1 = channelName... actually need direction
-                            .is_none(); // fallback: check channel info
-                        // Better: check if channel comp's type_name contains "Output" or direction
-                        let is_output_ch = self.components.values()
-                            .find(|c| {
-                                self.is_channel_comp(c.comp_id) &&
-                                c.slots.get(2).map(|s| s.value == SlotValue::Int(ch_id)).unwrap_or(false)
-                            })
-                            .map(|c| c.type_name.contains("Output") || c.type_name.contains("Pwm") || c.type_name.contains("Triac"))
-                            .unwrap_or(false);
+                        // Check if this is an output channel using the direction set
+                        // populated at tree build time from ChannelInfo.direction.
+                        let is_output_ch = self.output_channel_ids.contains(&ch_id);
 
                         if is_output_ch {
                             // Output channel: write FROM ConstFloat TO channel
@@ -1351,20 +1382,6 @@ impl ComponentTree {
                 Some(c) => c,
                 None => continue,
             };
-            // Check if any link targets this channel component
-            // (i.e., a logic component output is wired into this channel).
-            let has_incoming_link = comp.links.iter().any(|link| link.to_comp == comp_id);
-            if !has_incoming_link {
-                continue;
-            }
-            // Find the link(s) targeting this channel comp and check which slots were written.
-            // We care about slot 6 ("out") — the primary writable float value.
-            let targets_out_slot = comp.links.iter().any(|link| {
-                link.to_comp == comp_id && link.to_slot == 6
-            });
-            if !targets_out_slot {
-                continue;
-            }
             // Extract the engine channel_id from slot 2 ("channel").
             let channel_id = match comp.slots.get(2) {
                 Some(slot) => match &slot.value {
@@ -1373,6 +1390,16 @@ impl ComponentTree {
                 },
                 None => continue,
             };
+            // Allow forwarding if:
+            // A) A link targets slot 6 (wire from logic component), OR
+            // B) This is an output channel (bridge from ConstFloat "chXXXX")
+            let has_link_to_out = comp.links.iter().any(|link| {
+                link.to_comp == comp_id && link.to_slot == 6
+            });
+            let is_output = self.output_channel_ids.contains(&(channel_id as i32));
+            if !has_link_to_out && !is_output {
+                continue;
+            }
             // Read the current "out" slot value (slot 6).
             let value = match comp.slots.get(6) {
                 Some(slot) => match &slot.value {
@@ -7421,6 +7448,83 @@ mod tests {
             other => panic!("expected Float, got {other:?}"),
         }
         assert!(!changed.contains(&200), "ch0 should not trigger sensor bridge");
+    }
+
+    #[test]
+    fn output_channel_bridge_does_not_overwrite_user_value() {
+        // An output channel (direction="out") should NOT have its ConstFloat
+        // overwritten by the sensor bridge. Instead, the ConstFloat value should
+        // flow TO the channel component.
+        let channels = vec![
+            ChannelInfo {
+                id: 360,
+                label: "Digital Output 6".into(),
+                channel_type: "digital".into(),
+                direction: "out".into(),
+                enabled: true,
+                status: "ok".into(),
+                cur: 0.0,
+                raw: 0.0,
+            },
+            ChannelInfo {
+                id: 1113,
+                label: "AI1 10K Therm".into(),
+                channel_type: "analog".into(),
+                direction: "AI".into(),
+                enabled: true,
+                status: "ok".into(),
+                cur: 72.5,
+                raw: 2048.0,
+            },
+        ];
+        let mut tree = ComponentTree::from_channels(&channels);
+
+        // Verify output_channel_ids was populated
+        assert!(tree.output_channel_ids.contains(&360), "ch360 should be in output_channel_ids");
+        assert!(!tree.output_channel_ids.contains(&1113), "ch1113 should NOT be in output_channel_ids");
+
+        // Add a user ConstFloat named "ch360" with value 1.0 (user wants output ON)
+        let cf_id = tree.next_comp_id();
+        tree.add(VirtualComponent {
+            comp_id: cf_id,
+            parent_id: 6,
+            name: "ch360".into(),
+            type_name: "control::ConstFloat".into(),
+            kit_id: 1,
+            type_id: 100,
+            children: Vec::new(),
+            slots: vec![
+                VirtualSlot { name: "meta".into(), type_id: 4, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(1) },
+                VirtualSlot { name: "out".into(), type_id: 5, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Float(1.0) },
+            ],
+            links: Vec::new(),
+        });
+        tree.user_added_ids.insert(cf_id);
+
+        // Execute — the output bridge should write ConstFloat value (1.0) TO the channel,
+        // NOT overwrite the ConstFloat with the channel's current value (0.0).
+        tree.execute_components();
+
+        // ConstFloat "ch360" should still be 1.0
+        let comp = tree.get(cf_id).unwrap();
+        match &comp.slots[1].value {
+            SlotValue::Float(v) => assert!(
+                (*v - 1.0).abs() < 0.001,
+                "output channel ConstFloat should keep user value 1.0, got {v}"
+            ),
+            other => panic!("expected Float, got {other:?}"),
+        }
+
+        // Run again to confirm stability across multiple ticks
+        tree.execute_components();
+        let comp = tree.get(cf_id).unwrap();
+        match &comp.slots[1].value {
+            SlotValue::Float(v) => assert!(
+                (*v - 1.0).abs() < 0.001,
+                "output channel ConstFloat should still be 1.0 after second tick, got {v}"
+            ),
+            other => panic!("expected Float, got {other:?}"),
+        }
     }
 
     // ---- Save/Hibernate invoke tests ----
