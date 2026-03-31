@@ -40,11 +40,22 @@ tr:hover td{background:rgba(79,195,247,.08)}
 .s-ok{color:#0f0}.s-fault{color:#f44}.s-down{color:#f80}.s-unknown{color:#ff0}
 .val-cell{font-family:'Courier New',monospace;text-align:right}
 .alarm-row td{background:rgba(255,68,68,.1)!important;border-left:3px solid #f44}
+#sensor-table tbody tr{cursor:pointer}
+#chart-panel{display:none;margin:0 24px 14px;background:#16213e;border-radius:10px;border:1px solid #2a2a4a;overflow:hidden;animation:slideIn .3s ease}
+@keyframes slideIn{from{opacity:0;max-height:0}to{opacity:1;max-height:400px}}
+.chart-title{padding:12px 16px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #2a2a4a}
+.chart-title .name{font-weight:bold;font-size:.95rem;color:#4fc3f7}
+.chart-title .cur-val{font-size:1.3rem;font-weight:bold;color:#0f0;font-family:'Courier New',monospace;margin-left:16px}
+.chart-title .close-btn{background:none;border:1px solid #555;color:#e0e0e0;border-radius:6px;padding:4px 12px;cursor:pointer;font-size:.85rem}
+.chart-title .close-btn:hover{border-color:#f44;color:#f44}
+.chart-msg{text-align:center;padding:40px;color:#888;font-size:.9rem}
+#chart-canvas{display:block;width:100%;height:250px}
 footer{margin-top:auto;padding:14px 24px;text-align:center;font-size:.75rem;color:#555;border-top:1px solid #2a2a4a}
 @media(max-width:768px){
   .cards{grid-template-columns:repeat(2,1fr);padding:10px 12px}
   header{flex-direction:column;gap:8px;text-align:center}
   .panel{margin:0 12px 10px}
+  #chart-panel{margin:0 12px 10px}
   #search{width:140px}
   .tbl-wrap{max-height:50vh}
 }
@@ -93,6 +104,16 @@ footer{margin-top:auto;padding:14px 24px;text-align:center;font-size:.75rem;colo
     <th data-col="type">Type <span class="arrow"></span></th>
     <th data-col="direction">Dir <span class="arrow"></span></th>
   </tr></thead><tbody></tbody></table></div>
+</div>
+
+<div id="chart-panel">
+  <div class="chart-title">
+    <span><span id="chart-name">--</span><span class="cur-val" id="chart-cur">--</span></span>
+    <button class="close-btn" id="chart-close">&#10005; Close</button>
+  </div>
+  <div id="chart-body">
+    <canvas id="chart-canvas"></canvas>
+  </div>
 </div>
 
 <footer>Sandstar Engine v1.5.0 &mdash; Pure Rust DDC Controller</footer>
@@ -211,6 +232,137 @@ footer{margin-top:auto;padding:14px 24px;text-align:center;font-size:.75rem;colo
   });
 
   $('search').addEventListener('input',e=>{filter=e.target.value;renderTable()});
+
+  // --- History chart ---
+  let chartChannel=null, chartTimer=null, chartData=[];
+
+  function closeChart(){
+    $('chart-panel').style.display='none';
+    chartChannel=null;
+    if(chartTimer){clearInterval(chartTimer);chartTimer=null}
+  }
+  $('chart-close').addEventListener('click',closeChart);
+
+  function openChart(ch){
+    chartChannel=ch;
+    $('chart-name').textContent=(ch.label||'Channel')+' (ID: '+ch.id+')';
+    $('chart-cur').textContent=fmtVal(ch.cur);
+    $('chart-panel').style.display='block';
+    $('chart-body').innerHTML='<div class="chart-msg">Loading history...</div>';
+    fetchChart();
+    if(chartTimer)clearInterval(chartTimer);
+    chartTimer=setInterval(fetchChart,30000);
+  }
+
+  async function fetchChart(){
+    if(!chartChannel)return;
+    try{
+      const r=await fetch('/api/history/'+chartChannel.id+'?duration=1h&limit=1000');
+      if(!r.ok)throw new Error('HTTP '+r.status);
+      chartData=await r.json();
+      if(!chartData.length){
+        $('chart-body').innerHTML='<div class="chart-msg">No history data available for the last hour.</div>';
+        return;
+      }
+      // Update current value from latest channel data
+      const fresh=channels.find(c=>c.id===chartChannel.id);
+      if(fresh){chartChannel=fresh;$('chart-cur').textContent=fmtVal(fresh.cur)}
+      $('chart-body').innerHTML='<canvas id="chart-canvas"></canvas>';
+      drawChart();
+    }catch(e){
+      console.warn('history fetch error',e);
+      $('chart-body').innerHTML='<div class="chart-msg">Failed to load history data.</div>';
+    }
+  }
+
+  function drawChart(){
+    const canvas=$('chart-canvas');
+    if(!canvas)return;
+    const dpr=window.devicePixelRatio||1;
+    const rect=canvas.parentElement.getBoundingClientRect();
+    canvas.style.width=rect.width+'px';canvas.style.height='250px';
+    canvas.width=rect.width*dpr;canvas.height=250*dpr;
+    const ctx=canvas.getContext('2d');
+    ctx.scale(dpr,dpr);
+    const W=rect.width,H=250,pad={t:20,r:20,b:35,l:60};
+    const cW=W-pad.l-pad.r,cH=H-pad.t-pad.b;
+
+    // Data bounds
+    const vals=chartData.map(p=>p.cur);
+    let yMin=Math.min(...vals),yMax=Math.max(...vals);
+    if(yMin===yMax){yMin-=1;yMax+=1}
+    const yPad=(yMax-yMin)*0.08;yMin-=yPad;yMax+=yPad;
+    const tMin=chartData[0].ts,tMax=chartData[chartData.length-1].ts;
+    const tRange=Math.max(tMax-tMin,1);
+
+    const xOf=ts=>pad.l+((ts-tMin)/tRange)*cW;
+    const yOf=v=>pad.t+cH-(((v-yMin)/(yMax-yMin))*cH);
+
+    // Background
+    ctx.fillStyle='#16213e';ctx.fillRect(0,0,W,H);
+
+    // Grid lines
+    ctx.strokeStyle='#2a2a4a';ctx.lineWidth=1;
+    const yTicks=5;
+    ctx.fillStyle='#888';ctx.font='11px monospace';ctx.textAlign='right';
+    for(let i=0;i<=yTicks;i++){
+      const v=yMin+(yMax-yMin)*(i/yTicks);
+      const y=yOf(v);
+      ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke();
+      ctx.fillText(v.toFixed(1),pad.l-6,y+4);
+    }
+    // X-axis time labels
+    ctx.textAlign='center';
+    const xTicks=6;
+    for(let i=0;i<=xTicks;i++){
+      const ts=tMin+tRange*(i/xTicks);
+      const x=xOf(ts);
+      ctx.beginPath();ctx.moveTo(x,pad.t);ctx.lineTo(x,H-pad.b);ctx.stroke();
+      const d=new Date(ts*1000);
+      ctx.fillText(d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0'),x,H-pad.b+14);
+    }
+
+    // Gradient fill
+    const grad=ctx.createLinearGradient(0,pad.t,0,H-pad.b);
+    grad.addColorStop(0,'rgba(0,255,0,0.25)');grad.addColorStop(1,'rgba(0,255,0,0)');
+    ctx.beginPath();ctx.moveTo(xOf(chartData[0].ts),yOf(chartData[0].cur));
+    for(let i=1;i<chartData.length;i++)ctx.lineTo(xOf(chartData[i].ts),yOf(chartData[i].cur));
+    ctx.lineTo(xOf(chartData[chartData.length-1].ts),H-pad.b);
+    ctx.lineTo(xOf(chartData[0].ts),H-pad.b);ctx.closePath();
+    ctx.fillStyle=grad;ctx.fill();
+
+    // Line
+    ctx.beginPath();ctx.moveTo(xOf(chartData[0].ts),yOf(chartData[0].cur));
+    for(let i=1;i<chartData.length;i++)ctx.lineTo(xOf(chartData[i].ts),yOf(chartData[i].cur));
+    ctx.strokeStyle='#0f0';ctx.lineWidth=2;ctx.stroke();
+
+    // Tooltip on hover
+    canvas.onmousemove=function(e){
+      const br=canvas.getBoundingClientRect();
+      const mx=e.clientX-br.left,my=e.clientY-br.top;
+      if(mx<pad.l||mx>W-pad.r||my<pad.t||my>H-pad.b){canvas.title='';return}
+      const ts=tMin+((mx-pad.l)/cW)*tRange;
+      // Find nearest point
+      let best=0,bestD=Infinity;
+      for(let i=0;i<chartData.length;i++){
+        const d=Math.abs(chartData[i].ts-ts);
+        if(d<bestD){bestD=d;best=i}
+      }
+      const p=chartData[best];
+      const d=new Date(p.ts*1000);
+      canvas.title=d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0')+':'+d.getSeconds().toString().padStart(2,'0')+' — '+p.cur.toFixed(2);
+    };
+  }
+  window.addEventListener('resize',()=>{if(chartChannel&&chartData.length)drawChart()});
+
+  // Attach row click via event delegation on table body
+  $('sensor-table').querySelector('tbody').addEventListener('click',function(e){
+    const tr=e.target.closest('tr');
+    if(!tr)return;
+    const id=parseInt(tr.children[0].textContent,10);
+    const ch=channels.find(c=>c.id===id);
+    if(ch)openChart(ch);
+  });
 
   fetchAbout();fetchData();
   setInterval(fetchData,5000);
