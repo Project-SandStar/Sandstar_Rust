@@ -123,7 +123,7 @@ footer{margin-top:auto;padding:14px 24px;text-align:center;font-size:.75rem;colo
   <div class="meta">
     <span id="version">v--</span>
     <span id="uptime">Uptime: --</span>
-    <span id="updated"><span class="live-dot" id="live-dot"></span>Last updated: --</span>
+    <span><span class="live-dot" id="live-dot"></span>Last updated: <span id="update-time">--</span></span>
   </div>
 </header>
 <div id="error-banner">Connection lost — retrying...</div>
@@ -219,14 +219,14 @@ footer{margin-top:auto;padding:14px 24px;text-align:center;font-size:.75rem;colo
       channels=await rr.json();
       const st=await sr.json();
       $('error-banner').style.display='none';
-      $('live-dot').className='live-dot ok';
+      var dot=$('live-dot');if(dot)dot.className='live-dot ok';
       $('uptime').textContent='Uptime: '+fmtUptime(st.uptimeSecs);
-      $('updated').textContent='Last updated: '+now();
+      $('update-time').textContent=now();
       updateCards();renderAlarms();renderTable();
     }catch(e){
       console.warn('fetch error',e);
       $('error-banner').style.display='block';
-      $('live-dot').className='live-dot err';
+      var dot=$('live-dot');if(dot)dot.className='live-dot err';
     }
   }
 
@@ -453,7 +453,7 @@ footer{margin-top:auto;padding:14px 24px;text-align:center;font-size:.75rem;colo
     const val=parseFloat($('write-input').value);
     if(isNaN(val)){showToast('Invalid number','err');return}
     try{
-      const r=await fetch('/api/write',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({channel:writeChannel.id,value:val})});
+      const r=await fetch('/api/pointWrite',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({channel:writeChannel.id,value:val})});
       if(!r.ok)throw new Error('HTTP '+r.status);
       showToast('Wrote '+val+' to '+writeChannel.id,'ok');
       closeWriteModal();fetchData();
