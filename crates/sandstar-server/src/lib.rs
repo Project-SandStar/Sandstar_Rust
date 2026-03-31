@@ -8,6 +8,7 @@ pub mod cmd_handler;
 pub mod config;
 pub mod control;
 pub mod dispatch;
+pub mod drivers;
 pub mod history;
 pub mod ipc;
 pub mod loader;

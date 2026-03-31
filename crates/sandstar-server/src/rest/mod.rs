@@ -751,12 +751,18 @@ pub fn router_with_auth(
         ])
         .max_age(Duration::from_secs(3600));
 
+    // Driver framework REST endpoints (read-only, public).
+    let driver_mgr: crate::drivers::SharedDriverManager =
+        Arc::new(std::sync::Mutex::new(crate::drivers::DriverManager::new()));
+    let driver_routes = crate::drivers::driver_router(driver_mgr);
+
     // Merge and apply global middleware.
     // Layer order (axum applies bottom-up): CORS → body limit → rate limit → count.
     let mut app = public
         .merge(protected)
         .merge(ws_route)
         .merge(auth_route)
+        .merge(driver_routes)
         .layer(middleware::from_fn(count_requests));
 
     // Apply rate limiting only when configured (rate_limit > 0).
