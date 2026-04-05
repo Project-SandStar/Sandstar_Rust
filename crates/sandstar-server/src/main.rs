@@ -493,6 +493,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Merge roxWarp cluster endpoints (WebSocket + status API)
         if let Some(ref rw_state) = roxwarp_state {
             app = app.merge(rest::roxwarp_router(rw_state.clone()));
+        } else {
+            // Always provide /api/cluster/status even when clustering is off
+            app = app.merge(rest::cluster_disabled_router());
         }
 
         // Merge simulator REST endpoints when built with simulator-hal

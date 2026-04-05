@@ -812,6 +812,24 @@ pub fn router_with_auth(
 
 // ── roxWarp cluster routes ──────────────────────────────────
 
+/// Fallback router when clustering is disabled — always returns a status response.
+pub fn cluster_disabled_router() -> Router {
+    Router::new().route("/api/cluster/status", get(cluster_disabled_handler))
+}
+
+async fn cluster_disabled_handler() -> impl IntoResponse {
+    (StatusCode::OK, Json(serde_json::json!({
+        "enabled": false,
+        "message": "Clustering not enabled. Start with --cluster flag to enable roxWarp.",
+        "requirements": {
+            "flag": "--cluster",
+            "configFile": "--cluster-config <path> (optional)",
+            "nodeId": "--node-id <id> (optional, auto-generated from hostname)",
+            "peers": "Configure peer addresses in the cluster config JSON file"
+        }
+    })))
+}
+
 /// Build the Axum router for roxWarp cluster endpoints:
 /// - `GET /roxwarp` — WebSocket upgrade for peer gossip
 /// - `GET /api/cluster/status` — cluster overview (JSON)
