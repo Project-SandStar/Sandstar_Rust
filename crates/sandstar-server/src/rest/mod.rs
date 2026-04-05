@@ -810,6 +810,43 @@ pub fn router_with_auth(
         .layer(cors)
 }
 
+// ── roxWarp cluster routes ──────────────────────────────────
+
+/// Build the Axum router for roxWarp cluster endpoints:
+/// - `GET /roxwarp` — WebSocket upgrade for peer gossip
+/// - `GET /api/cluster/status` — cluster overview (JSON)
+pub fn roxwarp_router(state: crate::roxwarp::RoxWarpState) -> Router {
+    use crate::roxwarp::handler;
+
+    let ws_route = Router::new()
+        .route("/roxwarp", get(handler::roxwarp_upgrade))
+        .with_state(state.clone());
+
+    let status_route = Router::new()
+        .route("/api/cluster/status", get(cluster_status_handler))
+        .with_state(state);
+
+    ws_route.merge(status_route)
+}
+
+/// GET /api/cluster/status — return cluster status as JSON.
+async fn cluster_status_handler(
+    State(state): State<crate::roxwarp::RoxWarpState>,
+) -> impl IntoResponse {
+    // Build a snapshot of delta engine state
+    let de = &state.delta_engine;
+    let vv = de.get_version_vector().await;
+    let (version, points) = de.full_state().await;
+
+    let status = serde_json::json!({
+        "nodeId": de.node_id,
+        "version": version,
+        "pointCount": points.len(),
+        "versionVector": vv,
+    });
+    (StatusCode::OK, Json(status))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

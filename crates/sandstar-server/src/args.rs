@@ -121,6 +121,19 @@ pub struct ServerArgs {
     /// If not set, uses the default path.
     #[arg(long, env = "SANDSTAR_MANIFESTS_DIR")]
     pub manifests_dir: Option<String>,
+
+    /// Enable roxWarp cluster mode for peer-to-peer state synchronization.
+    #[arg(long, default_value_t = false)]
+    pub cluster: bool,
+
+    /// Path to roxWarp cluster configuration file (JSON).
+    /// Required when --cluster is enabled.
+    #[arg(long, env = "SANDSTAR_CLUSTER_CONFIG")]
+    pub cluster_config: Option<String>,
+
+    /// Override this node's cluster ID (default: sandstar-<hostname>).
+    #[arg(long, env = "SANDSTAR_NODE_ID")]
+    pub node_id: Option<String>,
 }
 
 fn default_socket() -> String {

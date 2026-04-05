@@ -18,6 +18,7 @@ pub mod metrics;
 pub mod pid;
 pub mod reload;
 pub mod rest;
+pub mod roxwarp;
 pub mod sax_converter;
 pub mod sd_notify;
 pub mod sox;

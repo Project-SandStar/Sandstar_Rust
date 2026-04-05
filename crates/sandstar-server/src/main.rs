@@ -428,6 +428,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(rest::sox_api::SoxApiState { tree, manifest_db })
     };
 
+    // 8b2. Set up roxWarp cluster (optional, requires --cluster flag)
+    let roxwarp_state: Option<sandstar_server::roxwarp::RoxWarpState> = if args.cluster {
+        use sandstar_server::roxwarp::{ClusterConfig, ClusterManager, RoxWarpState};
+        use sandstar_server::roxwarp::cluster::DeltaEngine;
+
+        let mut cluster_config = if let Some(ref config_path) = args.cluster_config {
+            ClusterConfig::load(config_path)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?
+        } else {
+            ClusterConfig::default()
+        };
+
+        // Override node_id if provided via CLI
+        if let Some(ref nid) = args.node_id {
+            cluster_config.node_id = nid.clone();
+        }
+
+        let delta_engine = Arc::new(DeltaEngine::new(cluster_config.node_id.clone()));
+        let cluster_handle = EngineHandle::new(cmd_tx.clone());
+        let manager = ClusterManager::new(
+            cluster_config.clone(),
+            delta_engine.clone(),
+            cluster_handle,
+        );
+
+        info!(
+            node_id = %cluster_config.node_id,
+            peers = cluster_config.peers.len(),
+            "roxWarp cluster mode enabled"
+        );
+
+        // Spawn the cluster manager (runs feed loop + outbound peer connections)
+        tokio::spawn(async move {
+            manager.run().await;
+        });
+
+        Some(RoxWarpState {
+            delta_engine,
+            config: cluster_config,
+        })
+    } else {
+        None
+    };
+
     if !args.no_rest {
         let handle = EngineHandle::new(cmd_tx.clone());
         let auth_state = sandstar_server::auth::AuthState::new(config.auth_store.clone());
@@ -445,6 +489,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Merge alert management REST endpoints
         app = app.merge(alerts::alert_router(alert_manager.clone()));
+
+        // Merge roxWarp cluster endpoints (WebSocket + status API)
+        if let Some(ref rw_state) = roxwarp_state {
+            app = app.merge(rest::roxwarp_router(rw_state.clone()));
+        }
 
         // Merge simulator REST endpoints when built with simulator-hal
         #[cfg(feature = "simulator-hal")]

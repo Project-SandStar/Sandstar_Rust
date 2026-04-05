@@ -49,6 +49,8 @@ pbkdf2 = { version = "0.12", features = ["simple"] }
 base64 = "0.22"
 rand = "0.9"
 quick-xml = "0.37"
+rmp-serde = { workspace = true }
+tokio-tungstenite = "0.26"
 axum-server = { version = "0.8", features = ["tls-rustls"], optional = true }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring"] }
 rustls-pemfile = { version = "2", optional = true }
