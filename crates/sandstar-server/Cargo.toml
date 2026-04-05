@@ -50,9 +50,9 @@ base64 = "0.22"
 rand = "0.9"
 quick-xml = "0.37"
 rmp-serde = { workspace = true }
-tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
-axum-server = { version = "0.8", features = ["tls-rustls"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2"
 webpki-roots = "0.26"
 
