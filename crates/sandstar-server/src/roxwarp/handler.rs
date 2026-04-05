@@ -101,6 +101,26 @@ pub(crate) enum WarpMessage {
         node_id: String,
         version: u64,
     },
+    /// Distributed Haystack filter query.
+    #[serde(rename = "warp:query")]
+    Query {
+        #[serde(rename = "nodeId")]
+        node_id: String,
+        #[serde(rename = "queryId")]
+        query_id: String,
+        filter: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
+    /// Response to a distributed query.
+    #[serde(rename = "warp:queryResult")]
+    QueryResult {
+        #[serde(rename = "nodeId")]
+        node_id: String,
+        #[serde(rename = "queryId")]
+        query_id: String,
+        results: Vec<super::protocol::QueryPoint>,
+    },
 }
 
 // ── WebSocket Upgrade Handler ─────────────────────────
@@ -133,12 +153,12 @@ async fn handle_roxwarp_connection(
     ws: WebSocket,
     delta_engine: Arc<DeltaEngine>,
     config: ClusterConfig,
-    _debug_mode: bool,
+    debug_mode: bool,
 ) {
     let (mut ws_tx, mut ws_rx) = ws.split();
     info!("roxWarp: incoming connection");
 
-    // Phase 1: Wait for hello
+    // Phase 1: Wait for hello (binary or text)
     let peer_node_id = match wait_for_hello(&mut ws_rx).await {
         Some((node_id, _peer_versions)) => {
             info!(peer = %node_id, "roxWarp: received hello");
@@ -156,7 +176,7 @@ async fn handle_roxwarp_connection(
         node_id: config.node_id.clone(),
         versions: our_versions,
     };
-    if send_message(&mut ws_tx, &welcome).await.is_err() {
+    if send_message(&mut ws_tx, &welcome, debug_mode).await.is_err() {
         return;
     }
 
@@ -169,7 +189,7 @@ async fn handle_roxwarp_connection(
             to_version: current_version,
             points: deltas,
         };
-        if send_message(&mut ws_tx, &delta_msg).await.is_err() {
+        if send_message(&mut ws_tx, &delta_msg, debug_mode).await.is_err() {
             return;
         }
     }
@@ -191,16 +211,31 @@ async fn handle_roxwarp_connection(
         tokio::select! {
             msg = ws_rx.next() => {
                 match msg {
+                    Some(Ok(Message::Binary(data))) => {
+                        last_activity = Instant::now();
+                        if let Err(e) = handle_incoming_binary(
+                            &data,
+                            &delta_engine,
+                            &config,
+                            &peer_node_id,
+                            &mut ws_tx,
+                            debug_mode,
+                        ).await {
+                            warn!(peer = %peer_node_id, error = %e, "roxWarp: binary message error");
+                            break;
+                        }
+                    }
                     Some(Ok(Message::Text(text))) => {
                         last_activity = Instant::now();
-                        if let Err(e) = handle_incoming_message(
+                        if let Err(e) = handle_incoming_text(
                             &text,
                             &delta_engine,
                             &config,
                             &peer_node_id,
                             &mut ws_tx,
+                            debug_mode,
                         ).await {
-                            warn!(peer = %peer_node_id, error = %e, "roxWarp: message handling error");
+                            warn!(peer = %peer_node_id, error = %e, "roxWarp: text message error");
                             break;
                         }
                     }
@@ -236,7 +271,7 @@ async fn handle_roxwarp_connection(
                     node_id: config.node_id.clone(),
                     timestamp: now_ms,
                 };
-                if send_message(&mut ws_tx, &hb).await.is_err() {
+                if send_message(&mut ws_tx, &hb, debug_mode).await.is_err() {
                     break;
                 }
 
@@ -251,7 +286,7 @@ async fn handle_roxwarp_connection(
                             to_version: current,
                             points: deltas,
                         };
-                        if send_message(&mut ws_tx, &delta_msg).await.is_err() {
+                        if send_message(&mut ws_tx, &delta_msg, debug_mode).await.is_err() {
                             break;
                         }
                         last_sent_version = current;
@@ -266,7 +301,7 @@ async fn handle_roxwarp_connection(
                     node_id: config.node_id.clone(),
                     versions,
                 };
-                if send_message(&mut ws_tx, &msg).await.is_err() {
+                if send_message(&mut ws_tx, &msg, debug_mode).await.is_err() {
                     break;
                 }
             }
@@ -277,6 +312,8 @@ async fn handle_roxwarp_connection(
 }
 
 /// Wait for a `warp:hello` message from the connecting peer.
+///
+/// Accepts both binary (MessagePack) and text (JSON) frames.
 async fn wait_for_hello(
     ws_rx: &mut futures_util::stream::SplitStream<WebSocket>,
 ) -> Option<(String, HashMap<String, u64>)> {
@@ -285,6 +322,14 @@ async fn wait_for_hello(
 
     while Instant::now() < deadline {
         match tokio::time::timeout(Duration::from_secs(10), ws_rx.next()).await {
+            Ok(Some(Ok(Message::Binary(data)))) => {
+                if let Ok(WarpMessage::Hello {
+                    node_id, versions, ..
+                }) = rmp_serde::from_slice::<WarpMessage>(&data)
+                {
+                    return Some((node_id, versions));
+                }
+            }
             Ok(Some(Ok(Message::Text(text)))) => {
                 if let Ok(WarpMessage::Hello {
                     node_id, versions, ..
@@ -299,17 +344,43 @@ async fn wait_for_hello(
     None
 }
 
-/// Handle an incoming message from a connected peer.
-async fn handle_incoming_message(
+/// Handle an incoming binary (MessagePack) message from a connected peer.
+async fn handle_incoming_binary(
+    data: &[u8],
+    delta_engine: &Arc<DeltaEngine>,
+    config: &ClusterConfig,
+    peer_node_id: &str,
+    ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    debug_mode: bool,
+) -> Result<(), String> {
+    let msg: WarpMessage = rmp_serde::from_slice(data)
+        .map_err(|e| format!("invalid msgpack message: {e}"))?;
+    process_warp_message(msg, delta_engine, config, peer_node_id, ws_tx, debug_mode).await
+}
+
+/// Handle an incoming text (JSON) message from a connected peer.
+async fn handle_incoming_text(
     text: &str,
     delta_engine: &Arc<DeltaEngine>,
     config: &ClusterConfig,
     peer_node_id: &str,
     ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    debug_mode: bool,
 ) -> Result<(), String> {
     let msg: WarpMessage = serde_json::from_str(text)
-        .map_err(|e| format!("invalid message: {e}"))?;
+        .map_err(|e| format!("invalid json message: {e}"))?;
+    process_warp_message(msg, delta_engine, config, peer_node_id, ws_tx, debug_mode).await
+}
 
+/// Process a decoded WarpMessage from either binary or text frame.
+async fn process_warp_message(
+    msg: WarpMessage,
+    delta_engine: &Arc<DeltaEngine>,
+    config: &ClusterConfig,
+    peer_node_id: &str,
+    ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    debug_mode: bool,
+) -> Result<(), String> {
     match msg {
         WarpMessage::Delta {
             node_id,
@@ -330,7 +401,7 @@ async fn handle_incoming_message(
                 node_id: config.node_id.clone(),
                 version: to_version,
             };
-            send_message(ws_tx, &ack)
+            send_message(ws_tx, &ack, debug_mode)
                 .await
                 .map_err(|_| "send failed".to_string())?;
         }
@@ -359,7 +430,7 @@ async fn handle_incoming_message(
                         to_version: our_version,
                         points: deltas,
                     };
-                    send_message(ws_tx, &delta_msg)
+                    send_message(ws_tx, &delta_msg, debug_mode)
                         .await
                         .map_err(|_| "send failed".to_string())?;
                 }
@@ -383,7 +454,7 @@ async fn handle_incoming_message(
                 to_version: current,
                 points: deltas,
             };
-            send_message(ws_tx, &delta_msg)
+            send_message(ws_tx, &delta_msg, debug_mode)
                 .await
                 .map_err(|_| "send failed".to_string())?;
         }
@@ -396,7 +467,7 @@ async fn handle_incoming_message(
                 version,
                 points,
             };
-            send_message(ws_tx, &full_msg)
+            send_message(ws_tx, &full_msg, debug_mode)
                 .await
                 .map_err(|_| "send failed".to_string())?;
         }
@@ -404,6 +475,45 @@ async fn handle_incoming_message(
         WarpMessage::Ack { node_id, version } => {
             debug!(peer = %node_id, version = version, "roxWarp: received ack");
             delta_engine.ack_peer(&node_id, version).await;
+        }
+
+        WarpMessage::Query {
+            node_id,
+            query_id,
+            filter,
+            limit,
+        } => {
+            debug!(
+                peer = %node_id,
+                query_id = %query_id,
+                filter = %filter,
+                "roxWarp: received query"
+            );
+            let results = evaluate_query_against_delta_engine(
+                delta_engine,
+                &config.node_id,
+                &filter,
+                limit,
+            )
+            .await;
+            let result_msg = WarpMessage::QueryResult {
+                node_id: config.node_id.clone(),
+                query_id,
+                results,
+            };
+            send_message(ws_tx, &result_msg, debug_mode)
+                .await
+                .map_err(|_| "send query result failed".to_string())?;
+        }
+
+        WarpMessage::QueryResult { node_id, query_id, .. } => {
+            debug!(
+                peer = %node_id,
+                query_id = %query_id,
+                "roxWarp: received query result (handled by caller)"
+            );
+            // Query results are typically collected by the distributed_query
+            // coordinator — here we just log them.
         }
 
         _ => {
@@ -414,14 +524,181 @@ async fn handle_incoming_message(
     Ok(())
 }
 
-/// Send a WarpMessage as JSON text over WebSocket.
+// ── Distributed Query Evaluation ─────────────────────
+
+/// Evaluate a filter query against the DeltaEngine's local points.
+///
+/// Supports basic filter operations:
+/// - `"point"` — matches all points
+/// - `"channel==N"` — exact channel match
+/// - `"channel > N"`, `"channel < N"` — channel range
+/// - Substring match on unit or status
+/// - `"X and Y"` — conjunction of two terms
+/// - `"X or Y"` — disjunction of two terms
+async fn evaluate_query_against_delta_engine(
+    delta_engine: &Arc<DeltaEngine>,
+    local_node_id: &str,
+    filter: &str,
+    limit: Option<u32>,
+) -> Vec<super::protocol::QueryPoint> {
+    let (_, all_points) = delta_engine.full_state().await;
+    let limit = limit.unwrap_or(u32::MAX) as usize;
+
+    all_points
+        .iter()
+        .filter(|p| evaluate_point_filter(filter, p))
+        .take(limit)
+        .map(|p| super::protocol::QueryPoint {
+            channel: p.channel,
+            value: p.value,
+            unit: p.unit.clone(),
+            status: p.status.clone(),
+            node_id: local_node_id.to_string(),
+        })
+        .collect()
+}
+
+/// Evaluate a filter expression against a single VersionedPoint.
+///
+/// This is a simplified filter evaluator for distributed queries.
+/// It handles the most common patterns without requiring the full
+/// Haystack filter parser (which operates on `ChannelInfo`).
+pub(crate) fn evaluate_point_filter(filter: &str, point: &VersionedPoint) -> bool {
+    let f = filter.trim();
+
+    // Handle "and" conjunction
+    if let Some(pos) = find_keyword(f, " and ") {
+        let left = &f[..pos];
+        let right = &f[pos + 5..];
+        return evaluate_point_filter(left, point)
+            && evaluate_point_filter(right, point);
+    }
+
+    // Handle "or" disjunction
+    if let Some(pos) = find_keyword(f, " or ") {
+        let left = &f[..pos];
+        let right = &f[pos + 4..];
+        return evaluate_point_filter(left, point)
+            || evaluate_point_filter(right, point);
+    }
+
+    let f_lower = f.to_lowercase();
+
+    // "point" matches everything
+    if f_lower == "point" {
+        return true;
+    }
+
+    // Comparison operators: channel==N, channel>N, channel<N, channel>=N, channel<=N
+    if f.contains("==") {
+        let parts: Vec<&str> = f.splitn(2, "==").collect();
+        let tag = parts[0].trim().to_lowercase();
+        let val = parts[1].trim();
+        return match tag.as_str() {
+            "channel" | "id" => val.parse::<u32>().map(|n| point.channel == n).unwrap_or(false),
+            "unit" => point.unit.eq_ignore_ascii_case(val.trim_matches('"')),
+            "status" => point.status.eq_ignore_ascii_case(val.trim_matches('"')),
+            _ => false,
+        };
+    }
+
+    if f.contains(">=") {
+        let parts: Vec<&str> = f.splitn(2, ">=").collect();
+        let tag = parts[0].trim().to_lowercase();
+        let val = parts[1].trim();
+        if tag == "channel" || tag == "id" {
+            return val.parse::<u32>().map(|n| point.channel >= n).unwrap_or(false);
+        }
+        if tag == "value" || tag == "cur" {
+            return val.parse::<f64>().map(|n| point.value >= n).unwrap_or(false);
+        }
+    }
+
+    if f.contains("<=") {
+        let parts: Vec<&str> = f.splitn(2, "<=").collect();
+        let tag = parts[0].trim().to_lowercase();
+        let val = parts[1].trim();
+        if tag == "channel" || tag == "id" {
+            return val.parse::<u32>().map(|n| point.channel <= n).unwrap_or(false);
+        }
+        if tag == "value" || tag == "cur" {
+            return val.parse::<f64>().map(|n| point.value <= n).unwrap_or(false);
+        }
+    }
+
+    // Single > or < (check after >= and <=)
+    if f.contains('>') && !f.contains(">=") {
+        let parts: Vec<&str> = f.splitn(2, '>').collect();
+        let tag = parts[0].trim().to_lowercase();
+        let val = parts[1].trim();
+        if tag == "channel" || tag == "id" {
+            return val.parse::<u32>().map(|n| point.channel > n).unwrap_or(false);
+        }
+        if tag == "value" || tag == "cur" {
+            return val.parse::<f64>().map(|n| point.value > n).unwrap_or(false);
+        }
+    }
+
+    if f.contains('<') && !f.contains("<=") {
+        let parts: Vec<&str> = f.splitn(2, '<').collect();
+        let tag = parts[0].trim().to_lowercase();
+        let val = parts[1].trim();
+        if tag == "channel" || tag == "id" {
+            return val.parse::<u32>().map(|n| point.channel < n).unwrap_or(false);
+        }
+        if tag == "value" || tag == "cur" {
+            return val.parse::<f64>().map(|n| point.value < n).unwrap_or(false);
+        }
+    }
+
+    // Substring match on unit or status (fallback)
+    point.unit.to_lowercase().contains(&f_lower)
+        || point.status.to_lowercase().contains(&f_lower)
+}
+
+/// Find the position of a keyword in a filter string, avoiding
+/// matches inside quoted strings.
+fn find_keyword(s: &str, keyword: &str) -> Option<usize> {
+    let lower = s.to_lowercase();
+    let kw_lower = keyword.to_lowercase();
+    // Simple: find the keyword outside of quotes
+    let mut in_quotes = false;
+    let chars: Vec<char> = lower.chars().collect();
+    let kw_chars: Vec<char> = kw_lower.chars().collect();
+    for i in 0..chars.len() {
+        if chars[i] == '"' {
+            in_quotes = !in_quotes;
+            continue;
+        }
+        if !in_quotes
+            && i + kw_chars.len() <= chars.len()
+            && chars[i..i + kw_chars.len()] == kw_chars[..]
+        {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Send a WarpMessage over WebSocket.
+///
+/// Uses binary (MessagePack) frames by default for efficiency.
+/// In debug mode (`?debug=trio`), uses text (JSON) frames for human inspection.
 async fn send_message(
     ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     msg: &WarpMessage,
+    debug_mode: bool,
 ) -> Result<(), ()> {
-    match serde_json::to_string(msg) {
-        Ok(json) => ws_tx.send(Message::Text(json.into())).await.map_err(|_| ()),
-        Err(_) => Err(()),
+    if debug_mode {
+        match serde_json::to_string(msg) {
+            Ok(json) => ws_tx.send(Message::Text(json.into())).await.map_err(|_| ()),
+            Err(_) => Err(()),
+        }
+    } else {
+        match rmp_serde::to_vec(msg) {
+            Ok(bytes) => ws_tx.send(Message::Binary(bytes.into())).await.map_err(|_| ()),
+            Err(_) => Err(()),
+        }
     }
 }
 
@@ -626,6 +903,162 @@ mod tests {
             assert_eq!(points.len(), 1);
         } else {
             panic!("expected Full");
+        }
+    }
+
+    // ── Filter evaluation tests ──────────────────────────
+
+    fn test_point(channel: u32, value: f64, unit: &str, status: &str) -> VersionedPoint {
+        VersionedPoint {
+            channel,
+            value,
+            unit: unit.to_string(),
+            status: status.to_string(),
+            version: 1,
+            timestamp: 1706000000_000,
+        }
+    }
+
+    #[test]
+    fn filter_point_matches_all() {
+        let p = test_point(1113, 72.5, "degF", "ok");
+        assert!(evaluate_point_filter("point", &p));
+    }
+
+    #[test]
+    fn filter_channel_eq() {
+        let p = test_point(1113, 72.5, "degF", "ok");
+        assert!(evaluate_point_filter("channel==1113", &p));
+        assert!(!evaluate_point_filter("channel==612", &p));
+    }
+
+    #[test]
+    fn filter_channel_gt() {
+        let p = test_point(1113, 72.5, "degF", "ok");
+        assert!(evaluate_point_filter("channel > 1000", &p));
+        assert!(!evaluate_point_filter("channel > 2000", &p));
+    }
+
+    #[test]
+    fn filter_channel_lt() {
+        let p = test_point(1113, 72.5, "degF", "ok");
+        assert!(evaluate_point_filter("channel < 2000", &p));
+        assert!(!evaluate_point_filter("channel < 1000", &p));
+    }
+
+    #[test]
+    fn filter_channel_ge_le() {
+        let p = test_point(1113, 72.5, "degF", "ok");
+        assert!(evaluate_point_filter("channel >= 1113", &p));
+        assert!(evaluate_point_filter("channel <= 1113", &p));
+        assert!(!evaluate_point_filter("channel >= 1114", &p));
+        assert!(!evaluate_point_filter("channel <= 1112", &p));
+    }
+
+    #[test]
+    fn filter_unit_substring() {
+        let p = test_point(1113, 72.5, "degF", "ok");
+        assert!(evaluate_point_filter("degf", &p));
+        assert!(!evaluate_point_filter("mA", &p));
+    }
+
+    #[test]
+    fn filter_status_substring() {
+        let p = test_point(1113, 72.5, "degF", "fault");
+        assert!(evaluate_point_filter("fault", &p));
+        assert!(!evaluate_point_filter("ok", &p));
+    }
+
+    #[test]
+    fn filter_unit_eq() {
+        let p = test_point(1113, 72.5, "degF", "ok");
+        assert!(evaluate_point_filter("unit==\"degF\"", &p));
+        assert!(!evaluate_point_filter("unit==\"mA\"", &p));
+    }
+
+    #[test]
+    fn filter_status_eq() {
+        let p = test_point(1113, 72.5, "degF", "ok");
+        assert!(evaluate_point_filter("status==\"ok\"", &p));
+        assert!(!evaluate_point_filter("status==\"fault\"", &p));
+    }
+
+    #[test]
+    fn filter_value_gt() {
+        let p = test_point(1113, 72.5, "degF", "ok");
+        assert!(evaluate_point_filter("value > 70", &p));
+        assert!(!evaluate_point_filter("value > 80", &p));
+    }
+
+    #[test]
+    fn filter_and() {
+        let p = test_point(1113, 72.5, "degF", "ok");
+        assert!(evaluate_point_filter("point and channel==1113", &p));
+        assert!(!evaluate_point_filter("point and channel==612", &p));
+    }
+
+    #[test]
+    fn filter_or() {
+        let p = test_point(1113, 72.5, "degF", "ok");
+        assert!(evaluate_point_filter("channel==1113 or channel==612", &p));
+        assert!(evaluate_point_filter("channel==612 or channel==1113", &p));
+        assert!(!evaluate_point_filter("channel==612 or channel==999", &p));
+    }
+
+    #[test]
+    fn filter_channel_range_and() {
+        let p = test_point(1113, 72.5, "degF", "ok");
+        assert!(evaluate_point_filter("channel > 1000 and channel < 2000", &p));
+        assert!(!evaluate_point_filter("channel > 1000 and channel < 1100", &p));
+    }
+
+    // ── Query message serialization ──────────────────────
+
+    #[test]
+    fn warp_query_serialize() {
+        let msg = WarpMessage::Query {
+            node_id: "node-a".to_string(),
+            query_id: "q-001".to_string(),
+            filter: "point and temp".to_string(),
+            limit: Some(100),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"warp:query\""));
+        assert!(json.contains("\"queryId\":\"q-001\""));
+        assert!(json.contains("\"filter\":\"point and temp\""));
+        assert!(json.contains("\"limit\":100"));
+    }
+
+    #[test]
+    fn warp_query_result_serialize() {
+        let msg = WarpMessage::QueryResult {
+            node_id: "node-b".to_string(),
+            query_id: "q-001".to_string(),
+            results: vec![super::super::protocol::QueryPoint {
+                channel: 1113,
+                value: 73.2,
+                unit: "degF".into(),
+                status: "ok".into(),
+                node_id: "node-b".into(),
+            }],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"warp:queryResult\""));
+        assert!(json.contains("\"results\""));
+
+        let decoded: WarpMessage = serde_json::from_str(&json).unwrap();
+        if let WarpMessage::QueryResult {
+            node_id,
+            query_id,
+            results,
+        } = decoded
+        {
+            assert_eq!(node_id, "node-b");
+            assert_eq!(query_id, "q-001");
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].channel, 1113);
+        } else {
+            panic!("expected QueryResult");
         }
     }
 }

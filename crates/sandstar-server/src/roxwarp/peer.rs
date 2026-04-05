@@ -14,6 +14,9 @@ use tracing::{debug, info, warn};
 use super::cluster::{DeltaEngine, PeerConfig, PeerState};
 use super::handler::WarpMessage;
 
+/// Optional mTLS client configuration for outbound connections.
+pub type MtlsClientConfig = Option<Arc<rustls::ClientConfig>>;
+
 /// Maximum backoff delay between reconnection attempts (60 seconds).
 const MAX_BACKOFF_SECS: u64 = 60;
 
@@ -22,12 +25,17 @@ const MAX_BACKOFF_SECS: u64 = 60;
 /// This function runs forever, attempting to maintain a connection to the
 /// configured peer. On disconnect it waits with exponential backoff before
 /// retrying.
+///
+/// When `tls_config` is `Some`, outbound connections use WSS with mTLS.
+/// When `debug_mode` is true, messages use JSON text frames instead of binary.
 pub async fn connect_to_peer(
     peer: &PeerConfig,
     delta_engine: Arc<DeltaEngine>,
     peer_states: Arc<RwLock<HashMap<String, PeerState>>>,
     heartbeat_secs: u64,
     anti_entropy_secs: u64,
+    tls_config: MtlsClientConfig,
+    debug_mode: bool,
 ) {
     let mut backoff_secs = 1u64;
 
@@ -47,6 +55,8 @@ pub async fn connect_to_peer(
             &peer_states,
             heartbeat_secs,
             anti_entropy_secs,
+            &tls_config,
+            debug_mode,
         )
         .await
         {
@@ -80,13 +90,26 @@ async fn try_connect(
     peer_states: &Arc<RwLock<HashMap<String, PeerState>>>,
     heartbeat_secs: u64,
     anti_entropy_secs: u64,
+    tls_config: &MtlsClientConfig,
+    debug_mode: bool,
 ) -> Result<(), String> {
-    // Build WebSocket URL (plain WS for Phase 1, WSS later)
-    let url = format!("ws://{}/roxwarp", peer.address);
-
-    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
-        .await
-        .map_err(|e| format!("WebSocket connect failed: {e}"))?;
+    // Build WebSocket URL: WSS when mTLS is configured, WS otherwise
+    let (url, ws_stream) = if let Some(tls_cfg) = tls_config {
+        let url = format!("wss://{}/roxwarp", peer.address);
+        let connector = tokio_tungstenite::Connector::Rustls(tls_cfg.clone());
+        let (stream, _) =
+            tokio_tungstenite::connect_async_tls_with_config(&url, None, false, Some(connector))
+                .await
+                .map_err(|e| format!("WSS connect failed: {e}"))?;
+        (url, stream)
+    } else {
+        let url = format!("ws://{}/roxwarp", peer.address);
+        let (stream, _) = tokio_tungstenite::connect_async(&url)
+            .await
+            .map_err(|e| format!("WebSocket connect failed: {e}"))?;
+        (url, stream)
+    };
+    let _ = url; // suppress unused warning
 
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
@@ -98,7 +121,7 @@ async fn try_connect(
         node_id: delta_engine.node_id.clone(),
         versions: our_versions,
     };
-    send_tungstenite(&mut ws_tx, &hello).await?;
+    send_tungstenite(&mut ws_tx, &hello, debug_mode).await?;
 
     // Phase 2: Wait for welcome
     let peer_versions = match wait_for_welcome(&mut ws_rx).await {
@@ -128,7 +151,7 @@ async fn try_connect(
             to_version: current_version,
             points: deltas,
         };
-        send_tungstenite(&mut ws_tx, &delta_msg).await?;
+        send_tungstenite(&mut ws_tx, &delta_msg, debug_mode).await?;
     }
 
     // Phase 4: Active gossip loop
@@ -150,13 +173,24 @@ async fn try_connect(
         tokio::select! {
             msg = ws_rx.next() => {
                 match msg {
+                    Some(Ok(TungsteniteMessage::Binary(data))) => {
+                        last_activity = Instant::now();
+                        handle_peer_binary(
+                            &data,
+                            delta_engine,
+                            &peer.node_id,
+                            &mut ws_tx,
+                            debug_mode,
+                        ).await?;
+                    }
                     Some(Ok(TungsteniteMessage::Text(text))) => {
                         last_activity = Instant::now();
-                        handle_peer_message(
+                        handle_peer_text(
                             &text,
                             delta_engine,
                             &peer.node_id,
                             &mut ws_tx,
+                            debug_mode,
                         ).await?;
                     }
                     Some(Ok(TungsteniteMessage::Ping(data))) => {
@@ -194,7 +228,7 @@ async fn try_connect(
                     node_id: delta_engine.node_id.clone(),
                     timestamp: now_ms,
                 };
-                send_tungstenite(&mut ws_tx, &hb).await?;
+                send_tungstenite(&mut ws_tx, &hb, debug_mode).await?;
 
                 // Push any new deltas
                 let current = delta_engine.current_version();
@@ -207,7 +241,7 @@ async fn try_connect(
                             to_version: current,
                             points: deltas,
                         };
-                        send_tungstenite(&mut ws_tx, &delta_msg).await?;
+                        send_tungstenite(&mut ws_tx, &delta_msg, debug_mode).await?;
                         last_sent_version = current;
                     }
                 }
@@ -219,13 +253,15 @@ async fn try_connect(
                     node_id: delta_engine.node_id.clone(),
                     versions,
                 };
-                send_tungstenite(&mut ws_tx, &msg).await?;
+                send_tungstenite(&mut ws_tx, &msg, debug_mode).await?;
             }
         }
     }
 }
 
 /// Wait for a `warp:welcome` response from the remote peer.
+///
+/// Accepts both binary (MessagePack) and text (JSON) frames.
 async fn wait_for_welcome<S>(
     ws_rx: &mut futures_util::stream::SplitStream<S>,
 ) -> Option<(String, HashMap<String, u64>)>
@@ -234,6 +270,15 @@ where
         + Unpin,
 {
     match tokio::time::timeout(Duration::from_secs(10), ws_rx.next()).await {
+        Ok(Some(Ok(TungsteniteMessage::Binary(data)))) => {
+            if let Ok(WarpMessage::Welcome {
+                node_id, versions, ..
+            }) = rmp_serde::from_slice(&data)
+            {
+                return Some((node_id, versions));
+            }
+            None
+        }
         Ok(Some(Ok(TungsteniteMessage::Text(text)))) => {
             if let Ok(WarpMessage::Welcome {
                 node_id, versions, ..
@@ -247,19 +292,49 @@ where
     }
 }
 
-/// Handle an incoming message from the connected peer.
-async fn handle_peer_message<S>(
+/// Handle an incoming binary (MessagePack) message from the connected peer.
+async fn handle_peer_binary<S>(
+    data: &[u8],
+    delta_engine: &Arc<DeltaEngine>,
+    peer_node_id: &str,
+    ws_tx: &mut futures_util::stream::SplitSink<S, TungsteniteMessage>,
+    debug_mode: bool,
+) -> Result<(), String>
+where
+    S: futures_util::Sink<TungsteniteMessage> + Unpin,
+{
+    let msg: WarpMessage = rmp_serde::from_slice(data)
+        .map_err(|e| format!("invalid msgpack message: {e}"))?;
+    process_peer_message(msg, delta_engine, peer_node_id, ws_tx, debug_mode).await
+}
+
+/// Handle an incoming text (JSON) message from the connected peer.
+async fn handle_peer_text<S>(
     text: &str,
     delta_engine: &Arc<DeltaEngine>,
     peer_node_id: &str,
     ws_tx: &mut futures_util::stream::SplitSink<S, TungsteniteMessage>,
+    debug_mode: bool,
 ) -> Result<(), String>
 where
     S: futures_util::Sink<TungsteniteMessage> + Unpin,
 {
     let msg: WarpMessage = serde_json::from_str(text)
-        .map_err(|e| format!("invalid message: {e}"))?;
+        .map_err(|e| format!("invalid json message: {e}"))?;
+    process_peer_message(msg, delta_engine, peer_node_id, ws_tx, debug_mode).await
+}
 
+/// Process a decoded WarpMessage from either binary or text frame.
+async fn process_peer_message<S>(
+    msg: WarpMessage,
+    delta_engine: &Arc<DeltaEngine>,
+    peer_node_id: &str,
+    ws_tx: &mut futures_util::stream::SplitSink<S, TungsteniteMessage>,
+    debug_mode: bool,
+) -> Result<(), String>
+where
+    S: futures_util::Sink<TungsteniteMessage> + Unpin,
+{
     match msg {
         WarpMessage::Delta {
             node_id,
@@ -280,12 +355,7 @@ where
                 node_id: delta_engine.node_id.clone(),
                 version: to_version,
             };
-            let json = serde_json::to_string(&ack)
-                .map_err(|e| format!("serialize ack: {e}"))?;
-            ws_tx
-                .send(TungsteniteMessage::Text(json.into()))
-                .await
-                .map_err(|_| "send ack failed".to_string())?;
+            send_tungstenite(ws_tx, &ack, debug_mode).await?;
         }
 
         WarpMessage::Heartbeat { node_id, .. } => {
@@ -311,12 +381,7 @@ where
                         to_version: our_version,
                         points: deltas,
                     };
-                    let json = serde_json::to_string(&delta_msg)
-                        .map_err(|e| format!("serialize delta: {e}"))?;
-                    ws_tx
-                        .send(TungsteniteMessage::Text(json.into()))
-                        .await
-                        .map_err(|_| "send delta failed".to_string())?;
+                    send_tungstenite(ws_tx, &delta_msg, debug_mode).await?;
                 }
             }
         }
@@ -347,19 +412,31 @@ where
     Ok(())
 }
 
-/// Send a WarpMessage as JSON over a tokio-tungstenite WebSocket.
+/// Send a WarpMessage over a tokio-tungstenite WebSocket.
+///
+/// Uses binary (MessagePack) frames by default for efficiency.
+/// In debug mode, uses text (JSON) frames for human inspection.
 async fn send_tungstenite<S>(
     ws_tx: &mut futures_util::stream::SplitSink<S, TungsteniteMessage>,
     msg: &WarpMessage,
+    debug_mode: bool,
 ) -> Result<(), String>
 where
     S: futures_util::Sink<TungsteniteMessage> + Unpin,
 {
-    let json = serde_json::to_string(msg).map_err(|e| format!("serialize: {e}"))?;
-    ws_tx
-        .send(TungsteniteMessage::Text(json.into()))
-        .await
-        .map_err(|_| "send failed".to_string())
+    if debug_mode {
+        let json = serde_json::to_string(msg).map_err(|e| format!("serialize json: {e}"))?;
+        ws_tx
+            .send(TungsteniteMessage::Text(json.into()))
+            .await
+            .map_err(|_| "send failed".to_string())
+    } else {
+        let bytes = rmp_serde::to_vec(msg).map_err(|e| format!("serialize msgpack: {e}"))?;
+        ws_tx
+            .send(TungsteniteMessage::Binary(bytes.into()))
+            .await
+            .map_err(|_| "send failed".to_string())
+    }
 }
 
 /// Update peer state in the shared state map.

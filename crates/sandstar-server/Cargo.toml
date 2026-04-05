@@ -20,7 +20,7 @@ mock-hal = []
 linux-hal = ["dep:sandstar-hal-linux", "dep:libc"]
 simulator-hal = ["sandstar-hal/simulator"]
 svm = ["dep:sandstar-svm"]
-tls = ["dep:axum-server", "dep:rustls", "dep:rustls-pemfile"]
+tls = []
 
 [dependencies]
 sandstar-engine = { path = "../sandstar-engine" }
@@ -50,10 +50,11 @@ base64 = "0.22"
 rand = "0.9"
 quick-xml = "0.37"
 rmp-serde = { workspace = true }
-tokio-tungstenite = "0.26"
-axum-server = { version = "0.8", features = ["tls-rustls"], optional = true }
-rustls = { version = "0.23", optional = true, default-features = false, features = ["ring"] }
-rustls-pemfile = { version = "2", optional = true }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2"
+webpki-roots = "0.26"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

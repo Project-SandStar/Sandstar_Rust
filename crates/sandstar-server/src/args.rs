@@ -134,6 +134,22 @@ pub struct ServerArgs {
     /// Override this node's cluster ID (default: sandstar-<hostname>).
     #[arg(long, env = "SANDSTAR_NODE_ID")]
     pub node_id: Option<String>,
+
+    /// roxWarp cluster listener port (default 7443). Separate from the REST API port.
+    #[arg(long, env = "SANDSTAR_CLUSTER_PORT", default_value_t = 7443)]
+    pub cluster_port: u16,
+
+    /// Path to device certificate (PEM) for roxWarp mTLS authentication.
+    #[arg(long, env = "SANDSTAR_CLUSTER_CERT")]
+    pub cluster_cert: Option<String>,
+
+    /// Path to device private key (PEM) for roxWarp mTLS authentication.
+    #[arg(long, env = "SANDSTAR_CLUSTER_KEY")]
+    pub cluster_key: Option<String>,
+
+    /// Path to CA certificate (PEM) for verifying roxWarp peer certificates.
+    #[arg(long, env = "SANDSTAR_CLUSTER_CA")]
+    pub cluster_ca: Option<String>,
 }
 
 fn default_socket() -> String {
@@ -339,5 +355,45 @@ mod tests {
         assert_eq!(args.sox_port, 1877);
         assert_eq!(args.sox_user, "myuser");
         assert_eq!(args.sox_pass, "mypass");
+    }
+
+    #[test]
+    fn test_cluster_defaults() {
+        let args = ServerArgs::parse_from(["sandstar-engine-server"]);
+        assert!(!args.cluster);
+        assert_eq!(args.cluster_port, 7443);
+        assert!(args.cluster_cert.is_none());
+        assert!(args.cluster_key.is_none());
+        assert!(args.cluster_ca.is_none());
+    }
+
+    #[test]
+    fn test_cluster_port_override() {
+        let args = ServerArgs::parse_from([
+            "sandstar-engine-server",
+            "--cluster",
+            "--cluster-port",
+            "9443",
+        ]);
+        assert!(args.cluster);
+        assert_eq!(args.cluster_port, 9443);
+    }
+
+    #[test]
+    fn test_cluster_mtls_args() {
+        let args = ServerArgs::parse_from([
+            "sandstar-engine-server",
+            "--cluster",
+            "--cluster-cert",
+            "/etc/device.pem",
+            "--cluster-key",
+            "/etc/device-key.pem",
+            "--cluster-ca",
+            "/etc/ca.pem",
+        ]);
+        assert!(args.cluster);
+        assert_eq!(args.cluster_cert.as_deref(), Some("/etc/device.pem"));
+        assert_eq!(args.cluster_key.as_deref(), Some("/etc/device-key.pem"));
+        assert_eq!(args.cluster_ca.as_deref(), Some("/etc/ca.pem"));
     }
 }

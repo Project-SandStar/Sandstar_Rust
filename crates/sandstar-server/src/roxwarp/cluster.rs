@@ -40,6 +40,9 @@ fn default_true() -> bool {
 pub struct ClusterConfig {
     /// This node's unique ID.
     pub node_id: String,
+    /// roxWarp listener port (default 7443).
+    #[serde(default = "default_cluster_port")]
+    pub port: u16,
     /// Peer nodes to connect to.
     #[serde(default)]
     pub peers: Vec<PeerConfig>,
@@ -52,8 +55,20 @@ pub struct ClusterConfig {
     /// Channel feed interval in seconds (how often to scan engine channels).
     #[serde(default = "default_feed_interval")]
     pub feed_interval_secs: u64,
+    /// Path to device certificate (PEM) for mTLS.
+    #[serde(default)]
+    pub cert_path: Option<String>,
+    /// Path to device private key (PEM) for mTLS.
+    #[serde(default)]
+    pub key_path: Option<String>,
+    /// Path to CA certificate (PEM) for mTLS peer verification.
+    #[serde(default)]
+    pub ca_path: Option<String>,
 }
 
+fn default_cluster_port() -> u16 {
+    7443
+}
 fn default_heartbeat() -> u64 {
     5
 }
@@ -68,10 +83,14 @@ impl Default for ClusterConfig {
     fn default() -> Self {
         Self {
             node_id: format!("sandstar-{}", hostname()),
+            port: 7443,
             peers: Vec::new(),
             heartbeat_interval_secs: 5,
             anti_entropy_interval_secs: 60,
             feed_interval_secs: 1,
+            cert_path: None,
+            key_path: None,
+            ca_path: None,
         }
     }
 }
@@ -313,10 +332,12 @@ impl ClusterManager {
 
     /// Start the cluster manager:
     /// 1. Start the channel feed loop (reads engine channels into delta engine)
-    /// 2. Spawn outbound connection tasks for each configured peer
+    /// 2. Build mTLS client config if configured
+    /// 3. Spawn outbound connection tasks for each configured peer
     pub async fn run(&self) {
         info!(
             node_id = %self.config.node_id,
+            port = self.config.port,
             peers = self.config.peers.len(),
             "roxWarp cluster manager starting"
         );
@@ -330,6 +351,25 @@ impl ClusterManager {
                 }
             }
         }
+
+        // Build mTLS client config for outbound connections (if configured)
+        let mtls_client: super::peer::MtlsClientConfig =
+            if let (Some(cert), Some(key), Some(ca)) =
+                (&self.config.cert_path, &self.config.key_path, &self.config.ca_path)
+            {
+                match super::mtls::build_mtls_client_config(cert, key, ca) {
+                    Ok(cfg) => {
+                        info!("roxWarp: mTLS client config loaded for outbound connections");
+                        Some(cfg)
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "roxWarp: failed to load mTLS client config, using plain WS");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
 
         // Spawn the channel feed loop
         let feed_engine = self.delta_engine.clone();
@@ -349,13 +389,41 @@ impl ClusterManager {
             let ps = self.peer_states.clone();
             let hb_secs = self.config.heartbeat_interval_secs;
             let ae_secs = self.config.anti_entropy_interval_secs;
+            let tls = mtls_client.clone();
 
             tokio::spawn(async move {
-                super::peer::connect_to_peer(&pc, de, ps, hb_secs, ae_secs).await;
+                super::peer::connect_to_peer(&pc, de, ps, hb_secs, ae_secs, tls, false).await;
             });
         }
 
         info!("roxWarp cluster manager started");
+    }
+
+    /// Execute a distributed query across the local delta engine.
+    ///
+    /// Evaluates a Haystack filter against all local points and returns
+    /// matching results. In a full cluster deployment, this would also
+    /// fan out to connected peers — for now, it queries the local node.
+    pub async fn distributed_query(
+        &self,
+        filter: &str,
+        limit: Option<u32>,
+    ) -> Vec<super::protocol::QueryPoint> {
+        let (_, all_points) = self.delta_engine.full_state().await;
+        let limit = limit.unwrap_or(u32::MAX) as usize;
+
+        all_points
+            .iter()
+            .filter(|p| super::handler::evaluate_point_filter(filter, p))
+            .take(limit)
+            .map(|p| super::protocol::QueryPoint {
+                channel: p.channel,
+                value: p.value,
+                unit: p.unit.clone(),
+                status: p.status.clone(),
+                node_id: self.config.node_id.clone(),
+            })
+            .collect()
     }
 
     /// Get cluster status for REST API / diagnostics.
@@ -491,10 +559,14 @@ mod tests {
     fn cluster_config_defaults() {
         let config = ClusterConfig::default();
         assert!(config.node_id.starts_with("sandstar-"));
+        assert_eq!(config.port, 7443);
         assert!(config.peers.is_empty());
         assert_eq!(config.heartbeat_interval_secs, 5);
         assert_eq!(config.anti_entropy_interval_secs, 60);
         assert_eq!(config.feed_interval_secs, 1);
+        assert!(config.cert_path.is_none());
+        assert!(config.key_path.is_none());
+        assert!(config.ca_path.is_none());
     }
 
     #[test]
@@ -509,11 +581,29 @@ mod tests {
         }"#;
         let config: ClusterConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.node_id, "test-node-1");
+        assert_eq!(config.port, 7443); // default when not specified
         assert_eq!(config.peers.len(), 2);
         assert!(config.peers[0].enabled);
         assert!(!config.peers[1].enabled);
         assert_eq!(config.heartbeat_interval_secs, 10);
         assert_eq!(config.anti_entropy_interval_secs, 60); // default
+    }
+
+    #[test]
+    fn cluster_config_deserialize_with_mtls() {
+        let json = r#"{
+            "node_id": "test-node-1",
+            "port": 9443,
+            "peers": [],
+            "cert_path": "/etc/sandstar/device.pem",
+            "key_path": "/etc/sandstar/device-key.pem",
+            "ca_path": "/etc/sandstar/ca.pem"
+        }"#;
+        let config: ClusterConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.port, 9443);
+        assert_eq!(config.cert_path.as_deref(), Some("/etc/sandstar/device.pem"));
+        assert_eq!(config.key_path.as_deref(), Some("/etc/sandstar/device-key.pem"));
+        assert_eq!(config.ca_path.as_deref(), Some("/etc/sandstar/ca.pem"));
     }
 
     #[test]

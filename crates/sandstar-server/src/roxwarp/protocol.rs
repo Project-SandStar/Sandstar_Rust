@@ -63,6 +63,9 @@ pub enum WarpMessage {
         versions: HashMap<String, u64>,
         #[serde(default)]
         capabilities: Vec<String>,
+        /// String table entries for tag name compression (optional).
+        #[serde(rename = "stringTable", default, skip_serializing_if = "Vec::is_empty")]
+        string_table: Vec<String>,
     },
 
     /// Handshake response from accepting peer.
@@ -73,6 +76,9 @@ pub enum WarpMessage {
         versions: HashMap<String, u64>,
         #[serde(default)]
         capabilities: Vec<String>,
+        /// String table entries for tag name compression (optional).
+        #[serde(rename = "stringTable", default, skip_serializing_if = "Vec::is_empty")]
+        string_table: Vec<String>,
     },
 
     /// Incremental state delta.
@@ -151,6 +157,45 @@ pub enum WarpMessage {
         node_id: String,
         version: u64,
     },
+
+    /// Distributed Haystack filter query.
+    #[serde(rename = "warp:query")]
+    Query {
+        #[serde(rename = "nodeId")]
+        node_id: String,
+        #[serde(rename = "queryId")]
+        query_id: String,
+        filter: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
+
+    /// Response to a distributed query.
+    #[serde(rename = "warp:queryResult")]
+    QueryResult {
+        #[serde(rename = "nodeId")]
+        node_id: String,
+        #[serde(rename = "queryId")]
+        query_id: String,
+        results: Vec<QueryPoint>,
+    },
+}
+
+/// A point returned by a distributed query.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryPoint {
+    /// Channel number.
+    pub channel: u32,
+    /// Current value in engineering units.
+    pub value: f64,
+    /// Unit string.
+    pub unit: String,
+    /// Status string.
+    pub status: String,
+    /// Originating node ID.
+    #[serde(rename = "nodeId")]
+    pub node_id: String,
 }
 
 // ── Serialization helpers ────────────────────────────
@@ -189,7 +234,9 @@ impl WarpMessage {
             | Self::DeltaReq { node_id, .. }
             | Self::Join { node_id, .. }
             | Self::Leave { node_id, .. }
-            | Self::Ack { node_id, .. } => node_id,
+            | Self::Ack { node_id, .. }
+            | Self::Query { node_id, .. }
+            | Self::QueryResult { node_id, .. } => node_id,
         }
     }
 
@@ -207,6 +254,8 @@ impl WarpMessage {
             Self::Join { .. } => "warp:join",
             Self::Leave { .. } => "warp:leave",
             Self::Ack { .. } => "warp:ack",
+            Self::Query { .. } => "warp:query",
+            Self::QueryResult { .. } => "warp:queryResult",
         }
     }
 }
@@ -225,6 +274,10 @@ pub mod capabilities {
     pub const ANTI_ENTROPY: &str = "antiEntropy";
     /// Supports load-based routing.
     pub const LOAD_ROUTING: &str = "loadRouting";
+    /// Supports distributed Haystack filter queries.
+    pub const DISTRIBUTED_QUERY: &str = "distributedQuery";
+    /// Supports string table compression for tag names.
+    pub const STRING_TABLE: &str = "stringTable";
 
     /// Returns the default set of capabilities for a Sandstar node.
     pub fn defaults() -> Vec<String> {
@@ -233,6 +286,8 @@ pub mod capabilities {
             DELTA_SYNC.to_string(),
             FULL_SYNC.to_string(),
             ANTI_ENTROPY.to_string(),
+            DISTRIBUTED_QUERY.to_string(),
+            STRING_TABLE.to_string(),
         ]
     }
 }
@@ -242,6 +297,7 @@ pub mod capabilities {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::string_table::StringTable;
 
     fn sample_point() -> VersionedPoint {
         VersionedPoint {
@@ -263,6 +319,7 @@ mod tests {
             node_id: "node-a".into(),
             versions: HashMap::from([("node-a".into(), 100)]),
             capabilities: capabilities::defaults(),
+            string_table: vec![],
         };
         let json = msg.to_json().unwrap();
         assert!(json.contains("\"type\":\"warp:hello\""));
@@ -279,6 +336,7 @@ mod tests {
             node_id: "node-b".into(),
             versions: HashMap::new(),
             capabilities: vec!["deltaSync".into()],
+            string_table: vec![],
         };
         let json = msg.to_json().unwrap();
         let decoded = WarpMessage::from_json(&json).unwrap();
@@ -408,6 +466,7 @@ mod tests {
             node_id: "node-a".into(),
             versions: HashMap::from([("node-a".into(), 100)]),
             capabilities: capabilities::defaults(),
+            string_table: vec![],
         };
         let bytes = msg.to_msgpack().unwrap();
         let decoded = WarpMessage::from_msgpack(&bytes).unwrap();
@@ -473,6 +532,7 @@ mod tests {
             node_id: "n".into(),
             versions: HashMap::new(),
             capabilities: vec![],
+            string_table: vec![],
         };
         assert_eq!(msg.type_tag(), "warp:hello");
 
@@ -495,6 +555,8 @@ mod tests {
         assert!(caps.contains(&"deltaSync".to_string()));
         assert!(caps.contains(&"fullSync".to_string()));
         assert!(caps.contains(&"antiEntropy".to_string()));
+        assert!(caps.contains(&"distributedQuery".to_string()));
+        assert!(caps.contains(&"stringTable".to_string()));
         assert!(!caps.contains(&"loadRouting".to_string()));
     }
 
@@ -505,5 +567,251 @@ mod tests {
         assert!((m.memory_percent - 0.0).abs() < f32::EPSILON);
         assert_eq!(m.channel_count, 0);
         assert_eq!(m.uptime_secs, 0);
+    }
+
+    // -- Query / QueryResult --
+
+    #[test]
+    fn query_json_roundtrip() {
+        let msg = WarpMessage::Query {
+            node_id: "node-a".into(),
+            query_id: "q-001".into(),
+            filter: "point and temp".into(),
+            limit: Some(100),
+        };
+        let json = msg.to_json().unwrap();
+        assert!(json.contains("\"type\":\"warp:query\""));
+        assert!(json.contains("\"queryId\":\"q-001\""));
+        assert!(json.contains("\"filter\":\"point and temp\""));
+        let decoded = WarpMessage::from_json(&json).unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn query_no_limit_json_roundtrip() {
+        let msg = WarpMessage::Query {
+            node_id: "node-a".into(),
+            query_id: "q-002".into(),
+            filter: "channel==1113".into(),
+            limit: None,
+        };
+        let json = msg.to_json().unwrap();
+        assert!(!json.contains("\"limit\""));
+        let decoded = WarpMessage::from_json(&json).unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn query_result_json_roundtrip() {
+        let msg = WarpMessage::QueryResult {
+            node_id: "node-b".into(),
+            query_id: "q-001".into(),
+            results: vec![
+                QueryPoint {
+                    channel: 1113,
+                    value: 73.2,
+                    unit: "degF".into(),
+                    status: "ok".into(),
+                    node_id: "node-b".into(),
+                },
+            ],
+        };
+        let json = msg.to_json().unwrap();
+        assert!(json.contains("\"type\":\"warp:queryResult\""));
+        assert!(json.contains("\"results\""));
+        let decoded = WarpMessage::from_json(&json).unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn query_msgpack_roundtrip() {
+        let msg = WarpMessage::Query {
+            node_id: "node-a".into(),
+            query_id: "q-001".into(),
+            filter: "point".into(),
+            limit: Some(50),
+        };
+        let bytes = msg.to_msgpack().unwrap();
+        let decoded = WarpMessage::from_msgpack(&bytes).unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn query_result_msgpack_roundtrip() {
+        let msg = WarpMessage::QueryResult {
+            node_id: "node-a".into(),
+            query_id: "q-001".into(),
+            results: vec![
+                QueryPoint {
+                    channel: 2200,
+                    value: 55.0,
+                    unit: "%RH".into(),
+                    status: "ok".into(),
+                    node_id: "node-a".into(),
+                },
+            ],
+        };
+        let bytes = msg.to_msgpack().unwrap();
+        let decoded = WarpMessage::from_msgpack(&bytes).unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn query_type_tag() {
+        let msg = WarpMessage::Query {
+            node_id: "n".into(),
+            query_id: "q".into(),
+            filter: "point".into(),
+            limit: None,
+        };
+        assert_eq!(msg.type_tag(), "warp:query");
+        assert_eq!(msg.node_id(), "n");
+
+        let msg = WarpMessage::QueryResult {
+            node_id: "n".into(),
+            query_id: "q".into(),
+            results: vec![],
+        };
+        assert_eq!(msg.type_tag(), "warp:queryResult");
+    }
+
+    // -- String table in handshake --
+
+    #[test]
+    fn hello_with_string_table_roundtrip() {
+        let table = StringTable::new();
+        let msg = WarpMessage::Hello {
+            node_id: "node-a".into(),
+            versions: HashMap::from([("node-a".into(), 100)]),
+            capabilities: capabilities::defaults(),
+            string_table: table.to_entries(),
+        };
+        let json = msg.to_json().unwrap();
+        assert!(json.contains("\"stringTable\""));
+        let decoded = WarpMessage::from_json(&json).unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn hello_empty_string_table_omitted() {
+        let msg = WarpMessage::Hello {
+            node_id: "node-a".into(),
+            versions: HashMap::new(),
+            capabilities: vec![],
+            string_table: vec![],
+        };
+        let json = msg.to_json().unwrap();
+        // Empty string table should be omitted from JSON
+        assert!(!json.contains("stringTable"));
+    }
+
+    // -- All variants msgpack roundtrip --
+
+    #[test]
+    fn welcome_msgpack_roundtrip() {
+        let msg = WarpMessage::Welcome {
+            node_id: "node-b".into(),
+            versions: HashMap::from([("node-b".into(), 200)]),
+            capabilities: vec!["deltaSync".into()],
+            string_table: vec![],
+        };
+        let bytes = msg.to_msgpack().unwrap();
+        let decoded = WarpMessage::from_msgpack(&bytes).unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn full_msgpack_roundtrip() {
+        let msg = WarpMessage::Full {
+            node_id: "node-a".into(),
+            version: 100,
+            points: vec![sample_point()],
+        };
+        let bytes = msg.to_msgpack().unwrap();
+        let decoded = WarpMessage::from_msgpack(&bytes).unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn full_req_msgpack_roundtrip() {
+        let msg = WarpMessage::FullReq {
+            node_id: "node-b".into(),
+        };
+        let bytes = msg.to_msgpack().unwrap();
+        let decoded = WarpMessage::from_msgpack(&bytes).unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn versions_msgpack_roundtrip() {
+        let msg = WarpMessage::Versions {
+            node_id: "node-a".into(),
+            versions: HashMap::from([
+                ("node-a".into(), 1542),
+                ("node-b".into(), 1200),
+            ]),
+        };
+        let bytes = msg.to_msgpack().unwrap();
+        let decoded = WarpMessage::from_msgpack(&bytes).unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn delta_req_msgpack_roundtrip() {
+        let msg = WarpMessage::DeltaReq {
+            node_id: "node-b".into(),
+            want_from: HashMap::from([("node-a".into(), 1500)]),
+        };
+        let bytes = msg.to_msgpack().unwrap();
+        let decoded = WarpMessage::from_msgpack(&bytes).unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn join_msgpack_roundtrip() {
+        let msg = WarpMessage::Join {
+            node_id: "node-c".into(),
+            address: "192.168.1.20:7443".into(),
+        };
+        let bytes = msg.to_msgpack().unwrap();
+        let decoded = WarpMessage::from_msgpack(&bytes).unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn leave_msgpack_roundtrip() {
+        let msg = WarpMessage::Leave {
+            node_id: "node-c".into(),
+        };
+        let bytes = msg.to_msgpack().unwrap();
+        let decoded = WarpMessage::from_msgpack(&bytes).unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn ack_msgpack_roundtrip() {
+        let msg = WarpMessage::Ack {
+            node_id: "node-b".into(),
+            version: 42,
+        };
+        let bytes = msg.to_msgpack().unwrap();
+        let decoded = WarpMessage::from_msgpack(&bytes).unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn query_point_serialize() {
+        let qp = QueryPoint {
+            channel: 1113,
+            value: 73.2,
+            unit: "degF".into(),
+            status: "ok".into(),
+            node_id: "node-a".into(),
+        };
+        let json = serde_json::to_string(&qp).unwrap();
+        assert!(json.contains("\"channel\":1113"));
+        assert!(json.contains("\"nodeId\":\"node-a\""));
+        let decoded: QueryPoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, qp);
     }
 }

@@ -833,6 +833,7 @@ async fn cluster_disabled_handler() -> impl IntoResponse {
 /// Build the Axum router for roxWarp cluster endpoints:
 /// - `GET /roxwarp` — WebSocket upgrade for peer gossip
 /// - `GET /api/cluster/status` — cluster overview (JSON)
+/// - `POST /api/cluster/query` — distributed Haystack filter query
 pub fn roxwarp_router(state: crate::roxwarp::RoxWarpState) -> Router {
     use crate::roxwarp::handler;
 
@@ -840,11 +841,12 @@ pub fn roxwarp_router(state: crate::roxwarp::RoxWarpState) -> Router {
         .route("/roxwarp", get(handler::roxwarp_upgrade))
         .with_state(state.clone());
 
-    let status_route = Router::new()
+    let api_routes = Router::new()
         .route("/api/cluster/status", get(cluster_status_handler))
+        .route("/api/cluster/query", post(cluster_query_handler))
         .with_state(state);
 
-    ws_route.merge(status_route)
+    ws_route.merge(api_routes)
 }
 
 /// GET /api/cluster/status — return cluster status as JSON.
@@ -863,6 +865,56 @@ async fn cluster_status_handler(
         "versionVector": vv,
     });
     (StatusCode::OK, Json(status))
+}
+
+/// POST /api/cluster/query — execute a distributed Haystack filter query.
+///
+/// Request body: `{"filter": "point and temp", "limit": 100}`
+/// Response: `{"results": [...], "nodeCount": 1, "totalResults": N}`
+async fn cluster_query_handler(
+    State(state): State<crate::roxwarp::RoxWarpState>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let filter = match body.get("filter").and_then(|v| v.as_str()) {
+        Some(f) => f,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "missing 'filter' field"})),
+            );
+        }
+    };
+    let limit = body
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
+
+    // Evaluate filter against local delta engine points
+    let (_, all_points) = state.delta_engine.full_state().await;
+    let max = limit.unwrap_or(u32::MAX) as usize;
+
+    let results: Vec<crate::roxwarp::QueryPoint> = all_points
+        .iter()
+        .filter(|p| crate::roxwarp::handler::evaluate_point_filter(filter, p))
+        .take(max)
+        .map(|p| crate::roxwarp::QueryPoint {
+            channel: p.channel,
+            value: p.value,
+            unit: p.unit.clone(),
+            status: p.status.clone(),
+            node_id: state.delta_engine.node_id.clone(),
+        })
+        .collect();
+
+    let total = results.len();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "results": results,
+            "nodeCount": 1,
+            "totalResults": total,
+        })),
+    )
 }
 
 #[cfg(test)]

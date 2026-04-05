@@ -445,6 +445,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cluster_config.node_id = nid.clone();
         }
 
+        // Override port from CLI
+        cluster_config.port = args.cluster_port;
+
+        // Set mTLS paths from CLI args
+        if args.cluster_cert.is_some() || args.cluster_key.is_some() || args.cluster_ca.is_some() {
+            sandstar_server::roxwarp::mtls::validate_mtls_args(
+                &args.cluster_cert,
+                &args.cluster_key,
+                &args.cluster_ca,
+            )
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            cluster_config.cert_path = args.cluster_cert.clone();
+            cluster_config.key_path = args.cluster_key.clone();
+            cluster_config.ca_path = args.cluster_ca.clone();
+        }
+
         let delta_engine = Arc::new(DeltaEngine::new(cluster_config.node_id.clone()));
         let cluster_handle = EngineHandle::new(cmd_tx.clone());
         let manager = ClusterManager::new(
@@ -455,7 +471,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         info!(
             node_id = %cluster_config.node_id,
+            port = cluster_config.port,
             peers = cluster_config.peers.len(),
+            mtls = cluster_config.cert_path.is_some(),
             "roxWarp cluster mode enabled"
         );
 
@@ -464,10 +482,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             manager.run().await;
         });
 
-        Some(RoxWarpState {
+        let rw_state = RoxWarpState {
             delta_engine,
-            config: cluster_config,
-        })
+            config: cluster_config.clone(),
+        };
+
+        // Start separate roxWarp listener on cluster port (default 7443)
+        let cluster_port = cluster_config.port;
+        let rw_state_for_listener = rw_state.clone();
+        tokio::spawn(async move {
+            use axum::routing::get;
+            use axum::Router;
+
+            let cluster_app = Router::new()
+                .route("/roxwarp", get(sandstar_server::roxwarp::handler::roxwarp_upgrade))
+                .with_state(rw_state_for_listener);
+
+            let bind_addr: std::net::SocketAddr = format!("0.0.0.0:{cluster_port}")
+                .parse()
+                .expect("valid cluster bind address");
+
+            // Build mTLS server config if certificates are configured
+            if let (Some(ref cert), Some(ref key), Some(ref ca)) =
+                (&cluster_config.cert_path, &cluster_config.key_path, &cluster_config.ca_path)
+            {
+                match sandstar_server::roxwarp::mtls::build_mtls_server_config(cert, key, ca) {
+                    Ok(server_tls_config) => {
+                        info!(port = cluster_port, "roxWarp: starting mTLS listener");
+                        let rustls_config =
+                            axum_server::tls_rustls::RustlsConfig::from_config(server_tls_config);
+                        if let Err(e) = axum_server::bind_rustls(bind_addr, rustls_config)
+                            .serve(cluster_app.into_make_service())
+                            .await
+                        {
+                            error!(port = cluster_port, error = %e, "roxWarp: mTLS listener failed");
+                        }
+                    }
+                    Err(e) => {
+                        error!(error = %e, "roxWarp: failed to build mTLS server config, falling back to plain WS");
+                        let listener = match tokio::net::TcpListener::bind(&bind_addr).await {
+                            Ok(l) => l,
+                            Err(e) => {
+                                error!(port = cluster_port, error = %e, "roxWarp: failed to bind cluster port");
+                                return;
+                            }
+                        };
+                        info!(port = cluster_port, "roxWarp: listening (plain WS, mTLS config failed)");
+                        axum::serve(listener, cluster_app).await.ok();
+                    }
+                }
+            } else {
+                // No mTLS configured — plain WebSocket listener
+                let listener = match tokio::net::TcpListener::bind(&bind_addr).await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        error!(port = cluster_port, error = %e, "roxWarp: failed to bind cluster port");
+                        return;
+                    }
+                };
+                info!(port = cluster_port, "roxWarp: listening (plain WS)");
+                axum::serve(listener, cluster_app).await.ok();
+            }
+        });
+
+        Some(rw_state)
     } else {
         None
     };
