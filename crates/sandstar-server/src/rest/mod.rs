@@ -12,6 +12,8 @@ pub mod filter;
 pub mod handlers;
 #[cfg(feature = "simulator-hal")]
 pub mod sim;
+pub mod rows;
+pub mod sox_api;
 pub mod tags;
 mod types;
 pub mod ws;
@@ -656,11 +658,23 @@ async fn rate_limit_middleware(
 /// Embedded web dashboard served at GET /.
 const DASHBOARD_HTML: &str = include_str!("dashboard.html");
 
+/// Embedded DDC editor placeholder served at GET /editor.
+const EDITOR_HTML: &str = include_str!("editor.html");
+
 async fn dashboard() -> Response {
     (
         StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
         DASHBOARD_HTML,
+    )
+        .into_response()
+}
+
+async fn editor() -> Response {
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        EDITOR_HTML,
     )
         .into_response()
 }
@@ -678,19 +692,24 @@ pub fn router(handle: EngineHandle, auth_token: Option<String>, rate_limit: u64)
         None => AuthStore::new(),
     };
     let auth_state = AuthState::new(auth_store);
-    router_with_auth(handle, auth_state, auth_token, rate_limit)
+    router_with_auth(handle, auth_state, auth_token, rate_limit, None)
 }
 
 /// Build the router with full `AuthState` (SCRAM + bearer + sessions).
+///
+/// If `sox_state` is provided, SOX API endpoints are mounted under `/api/sox/*`
+/// and the editor page is available at `/editor`.
 pub fn router_with_auth(
     handle: EngineHandle,
     auth_state: AuthState,
     auth_token: Option<String>,
     rate_limit: u64,
+    sox_state: Option<sox_api::SoxApiState>,
 ) -> Router {
     // Public read-only routes (no auth required)
     let public = Router::new()
         .route("/", get(dashboard))
+        .route("/editor", get(editor))
         .route("/api/about", get(handlers::about))
         .route("/api/ops", get(handlers::ops))
         .route("/api/formats", get(handlers::formats))
@@ -743,7 +762,7 @@ pub fn router_with_auth(
     // headers and methods.
     let cors = CorsLayer::new()
         .allow_origin(tower_http::cors::Any)
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
         .allow_headers([
             HeaderName::from_static("content-type"),
             HeaderName::from_static("authorization"),
@@ -762,8 +781,24 @@ pub fn router_with_auth(
         .merge(protected)
         .merge(ws_route)
         .merge(auth_route)
-        .merge(driver_routes)
-        .layer(middleware::from_fn(count_requests));
+        .merge(driver_routes);
+
+    // SOX API endpoints (component tree REST interface for DDC visual editor).
+    // RoWS WebSocket endpoint (real-time component tree operations + COV push).
+    if let Some(sox) = sox_state {
+        let rows_route = Router::new()
+            .route("/api/rows", get(rows::rows_ws_handler))
+            .with_state(rows::RowsState {
+                tree: sox.tree.clone(),
+                manifest_db: sox.manifest_db.clone(),
+            });
+        app = app
+            .merge(sox_api::public_router(sox.clone()))
+            .merge(sox_api::protected_router(sox))
+            .merge(rows_route);
+    }
+
+    let mut app = app.layer(middleware::from_fn(count_requests));
 
     // Apply rate limiting only when configured (rate_limit > 0).
     if rate_limit > 0 {

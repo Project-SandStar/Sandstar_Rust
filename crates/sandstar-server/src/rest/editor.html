@@ -1,0 +1,2500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Sandstar DDC Editor</title>
+<style>
+/* Reset */
+*, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+
+/* Custom properties */
+:root {
+  --bg-deep: #0d0d1a;
+  --bg-surface: #1a1a2e;
+  --bg-elevated: #16213e;
+  --bg-glass: rgba(22,33,62,0.85);
+  --bg-input: #0f1629;
+  --text-primary: #e8eaf0;
+  --text-secondary: #8892a4;
+  --text-muted: #505868;
+  --text-live: #00ff88;
+  --accent: #4fc3f7;
+  --success: #00ff88;
+  --warning: #ffb74d;
+  --danger: #ff4444;
+  --border: rgba(255,255,255,0.08);
+  --border-focus: #4fc3f7;
+  --type-float: #7ecf6a;
+  --type-bool: #cc3333;
+  --type-int: #3dc9b0;
+  --type-string: #d175d1;
+  --type-void: #666;
+  --glass-blur: blur(12px);
+  --shadow: 0 4px 20px rgba(0,0,0,0.4);
+  --shadow-lg: 0 12px 40px rgba(0,0,0,0.5);
+  --left-panel-width: 250px;
+}
+
+html, body { height:100%; overflow:hidden; }
+body { background:var(--bg-deep); color:var(--text-primary); font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; font-size:13px; }
+
+/* Toolbar */
+#toolbar { position:fixed; top:0; left:0; right:0; height:48px; display:flex; align-items:center; justify-content:space-between; padding:0 16px; background:var(--bg-glass); backdrop-filter:var(--glass-blur); -webkit-backdrop-filter:var(--glass-blur); border-bottom:1px solid var(--border); z-index:100; gap:12px; }
+.toolbar-left, .toolbar-center, .toolbar-right { display:flex; align-items:center; gap:8px; }
+.logo { color:var(--accent); font-weight:700; font-size:15px; text-decoration:none; letter-spacing:0.5px; }
+.logo:hover { color:#fff; }
+
+/* Toolbar buttons */
+.tb-btn { background:rgba(255,255,255,0.06); border:1px solid var(--border); color:var(--text-primary); border-radius:6px; padding:6px 12px; font-size:12px; cursor:pointer; transition:all 0.15s; user-select:none; white-space:nowrap; }
+.tb-btn:hover { background:rgba(255,255,255,0.12); border-color:rgba(255,255,255,0.15); }
+.tb-btn.accent { background:var(--accent); color:#000; border-color:var(--accent); font-weight:600; }
+.tb-btn.accent:hover { background:#6fd4ff; }
+.tb-btn.danger { border-color:var(--danger); color:var(--danger); }
+.tb-btn.danger:hover { background:rgba(255,68,68,0.15); }
+.tb-btn.toggle.active { background:rgba(79,195,247,0.2); border-color:var(--accent); color:var(--accent); }
+.tb-btn.small { padding:4px 8px; font-size:11px; }
+.tb-sep { width:1px; height:24px; background:var(--border); }
+.zoom-display { font-family:'Courier New',monospace; font-size:12px; color:var(--text-secondary); min-width:40px; text-align:center; }
+.hamburger-btn { background:none; border:none; color:var(--text-primary); font-size:18px; cursor:pointer; padding:4px 8px; border-radius:4px; }
+.hamburger-btn:hover { background:rgba(255,255,255,0.1); }
+
+/* Live indicator */
+.live-dot { width:8px; height:8px; border-radius:50%; background:#666; display:inline-block; margin-right:4px; }
+.live-dot.connected { background:var(--success); box-shadow:0 0 6px var(--success); animation:pulse 2s infinite; }
+.live-dot.error { background:var(--danger); box-shadow:0 0 6px var(--danger); }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+#conn-status { font-size:11px; color:var(--text-secondary); }
+
+/* Left Panel */
+.left-panel { position:fixed; left:0; top:48px; bottom:0; width:var(--left-panel-width); background:var(--bg-glass); backdrop-filter:var(--glass-blur); -webkit-backdrop-filter:var(--glass-blur); border-right:1px solid var(--border); z-index:50; display:flex; flex-direction:column; transition:transform 0.2s ease; }
+.left-panel.collapsed { transform:translateX(calc(-1 * var(--left-panel-width))); }
+
+.panel-section { flex:1; display:flex; flex-direction:column; overflow:hidden; min-height:80px; }
+.section-header { padding:8px 12px; font-size:11px; text-transform:uppercase; letter-spacing:1px; color:var(--text-muted); border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; flex-shrink:0; }
+.panel-divider { height:4px; background:var(--border); cursor:row-resize; flex-shrink:0; }
+.panel-divider:hover { background:var(--accent); opacity:0.5; }
+
+/* Tree view */
+.tree-view { flex:1; overflow-y:auto; padding:4px; }
+.tree-item { display:flex; align-items:center; padding:3px 4px; border-radius:4px; cursor:pointer; font-size:12px; gap:4px; }
+.tree-item:hover { background:rgba(255,255,255,0.06); }
+.tree-item.selected { background:rgba(79,195,247,0.15); color:var(--accent); }
+.tree-item.grayed { opacity:0.45; }
+.tree-item .arrow { width:16px; text-align:center; font-size:10px; color:var(--text-muted); cursor:pointer; flex-shrink:0; }
+.tree-item .arrow:hover { color:var(--text-primary); }
+.tree-item .icon { font-size:10px; flex-shrink:0; }
+.tree-item .name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.tree-item .value { font-family:'Courier New',monospace; font-size:10px; color:var(--text-live); flex-shrink:0; margin-left:4px; }
+.tree-children { padding-left:16px; }
+.tree-children.collapsed { display:none; }
+
+/* Palette sidebar */
+.palette-list { flex:1; overflow-y:auto; padding:4px; }
+.palette-search-inline { background:var(--bg-input); border:1px solid var(--border); border-radius:4px; color:var(--text-primary); font-size:11px; padding:4px 8px; width:100px; outline:none; }
+.palette-search-inline:focus { border-color:var(--accent); }
+.palette-cat-header { padding:4px 8px; font-size:11px; font-weight:600; color:var(--text-secondary); cursor:pointer; display:flex; align-items:center; gap:6px; border-radius:4px; }
+.palette-cat-header:hover { color:var(--text-primary); background:rgba(255,255,255,0.03); }
+.palette-cat-count { font-size:10px; color:var(--text-muted); margin-left:auto; font-weight:400; }
+.palette-cat-arrow { font-size:9px; color:var(--text-muted); transition:transform 0.15s; width:12px; text-align:center; }
+.palette-cat-arrow.collapsed { transform:rotate(-90deg); }
+.palette-cat-group { overflow:hidden; }
+.palette-cat-group.collapsed { display:none; }
+.palette-type-item { padding:4px 8px 4px 24px; font-size:12px; cursor:grab; border-radius:4px; display:flex; align-items:center; gap:6px; }
+.palette-type-item:hover { background:rgba(79,195,247,0.08); }
+.palette-type-item.active { background:rgba(79,195,247,0.14); }
+.palette-type-dot { width:6px; height:6px; border-radius:50%; flex-shrink:0; }
+
+/* Drag ghost (follows cursor while dragging from palette) */
+.drag-ghost { position:fixed; pointer-events:none; z-index:999; padding:6px 14px; background:var(--bg-glass); backdrop-filter:var(--glass-blur); border:1px solid var(--accent); border-radius:8px; font-size:12px; font-weight:600; color:var(--accent); box-shadow:0 8px 24px rgba(0,0,0,0.5); opacity:0.9; white-space:nowrap; display:flex; align-items:center; gap:6px; transform:translate(-50%,-50%); }
+.drag-ghost .palette-type-dot { width:8px; height:8px; }
+
+/* Drop zone highlight */
+#workspace.drop-target { outline:2px dashed var(--accent); outline-offset:-4px; }
+
+/* Workspace */
+#workspace { position:absolute; top:48px; bottom:0; left:var(--left-panel-width); right:0; overflow:hidden; background:var(--bg-deep); transition:left 0.2s ease; }
+#workspace.full-width { left:0; }
+#wire-canvas { position:absolute; top:0; left:0; width:100%; height:100%; z-index:1; pointer-events:none; }
+#node-layer { position:absolute; top:0; left:0; z-index:2; transform-origin:0 0; }
+
+/* Nodes */
+.node { position:absolute; min-width:160px; max-width:280px; background:var(--bg-glass); backdrop-filter:var(--glass-blur); -webkit-backdrop-filter:var(--glass-blur); border:1px solid var(--border); border-radius:10px; box-shadow:var(--shadow); font-size:12px; user-select:none; transition:box-shadow 0.15s, border-color 0.15s; overflow:hidden; }
+.node:hover { border-color:rgba(255,255,255,0.15); box-shadow:0 6px 28px rgba(0,0,0,0.5); }
+.node.selected { border-color:var(--accent); box-shadow:0 0 0 2px var(--accent), 0 8px 32px rgba(79,195,247,0.2); }
+.node-header { padding:7px 12px; font-weight:600; font-size:11px; letter-spacing:0.5px; text-transform:uppercase; color:#fff; display:flex; justify-content:space-between; align-items:center; cursor:grab; gap:8px; }
+.node-header:active { cursor:grabbing; }
+.node-type { opacity:0.85; }
+.node-name { font-weight:400; font-size:10px; opacity:0.7; overflow:hidden; text-overflow:ellipsis; }
+.node-body { padding:6px 0; }
+.node-slots { display:flex; flex-direction:column; }
+
+/* Slot rows */
+.node-slot { display:flex; align-items:center; padding:3px 10px; min-height:22px; gap:6px; }
+.node-slot.input { justify-content:flex-start; }
+.node-slot.output { justify-content:flex-end; }
+.node-slot.config { background:rgba(255,255,255,0.02); }
+
+/* Port dots */
+.port { width:10px; height:10px; border-radius:50%; border:2px solid; background:var(--bg-deep); cursor:crosshair; transition:transform 0.1s, background 0.1s; flex-shrink:0; }
+.port:hover { transform:scale(1.4); }
+.port.connected { background:currentColor; }
+.port[data-type="float"] { color:var(--type-float); border-color:var(--type-float); }
+.port[data-type="bool"] { color:var(--type-bool); border-color:var(--type-bool); }
+.port[data-type="int"] { color:var(--type-int); border-color:var(--type-int); }
+.port[data-type="string"] { color:var(--type-string); border-color:var(--type-string); }
+.port[data-type="void"] { color:var(--type-void); border-color:var(--type-void); }
+
+.slot-name { font-size:10px; color:var(--text-secondary); }
+.slot-value { font-family:'Courier New',monospace; font-size:10px; color:var(--text-live); min-width:40px; padding:1px 4px; border-radius:3px; background:rgba(0,255,136,0.08); }
+.slot-value.changed { animation:valueFlash 0.4s ease-out; }
+@keyframes valueFlash { 0%{background:rgba(0,255,136,0.3)} 100%{background:rgba(0,255,136,0.08)} }
+
+/* Property panel */
+.props-panel { position:fixed; right:0; top:48px; bottom:0; width:300px; background:var(--bg-glass); backdrop-filter:var(--glass-blur); -webkit-backdrop-filter:var(--glass-blur); border-left:1px solid var(--border); z-index:50; display:flex; flex-direction:column; transition:transform 0.2s; }
+.props-panel.hidden { transform:translateX(100%); }
+.props-header { padding:12px 16px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; font-weight:600; }
+.props-body { flex:1; overflow-y:auto; padding:12px; }
+.props-empty { color:var(--text-muted); text-align:center; padding:40px 20px; font-style:italic; }
+
+/* Property rows */
+.prop-row { display:flex; justify-content:space-between; align-items:center; padding:6px 0; border-bottom:1px solid rgba(255,255,255,0.03); }
+.prop-label { font-size:11px; color:var(--text-secondary); }
+.prop-value { font-family:'Courier New',monospace; font-size:12px; color:var(--text-live); }
+.prop-input { background:var(--bg-input); border:1px solid var(--border); border-radius:4px; color:var(--text-live); font-family:'Courier New',monospace; font-size:12px; padding:4px 8px; width:100px; text-align:right; }
+.prop-input:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 2px rgba(79,195,247,0.2); }
+.prop-section { font-size:10px; text-transform:uppercase; letter-spacing:1px; color:var(--text-muted); margin:12px 0 6px; padding-bottom:4px; border-bottom:1px solid var(--border); }
+
+/* Property panel enhancements */
+.prop-section-group { margin-bottom:8px; }
+.prop-action-btn { background:rgba(79,195,247,0.15); border:1px solid var(--accent); color:var(--accent); border-radius:4px; padding:3px 10px; font-size:11px; cursor:pointer; transition:all 0.15s; }
+.prop-action-btn:hover { background:rgba(79,195,247,0.3); }
+.prop-info { font-size:10px; color:var(--text-muted); padding:2px 0; }
+
+/* Context menu */
+.ctx-menu { position:fixed; background:var(--bg-glass); backdrop-filter:var(--glass-blur); -webkit-backdrop-filter:var(--glass-blur); border:1px solid var(--border); border-radius:8px; box-shadow:var(--shadow-lg); padding:4px; min-width:180px; z-index:300; }
+.ctx-menu.hidden { display:none; }
+.ctx-item { padding:8px 12px; border-radius:4px; cursor:pointer; display:flex; justify-content:space-between; align-items:center; color:var(--text-primary); font-size:12px; }
+.ctx-item:hover { background:rgba(79,195,247,0.12); }
+.ctx-item .shortcut { color:var(--text-muted); font-size:10px; }
+.ctx-sep { height:1px; background:var(--border); margin:4px 8px; }
+.ctx-item.danger { color:var(--danger); }
+.ctx-item.danger:hover { background:rgba(255,68,68,0.12); }
+
+/* Toast */
+.toast-container { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); z-index:500; display:flex; flex-direction:column; gap:8px; align-items:center; pointer-events:none; }
+.toast { padding:10px 20px; border-radius:8px; font-size:12px; background:var(--bg-glass); backdrop-filter:var(--glass-blur); border:1px solid var(--border); color:var(--text-primary); opacity:0; transform:translateY(10px); transition:all 0.3s; pointer-events:auto; }
+.toast.show { opacity:1; transform:translateY(0); }
+.toast-success { border-color:var(--success); color:var(--success); }
+.toast-error { border-color:var(--danger); color:var(--danger); }
+.toast-info { border-color:var(--accent); color:var(--accent); }
+
+/* Selection box */
+.selection-box { position:absolute; border:1px dashed var(--accent); background:rgba(79,195,247,0.06); pointer-events:none; z-index:5; }
+
+/* Inline rename input */
+.node-name-input { background:var(--bg-input); border:1px solid var(--accent); border-radius:3px; color:#fff; font-size:10px; padding:1px 4px; width:80px; outline:none; }
+
+/* Disabled toolbar button */
+.tb-btn:disabled, .tb-btn.disabled { opacity:0.3; cursor:not-allowed; pointer-events:none; }
+
+/* Scrollbar */
+::-webkit-scrollbar { width:6px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.1); border-radius:3px; }
+::-webkit-scrollbar-thumb:hover { background:rgba(255,255,255,0.2); }
+
+/* Mobile */
+@media (pointer:coarse) {
+  .port { width:14px; height:14px; }
+  .node-header { padding:10px 14px; }
+  .node-slot { min-height:28px; }
+  .tb-btn { padding:8px 14px; }
+}
+@media (max-width:768px) {
+  .toolbar-center { gap:4px; }
+  .tb-btn { padding:6px 8px; font-size:11px; }
+  .props-panel { width:100%; }
+  .left-panel { width:100%; }
+}
+</style>
+</head>
+<body>
+  <!-- Top toolbar (simplified) -->
+  <header id="toolbar">
+    <div class="toolbar-left">
+      <button id="btn-sidebar" class="hamburger-btn" title="Toggle sidebar">&#9776;</button>
+      <a href="/" class="logo" title="Back to Dashboard">Sandstar DDC</a>
+    </div>
+    <div class="toolbar-center">
+      <button id="btn-zoom-in" class="tb-btn" title="Zoom In (+)">+</button>
+      <span id="zoom-level" class="zoom-display">100%</span>
+      <button id="btn-zoom-out" class="tb-btn" title="Zoom Out (-)">&#8722;</button>
+      <button id="btn-fit" class="tb-btn" title="Fit All (F)">Fit</button>
+    </div>
+    <div class="toolbar-right">
+      <span id="live-dot" class="live-dot"></span>
+      <span id="conn-status">Connecting...</span>
+    </div>
+  </header>
+
+  <!-- Left sidebar: tree + palette -->
+  <aside id="left-panel" class="left-panel">
+    <!-- Tree Navigator (top) -->
+    <div id="tree-section" class="panel-section">
+      <div class="section-header">
+        <span>Components</span>
+      </div>
+      <div id="tree-view" class="tree-view">
+        <!-- Populated dynamically -->
+      </div>
+    </div>
+
+    <!-- Resizable divider -->
+    <div id="panel-divider" class="panel-divider"></div>
+
+    <!-- Palette (bottom) -->
+    <div id="palette-section" class="panel-section">
+      <div class="section-header">
+        <span>Palette</span>
+        <input id="palette-search" type="text" placeholder="Search..." class="palette-search-inline">
+      </div>
+      <div id="palette-list" class="palette-list">
+        <!-- Category groups with expandable items -->
+      </div>
+    </div>
+  </aside>
+
+  <!-- Property Panel (right sidebar, hidden by default) -->
+  <aside id="props-panel" class="props-panel hidden">
+    <div class="props-header">
+      <span id="props-title">Properties</span>
+      <button id="btn-props-close" class="tb-btn small">&#10005;</button>
+    </div>
+    <div id="props-body" class="props-body">
+      <p class="props-empty">Select a component to view properties</p>
+    </div>
+  </aside>
+
+  <!-- Main workspace (canvas + node layer) -->
+  <main id="workspace">
+    <canvas id="wire-canvas"></canvas>
+    <div id="node-layer"></div>
+  </main>
+
+  <!-- Context menu -->
+  <div id="ctx-menu" class="ctx-menu hidden"></div>
+
+  <!-- Toast notifications -->
+  <div id="toast-container" class="toast-container"></div>
+
+<script>
+(function() {
+  'use strict';
+
+  // ── Constants ──
+  var GRID_SIZE = 20;
+  var SCALE_UNIT = GRID_SIZE;
+  var MIN_ZOOM = 0.2;
+  var MAX_ZOOM = 3.0;
+  var TYPE_COLORS = {1:'#cc3333', 4:'#3dc9b0', 6:'#7ecf6a', 8:'#d175d1'};
+  var TYPE_NAME_COLORS = {
+    'float':'#7ecf6a', 'double':'#7ecf6a',
+    'bool':'#cc3333',
+    'int':'#3dc9b0', 'long':'#3dc9b0',
+    'buf':'#d175d1', 'str':'#d175d1',
+    'void':'#666'
+  };
+  var CATEGORY_COLORS = {
+    Sensor:'#2196f3', Actuator:'#ff5722', Logic:'#4caf50', Arithmetic:'#e91e63',
+    Math:'#00bcd4', Constant:'#9c27b0', Comparator:'#795548', Conversion:'#009688',
+    Switch:'#3f51b5', Hysteresis:'#cddc39', Stateful:'#ff5722', Sequencer:'#673ab7',
+    Control:'#ff9800', System:'#607d8b', Other:'#607d8b'
+  };
+  var MAX_UNDO = 50;
+
+  // ── State ──
+  var state = {
+    components: new Map(),   // compId -> tree comp data
+    compDetails: new Map(),  // compId -> full detail (slots, links)
+    nodes: new Map(),        // compId -> DOM element (only user/control comps on canvas)
+    links: [],               // deduplicated [{fromComp, fromSlot, toComp, toSlot}]
+    selection: new Set(),    // selected compIds
+    selectedWire: null,      // selected wire index or null
+    palette: [],
+    panX: 0, panY: 0,
+    zoom: 1.0,
+    dragging: null,
+    pendingWire: null,
+    boxSelect: null,
+    undoStack: [],
+    redoStack: [],
+    showWireLabels: false,
+    showFlowAnim: true,
+    ws: null,
+    sidebarOpen: true,
+    treeExpanded: { 'app': true, 'service': false, 'io': false, 'control': true },
+    treeSelectedId: null
+  };
+
+  // ── DOM refs ──
+  var canvas = document.getElementById('wire-canvas');
+  var ctx = canvas.getContext('2d');
+  var nodeLayer = document.getElementById('node-layer');
+  var workspace = document.getElementById('workspace');
+  var zoomDisplay = document.getElementById('zoom-level');
+  var connStatus = document.getElementById('conn-status');
+  var liveDot = document.getElementById('live-dot');
+  var paletteSearch = document.getElementById('palette-search');
+  var paletteList = document.getElementById('palette-list');
+  var propsPanel = document.getElementById('props-panel');
+  var propsTitle = document.getElementById('props-title');
+  var propsBody = document.getElementById('props-body');
+  var ctxMenu = document.getElementById('ctx-menu');
+  var toastContainer = document.getElementById('toast-container');
+  var leftPanel = document.getElementById('left-panel');
+  var treeView = document.getElementById('tree-view');
+
+  // ── API Module ──
+  var API = {
+    getTree: function() { return fetch('/api/sox/tree').then(function(r){return r.json();}); },
+    getComp: function(id) { return fetch('/api/sox/comp/'+id).then(function(r){return r.json();}); },
+    addComp: function(parentId, kitId, typeId, name) {
+      return fetch('/api/sox/comp',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({parentId:parentId,kitId:kitId,typeId:typeId,name:name})}).then(function(r){return r.json();});
+    },
+    deleteComp: function(id) { return fetch('/api/sox/comp/'+id,{method:'DELETE'}); },
+    renameComp: function(id, name) { return fetch('/api/sox/comp/'+id+'/name',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})}); },
+    writeSlot: function(id, idx, value) { return fetch('/api/sox/comp/'+id+'/slot/'+idx,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:value})}); },
+    invoke: function(id, slot) { return fetch('/api/sox/comp/'+id+'/invoke/'+slot,{method:'POST'}); },
+    addLink: function(fromComp, fromSlot, toComp, toSlot) { return fetch('/api/sox/link',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fromComp:fromComp,fromSlot:fromSlot,toComp:toComp,toSlot:toSlot})}); },
+    deleteLink: function(fromComp, fromSlot, toComp, toSlot) { return fetch('/api/sox/link',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({fromComp:fromComp,fromSlot:fromSlot,toComp:toComp,toSlot:toSlot})}); },
+    updatePos: function(id, x, y) { return fetch('/api/sox/comp/'+id+'/pos',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({x:x,y:y})}); },
+    getPalette: function() { return fetch('/api/sox/palette').then(function(r){return r.json();}); }
+  };
+
+  // ── Undo/Redo System ──
+  function pushUndo(action) {
+    state.undoStack.push(action);
+    if (state.undoStack.length > MAX_UNDO) state.undoStack.shift();
+    state.redoStack = [];
+  }
+
+  function performUndo() {
+    if (state.undoStack.length === 0) return;
+    var action = state.undoStack.pop();
+    state.redoStack.push(action);
+    applyUndoAction(action, false);
+  }
+
+  function performRedo() {
+    if (state.redoStack.length === 0) return;
+    var action = state.redoStack.pop();
+    state.undoStack.push(action);
+    applyUndoAction(action, true);
+  }
+
+  function applyUndoAction(action, isRedo) {
+    switch (action.type) {
+      case 'move':
+        var pos = isRedo ? action.newPos : action.oldPos;
+        var el = state.nodes.get(action.compId);
+        if (el) {
+          var wp = Viewport.metaToWorld(pos.x, pos.y);
+          el.style.transform = 'translate(' + wp.x + 'px,' + wp.y + 'px)';
+          API.updatePos(action.compId, pos.x, pos.y);
+          WireRenderer.draw(null);
+        }
+        break;
+      case 'add_comp':
+        if (isRedo) {
+          API.addComp(action.parentId, action.kitId, action.typeId, action.name).then(function() { refreshAll(); });
+        } else {
+          API.deleteComp(action.compId).then(function() { refreshAll(); });
+        }
+        break;
+      case 'delete_comp':
+        if (isRedo) {
+          API.deleteComp(action.compId).then(function() { refreshAll(); });
+        } else {
+          API.addComp(action.parentId, action.kitId, action.typeId, action.name).then(function() { refreshAll(); });
+        }
+        break;
+      case 'add_link':
+        if (isRedo) {
+          API.addLink(action.fromComp, action.fromSlot, action.toComp, action.toSlot).then(function() { refreshAll(); });
+        } else {
+          API.deleteLink(action.fromComp, action.fromSlot, action.toComp, action.toSlot).then(function() { refreshAll(); });
+        }
+        break;
+      case 'delete_link':
+        if (isRedo) {
+          API.deleteLink(action.fromComp, action.fromSlot, action.toComp, action.toSlot).then(function() { refreshAll(); });
+        } else {
+          API.addLink(action.fromComp, action.fromSlot, action.toComp, action.toSlot).then(function() { refreshAll(); });
+        }
+        break;
+      case 'rename':
+        var name = isRedo ? action.newName : action.oldName;
+        API.renameComp(action.compId, name).then(function() { refreshAll(); });
+        break;
+      case 'write_slot':
+        var val = isRedo ? action.newValue : action.oldValue;
+        API.writeSlot(action.compId, action.slotIdx, val).then(function() { refreshAll(); });
+        break;
+    }
+  }
+
+  // ── Viewport ──
+  var Viewport = {
+    resize: function() {
+      var r = devicePixelRatio || 1;
+      canvas.width = workspace.clientWidth * r;
+      canvas.height = workspace.clientHeight * r;
+      canvas.style.width = workspace.clientWidth + 'px';
+      canvas.style.height = workspace.clientHeight + 'px';
+      ctx.setTransform(r, 0, 0, r, 0, 0);
+      this.update();
+    },
+    update: function() {
+      nodeLayer.style.transform = 'translate(' + state.panX + 'px,' + state.panY + 'px) scale(' + state.zoom + ')';
+      nodeLayer.style.transformOrigin = '0 0';
+      zoomDisplay.textContent = Math.round(state.zoom * 100) + '%';
+      WireRenderer.draw(null);
+    },
+    worldToScreen: function(wx, wy) {
+      return { x: wx * state.zoom + state.panX, y: wy * state.zoom + state.panY };
+    },
+    screenToWorld: function(sx, sy) {
+      return { x: (sx - state.panX) / state.zoom, y: (sy - state.panY) / state.zoom };
+    },
+    metaToWorld: function(mx, my) { return { x: mx * SCALE_UNIT, y: my * SCALE_UNIT }; },
+    worldToMeta: function(wx, wy) { return { x: Math.round(wx/SCALE_UNIT)&0xFF, y: Math.round(wy/SCALE_UNIT)&0xFF }; },
+    fitAll: function() {
+      var nodeEls = nodeLayer.querySelectorAll('.node');
+      if (nodeEls.length === 0) return;
+      var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      nodeEls.forEach(function(el) {
+        var m = el.style.transform.match(/translate\(\s*([-\d.]+)px\s*,\s*([-\d.]+)px\s*\)/);
+        if (!m) return;
+        var nx = parseFloat(m[1]);
+        var ny = parseFloat(m[2]);
+        var w = el.offsetWidth || 180;
+        var h = el.offsetHeight || 100;
+        if (nx < minX) minX = nx;
+        if (ny < minY) minY = ny;
+        if (nx + w > maxX) maxX = nx + w;
+        if (ny + h > maxY) maxY = ny + h;
+      });
+      if (!isFinite(minX)) return;
+      var pad = 60;
+      var bw = maxX - minX + pad * 2;
+      var bh = maxY - minY + pad * 2;
+      var vw = workspace.clientWidth;
+      var vh = workspace.clientHeight;
+      var z = Math.min(vw / bw, vh / bh, 1.5);
+      z = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, z));
+      state.zoom = z;
+      state.panX = (vw - bw * z) / 2 - (minX - pad) * z;
+      state.panY = (vh - bh * z) / 2 - (minY - pad) * z;
+      this.update();
+    }
+  };
+
+  // ── Grid Drawing ──
+  function drawGrid() {
+    var w = canvas.width / (devicePixelRatio||1);
+    var h = canvas.height / (devicePixelRatio||1);
+    ctx.clearRect(0, 0, w, h);
+
+    var step = GRID_SIZE * state.zoom;
+    if (step < 4) return;
+
+    var offsetX = state.panX % step;
+    var offsetY = state.panY % step;
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    for (var x = offsetX; x < w; x += step) { ctx.moveTo(x, 0); ctx.lineTo(x, h); }
+    for (var y = offsetY; y < h; y += step) { ctx.moveTo(0, y); ctx.lineTo(w, y); }
+    ctx.stroke();
+
+    var major = step * 5;
+    if (major >= 20) {
+      var mx = state.panX % major;
+      var my = state.panY % major;
+      ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (var x2 = mx; x2 < w; x2 += major) { ctx.moveTo(x2, 0); ctx.lineTo(x2, h); }
+      for (var y2 = my; y2 < h; y2 += major) { ctx.moveTo(0, y2); ctx.lineTo(w, y2); }
+      ctx.stroke();
+    }
+  }
+
+  // ── Value Formatting ──
+  function formatSlotValue(value, typeName) {
+    if (value === null || value === undefined) return '--';
+    var tn = (typeName || '').toLowerCase();
+    if (tn === 'float' || tn === 'double') {
+      var n = parseFloat(value);
+      return isNaN(n) ? String(value) : n.toFixed(2);
+    }
+    if (tn === 'bool') return value === true || value === 'true' ? 'true' : 'false';
+    if (tn === 'int' || tn === 'long') return String(parseInt(value, 10));
+    if (tn === 'buf' || tn === 'str') return '"' + String(value) + '"';
+    return String(value);
+  }
+
+  function slotTypeDataAttr(typeName) {
+    var tn = (typeName || '').toLowerCase();
+    if (tn === 'float' || tn === 'double') return 'float';
+    if (tn === 'bool') return 'bool';
+    if (tn === 'int' || tn === 'long') return 'int';
+    if (tn === 'buf' || tn === 'str') return 'string';
+    return 'void';
+  }
+
+  function escapeHtml(str) {
+    var d = document.createElement('div');
+    d.textContent = str;
+    return d.innerHTML;
+  }
+
+  function categoryFromType(kitId, typeId) {
+    var map = {
+      '2,3':'Arithmetic','2,4':'Arithmetic','2,49':'Arithmetic','2,50':'Arithmetic',
+      '2,37':'Arithmetic','2,38':'Arithmetic','2,18':'Arithmetic',
+      '2,39':'Math','2,23':'Math','2,34':'Math','2,35':'Math','2,32':'Math','2,47':'Math',
+      '2,5':'Logic','2,6':'Logic','2,42':'Logic','2,43':'Logic','2,40':'Logic','2,59':'Logic',
+      '2,12':'Comparator','2,10':'Conversion','2,22':'Conversion','2,26':'Conversion',
+      '2,1':'Switch','2,11':'Switch','2,28':'Switch',
+      '2,25':'Hysteresis','2,48':'Hysteresis','2,46':'Hysteresis',
+      '2,14':'Constant','2,15':'Constant','2,13':'Constant',
+      '2,57':'Actuator','2,56':'Actuator','2,58':'Actuator',
+      '2,19':'Stateful','2,20':'Stateful','2,16':'Stateful','2,44':'Stateful','2,54':'Stateful','2,55':'Stateful',
+      '2,31':'Sequencer','1,100':'Sensor'
+    };
+    return map[kitId+','+typeId] || 'Other';
+  }
+
+  // ── Helper: is this a user/control component (shown on canvas)? ──
+  function isCanvasComponent(comp) {
+    return !comp.isSystem && !comp.isChannel;
+  }
+
+  // ── Helper: get node position from transform ──
+  function getNodePos(el) {
+    var m = el.style.transform.match(/translate\(\s*([-\d.]+)px\s*,\s*([-\d.]+)px\s*\)/);
+    return m ? { x: parseFloat(m[1]), y: parseFloat(m[2]) } : { x: 0, y: 0 };
+  }
+
+  // ── Node Rendering (only for canvas components) ──
+  function createNodeElement(comp, detail) {
+    var el = document.createElement('div');
+    el.className = 'node';
+    el.dataset.compId = comp.compId;
+    var px = comp.position ? comp.position[0] : 0;
+    var py = comp.position ? comp.position[1] : 0;
+    var pos = Viewport.metaToWorld(px, py);
+    el.style.transform = 'translate(' + pos.x + 'px, ' + pos.y + 'px)';
+
+    var cat = comp.category || categoryFromType(comp.kitId, comp.typeId);
+    var catColor = CATEGORY_COLORS[cat] || CATEGORY_COLORS.Other;
+    var shortType = comp.typeName.indexOf('::') >= 0 ? comp.typeName.split('::').pop() : comp.typeName;
+
+    var headerHtml =
+      '<div class="node-header" style="background:' + catColor + '">' +
+        '<span class="node-type">' + escapeHtml(shortType) + '</span>' +
+        '<span class="node-name" data-comp-id="' + comp.compId + '">' + escapeHtml(comp.name) + '</span>' +
+      '</div>';
+
+    var slotsHtml = '';
+    if (detail && detail.slots) {
+      var inputs = [];
+      var outputs = [];
+      for (var i = 0; i < detail.slots.length; i++) {
+        var s = detail.slots[i];
+        if (s.index === 0) continue;
+        if (s.direction === 'action') continue;
+        if (s.direction === 'property') continue;
+        if (s.direction === 'in') inputs.push(s);
+        else if (s.direction === 'out') outputs.push(s);
+      }
+
+      for (var ii = 0; ii < inputs.length; ii++) {
+        var si = inputs[ii];
+        var dt = slotTypeDataAttr(si.typeName);
+        slotsHtml +=
+          '<div class="node-slot input">' +
+            '<span class="port" data-type="' + dt + '" data-comp-id="' + comp.compId +
+              '" data-slot-idx="' + si.index + '" data-dir="in"></span>' +
+            '<span class="slot-name">' + escapeHtml(si.name) + '</span>' +
+            '<span class="slot-value">' + escapeHtml(formatSlotValue(si.value, si.typeName)) + '</span>' +
+          '</div>';
+      }
+
+      for (var oi = 0; oi < outputs.length; oi++) {
+        var so = outputs[oi];
+        var dto = slotTypeDataAttr(so.typeName);
+        slotsHtml +=
+          '<div class="node-slot output">' +
+            '<span class="slot-value">' + escapeHtml(formatSlotValue(so.value, so.typeName)) + '</span>' +
+            '<span class="slot-name">' + escapeHtml(so.name) + '</span>' +
+            '<span class="port" data-type="' + dto + '" data-comp-id="' + comp.compId +
+              '" data-slot-idx="' + so.index + '" data-dir="out"></span>' +
+          '</div>';
+      }
+    }
+
+    el.innerHTML =
+      headerHtml +
+      '<div class="node-body">' +
+        '<div class="node-slots">' + slotsHtml + '</div>' +
+      '</div>';
+
+    // Node drag handling (header drag -- supports multi-select drag)
+    var header = el.querySelector('.node-header');
+    header.addEventListener('pointerdown', function(e) {
+      if (e.button !== 0 || spaceDown) return;
+      e.stopPropagation();
+
+      var cid = comp.compId;
+
+      if (!state.selection.has(cid) && !e.ctrlKey) {
+        clearSelection();
+        state.selection.add(cid);
+        el.classList.add('selected');
+        showProperties(cid);
+        highlightTreeItem(cid);
+      } else if (!state.selection.has(cid) && e.ctrlKey) {
+        state.selection.add(cid);
+        el.classList.add('selected');
+      }
+
+      var startPositions = new Map();
+      state.selection.forEach(function(sid) {
+        var sn = state.nodes.get(sid);
+        if (sn) startPositions.set(sid, getNodePos(sn));
+      });
+      var startMX = e.clientX;
+      var startMY = e.clientY;
+      var moved = false;
+
+      function onMove(ev) {
+        moved = true;
+        var dx = (ev.clientX - startMX) / state.zoom;
+        var dy = (ev.clientY - startMY) / state.zoom;
+        state.selection.forEach(function(sid) {
+          var sn = state.nodes.get(sid);
+          var sp = startPositions.get(sid);
+          if (sn && sp) {
+            sn.style.transform = 'translate(' + (sp.x + dx) + 'px,' + (sp.y + dy) + 'px)';
+          }
+        });
+        WireRenderer.draw(null);
+      }
+      function onUp(ev) {
+        document.removeEventListener('pointermove', onMove);
+        document.removeEventListener('pointerup', onUp);
+        if (!moved) return;
+        state.selection.forEach(function(sid) {
+          var sn = state.nodes.get(sid);
+          if (!sn) return;
+          var newPos = getNodePos(sn);
+          var wm = Viewport.worldToMeta(newPos.x, newPos.y);
+          var oldSp = startPositions.get(sid);
+          var oldMeta = oldSp ? Viewport.worldToMeta(oldSp.x, oldSp.y) : {x:0,y:0};
+          API.updatePos(sid, wm.x, wm.y);
+          pushUndo({type:'move', compId:sid, oldPos:oldMeta, newPos:wm});
+        });
+      }
+      document.addEventListener('pointermove', onMove);
+      document.addEventListener('pointerup', onUp);
+    });
+
+    // Node selection on click
+    el.addEventListener('pointerdown', function(e) {
+      if (e.target.classList.contains('port')) return;
+      if (e.button !== 0) return;
+      var cid = comp.compId;
+
+      state.selectedWire = null;
+
+      if (e.ctrlKey) {
+        if (state.selection.has(cid)) {
+          state.selection.delete(cid);
+          el.classList.remove('selected');
+        } else {
+          state.selection.add(cid);
+          el.classList.add('selected');
+        }
+      } else if (!state.selection.has(cid)) {
+        clearSelection();
+        state.selection.add(cid);
+        el.classList.add('selected');
+        showProperties(cid);
+        highlightTreeItem(cid);
+      }
+    });
+
+    // Double-click on node name to rename inline
+    el.addEventListener('dblclick', function(e) {
+      var nameSpan = el.querySelector('.node-name');
+      if (!nameSpan) return;
+      if (!e.target.closest('.node-header')) return;
+      startInlineRename(comp.compId, nameSpan);
+    });
+
+    return el;
+  }
+
+  // ── Inline Rename ──
+  function startInlineRename(compId, nameSpan) {
+    var comp = state.components.get(compId);
+    if (!comp) return;
+    if (comp.isChannel) {
+      toast('Cannot rename channel components', 'error');
+      return;
+    }
+    var oldName = comp.name;
+    var input = document.createElement('input');
+    input.className = 'node-name-input';
+    input.value = oldName;
+    input.maxLength = MAX_NAME_LEN;
+    nameSpan.replaceWith(input);
+    input.focus();
+    input.select();
+
+    function finish(save) {
+      var newName = input.value.trim();
+      var span = document.createElement('span');
+      span.className = 'node-name';
+      span.dataset.compId = compId;
+      span.textContent = save && newName && newName !== oldName ? newName : oldName;
+      input.replaceWith(span);
+      if (save && newName && newName !== oldName) {
+        var nameErr = validateName(newName);
+        if (nameErr) {
+          span.textContent = oldName;
+          toast(nameErr, 'error');
+          return;
+        }
+        API.renameComp(compId, newName).then(function() {
+          comp.name = newName;
+          toast('Renamed to "' + newName + '"', 'success');
+          pushUndo({type:'rename', compId:compId, oldName:oldName, newName:newName});
+          if (state.selection.has(compId)) showProperties(compId);
+          buildTree();
+        }).catch(function(err) {
+          span.textContent = oldName;
+          toast('Rename failed: ' + err.message, 'error');
+        });
+      }
+    }
+
+    input.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+      if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+      e.stopPropagation();
+    });
+    input.addEventListener('blur', function() { finish(true); });
+  }
+
+  // ── Selection Helpers ──
+  function clearSelection() {
+    state.selection.forEach(function(id) {
+      var n = state.nodes.get(id);
+      if (n) n.classList.remove('selected');
+    });
+    state.selection.clear();
+    state.selectedWire = null;
+  }
+
+  function selectAll() {
+    clearSelection();
+    state.components.forEach(function(comp, cid) {
+      if (!isCanvasComponent(comp)) return;
+      state.selection.add(cid);
+      var n = state.nodes.get(cid);
+      if (n) n.classList.add('selected');
+    });
+    toast('Selected ' + state.selection.size + ' components', 'info');
+  }
+
+  // ── Delete Selected ──
+  function deleteSelected() {
+    if (state.selectedWire !== null) {
+      deleteSelectedWire();
+      return;
+    }
+    if (state.selection.size === 0) return;
+
+    var toDelete = [];
+    state.selection.forEach(function(cid) {
+      var comp = state.components.get(cid);
+      if (!comp) return;
+      if (comp.isChannel) {
+        toast('Cannot delete channel component "' + comp.name + '"', 'error');
+      } else {
+        toDelete.push(cid);
+      }
+    });
+    if (toDelete.length === 0) return;
+
+    var count = toDelete.length;
+    var promises = toDelete.map(function(cid) {
+      var comp = state.components.get(cid);
+      var compLinks = state.links.filter(function(l) { return l.fromComp === cid || l.toComp === cid; });
+      pushUndo({
+        type:'delete_comp', compId:cid,
+        parentId: comp.parentId || 1,
+        kitId: comp.kitId, typeId: comp.typeId, name: comp.name,
+        links: compLinks
+      });
+      return API.deleteComp(cid);
+    });
+
+    Promise.all(promises).then(function() {
+      toast('Deleted ' + count + ' component' + (count > 1 ? 's' : ''), 'success');
+      state.selection.clear();
+      state.selectedWire = null;
+      propsPanel.classList.add('hidden');
+      refreshAll();
+    }).catch(function(err) {
+      toast('Delete failed: ' + err.message, 'error');
+      refreshAll();
+    });
+  }
+
+  // ── Wire Hit Testing ──
+  function isPointNearBezier(px, py, x1, y1, x2, y2, threshold) {
+    var dx = Math.abs(x2 - x1);
+    var cp = Math.max(dx * 0.5, 50);
+    for (var t = 0; t <= 1; t += 0.05) {
+      var mt = 1 - t;
+      var bx = mt*mt*mt*x1 + 3*mt*mt*t*(x1+cp) + 3*mt*t*t*(x2-cp) + t*t*t*x2;
+      var by = mt*mt*mt*y1 + 3*mt*mt*t*y1 + 3*mt*t*t*y2 + t*t*t*y2;
+      var dist = Math.sqrt((px-bx)*(px-bx) + (py-by)*(py-by));
+      if (dist < threshold) return true;
+    }
+    return false;
+  }
+
+  function getWireEndpoints(link) {
+    var srcPort = document.querySelector('.port[data-comp-id="' + link.fromComp + '"][data-slot-idx="' + link.fromSlot + '"][data-dir="out"]');
+    var dstPort = document.querySelector('.port[data-comp-id="' + link.toComp + '"][data-slot-idx="' + link.toSlot + '"][data-dir="in"]');
+    if (!srcPort || !dstPort) return null;
+    var wsRect = workspace.getBoundingClientRect();
+    var srcRect = srcPort.getBoundingClientRect();
+    var dstRect = dstPort.getBoundingClientRect();
+    return {
+      x1: srcRect.left + srcRect.width/2 - wsRect.left,
+      y1: srcRect.top + srcRect.height/2 - wsRect.top,
+      x2: dstRect.left + dstRect.width/2 - wsRect.left,
+      y2: dstRect.top + dstRect.height/2 - wsRect.top,
+      srcPort: srcPort
+    };
+  }
+
+  function hitTestWire(screenX, screenY) {
+    var wsRect = workspace.getBoundingClientRect();
+    var px = screenX - wsRect.left;
+    var py = screenY - wsRect.top;
+    var threshold = 8 / state.zoom;
+    if (threshold < 6) threshold = 6;
+    if (threshold > 15) threshold = 15;
+
+    for (var i = 0; i < state.links.length; i++) {
+      var ep = getWireEndpoints(state.links[i]);
+      if (!ep) continue;
+      if (isPointNearBezier(px, py, ep.x1, ep.y1, ep.x2, ep.y2, threshold)) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  function deleteSelectedWire() {
+    if (state.selectedWire === null || state.selectedWire < 0 || state.selectedWire >= state.links.length) return;
+    var link = state.links[state.selectedWire];
+    pushUndo({type:'delete_link', fromComp:link.fromComp, fromSlot:link.fromSlot, toComp:link.toComp, toSlot:link.toSlot});
+    API.deleteLink(link.fromComp, link.fromSlot, link.toComp, link.toSlot).then(function() {
+      toast('Wire deleted', 'success');
+      state.selectedWire = null;
+      refreshAll();
+    }).catch(function(err) {
+      toast('Failed to delete wire: ' + err.message, 'error');
+    });
+  }
+
+  // ── Properties Panel (Enhanced) ──
+  function showProperties(compId) {
+    var detail = state.compDetails.get(compId);
+    var comp = state.components.get(compId);
+    if (!detail || !comp) return;
+    propsPanel.classList.remove('hidden');
+    var shortType = comp.typeName.indexOf('::') >= 0 ? comp.typeName.split('::').pop() : comp.typeName;
+    propsTitle.textContent = shortType + ' - ' + comp.name;
+
+    var html = '';
+    html += '<div class="prop-section">Info</div>';
+    html += '<div class="prop-row"><span class="prop-label">ID</span><span class="prop-value">' + compId + '</span></div>';
+    html += '<div class="prop-row"><span class="prop-label">Type</span><span class="prop-value">' + escapeHtml(comp.typeName) + '</span></div>';
+    html += '<div class="prop-row"><span class="prop-label">Name</span><span class="prop-value">' + escapeHtml(comp.name) + '</span></div>';
+
+    if (detail.slots && detail.slots.length > 0) {
+      var configs = [], inputs = [], outputs = [], actions = [];
+      for (var i = 0; i < detail.slots.length; i++) {
+        var s = detail.slots[i];
+        if (s.index === 0) continue;
+        if (s.direction === 'action') actions.push(s);
+        else if (s.direction === 'property' || s.direction === 'config') configs.push(s);
+        else if (s.direction === 'in') inputs.push(s);
+        else if (s.direction === 'out') outputs.push(s);
+      }
+
+      if (configs.length) {
+        html += '<div class="prop-section">Config</div>';
+        for (var ci = 0; ci < configs.length; ci++) {
+          var sc = configs[ci];
+          html += '<div class="prop-row"><span class="prop-label">' + escapeHtml(sc.name) + '</span>' +
+            '<input class="prop-input" data-comp-id="' + compId + '" data-slot-idx="' + sc.index +
+            '" data-slot-type="' + escapeHtml(sc.typeName || '') + '" data-old-value="' + escapeHtml(String(sc.value != null ? sc.value : '')) +
+            '" value="' + escapeHtml(formatSlotValue(sc.value, sc.typeName)) + '"></div>';
+        }
+      }
+
+      if (inputs.length) {
+        html += '<div class="prop-section">Inputs</div>';
+        for (var ii = 0; ii < inputs.length; ii++) {
+          var si = inputs[ii];
+          html += '<div class="prop-row"><span class="prop-label">' + escapeHtml(si.name) + '</span>' +
+            '<input class="prop-input" data-comp-id="' + compId + '" data-slot-idx="' + si.index +
+            '" data-slot-type="' + escapeHtml(si.typeName || '') + '" data-old-value="' + escapeHtml(String(si.value != null ? si.value : '')) +
+            '" value="' + escapeHtml(formatSlotValue(si.value, si.typeName)) + '"></div>';
+        }
+      }
+
+      if (outputs.length) {
+        html += '<div class="prop-section">Outputs</div>';
+        for (var oi = 0; oi < outputs.length; oi++) {
+          var so = outputs[oi];
+          html += '<div class="prop-row"><span class="prop-label">' + escapeHtml(so.name) + '</span>' +
+            '<span class="prop-value">' + escapeHtml(formatSlotValue(so.value, so.typeName)) + '</span></div>';
+        }
+      }
+
+      if (actions.length) {
+        html += '<div class="prop-section">Actions</div>';
+        for (var ai = 0; ai < actions.length; ai++) {
+          var sa = actions[ai];
+          html += '<div class="prop-row"><span class="prop-label">' + escapeHtml(sa.name) + '</span>' +
+            '<button class="prop-action-btn" data-comp-id="' + compId + '" data-slot-idx="' + sa.index + '">Invoke</button></div>';
+        }
+      }
+    }
+    propsBody.innerHTML = html;
+
+    // Wire up config/input slot editing
+    propsBody.querySelectorAll('.prop-input').forEach(function(inp) {
+      function commitSlot() {
+        var newVal = inp.value.trim();
+        var oldVal = inp.dataset.oldValue;
+        if (newVal === oldVal) return;
+        var cid = parseInt(inp.dataset.compId);
+        var sidx = parseInt(inp.dataset.slotIdx);
+        var slotType = inp.dataset.slotType || 'float';
+        // Parse string to proper typed JSON value
+        var typedVal;
+        if (slotType === 'bool') {
+          typedVal = (newVal === 'true' || newVal === '1');
+        } else if (slotType === 'int' || slotType === 'long' || slotType === 'byte' || slotType === 'short') {
+          typedVal = parseInt(newVal, 10);
+          if (isNaN(typedVal)) typedVal = 0;
+        } else if (slotType === 'float' || slotType === 'double') {
+          typedVal = parseFloat(newVal);
+          if (isNaN(typedVal)) typedVal = 0.0;
+        } else {
+          typedVal = newVal; // string/buf
+        }
+        API.writeSlot(cid, sidx, typedVal).then(function() {
+          toast('Slot updated', 'success');
+          inp.dataset.oldValue = newVal;
+          pushUndo({type:'write_slot', compId:cid, slotIdx:sidx, oldValue:oldVal, newValue:newVal});
+          refreshAll();
+        }).catch(function(err) {
+          toast('Write failed: ' + err.message, 'error');
+          inp.value = oldVal;
+        });
+      }
+      inp.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') { e.preventDefault(); inp.blur(); }
+        if (e.key === 'Escape') { inp.value = inp.dataset.oldValue; inp.blur(); }
+        e.stopPropagation();
+      });
+      inp.addEventListener('blur', commitSlot);
+    });
+
+    // Wire up action buttons
+    propsBody.querySelectorAll('.prop-action-btn').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var cid = parseInt(btn.dataset.compId);
+        var sidx = parseInt(btn.dataset.slotIdx);
+        API.invoke(cid, sidx).then(function() {
+          toast('Action invoked', 'success');
+        }).catch(function(err) {
+          toast('Invoke failed: ' + err.message, 'error');
+        });
+      });
+    });
+  }
+
+  // ── Wire Renderer ──
+  var WireRenderer = {
+    draw: function(timestamp) {
+      var w = canvas.width / (devicePixelRatio||1);
+      var h = canvas.height / (devicePixelRatio||1);
+      ctx.clearRect(0, 0, w, h);
+      drawGrid();
+
+      var wsRect = workspace.getBoundingClientRect();
+
+      for (var i = 0; i < state.links.length; i++) {
+        var isSelected = (state.selectedWire === i);
+        this.drawWire(state.links[i], timestamp, wsRect, isSelected);
+      }
+
+      if (state.pendingWire) {
+        this.drawPendingWire(state.pendingWire, wsRect);
+      }
+    },
+
+    drawWire: function(link, timestamp, wsRect, isSelected) {
+      var srcPort = document.querySelector('.port[data-comp-id="' + link.fromComp + '"][data-slot-idx="' + link.fromSlot + '"][data-dir="out"]');
+      var dstPort = document.querySelector('.port[data-comp-id="' + link.toComp + '"][data-slot-idx="' + link.toSlot + '"][data-dir="in"]');
+      if (!srcPort || !dstPort) return;
+
+      var srcRect = srcPort.getBoundingClientRect();
+      var dstRect = dstPort.getBoundingClientRect();
+
+      var x1 = srcRect.left + srcRect.width / 2 - wsRect.left;
+      var y1 = srcRect.top + srcRect.height / 2 - wsRect.top;
+      var x2 = dstRect.left + dstRect.width / 2 - wsRect.left;
+      var y2 = dstRect.top + dstRect.height / 2 - wsRect.top;
+
+      var dataType = srcPort.getAttribute('data-type') || 'float';
+      var color = TYPE_NAME_COLORS[dataType] || '#7ecf6a';
+      var dx = Math.abs(x2 - x1);
+      var cp = Math.max(dx * 0.5, 50);
+
+      var wireWidth = isSelected ? 4 : 2;
+      var glowWidth = isSelected ? 10 : 6;
+      var glowAlpha = isSelected ? 0.3 : 0.1;
+
+      // Glow layer
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.bezierCurveTo(x1 + cp, y1, x2 - cp, y2, x2, y2);
+      ctx.strokeStyle = isSelected ? '#fff' : color;
+      ctx.lineWidth = glowWidth;
+      ctx.globalAlpha = glowAlpha;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+      ctx.restore();
+
+      // Main wire
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.bezierCurveTo(x1 + cp, y1, x2 - cp, y2, x2, y2);
+      ctx.strokeStyle = isSelected ? '#fff' : color;
+      ctx.lineWidth = wireWidth;
+      ctx.lineCap = 'round';
+      ctx.globalAlpha = 1.0;
+      ctx.stroke();
+
+      // Flow animation
+      if (state.showFlowAnim && timestamp) {
+        ctx.save();
+        ctx.setLineDash([8, 4]);
+        ctx.lineDashOffset = -timestamp * 0.03;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = wireWidth;
+        ctx.globalAlpha = isSelected ? 0.6 : 0.4;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.bezierCurveTo(x1 + cp, y1, x2 - cp, y2, x2, y2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+
+      // Wire label
+      if (state.showWireLabels) {
+        var mx = (x1 + x2) / 2;
+        var my = (y1 + y2) / 2;
+        var detail = state.compDetails.get(link.fromComp);
+        if (detail && detail.slots) {
+          for (var si = 0; si < detail.slots.length; si++) {
+            if (detail.slots[si].index === link.fromSlot) {
+              var val = formatSlotValue(detail.slots[si].value, detail.slots[si].typeName);
+              ctx.save();
+              ctx.font = '10px Courier New';
+              ctx.fillStyle = color;
+              ctx.globalAlpha = 0.8;
+              ctx.textAlign = 'center';
+              ctx.fillText(val, mx, my - 6);
+              ctx.restore();
+              break;
+            }
+          }
+        }
+      }
+    },
+
+    drawPendingWire: function(pw, wsRect) {
+      var srcPort = pw.sourcePort;
+      if (!srcPort) return;
+      var srcRect = srcPort.getBoundingClientRect();
+      var x1 = srcRect.left + srcRect.width / 2 - wsRect.left;
+      var y1 = srcRect.top + srcRect.height / 2 - wsRect.top;
+      var x2 = pw.mouseX - wsRect.left;
+      var y2 = pw.mouseY - wsRect.top;
+
+      var dataType = srcPort.getAttribute('data-type') || 'float';
+      var color = TYPE_NAME_COLORS[dataType] || '#7ecf6a';
+      var dx = Math.abs(x2 - x1);
+      var cp = Math.max(dx * 0.5, 50);
+
+      ctx.save();
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.bezierCurveTo(x1 + cp, y1, x2 - cp, y2, x2, y2);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.lineCap = 'round';
+      ctx.globalAlpha = 0.6;
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+  };
+
+  // ── Animation Loop ──
+  var animFrameId = null;
+  function renderLoop(timestamp) {
+    WireRenderer.draw(timestamp);
+    if (state.showFlowAnim) {
+      animFrameId = requestAnimationFrame(renderLoop);
+    }
+  }
+  function startAnimLoop() {
+    if (!animFrameId && state.showFlowAnim) {
+      animFrameId = requestAnimationFrame(renderLoop);
+    }
+  }
+  function stopAnimLoop() {
+    if (animFrameId) {
+      cancelAnimationFrame(animFrameId);
+      animFrameId = null;
+    }
+    WireRenderer.draw(null);
+  }
+
+  // ── Link deduplication & connected port marking ──
+  function collectLinks(compDetails) {
+    var linkSet = new Map();
+    compDetails.forEach(function(detail) {
+      if (!detail.links) return;
+      for (var i = 0; i < detail.links.length; i++) {
+        var l = detail.links[i];
+        var key = l.fromComp + ':' + l.fromSlot + '->' + l.toComp + ':' + l.toSlot;
+        if (!linkSet.has(key)) {
+          linkSet.set(key, {fromComp: l.fromComp, fromSlot: l.fromSlot, toComp: l.toComp, toSlot: l.toSlot});
+        }
+      }
+    });
+    return Array.from(linkSet.values());
+  }
+
+  function markConnectedPorts(links) {
+    var connected = new Set();
+    for (var i = 0; i < links.length; i++) {
+      var l = links[i];
+      connected.add(l.fromComp + ':' + l.fromSlot + ':out');
+      connected.add(l.toComp + ':' + l.toSlot + ':in');
+    }
+    var allPorts = document.querySelectorAll('.port');
+    allPorts.forEach(function(p) {
+      var key = p.getAttribute('data-comp-id') + ':' + p.getAttribute('data-slot-idx') + ':' + p.getAttribute('data-dir');
+      if (connected.has(key)) {
+        p.classList.add('connected');
+      } else {
+        p.classList.remove('connected');
+      }
+    });
+  }
+
+  // ── Toast ──
+  function toast(msg, type, duration) {
+    type = type || 'info';
+    duration = duration || 3000;
+    var el = document.createElement('div');
+    el.className = 'toast toast-' + type;
+    el.textContent = msg;
+    toastContainer.appendChild(el);
+    requestAnimationFrame(function() { el.classList.add('show'); });
+    setTimeout(function() { el.classList.remove('show'); setTimeout(function() { el.remove(); }, 300); }, duration);
+  }
+
+  // ── Context Menu ──
+  function showContextMenu(x, y, items) {
+    ctxMenu.innerHTML = '';
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i];
+      if (item.separator) {
+        var sep = document.createElement('div');
+        sep.className = 'ctx-sep';
+        ctxMenu.appendChild(sep);
+        continue;
+      }
+      var div = document.createElement('div');
+      div.className = 'ctx-item' + (item.danger ? ' danger' : '');
+      div.innerHTML = '<span>' + escapeHtml(item.label) + '</span>' +
+        (item.shortcut ? '<span class="shortcut">' + escapeHtml(item.shortcut) + '</span>' : '');
+      div.addEventListener('click', (function(cb) { return function() { hideContextMenu(); cb(); }; })(item.action));
+      ctxMenu.appendChild(div);
+    }
+
+    ctxMenu.classList.remove('hidden');
+    var mw = ctxMenu.offsetWidth;
+    var mh = ctxMenu.offsetHeight;
+    if (x + mw > window.innerWidth) x = window.innerWidth - mw - 8;
+    if (y + mh > window.innerHeight) y = window.innerHeight - mh - 8;
+    ctxMenu.style.left = x + 'px';
+    ctxMenu.style.top = y + 'px';
+  }
+
+  function hideContextMenu() {
+    ctxMenu.classList.add('hidden');
+  }
+
+  // Right-click handler
+  workspace.addEventListener('contextmenu', function(e) {
+    e.preventDefault();
+    hideContextMenu();
+
+    var nodeEl = e.target.closest('.node');
+    if (nodeEl) {
+      var compId = parseInt(nodeEl.dataset.compId);
+      var comp = state.components.get(compId);
+      if (!comp) return;
+
+      if (!state.selection.has(compId)) {
+        clearSelection();
+        state.selection.add(compId);
+        nodeEl.classList.add('selected');
+        showProperties(compId);
+      }
+
+      var menuItems = [
+        { label: 'Rename...', shortcut: 'Dbl-click', action: function() {
+          var nameSpan = nodeEl.querySelector('.node-name');
+          if (nameSpan) startInlineRename(compId, nameSpan);
+        }},
+        { label: 'Properties', action: function() { showProperties(compId); }},
+        { separator: true },
+        { label: 'Toggle Wire Labels', shortcut: 'L', action: function() {
+          state.showWireLabels = !state.showWireLabels;
+          WireRenderer.draw(null);
+        }},
+        { label: 'Toggle Flow Animation', shortcut: 'A', action: function() {
+          state.showFlowAnim = !state.showFlowAnim;
+          if (state.showFlowAnim) startAnimLoop(); else stopAnimLoop();
+        }},
+        { separator: true },
+        { label: 'Duplicate', action: function() {
+          var shortType = comp.typeName.indexOf('::') >= 0 ? comp.typeName.split('::').pop() : comp.typeName;
+          var dupName = generateName(shortType);
+          var parentId = comp.parentId || 6;
+          var origPos = comp.position || [0, 0];
+          var dupX = Math.min((origPos[0] || 0) + 2, 255);
+          var dupY = Math.min((origPos[1] || 0) + 2, 255);
+          API.addComp(parentId, comp.kitId, comp.typeId, dupName).then(function(result) {
+            if (result && result.compId) {
+              API.updatePos(result.compId, dupX, dupY);
+              pushUndo({type:'add_comp', compId:result.compId, parentId:parentId, kitId:comp.kitId, typeId:comp.typeId, name:dupName});
+            }
+            return refreshAll().then(function() {
+              if (result && result.compId) {
+                clearSelection();
+                state.selection.add(result.compId);
+                var newNode = state.nodes.get(result.compId);
+                if (newNode) {
+                  newNode.classList.add('selected');
+                  showProperties(result.compId);
+                }
+              }
+              toast('Duplicated ' + comp.name, 'success');
+            });
+          }).catch(function(err) { toast('Duplicate failed: ' + err.message, 'error'); });
+        }},
+        { separator: true },
+        { label: 'Delete', shortcut: 'Del', danger: true, action: function() { deleteSelected(); }}
+      ];
+      showContextMenu(e.clientX, e.clientY, menuItems);
+      return;
+    }
+
+    // Check if right-clicked on a wire
+    var wireIdx = hitTestWire(e.clientX, e.clientY);
+    if (wireIdx >= 0) {
+      state.selectedWire = wireIdx;
+      clearSelection();
+      WireRenderer.draw(null);
+      var link = state.links[wireIdx];
+      var fromComp = state.components.get(link.fromComp);
+      var toComp = state.components.get(link.toComp);
+      var wireLabel = (fromComp ? fromComp.name : link.fromComp) + ' -> ' + (toComp ? toComp.name : link.toComp);
+      showContextMenu(e.clientX, e.clientY, [
+        { label: 'Delete Wire (' + wireLabel + ')', shortcut: 'Del', danger: true, action: function() { deleteSelectedWire(); }}
+      ]);
+      return;
+    }
+
+    // Right-click on empty canvas
+    showContextMenu(e.clientX, e.clientY, [
+      { label: 'Fit View', shortcut: 'F', action: function() { Viewport.fitAll(); }},
+      { label: 'Select All', shortcut: 'Ctrl+A', action: function() { selectAll(); }},
+      { separator: true },
+      { label: 'Toggle Wire Labels', shortcut: 'L', action: function() {
+        state.showWireLabels = !state.showWireLabels;
+        WireRenderer.draw(null);
+      }},
+      { label: 'Toggle Flow Animation', shortcut: 'A', action: function() {
+        state.showFlowAnim = !state.showFlowAnim;
+        if (state.showFlowAnim) startAnimLoop(); else stopAnimLoop();
+      }}
+    ]);
+  });
+
+  // Close context menu on click outside, scroll
+  document.addEventListener('click', function(e) {
+    if (!e.target.closest('.ctx-menu')) hideContextMenu();
+  });
+  workspace.addEventListener('wheel', function() { hideContextMenu(); }, {passive: true, capture: true});
+
+  // ── Name Generation ──
+  var MAX_NAME_LEN = 31; // Sedona editor compatibility
+
+  function validateName(name) {
+    if (!name || name.length === 0) return 'Name cannot be empty';
+    if (name.length > MAX_NAME_LEN) return 'Name too long (max ' + MAX_NAME_LEN + ' chars for Sedona compatibility)';
+    if (!/^[a-zA-Z]/.test(name)) return 'Name must start with a letter';
+    if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(name)) return 'Name can only contain letters, numbers, and underscores';
+    return null;
+  }
+
+  function generateName(typeName) {
+    var base = (typeName || 'New').replace(/[^a-zA-Z0-9]/g, '');
+    if (base.length > MAX_NAME_LEN - 3) base = base.substring(0, MAX_NAME_LEN - 3); // leave room for _N
+    var i = 1;
+    var existing = [];
+    state.components.forEach(function(c) { existing.push(c.name); });
+    while (existing.indexOf(base + '_' + i) >= 0) i++;
+    var name = base + '_' + i;
+    if (name.length > MAX_NAME_LEN) name = name.substring(0, MAX_NAME_LEN);
+    return name;
+  }
+
+  // ── Viewport Center (meta coords for new component placement) ──
+  function getViewportCenterMeta() {
+    var vw = workspace.clientWidth;
+    var vh = workspace.clientHeight;
+    var world = Viewport.screenToWorld(vw / 2, vh / 2);
+    return Viewport.worldToMeta(world.x, world.y);
+  }
+
+  // ── Highlight matching text ──
+  function highlightMatch(text, query) {
+    if (!query) return escapeHtml(text);
+    var lower = text.toLowerCase();
+    var idx = lower.indexOf(query.toLowerCase());
+    if (idx < 0) return escapeHtml(text);
+    var before = text.substring(0, idx);
+    var match = text.substring(idx, idx + query.length);
+    var after = text.substring(idx + query.length);
+    return escapeHtml(before) + '<mark style="background:rgba(79,195,247,0.25);color:var(--text-primary);border-radius:2px;padding:0 1px">' + escapeHtml(match) + '</mark>' + escapeHtml(after);
+  }
+
+  // ── Add Component at specific position (drag-and-drop from palette) ──
+  function addComponentAtPosition(paletteEntry, metaX, metaY) {
+    var typeName = (paletteEntry.typeName || paletteEntry.name || 'New');
+    if (typeName.indexOf('::') >= 0) typeName = typeName.split('::').pop();
+    var name = generateName(typeName);
+    var parentId = 6;
+
+    API.addComp(parentId, paletteEntry.kitId, paletteEntry.typeId, name).then(function(result) {
+      if (result && result.compId) {
+        API.updatePos(result.compId, metaX, metaY);
+        pushUndo({type:'add_comp', compId:result.compId, parentId:parentId, kitId:paletteEntry.kitId, typeId:paletteEntry.typeId, name:name});
+      }
+      return refreshAll().then(function() {
+        if (result && result.compId) {
+          clearSelection();
+          state.selection.add(result.compId);
+          var newNode = state.nodes.get(result.compId);
+          if (newNode) {
+            newNode.classList.add('selected');
+            showProperties(result.compId);
+          }
+        }
+        toast('Added ' + typeName, 'success');
+      });
+    }).catch(function(err) { toast('Add failed: ' + err.message, 'error'); });
+  }
+
+  // ── Add Component from Palette (click — places at viewport center) ──
+  function addComponentFromPalette(paletteEntry) {
+    var typeName = (paletteEntry.typeName || paletteEntry.name || 'New');
+    if (typeName.indexOf('::') >= 0) typeName = typeName.split('::').pop();
+    var name = generateName(typeName);
+    var center = getViewportCenterMeta();
+    var parentId = 6; // App component
+
+    API.addComp(parentId, paletteEntry.kitId, paletteEntry.typeId, name).then(function(result) {
+      if (result && result.compId) {
+        API.updatePos(result.compId, center.x, center.y);
+        pushUndo({type:'add_comp', compId:result.compId, parentId:parentId, kitId:paletteEntry.kitId, typeId:paletteEntry.typeId, name:name});
+      }
+      return refreshAll().then(function() {
+        if (result && result.compId) {
+          clearSelection();
+          state.selection.add(result.compId);
+          var newNode = state.nodes.get(result.compId);
+          if (newNode) {
+            newNode.classList.add('selected');
+            showProperties(result.compId);
+          }
+        }
+        toast('Added ' + typeName, 'success');
+      });
+    }).catch(function(err) { toast('Add failed: ' + err.message, 'error'); });
+  }
+
+  // ═══════════════════════════════════════════════════════
+  // ── Tree Navigator ──
+  // ═══════════════════════════════════════════════════════
+
+  function buildTree() {
+    treeView.innerHTML = '';
+
+    // Classify components into folders
+    var serviceComps = [];
+    var ioComps = [];
+    var controlComps = [];
+
+    state.components.forEach(function(comp) {
+      if (comp.isSystem) {
+        serviceComps.push(comp);
+      } else if (comp.isChannel) {
+        ioComps.push(comp);
+      } else {
+        controlComps.push(comp);
+      }
+    });
+
+    // Sort alphabetically within each group
+    serviceComps.sort(function(a,b) { return a.name.localeCompare(b.name); });
+    ioComps.sort(function(a,b) { return a.name.localeCompare(b.name); });
+    controlComps.sort(function(a,b) { return a.name.localeCompare(b.name); });
+
+    // Build "app" root
+    var appEl = createTreeFolder('app', 'app', [
+      { key: 'service', label: 'service', items: serviceComps },
+      { key: 'io', label: 'io (' + ioComps.length + ')', items: ioComps },
+      { key: 'control', label: 'control (' + controlComps.length + ')', items: controlComps }
+    ]);
+    treeView.appendChild(appEl);
+  }
+
+  function createTreeFolder(key, label, subfolders) {
+    var container = document.createElement('div');
+    var expanded = state.treeExpanded[key] !== false;
+
+    // Folder header
+    var item = document.createElement('div');
+    item.className = 'tree-item';
+    item.innerHTML =
+      '<span class="arrow">' + (expanded ? '\u25BE' : '\u25B8') + '</span>' +
+      '<span class="icon">\uD83D\uDCC1</span>' +
+      '<span class="name">' + escapeHtml(label) + '</span>';
+
+    var childrenEl = document.createElement('div');
+    childrenEl.className = 'tree-children' + (expanded ? '' : ' collapsed');
+
+    item.addEventListener('click', function(e) {
+      e.stopPropagation();
+      state.treeExpanded[key] = !state.treeExpanded[key];
+      var isExp = state.treeExpanded[key];
+      childrenEl.classList.toggle('collapsed', !isExp);
+      item.querySelector('.arrow').textContent = isExp ? '\u25BE' : '\u25B8';
+    });
+
+    container.appendChild(item);
+
+    // Sub-folders
+    for (var i = 0; i < subfolders.length; i++) {
+      var sf = subfolders[i];
+      var sfExpanded = state.treeExpanded[sf.key] !== false;
+
+      var sfItem = document.createElement('div');
+      sfItem.className = 'tree-item';
+      sfItem.innerHTML =
+        '<span class="arrow">' + (sfExpanded ? '\u25BE' : '\u25B8') + '</span>' +
+        '<span class="icon">\uD83D\uDCC2</span>' +
+        '<span class="name">' + escapeHtml(sf.label) + '</span>';
+
+      var sfChildren = document.createElement('div');
+      sfChildren.className = 'tree-children' + (sfExpanded ? '' : ' collapsed');
+
+      sfItem.addEventListener('click', (function(sfKey, sfChildrenEl, sfItemEl) {
+        return function(e) {
+          e.stopPropagation();
+          state.treeExpanded[sfKey] = !state.treeExpanded[sfKey];
+          var isExp = state.treeExpanded[sfKey];
+          sfChildrenEl.classList.toggle('collapsed', !isExp);
+          sfItemEl.querySelector('.arrow').textContent = isExp ? '\u25BE' : '\u25B8';
+        };
+      })(sf.key, sfChildren, sfItem));
+
+      // Leaf items
+      for (var j = 0; j < sf.items.length; j++) {
+        var comp = sf.items[j];
+        var leafEl = createTreeLeaf(comp, sf.key);
+        sfChildren.appendChild(leafEl);
+      }
+
+      var sfWrapper = document.createElement('div');
+      sfWrapper.style.paddingLeft = '16px';
+      sfWrapper.appendChild(sfItem);
+      sfWrapper.appendChild(sfChildren);
+      childrenEl.appendChild(sfWrapper);
+    }
+
+    container.appendChild(childrenEl);
+    return container;
+  }
+
+  function createTreeLeaf(comp, folderKey) {
+    var leafEl = document.createElement('div');
+    leafEl.className = 'tree-item' + (comp.isSystem ? ' grayed' : '');
+    leafEl.dataset.compId = comp.compId;
+    if (state.treeSelectedId === comp.compId) leafEl.classList.add('selected');
+
+    // Get output value for display
+    var valueStr = '';
+    var detail = state.compDetails.get(comp.compId);
+    if (detail && detail.slots) {
+      for (var k = 0; k < detail.slots.length; k++) {
+        var s = detail.slots[k];
+        if (s.direction === 'out' && s.value !== null && s.value !== undefined) {
+          valueStr = formatSlotValue(s.value, s.typeName);
+          break;
+        }
+      }
+    }
+
+    var iconColor = comp.isChannel ? '#2196f3' : (comp.isSystem ? '#607d8b' : '#4caf50');
+    leafEl.innerHTML =
+      '<span class="arrow" style="visibility:hidden">\u25B8</span>' +
+      '<span class="icon" style="color:' + iconColor + '">\u25CF</span>' +
+      '<span class="name">' + escapeHtml(comp.name) + '</span>' +
+      (valueStr ? '<span class="value">' + escapeHtml(valueStr) + '</span>' : '');
+
+    // Click: select component, show properties
+    leafEl.addEventListener('click', function(e) {
+      e.stopPropagation();
+      state.treeSelectedId = comp.compId;
+
+      // Highlight in tree
+      treeView.querySelectorAll('.tree-item.selected').forEach(function(el) { el.classList.remove('selected'); });
+      leafEl.classList.add('selected');
+
+      // Show properties
+      showProperties(comp.compId);
+
+      // If on canvas, select and scroll to it
+      if (isCanvasComponent(comp)) {
+        clearSelection();
+        state.selection.add(comp.compId);
+        var nodeEl = state.nodes.get(comp.compId);
+        if (nodeEl) {
+          nodeEl.classList.add('selected');
+          // Scroll canvas to this node
+          var pos = getNodePos(nodeEl);
+          var screenPos = Viewport.worldToScreen(pos.x, pos.y);
+          var vw = workspace.clientWidth;
+          var vh = workspace.clientHeight;
+          // If node is off-screen, pan to center it
+          if (screenPos.x < 0 || screenPos.x > vw || screenPos.y < 0 || screenPos.y > vh) {
+            state.panX = vw / 2 - pos.x * state.zoom;
+            state.panY = vh / 2 - pos.y * state.zoom;
+            Viewport.update();
+          }
+        }
+      }
+    });
+
+    // Double-click: zoom to it on canvas
+    leafEl.addEventListener('dblclick', function(e) {
+      e.stopPropagation();
+      if (!isCanvasComponent(comp)) return;
+      var nodeEl = state.nodes.get(comp.compId);
+      if (!nodeEl) return;
+      var pos = getNodePos(nodeEl);
+      var vw = workspace.clientWidth;
+      var vh = workspace.clientHeight;
+      state.zoom = 1.0;
+      state.panX = vw / 2 - pos.x * state.zoom;
+      state.panY = vh / 2 - pos.y * state.zoom;
+      Viewport.update();
+    });
+
+    return leafEl;
+  }
+
+  function highlightTreeItem(compId) {
+    state.treeSelectedId = compId;
+    treeView.querySelectorAll('.tree-item.selected').forEach(function(el) { el.classList.remove('selected'); });
+    var leaf = treeView.querySelector('.tree-item[data-comp-id="' + compId + '"]');
+    if (leaf) {
+      leaf.classList.add('selected');
+      leaf.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════
+  // ── Sidebar Palette ──
+  // ═══════════════════════════════════════════════════════
+
+  var paletteCollapsed = {};
+  var paletteActiveIndex = -1;
+  var paletteItems = [];
+
+  function populatePalette(filter) {
+    paletteList.innerHTML = '';
+    paletteItems = [];
+    paletteActiveIndex = -1;
+    var q = (filter || '').toLowerCase().trim();
+
+    var matches = state.palette.filter(function(p) {
+      if (!q) return true;
+      var name = (p.typeName || p.name || '').toLowerCase();
+      var kit = (p.kitName || '').toLowerCase();
+      var cat = (p.category || categoryFromType(p.kitId, p.typeId)).toLowerCase();
+      return name.indexOf(q) >= 0 || kit.indexOf(q) >= 0 || cat.indexOf(q) >= 0;
+    });
+
+    if (matches.length === 0) {
+      paletteList.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:11px">No matching types</div>';
+      return;
+    }
+
+    // Group by category
+    var groups = {};
+    var categoryOrder = [];
+    for (var i = 0; i < matches.length; i++) {
+      var p = matches[i];
+      var cat = p.category || categoryFromType(p.kitId, p.typeId);
+      if (!groups[cat]) {
+        groups[cat] = [];
+        categoryOrder.push(cat);
+      }
+      groups[cat].push(p);
+    }
+    categoryOrder.sort();
+
+    var forceExpand = q.length > 0;
+
+    for (var ci = 0; ci < categoryOrder.length; ci++) {
+      var catName = categoryOrder[ci];
+      var catColor = CATEGORY_COLORS[catName] || CATEGORY_COLORS.Other;
+      var items = groups[catName];
+      var isCollapsed = !forceExpand && paletteCollapsed[catName];
+
+      // Category header
+      var header = document.createElement('div');
+      header.className = 'palette-cat-header';
+      header.innerHTML =
+        '<span class="palette-cat-arrow' + (isCollapsed ? ' collapsed' : '') + '">\u25BC</span>' +
+        '<span class="palette-type-dot" style="background:' + catColor + '"></span>' +
+        '<span style="flex:1">' + escapeHtml(catName) + '</span>' +
+        '<span class="palette-cat-count">' + items.length + '</span>';
+      header.addEventListener('click', (function(cn) {
+        return function() {
+          paletteCollapsed[cn] = !paletteCollapsed[cn];
+          populatePalette(paletteSearch.value);
+        };
+      })(catName));
+      paletteList.appendChild(header);
+
+      // Items group
+      var groupEl = document.createElement('div');
+      groupEl.className = 'palette-cat-group' + (isCollapsed ? ' collapsed' : '');
+
+      for (var ii = 0; ii < items.length; ii++) {
+        var pe = items[ii];
+        var shortName = (pe.typeName || pe.name || 'Unknown');
+        if (shortName.indexOf('::') >= 0) shortName = shortName.split('::').pop();
+
+        var div = document.createElement('div');
+        div.className = 'palette-type-item';
+        div.dataset.paletteIdx = String(paletteItems.length);
+        div.innerHTML =
+          '<span class="palette-type-dot" style="background:' + catColor + '"></span>' +
+          '<span>' + highlightMatch(shortName, q) + '</span>';
+
+        div.addEventListener('click', (function(entry) {
+          return function() { addComponentFromPalette(entry); };
+        })(pe));
+
+        // Drag-and-drop from palette to canvas
+        div.addEventListener('pointerdown', (function(entry, dotColor) {
+          return function(ev) {
+            if (ev.button !== 0) return;
+            var startX = ev.clientX, startY = ev.clientY;
+            var ghost = null;
+            var dragging = false;
+            var shortN = (entry.typeName || '').split('::').pop() || 'New';
+
+            function onMove(me) {
+              var dx = me.clientX - startX, dy = me.clientY - startY;
+              if (!dragging && (Math.abs(dx) > 5 || Math.abs(dy) > 5)) {
+                dragging = true;
+                ghost = document.createElement('div');
+                ghost.className = 'drag-ghost';
+                ghost.innerHTML = '<span class="palette-type-dot" style="background:' + dotColor + '"></span>' + shortN;
+                document.body.appendChild(ghost);
+                workspace.classList.add('drop-target');
+              }
+              if (ghost) {
+                ghost.style.left = me.clientX + 'px';
+                ghost.style.top = me.clientY + 'px';
+              }
+            }
+            function onUp(ue) {
+              document.removeEventListener('pointermove', onMove);
+              document.removeEventListener('pointerup', onUp);
+              workspace.classList.remove('drop-target');
+              if (ghost) {
+                ghost.remove();
+                // Check if dropped over workspace
+                var wsRect = workspace.getBoundingClientRect();
+                if (ue.clientX >= wsRect.left && ue.clientX <= wsRect.right &&
+                    ue.clientY >= wsRect.top && ue.clientY <= wsRect.bottom) {
+                  // Convert drop position to meta coordinates
+                  var sx = ue.clientX - wsRect.left;
+                  var sy = ue.clientY - wsRect.top;
+                  var world = Viewport.screenToWorld(sx, sy);
+                  var meta = Viewport.worldToMeta(world.x, world.y);
+                  addComponentAtPosition(entry, meta.x, meta.y);
+                }
+              }
+            }
+            document.addEventListener('pointermove', onMove);
+            document.addEventListener('pointerup', onUp);
+          };
+        })(pe, catColor));
+
+        groupEl.appendChild(div);
+        paletteItems.push(pe);
+      }
+
+      paletteList.appendChild(groupEl);
+    }
+
+    if (q && paletteItems.length > 0) {
+      paletteActiveIndex = 0;
+      updatePaletteHighlight();
+    }
+  }
+
+  function updatePaletteHighlight() {
+    var allItems = paletteList.querySelectorAll('.palette-type-item');
+    for (var i = 0; i < allItems.length; i++) {
+      allItems[i].classList.remove('active');
+    }
+    if (paletteActiveIndex >= 0 && paletteActiveIndex < paletteItems.length) {
+      var active = paletteList.querySelector('.palette-type-item[data-palette-idx="' + paletteActiveIndex + '"]');
+      if (active) {
+        active.classList.add('active');
+        active.scrollIntoView({block:'nearest', behavior:'smooth'});
+      }
+    }
+  }
+
+  paletteSearch.addEventListener('input', function() { populatePalette(paletteSearch.value); });
+
+  // Keyboard navigation in palette search
+  paletteSearch.addEventListener('keydown', function(e) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (paletteItems.length === 0) return;
+      paletteActiveIndex = Math.min(paletteActiveIndex + 1, paletteItems.length - 1);
+      updatePaletteHighlight();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (paletteItems.length === 0) return;
+      paletteActiveIndex = Math.max(paletteActiveIndex - 1, 0);
+      updatePaletteHighlight();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (paletteActiveIndex >= 0 && paletteActiveIndex < paletteItems.length) {
+        addComponentFromPalette(paletteItems[paletteActiveIndex]);
+      } else if (paletteItems.length > 0) {
+        addComponentFromPalette(paletteItems[0]);
+      }
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      paletteSearch.blur();
+    }
+    e.stopPropagation();
+  });
+
+  // ═══════════════════════════════════════════════════════
+  // ── Sidebar Toggle & Resizable Divider ──
+  // ═══════════════════════════════════════════════════════
+
+  function toggleSidebar() {
+    state.sidebarOpen = !state.sidebarOpen;
+    leftPanel.classList.toggle('collapsed', !state.sidebarOpen);
+    workspace.classList.toggle('full-width', !state.sidebarOpen);
+    // Resize canvas after transition
+    setTimeout(function() { Viewport.resize(); }, 220);
+  }
+
+  // Resizable divider between tree and palette
+  (function() {
+    var divider = document.getElementById('panel-divider');
+    var treeSection = document.getElementById('tree-section');
+    var paletteSection = document.getElementById('palette-section');
+    var dragging = false;
+    var startY, startTreeH;
+
+    divider.addEventListener('pointerdown', function(e) {
+      e.preventDefault();
+      dragging = true;
+      startY = e.clientY;
+      startTreeH = treeSection.offsetHeight;
+      divider.setPointerCapture(e.pointerId);
+    });
+
+    divider.addEventListener('pointermove', function(e) {
+      if (!dragging) return;
+      var dy = e.clientY - startY;
+      var newH = Math.max(80, Math.min(startTreeH + dy, leftPanel.offsetHeight - 120));
+      treeSection.style.flex = 'none';
+      treeSection.style.height = newH + 'px';
+      paletteSection.style.flex = '1';
+    });
+
+    divider.addEventListener('pointerup', function() { dragging = false; });
+    divider.addEventListener('lostpointercapture', function() { dragging = false; });
+  })();
+
+  // ── Keyboard shortcuts ──
+  document.addEventListener('keydown', function(e) {
+    var isInput = document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA';
+
+    // Ctrl+Z = undo
+    if (e.key === 'z' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !isInput) {
+      e.preventDefault();
+      performUndo();
+      return;
+    }
+    // Ctrl+Y or Ctrl+Shift+Z = redo
+    if (((e.key === 'y' && (e.ctrlKey || e.metaKey)) || (e.key === 'z' && (e.ctrlKey || e.metaKey) && e.shiftKey)) && !isInput) {
+      e.preventDefault();
+      performRedo();
+      return;
+    }
+    // Ctrl+A = select all
+    if (e.key === 'a' && (e.ctrlKey || e.metaKey) && !isInput) {
+      e.preventDefault();
+      selectAll();
+      return;
+    }
+
+    if (isInput) return;
+
+    // Escape
+    if (e.key === 'Escape') {
+      hideContextMenu();
+      clearSelection();
+      propsPanel.classList.add('hidden');
+    }
+    // F = fit view
+    if (e.key === 'f' || e.key === 'F') {
+      if (!e.ctrlKey && !e.metaKey) Viewport.fitAll();
+    }
+    // L = toggle labels
+    if (e.key === 'l' || e.key === 'L') {
+      state.showWireLabels = !state.showWireLabels;
+      WireRenderer.draw(null);
+    }
+    // A = toggle animation (only when ctrl not held)
+    if ((e.key === 'a' || e.key === 'A') && !e.ctrlKey && !e.metaKey) {
+      state.showFlowAnim = !state.showFlowAnim;
+      if (state.showFlowAnim) startAnimLoop(); else stopAnimLoop();
+    }
+    // Delete/Backspace
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault();
+      deleteSelected();
+    }
+  });
+
+  // ── Button handlers ──
+  document.getElementById('btn-sidebar').addEventListener('click', function() {
+    toggleSidebar();
+  });
+  document.getElementById('btn-zoom-in').addEventListener('click', function() {
+    state.zoom = Math.min(MAX_ZOOM, state.zoom * 1.2);
+    Viewport.update();
+  });
+  document.getElementById('btn-zoom-out').addEventListener('click', function() {
+    state.zoom = Math.max(MIN_ZOOM, state.zoom / 1.2);
+    Viewport.update();
+  });
+  document.getElementById('btn-fit').addEventListener('click', function() {
+    Viewport.fitAll();
+  });
+  document.getElementById('btn-props-close').addEventListener('click', function() {
+    propsPanel.classList.add('hidden');
+  });
+
+  // ── Zoom with scroll wheel ──
+  workspace.addEventListener('wheel', function(e) {
+    e.preventDefault();
+    var delta = e.deltaY > 0 ? -0.1 : 0.1;
+    var oldZoom = state.zoom;
+    state.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, state.zoom * (1 + delta)));
+    var rect = workspace.getBoundingClientRect();
+    var mx = e.clientX - rect.left;
+    var my = e.clientY - rect.top;
+    state.panX = mx - (mx - state.panX) * (state.zoom / oldZoom);
+    state.panY = my - (my - state.panY) * (state.zoom / oldZoom);
+    Viewport.update();
+  }, {passive: false});
+
+  // ── Pan with middle mouse or Space+drag ──
+  var spaceDown = false;
+  document.addEventListener('keydown', function(e) {
+    if (e.code === 'Space' && document.activeElement.tagName !== 'INPUT') {
+      spaceDown = true;
+      workspace.style.cursor = 'grab';
+      e.preventDefault();
+    }
+  });
+  document.addEventListener('keyup', function(e) {
+    if (e.code === 'Space') {
+      spaceDown = false;
+      workspace.style.cursor = '';
+    }
+  });
+
+  workspace.addEventListener('pointerdown', function(e) {
+    // Middle-mouse pan
+    if (e.button === 1) {
+      e.preventDefault();
+      state.dragging = {type:'pan', startX: e.clientX, startY: e.clientY, startPanX: state.panX, startPanY: state.panY};
+      workspace.style.cursor = 'grabbing';
+      workspace.setPointerCapture(e.pointerId);
+      return;
+    }
+
+    // Space + left-click pan
+    if (e.button === 0 && spaceDown) {
+      e.preventDefault();
+      state.dragging = {type:'pan', startX: e.clientX, startY: e.clientY, startPanX: state.panX, startPanY: state.panY};
+      workspace.style.cursor = 'grabbing';
+      workspace.setPointerCapture(e.pointerId);
+      return;
+    }
+
+    // Left-click on empty canvas: pan (default), or Ctrl+drag for box select
+    if (e.button === 0 && !spaceDown && (e.target === workspace || e.target === canvas || e.target === nodeLayer)) {
+      // First check if clicking a wire
+      var wireIdx = hitTestWire(e.clientX, e.clientY);
+      if (wireIdx >= 0) {
+        clearSelection();
+        state.selectedWire = wireIdx;
+        WireRenderer.draw(null);
+        e.preventDefault();
+        return;
+      }
+
+      if (e.ctrlKey || e.metaKey) {
+        // Ctrl+drag: box selection
+        var wsRect = workspace.getBoundingClientRect();
+        var startSX = e.clientX - wsRect.left;
+        var startSY = e.clientY - wsRect.top;
+
+        var boxEl = document.createElement('div');
+        boxEl.className = 'selection-box';
+        workspace.appendChild(boxEl);
+
+        state.boxSelect = {
+          startX: startSX, startY: startSY,
+          el: boxEl,
+          pointerId: e.pointerId,
+          moved: false
+        };
+        workspace.setPointerCapture(e.pointerId);
+      } else {
+        // Default left-click drag: pan canvas
+        e.preventDefault();
+        state.dragging = {type:'pan', startX: e.clientX, startY: e.clientY, startPanX: state.panX, startPanY: state.panY, clicked: true};
+        workspace.style.cursor = 'grabbing';
+        workspace.setPointerCapture(e.pointerId);
+      }
+    }
+  });
+
+  workspace.addEventListener('pointermove', function(e) {
+    // Pan dragging
+    if (state.dragging && state.dragging.type === 'pan') {
+      state.panX = state.dragging.startPanX + (e.clientX - state.dragging.startX);
+      state.panY = state.dragging.startPanY + (e.clientY - state.dragging.startY);
+      Viewport.update();
+    }
+
+    // Box selection dragging
+    if (state.boxSelect) {
+      var wsRect = workspace.getBoundingClientRect();
+      var curX = e.clientX - wsRect.left;
+      var curY = e.clientY - wsRect.top;
+      var bx = Math.min(state.boxSelect.startX, curX);
+      var by = Math.min(state.boxSelect.startY, curY);
+      var bw = Math.abs(curX - state.boxSelect.startX);
+      var bh = Math.abs(curY - state.boxSelect.startY);
+      state.boxSelect.el.style.left = bx + 'px';
+      state.boxSelect.el.style.top = by + 'px';
+      state.boxSelect.el.style.width = bw + 'px';
+      state.boxSelect.el.style.height = bh + 'px';
+      if (bw > 3 || bh > 3) state.boxSelect.moved = true;
+    }
+
+    // Update pending wire mouse pos
+    if (state.pendingWire) {
+      state.pendingWire.mouseX = e.clientX;
+      state.pendingWire.mouseY = e.clientY;
+      WireRenderer.draw(null);
+    }
+  });
+
+  workspace.addEventListener('pointerup', function(e) {
+    if (state.dragging && state.dragging.type === 'pan') {
+      // If user just clicked without moving, deselect everything
+      if (state.dragging.clicked) {
+        var dx = Math.abs(e.clientX - state.dragging.startX);
+        var dy = Math.abs(e.clientY - state.dragging.startY);
+        if (dx < 3 && dy < 3) {
+          clearSelection();
+          state.selectedWire = -1;
+          propsPanel.classList.add('hidden');
+          WireRenderer.draw(null);
+        }
+      }
+      state.dragging = null;
+      workspace.style.cursor = '';
+    }
+
+    // Box selection end
+    if (state.boxSelect) {
+      var bs = state.boxSelect;
+      var wsRect = workspace.getBoundingClientRect();
+      var curX = e.clientX - wsRect.left;
+      var curY = e.clientY - wsRect.top;
+
+      if (bs.moved) {
+        var sx1 = Math.min(bs.startX, curX);
+        var sy1 = Math.min(bs.startY, curY);
+        var sx2 = Math.max(bs.startX, curX);
+        var sy2 = Math.max(bs.startY, curY);
+
+        if (!e.ctrlKey) clearSelection();
+
+        state.nodes.forEach(function(nodeEl, cid) {
+          var comp = state.components.get(cid);
+          if (!comp || !isCanvasComponent(comp)) return;
+          var nodePos = getNodePos(nodeEl);
+          var screenPos = Viewport.worldToScreen(nodePos.x, nodePos.y);
+          var nw = (nodeEl.offsetWidth || 180) * state.zoom;
+          var nh = (nodeEl.offsetHeight || 100) * state.zoom;
+          if (screenPos.x + nw > sx1 && screenPos.x < sx2 && screenPos.y + nh > sy1 && screenPos.y < sy2) {
+            state.selection.add(cid);
+            nodeEl.classList.add('selected');
+          }
+        });
+        if (state.selection.size > 0) {
+          toast('Selected ' + state.selection.size + ' component' + (state.selection.size > 1 ? 's' : ''), 'info');
+        }
+      } else {
+        clearSelection();
+        propsPanel.classList.add('hidden');
+      }
+
+      bs.el.remove();
+      state.boxSelect = null;
+    }
+
+    // Complete pending wire
+    if (state.pendingWire) {
+      var target = document.elementFromPoint(e.clientX, e.clientY);
+      if (target && target.classList.contains('port')) {
+        var srcDir = state.pendingWire.sourcePort.getAttribute('data-dir');
+        var dstDir = target.getAttribute('data-dir');
+        if (srcDir !== dstDir) {
+          var fromPort = srcDir === 'out' ? state.pendingWire.sourcePort : target;
+          var toPort = srcDir === 'in' ? state.pendingWire.sourcePort : target;
+          var fc = parseInt(fromPort.getAttribute('data-comp-id'));
+          var fs = parseInt(fromPort.getAttribute('data-slot-idx'));
+          var tc = parseInt(toPort.getAttribute('data-comp-id'));
+          var ts = parseInt(toPort.getAttribute('data-slot-idx'));
+          API.addLink(fc, fs, tc, ts).then(function() {
+            toast('Link created', 'success');
+            pushUndo({type:'add_link', fromComp:fc, fromSlot:fs, toComp:tc, toSlot:ts});
+            refreshAll();
+          }).catch(function(err) {
+            toast('Failed to create link: ' + err.message, 'error');
+          });
+        }
+      }
+      state.pendingWire = null;
+      WireRenderer.draw(null);
+    }
+  });
+
+  // Port drag to create wires
+  document.addEventListener('pointerdown', function(e) {
+    if (e.target.classList.contains('port') && e.button === 0 && !spaceDown) {
+      e.stopPropagation();
+      e.preventDefault();
+      state.pendingWire = {
+        sourcePort: e.target,
+        mouseX: e.clientX,
+        mouseY: e.clientY
+      };
+    }
+  }, true);
+
+  // ── Window resize ──
+  window.addEventListener('resize', function() { Viewport.resize(); });
+
+  // ── Batch fetch with concurrency limit ──
+  function fetchAllDetails(compIds, concurrency) {
+    concurrency = concurrency || 6;
+    var results = new Map();
+    var idx = 0;
+    return new Promise(function(resolve, reject) {
+      var active = 0;
+      var done = false;
+      function next() {
+        if (done) return;
+        while (active < concurrency && idx < compIds.length) {
+          (function(cid) {
+            active++;
+            API.getComp(cid).then(function(detail) {
+              results.set(cid, detail);
+              active--;
+              if (idx >= compIds.length && active === 0) {
+                done = true;
+                resolve(results);
+              } else {
+                next();
+              }
+            }).catch(function(err) {
+              console.warn('Failed to fetch comp ' + cid + ':', err);
+              active--;
+              if (idx >= compIds.length && active === 0) {
+                done = true;
+                resolve(results);
+              } else {
+                next();
+              }
+            });
+          })(compIds[idx]);
+          idx++;
+        }
+      }
+      if (compIds.length === 0) { resolve(results); return; }
+      next();
+    });
+  }
+
+  // ── Refresh all data ──
+  function refreshAll() {
+    return API.getTree().then(function(treeData) {
+      var comps = treeData.components || [];
+      state.components.clear();
+      var nonSystemIds = [];
+      for (var i = 0; i < comps.length; i++) {
+        var comp = comps[i];
+        state.components.set(comp.compId, comp);
+        if (!comp.isSystem) {
+          nonSystemIds.push(comp.compId);
+        }
+      }
+      return fetchAllDetails(nonSystemIds).then(function(details) {
+        state.compDetails = details;
+        state.links = collectLinks(details);
+        nodeLayer.innerHTML = '';
+        state.nodes.clear();
+        var prevSelection = new Set(state.selection);
+        state.selection.clear();
+        state.selectedWire = null;
+
+        // ONLY render canvas components (not channel, not system)
+        nonSystemIds.forEach(function(cid) {
+          var comp = state.components.get(cid);
+          if (!isCanvasComponent(comp)) return; // Skip channel components
+          var detail = state.compDetails.get(cid);
+          var el = createNodeElement(comp, detail);
+          nodeLayer.appendChild(el);
+          state.nodes.set(cid, el);
+          if (prevSelection.has(cid)) {
+            state.selection.add(cid);
+            el.classList.add('selected');
+          }
+        });
+        markConnectedPorts(state.links);
+        WireRenderer.draw(null);
+        if (state.showFlowAnim) startAnimLoop();
+
+        // Rebuild the tree navigator
+        buildTree();
+
+        return comps;
+      });
+    });
+  }
+
+  // ── Init ──
+  function init() {
+    Viewport.resize();
+    toast('Loading editor...', 'info', 2000);
+
+    var treePromise = API.getTree();
+    var palettePromise = API.getPalette();
+
+    treePromise.then(function(treeData) {
+      var comps = treeData.components || [];
+      state.components.clear();
+      var nonSystemIds = [];
+      var canvasIds = [];
+      for (var i = 0; i < comps.length; i++) {
+        var comp = comps[i];
+        state.components.set(comp.compId, comp);
+        if (!comp.isSystem) {
+          nonSystemIds.push(comp.compId);
+          if (isCanvasComponent(comp)) {
+            canvasIds.push(comp.compId);
+          }
+        }
+      }
+
+      connStatus.textContent = 'Loading ' + canvasIds.length + ' components...';
+
+      return fetchAllDetails(nonSystemIds).then(function(details) {
+        state.compDetails = details;
+        state.links = collectLinks(details);
+
+        // ONLY render canvas components (user control logic)
+        canvasIds.forEach(function(cid) {
+          var comp = state.components.get(cid);
+          var detail = state.compDetails.get(cid);
+          var el = createNodeElement(comp, detail);
+          nodeLayer.appendChild(el);
+          state.nodes.set(cid, el);
+        });
+
+        markConnectedPorts(state.links);
+        WireRenderer.draw(null);
+
+        // Build tree navigator
+        buildTree();
+
+        requestAnimationFrame(function() {
+          Viewport.fitAll();
+          if (state.showFlowAnim) startAnimLoop();
+        });
+
+        return comps;
+      });
+    }).then(function(comps) {
+      return palettePromise.then(function(paletteData) {
+        state.palette = paletteData;
+        populatePalette('');
+        liveDot.classList.add('connected');
+        var canvasCount = 0;
+        state.components.forEach(function(c) { if (isCanvasComponent(c)) canvasCount++; });
+        connStatus.textContent = canvasCount + ' on canvas, ' + comps.length + ' total';
+        toast('Loaded ' + canvasCount + ' control components, ' + state.links.length + ' wires', 'success');
+        LiveData.connect();
+      });
+    }).catch(function(err) {
+      console.error('Failed to load:', err);
+      liveDot.classList.add('error');
+      connStatus.textContent = 'Error';
+      toast('Failed to connect: ' + err.message, 'error', 5000);
+    });
+  }
+
+  // ── LiveData: WebSocket real-time value updates ──
+  var LiveData = {
+    ws: null, watchId: null, reconnectDelay: 1000, reconnectTimer: null,
+    maxReconnectDelay: 30000, pingTimer: null,
+    channelMap: new Map(),
+
+    connect: function() {
+      if (this.ws && this.ws.readyState <= 1) return;
+      var protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      var url = protocol + '//' + location.host + '/api/ws';
+      var self = this;
+      this.ws = new WebSocket(url);
+
+      this.ws.onopen = function() {
+        liveDot.classList.remove('error');
+        liveDot.classList.add('connected');
+        self.reconnectDelay = 1000;
+        self.pingTimer = setInterval(function() {
+          if (self.ws && self.ws.readyState === 1) self.ws.send(JSON.stringify({op:'ping'}));
+        }, 30000);
+        self.buildChannelMap();
+        self.subscribeAll();
+      };
+
+      this.ws.onmessage = function(evt) {
+        try {
+          var msg = JSON.parse(evt.data);
+          if (msg.op === 'subscribed') { self.watchId = msg.watchId; self.handleRows(msg.rows); }
+          else if (msg.op === 'update' || msg.op === 'snapshot') { self.handleRows(msg.rows); }
+        } catch(e) { console.error('WS parse:', e); }
+      };
+
+      this.ws.onclose = function() {
+        liveDot.classList.remove('connected');
+        liveDot.classList.add('error');
+        connStatus.textContent = 'Disconnected';
+        clearInterval(self.pingTimer);
+        self.watchId = null;
+        self.reconnectTimer = setTimeout(function() {
+          self.reconnectDelay = Math.min(self.reconnectDelay * 2, self.maxReconnectDelay);
+          self.connect();
+        }, self.reconnectDelay);
+      };
+    },
+
+    buildChannelMap: function() {
+      this.channelMap.clear();
+      state.components.forEach(function(comp, compId) {
+        if (!comp.isChannel) return;
+        var m = comp.name.match(/^ch_?(\d+)$/);
+        if (!m) return;
+        var chId = parseInt(m[1], 10);
+        if (chId <= 0) return;
+        var detail = state.compDetails ? state.compDetails.get(compId) : null;
+        if (detail && detail.slots) {
+          for (var i = 0; i < detail.slots.length; i++) {
+            if (detail.slots[i].name === 'out') {
+              var arr = LiveData.channelMap.get(chId) || [];
+              arr.push({compId: compId, slotIdx: detail.slots[i].index});
+              LiveData.channelMap.set(chId, arr);
+              break;
+            }
+          }
+        }
+      });
+      // Also map user ConstFloat "chXXXX" bridges
+      state.components.forEach(function(comp, compId) {
+        if (comp.isChannel || comp.isSystem) return;
+        var m = comp.name.match(/^ch(\d{3,5})$/);
+        if (!m) return;
+        var chId = parseInt(m[1], 10);
+        var detail = state.compDetails ? state.compDetails.get(compId) : null;
+        if (detail && detail.slots) {
+          for (var i = 0; i < detail.slots.length; i++) {
+            if (detail.slots[i].direction === 'out') {
+              var arr = LiveData.channelMap.get(chId) || [];
+              arr.push({compId: compId, slotIdx: detail.slots[i].index});
+              LiveData.channelMap.set(chId, arr);
+              break;
+            }
+          }
+        }
+      });
+    },
+
+    subscribeAll: function() {
+      if (!this.ws || this.ws.readyState !== 1) return;
+      var ids = Array.from(this.channelMap.keys());
+      if (ids.length === 0) return;
+      this.ws.send(JSON.stringify({op:'subscribe', ids:ids, pollInterval:1000}));
+    },
+
+    handleRows: function(rows) {
+      if (!rows || !rows.length) return;
+      for (var i = 0; i < rows.length; i++) {
+        var row = rows[i];
+        var targets = this.channelMap.get(row.channel);
+        if (!targets) continue;
+        for (var j = 0; j < targets.length; j++) {
+          var t = targets[j];
+          // Update in-memory
+          var detail = state.compDetails ? state.compDetails.get(t.compId) : null;
+          if (detail && detail.slots) {
+            for (var k = 0; k < detail.slots.length; k++) {
+              if (detail.slots[k].index === t.slotIdx) { detail.slots[k].value = row.cur; break; }
+            }
+          }
+          // Update DOM node (if on canvas)
+          var nodeEl = state.nodes.get(t.compId);
+          if (nodeEl) {
+            var valEls = nodeEl.querySelectorAll('.node-slot[data-slot-idx="' + t.slotIdx + '"] .slot-value');
+            valEls.forEach(function(valSpan) {
+              var formatted = formatSlotValue(row.cur, 'float');
+              if (valSpan.textContent !== formatted) {
+                valSpan.textContent = formatted;
+                valSpan.classList.add('changed');
+                setTimeout(function() { valSpan.classList.remove('changed'); }, 400);
+              }
+            });
+          }
+          // Update tree leaf value
+          var treeLeaf = treeView.querySelector('.tree-item[data-comp-id="' + t.compId + '"] .value');
+          if (treeLeaf) {
+            var fmtVal = formatSlotValue(row.cur, 'float');
+            if (treeLeaf.textContent !== fmtVal) {
+              treeLeaf.textContent = fmtVal;
+            }
+          }
+        }
+      }
+    },
+
+    disconnect: function() {
+      clearInterval(this.pingTimer);
+      clearTimeout(this.reconnectTimer);
+      if (this.ws) { this.ws.close(); this.ws = null; }
+    }
+  };
+
+  init();
+})();
+</script>
+</body>
+</html>

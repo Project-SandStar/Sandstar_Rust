@@ -19,6 +19,10 @@ pub struct Metrics {
     pub ws_total: AtomicU64,
     pub ws_messages_in: AtomicU64,
     pub ws_messages_out: AtomicU64,
+    pub rows_active: AtomicI64,
+    pub rows_total: AtomicU64,
+    pub rows_messages_in: AtomicU64,
+    pub rows_messages_out: AtomicU64,
 }
 
 static METRICS: Metrics = Metrics {
@@ -35,6 +39,10 @@ static METRICS: Metrics = Metrics {
     ws_total: AtomicU64::new(0),
     ws_messages_in: AtomicU64::new(0),
     ws_messages_out: AtomicU64::new(0),
+    rows_active: AtomicI64::new(0),
+    rows_total: AtomicU64::new(0),
+    rows_messages_in: AtomicU64::new(0),
+    rows_messages_out: AtomicU64::new(0),
 };
 
 /// Get the global metrics instance.
@@ -59,6 +67,10 @@ impl Metrics {
             "wsTotal": self.ws_total.load(Ordering::Relaxed),
             "wsMessagesIn": self.ws_messages_in.load(Ordering::Relaxed),
             "wsMessagesOut": self.ws_messages_out.load(Ordering::Relaxed),
+            "rowsActive": self.rows_active.load(Ordering::Relaxed),
+            "rowsTotal": self.rows_total.load(Ordering::Relaxed),
+            "rowsMessagesIn": self.rows_messages_in.load(Ordering::Relaxed),
+            "rowsMessagesOut": self.rows_messages_out.load(Ordering::Relaxed),
         })
     }
 }

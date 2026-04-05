@@ -65,7 +65,7 @@ impl TestServer {
         let engine = setup_demo_engine();
         let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCmd>(64);
         let handle = EngineHandle::new(cmd_tx);
-        let app = rest::router_with_auth(handle, auth_state, bearer_token.map(|s| s.to_string()), 0);
+        let app = rest::router_with_auth(handle, auth_state, bearer_token.map(|s| s.to_string()), 0, None);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());

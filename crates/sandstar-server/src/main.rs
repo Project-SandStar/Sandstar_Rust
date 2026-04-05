@@ -392,6 +392,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 8a. Set up REST API (Axum HTTP server, with optional TLS)
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<EngineCmd>(64);
+
+    // 8b. Start SOX/DASP server BEFORE REST so we can share the tree with REST endpoints.
+    let _sox_handles = if args.sox {
+        let sox_engine_handle = rest::EngineHandle::new(cmd_tx.clone());
+        info!(port = args.sox_port, "SOX/DASP server starting");
+        Some(sandstar_server::sox::spawn_sox_server(
+            args.sox_port,
+            args.sox_user.clone(),
+            args.sox_pass.clone(),
+            sox_engine_handle,
+            args.manifests_dir.clone(),
+            Some(dyn_store.clone()),
+        ))
+    } else {
+        None
+    };
+
+    // Build SOX API state for the DDC visual editor REST endpoints.
+    // When the SOX UDP server is running, reuse its shared tree.
+    // Otherwise, create a standalone tree + manifest DB so the editor
+    // works even without the `--sox` flag.
+    let sox_api_state = if let Some(ref h) = _sox_handles {
+        Some(rest::sox_api::SoxApiState {
+            tree: h.tree.clone(),
+            manifest_db: h.manifest_db.clone(),
+        })
+    } else {
+        use sandstar_server::sox::sox_handlers::{ComponentTree, ManifestDb};
+        let dir = args.manifests_dir.clone().unwrap_or_else(|| String::new());
+        let manifest_db = std::sync::Arc::new(ManifestDb::load(&dir));
+        let tree = std::sync::Arc::new(std::sync::RwLock::new(
+            ComponentTree::new_with_manifest(manifest_db.clone()),
+        ));
+        Some(rest::sox_api::SoxApiState { tree, manifest_db })
+    };
+
     if !args.no_rest {
         let handle = EngineHandle::new(cmd_tx.clone());
         let auth_state = sandstar_server::auth::AuthState::new(config.auth_store.clone());
@@ -401,6 +437,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             auth_state,
             config.auth_token.clone(),
             config.rate_limit,
+            sox_api_state,
         );
 
         // Merge dynamic tags REST endpoints
@@ -452,22 +489,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             start_http_server(addr, app, config.rate_limit).await?;
         }
     }
-
-    // 8b. Start SOX/DASP server (optional, for Sedona Application Editor)
-    let _sox_handle = if args.sox {
-        let sox_engine_handle = rest::EngineHandle::new(cmd_tx.clone());
-        info!(port = args.sox_port, "SOX/DASP server starting");
-        Some(sandstar_server::sox::spawn_sox_server(
-            args.sox_port,
-            args.sox_user.clone(),
-            args.sox_pass.clone(),
-            sox_engine_handle,
-            args.manifests_dir.clone(),
-            Some(dyn_store.clone()),
-        ))
-    } else {
-        None
-    };
 
     // 8c. Notify systemd that the service is ready (Type=notify)
     sd_notify::ready();

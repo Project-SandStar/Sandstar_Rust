@@ -1,7 +1,7 @@
 # Sandstar Rust Migration -- Roadmap v2
 
-**Date:** 2026-03-30 (updated)
-**Status:** PRODUCTION DEPLOYED — Rust v1.4.0 on BeagleBone. **Visual DDC programming working** — 35 executable component types with dataflow engine, components wired in Sedona Application Editor with wire lines on canvas, values propagate through links in real-time. **20/20 SOX commands complete** — all SOX ops implemented including fileWrite/fileRename. **Component persistence** via sox_components.json with auto-save every 5s. **Channel-to-logic bridge** using "chXXXX" naming convention for sensor proxy. **Full DDC loop verified with real hardware** — real sensor (121F) through Tstat to heating output. **Cycle detection** in link graph (DFS). **Faster COV** — 200 burst on subscribe, 50/tick normal. **185 component types** loaded from manifest XML parser across all 15 kits.
+**Date:** 2026-03-31 (updated)
+**Status:** PRODUCTION DEPLOYED — Rust v1.4.0 on BeagleBone. **Visual DDC programming working** — 35 executable component types with dataflow engine, components wired in Sedona Application Editor with wire lines on canvas, values propagate through links in real-time. **20/20 SOX commands complete** — all SOX ops implemented including fileWrite/fileRename. **Component persistence** via sox_components.json with auto-save every 5s. **Channel-to-logic bridge** using "chXXXX" naming convention for sensor proxy. **Full DDC loop verified with real hardware** — real sensor (121F) through Tstat to heating output. **Cycle detection** in link graph (DFS). **Faster COV** — 200 burst on subscribe, 50/tick normal. **185 component types** loaded from manifest XML parser across all 15 kits. **Phase 14.0A IN PROGRESS** — Web-based Visual DDC Editor (REST API endpoints for component tree CRUD).
 **Version:** 1.4.0 (7 crates, 1,637 tests, ~40,000+ lines of Rust)
 **Feature Parity:** ~99% (80/80 features vs C system + extras)
 **Research Documents:** 20 analysis docs (00-19) — deep gap analysis completed 2026-03-20
@@ -86,6 +86,12 @@
 | Phase | Description | Complexity | Research Doc | Priority |
 |-------|-------------|-----------|--------------|----------|
 | ~~Phase 8.0B~~ | ~~Full ROX Protocol~~ — **COMPLETE.** All 20/20 SOX commands implemented: readSchema(v), readVersion(y), readComp(c), subscribe(s), unsubscribe(u), write(w), fileOpen(f), fileRead(g), fileClose(q), event(e), readSchemaDetail(n), readProp(r), invoke(i), add(a), delete(d), rename(n), link(l), reorder(o), fileWrite(h), fileRename(x). | S | 15 | **COMPLETE** |
+| **Phase 14.0A** | **Web-Based Visual DDC Editor: REST API Endpoints** | **M** | -- | **IN PROGRESS** |
+| Phase 14.0B | Web-Based Visual DDC Editor: HTML Scaffold | M | -- | PLANNED |
+| Phase 14.0C | Web-Based Visual DDC Editor: Canvas Rendering Engine | L | -- | PLANNED |
+| Phase 14.0D | Web-Based Visual DDC Editor: Interactions | L | -- | PLANNED |
+| Phase 14.0E | Web-Based Visual DDC Editor: Component Palette & CRUD | M | -- | PLANNED |
+| Phase 14.0F | Web-Based Visual DDC Editor: Live Data & WebSocket | M | -- | PLANNED |
 | Phase 9.0 | Northbound clustering (roxWarp) | XL | 16 | Low |
 | Phase 11.0 | Sedona VM Rust port (bytecode interpreter, name interning) | XL | 12, 13, 17 | Very Low |
 | Phase 12.0 | Driver Framework v2 (Haxall-inspired, pure Rust) | XL | 18 | Very Low |
@@ -432,6 +438,122 @@ The security audit identified issues across four severity levels. These MUST be 
 
 ---
 
+### Phase 14.0: Web-Based Visual DDC Editor (Medium) [L]
+
+**Goal:** Browser-based visual programming editor served directly from the Rust server, enabling drag-and-drop DDC component wiring without requiring the Sedona Application Editor (Java desktop app). Provides a modern, accessible alternative for creating and editing control logic.
+
+---
+
+#### Phase 14.0A: REST API Endpoints (Rust Backend) -- IN PROGRESS
+
+**Goal:** Expose the ComponentTree via `Arc<RwLock>` and add 11 new `/api/sox/*` REST endpoints for tree CRUD, palette listing, and position updates.
+
+| Task | Description | Effort | Status |
+|------|-------------|--------|--------|
+| 14.0Aa | **Share ComponentTree via Arc<RwLock>**: Make the SOX component tree accessible from REST handlers alongside the existing DASP/SOX path. | [M] | IN PROGRESS |
+| 14.0Ab | **GET /api/sox/tree**: Return full component tree as JSON (id, name, type, children, slots, links, position). | [S] | |
+| 14.0Ac | **POST /api/sox/add**: Add component to tree (parent_id, kit_id, type_id, name). | [S] | |
+| 14.0Ad | **POST /api/sox/delete**: Delete component by id (with subtree). | [S] | |
+| 14.0Ae | **POST /api/sox/rename**: Rename component (id, new_name). | [S] | |
+| 14.0Af | **POST /api/sox/write**: Write slot value (comp_id, slot_name, value). | [S] | |
+| 14.0Ag | **POST /api/sox/link**: Add/remove link (from_comp, from_slot, to_comp, to_slot). | [S] | |
+| 14.0Ah | **GET /api/sox/palette**: Return available component types from manifest (kit/type/slots). | [S] | |
+| 14.0Ai | **POST /api/sox/position**: Update component x,y position for editor layout persistence. | [S] | |
+| 14.0Aj | **POST /api/sox/reorder**: Reorder children of a parent component. | [S] | |
+| 14.0Ak | **Integration tests**: REST round-trip tests for all 11 endpoints. | [M] | |
+
+**Total effort:** 3-5 days
+**Blocks:** Phase 14.0B
+
+---
+
+#### Phase 14.0B: Editor HTML Scaffold -- PLANNED
+
+**Goal:** Serve a single-file visual editor at `GET /editor` with a dark glassmorphism theme, toolbar, sidebar, canvas workspace, and CSS design system.
+
+| Task | Description | Effort | Status |
+|------|-------------|--------|--------|
+| 14.0Ba | **GET /editor route**: Serve single HTML file with embedded CSS/JS from Rust server (no build tooling). | [S] | PLANNED |
+| 14.0Bb | **Dark glassmorphism theme**: CSS design system with blur/transparency effects, category colors, CSS custom properties. | [M] | PLANNED |
+| 14.0Bc | **Toolbar**: Top bar with zoom controls, undo/redo buttons, save, grid toggle, editor title. | [S] | PLANNED |
+| 14.0Bd | **Sidebar**: Collapsible left panel showing component tree hierarchy, properties panel for selected node. | [M] | PLANNED |
+| 14.0Be | **Canvas workspace**: Central area for node placement and wire drawing. Responsive layout. | [S] | PLANNED |
+
+**Total effort:** 2-3 days
+**Blocks:** Phase 14.0C
+
+---
+
+#### Phase 14.0C: Canvas Rendering Engine -- PLANNED
+
+**Goal:** Hybrid DOM nodes + Canvas wires rendering. Grid background, bezier curve wires, viewport pan/zoom, node DOM elements with category-colored headers.
+
+| Task | Description | Effort | Status |
+|------|-------------|--------|--------|
+| 14.0Ca | **Grid background**: Canvas-rendered dot/line grid with zoom-responsive density. | [S] | PLANNED |
+| 14.0Cb | **Node DOM elements**: HTML div nodes with category-colored headers (Math=blue, Logic=green, HVAC=orange, etc.), input/output port circles, slot value displays. | [M] | PLANNED |
+| 14.0Cc | **Bezier curve wires**: Canvas-drawn cubic bezier connections between ports, colored by data type. | [M] | PLANNED |
+| 14.0Cd | **Viewport pan/zoom**: Mouse wheel zoom, middle-click pan, zoom-to-fit, minimap (optional). | [M] | PLANNED |
+| 14.0Ce | **Coordinate system**: World-space to screen-space transform, consistent hit testing across zoom levels. | [S] | PLANNED |
+
+**Total effort:** 3-5 days
+**Blocks:** Phase 14.0D
+
+---
+
+#### Phase 14.0D: Interactions -- PLANNED
+
+**Goal:** Drag nodes, create/delete wires by port dragging, select/multi-select, pan/zoom, context menus, undo/redo stack.
+
+| Task | Description | Effort | Status |
+|------|-------------|--------|--------|
+| 14.0Da | **Drag nodes**: Click-drag to move nodes, snap-to-grid option, update position via REST. | [S] | PLANNED |
+| 14.0Db | **Wire creation**: Drag from output port to input port to create link, visual preview during drag. | [M] | PLANNED |
+| 14.0Dc | **Wire deletion**: Click wire to select, Delete key or right-click to remove. | [S] | PLANNED |
+| 14.0Dd | **Select/multi-select**: Click to select node, Shift+click or rubber-band for multi-select, selection highlight. | [M] | PLANNED |
+| 14.0De | **Context menus**: Right-click on canvas (add component), node (rename/delete/properties), wire (delete), port (disconnect all). | [M] | PLANNED |
+| 14.0Df | **Undo/redo stack**: Command pattern for add/delete/move/wire/rename operations, Ctrl+Z/Ctrl+Y. | [M] | PLANNED |
+
+**Total effort:** 3-5 days
+**Blocks:** Phase 14.0E
+
+---
+
+#### Phase 14.0E: Component Palette & CRUD -- PLANNED
+
+**Goal:** Searchable command palette, add/delete/rename components, inline property editing, right-click context menu.
+
+| Task | Description | Effort | Status |
+|------|-------------|--------|--------|
+| 14.0Ea | **Command palette**: Press `/` to open searchable overlay listing all available component types from manifest. Filter by name/kit/category. | [M] | PLANNED |
+| 14.0Eb | **Add component**: Select from palette, click canvas to place. Calls POST /api/sox/add. | [S] | PLANNED |
+| 14.0Ec | **Delete component**: Select + Delete key or context menu. Removes links. Calls POST /api/sox/delete. | [S] | PLANNED |
+| 14.0Ed | **Rename component**: Double-click node header for inline rename. Calls POST /api/sox/rename. | [S] | PLANNED |
+| 14.0Ee | **Inline property editing**: Click slot value on node to edit in-place. Calls POST /api/sox/write. | [M] | PLANNED |
+
+**Total effort:** 2-3 days
+**Blocks:** Phase 14.0F
+
+---
+
+#### Phase 14.0F: Live Data & WebSocket -- PLANNED
+
+**Goal:** Real-time value updates via WebSocket, flow animation on wires, cross-editor sync (browser and Sedona Editor), value flash animations.
+
+| Task | Description | Effort | Status |
+|------|-------------|--------|--------|
+| 14.0Fa | **WebSocket subscription**: Connect to existing `/api/ws` endpoint, subscribe to component COV events. | [S] | PLANNED |
+| 14.0Fb | **Live value updates**: Update slot values on node DOM elements in real-time as COV events arrive. | [M] | PLANNED |
+| 14.0Fc | **Flow animation**: Animated dashes/particles on wires to indicate data flow direction and activity. | [S] | PLANNED |
+| 14.0Fd | **Value flash animations**: Brief highlight/pulse when a slot value changes (CSS transition). | [S] | PLANNED |
+| 14.0Fe | **Cross-editor sync**: Changes made in Sedona Application Editor (via SOX/DASP) reflect in browser editor and vice versa. Tree change events trigger UI refresh. | [M] | PLANNED |
+| 14.0Ff | **Connection status**: Visual indicator for WebSocket connection state (connected/reconnecting/disconnected). | [S] | PLANNED |
+
+**Total effort:** 3-5 days
+**Blocks:** Nothing
+
+---
+
 ### Phase 9.0: Northbound Clustering -- roxWarp (Low) [XL]
 
 **Goal:** Multi-device clustering with delta-encoded state replication.
@@ -558,6 +680,14 @@ COMPLETED production tracks:
   ✓ Phase 10.0:     Config-driven control (A-E complete + .sax converter)
   ✓ DDC Loop:       Visual DDC programming, 35 component types, persistence, channel bridge
 
+Active development:
+  ├── Phase 14.0A: Web DDC Editor REST API [M, IN PROGRESS]
+  ├── Phase 14.0B: Editor HTML Scaffold    [M, PLANNED, needs 14.0A]
+  ├── Phase 14.0C: Canvas Rendering Engine [L, PLANNED, needs 14.0B]
+  ├── Phase 14.0D: Interactions            [L, PLANNED, needs 14.0C]
+  ├── Phase 14.0E: Palette & CRUD          [M, PLANNED, needs 14.0D]
+  └── Phase 14.0F: Live Data & WebSocket   [M, PLANNED, needs 14.0E]
+
 Remaining future tracks (post-production):
   ├── Phase 9.0:  roxWarp clustering       [XL, no blockers]
   ├── Phase 11.0: Sedona VM Rust port      [XL, may be unnecessary]
@@ -565,7 +695,7 @@ Remaining future tracks (post-production):
   └── Phase 13.0: Dynamic Slots            [L, needs 12.0]
 ```
 
-**Status:** PRODUCTION LIVE since 2026-03-18, v1.4.0 (20/20 SOX, 35 component types, visual DDC, full DDC loop verified, 1,637 tests)
+**Status:** PRODUCTION LIVE since 2026-03-18, v1.4.0 (20/20 SOX, 35 component types, visual DDC, full DDC loop verified, 1,637 tests). **Phase 14.0A (Web DDC Editor REST API) IN PROGRESS.**
 **BeagleBone:** 192.168.1.3 (Todd Air Flow), port 1919
 **Deployment guide:** `docs/DEPLOYMENT_CHECKLIST.md` (copy-paste ready)
 
@@ -591,6 +721,12 @@ Remaining future tracks (post-production):
 | 8.0A | Haystack-over-WebSocket | Medium | [M] | COMPLETE (ws.rs + 31 tests) | 15 |
 | 8.0A-SOX | SOX/DASP protocol (pure Rust) | Medium | [L] | COMPLETE (DASP + 20/20 commands, 185 manifest types, dataflow engine) | 15 |
 | 8.0B | Full ROX Protocol (all SOX ops) | Low | [S] | **COMPLETE** (20/20 SOX commands, fileWrite+fileRename done) | 15 |
+| **14.0A** | **Web DDC Editor: REST API** | **Medium** | **[M]** | **IN PROGRESS** | -- |
+| 14.0B | Web DDC Editor: HTML Scaffold | Medium | [M] | PLANNED | -- |
+| 14.0C | Web DDC Editor: Canvas Rendering | Medium | [L] | PLANNED | -- |
+| 14.0D | Web DDC Editor: Interactions | Medium | [L] | PLANNED | -- |
+| 14.0E | Web DDC Editor: Palette & CRUD | Medium | [M] | PLANNED | -- |
+| 14.0F | Web DDC Editor: Live Data & WS | Medium | [M] | PLANNED | -- |
 | 9.0 | roxWarp clustering | Low | [XL] | Not started | 16 |
 | 10.0A-D | Config-driven control engine | Medium | [M] | COMPLETE | -- |
 | 10.0E | Additional components library | Low | [M] | COMPLETE (20 + converter) | -- |
@@ -697,6 +833,7 @@ Deep gap analysis completed 2026-03-20 (3-agent, 20 documents vs full codebase).
 | Phase 5.8h added (code quality) | Clippy warnings are all style-level but should be cleaned before production. No correctness issues found | 2026-03-10 |
 | Phase 5.8i added (test coverage) | dispatch.rs, CLI, main.rs, ipc.rs have 0 tests. Targeting ~55-75 new tests to reach ~80% coverage | 2026-03-10 |
 | Hardware soak reduced 48h→4-8h | 800 tests + SimulatorHal E2E + soak/stress tests provide confidence that 48h was designed to build. 4-8h validates only hardware-specific behavior (I2C timing, ADC accuracy, ARM constraints) | 2026-03-10 |
+| Web-based DDC editor (Phase 14.0) | Browser-based visual editor served from Rust server replaces need for Java-based Sedona Application Editor. Single HTML file with embedded CSS/JS, no build tooling. Hybrid DOM nodes + Canvas wires for rendering. 6 sub-phases (A-F) from REST API through live WebSocket sync | 2026-03-31 |
 | Project declared hardware-ready | All software phases complete. 800 tests, 0 clippy, 0 security issues. Only blocker is BeagleBone network access. Deployment checklist created at docs/DEPLOYMENT_CHECKLIST.md | 2026-03-10 |
 | Phase 5.9 production cutover | C sandstar v0.1.1 removed, Rust v1.0.0 deployed to BeagleBone (Todd Air Flow). 150 channels, 15 polls, 3.4MB memory, 0.28% CPU | 2026-03-18 |
 | I2C protocol detection by address | SDP810 channels with generic labels ("CFM Flow") were using wrong protocol. Added address-based fallback (0x25 → SDP810) | 2026-03-19 |

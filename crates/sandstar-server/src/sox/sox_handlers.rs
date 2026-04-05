@@ -1825,6 +1825,308 @@ impl ManifestDb {
         ]);
         db.type_name_lookup.insert((1, "ChannelRead".to_string()), 100);
 
+        // Register hardcoded control types so the palette works even without manifest XMLs.
+        // Only insert if not already loaded from a manifest file (manifests take priority).
+        let hardcoded_types: Vec<(u8, u8, &str, Vec<ManifestSlot>)> = vec![
+            (2, 14, "ConstFloat", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "set".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_ACTION, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "setNull".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, default_value: SlotValue::Null },
+            ]),
+            (2, 15, "ConstInt", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(0) },
+                ManifestSlot { name: "set".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_ACTION, default_value: SlotValue::Int(0) },
+            ]),
+            (2, 13, "ConstBool", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "setTrue".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, default_value: SlotValue::Null },
+                ManifestSlot { name: "setFalse".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, default_value: SlotValue::Null },
+                ManifestSlot { name: "setNull".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, default_value: SlotValue::Null },
+            ]),
+            (2, 3, "Add2", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+            ]),
+            (2, 49, "Sub2", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+            ]),
+            (2, 37, "Mul2", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+            ]),
+            (2, 18, "Div2", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "div0".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+            ]),
+            (2, 56, "WriteBool", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "in".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "setTrue".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, default_value: SlotValue::Null },
+                ManifestSlot { name: "setFalse".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, default_value: SlotValue::Null },
+                ManifestSlot { name: "setNull".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, default_value: SlotValue::Null },
+            ]),
+            (2, 57, "WriteFloat", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "in".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "set".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_ACTION, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "setNull".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, default_value: SlotValue::Null },
+            ]),
+            (2, 58, "WriteInt", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "in".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(0) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Int(0) },
+                ManifestSlot { name: "set".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_ACTION, default_value: SlotValue::Int(0) },
+            ]),
+            // --- 4-input Arithmetic ---
+            (2, 4, "Add4", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in3".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in4".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+            ]),
+            (2, 50, "Sub4", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in3".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in4".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+            ]),
+            (2, 38, "Mul4", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in3".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in4".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+            ]),
+            // --- Unary Math ---
+            (2, 39, "Neg", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+            ]),
+            (2, 23, "FloatOffset", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "offset".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(0.0) },
+            ]),
+            (2, 34, "Max", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+            ]),
+            (2, 35, "Min", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+            ]),
+            (2, 32, "Limiter", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "lowLmt".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "highLmt".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(100.0) },
+            ]),
+            (2, 47, "Round", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "decimalPlaces".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(2) },
+            ]),
+            // --- Boolean Logic ---
+            (2, 5, "And2", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+            ]),
+            (2, 6, "And4", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "in3".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "in4".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+            ]),
+            (2, 42, "Or2", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+            ]),
+            (2, 43, "Or4", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "in3".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "in4".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+            ]),
+            (2, 40, "Not", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "in".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+            ]),
+            (2, 59, "Xor", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+            ]),
+            // --- Comparator ---
+            (2, 12, "Cmpr", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "xgy".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "xey".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "xly".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "x".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "y".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+            ]),
+            // --- Type Conversion ---
+            (2, 10, "B2P", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "in".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+            ]),
+            (2, 22, "F2I", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Int(0) },
+                ManifestSlot { name: "in".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+            ]),
+            (2, 26, "I2F", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Int(0) },
+            ]),
+            // --- Multiplexers / Switches ---
+            (2, 1, "ASW", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "sel".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+            ]),
+            (2, 11, "BSW", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "sel".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+            ]),
+            (2, 28, "ISW", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Int(0) },
+                ManifestSlot { name: "sel".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Int(0) },
+                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Int(0) },
+            ]),
+            // --- Hysteresis / Latches ---
+            (2, 25, "Hysteresis", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "in".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "rising".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(75.0) },
+                ManifestSlot { name: "falling".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(70.0) },
+            ]),
+            (2, 48, "SRLatch", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "set".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "reset".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+            ]),
+            (2, 46, "Reset", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "in".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "inLow".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "inHigh".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(100.0) },
+                ManifestSlot { name: "outLow".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "outHigh".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(100.0) },
+            ]),
+            // --- Sequencer ---
+            (2, 31, "LSeq", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Int(0) },
+                ManifestSlot { name: "in".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "numStages".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(4) },
+                ManifestSlot { name: "rampTime".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(0.0) },
+            ]),
+            // --- Stateful: Timers ---
+            (2, 20, "DlyOn", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "in".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "delay".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(5.0) },
+            ]),
+            (2, 19, "DlyOff", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "in".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "delay".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(5.0) },
+            ]),
+            (2, 16, "Count", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Int(0) },
+                ManifestSlot { name: "in".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "preset".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(0) },
+            ]),
+            (2, 44, "Ramp", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "min".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "max".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(100.0) },
+                ManifestSlot { name: "step".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(1.0) },
+            ]),
+            // --- Tstat (Thermostat with deadband) ---
+            (2, 54, "Tstat", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "diff".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(2.0) },
+                ManifestSlot { name: "isHeating".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Bool(true) },
+                ManifestSlot { name: "sp".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(72.0) },
+                ManifestSlot { name: "cv".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "raise".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "lower".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+            ]),
+            // --- UpDn (Up/down accumulator) ---
+            (2, 55, "UpDn", vec![
+                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
+                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "up".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "dn".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
+                ManifestSlot { name: "step".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(1.0) },
+                ManifestSlot { name: "min".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(0.0) },
+                ManifestSlot { name: "max".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(100.0) },
+            ]),
+        ];
+        for (kit_id, type_id, type_name, slots) in hardcoded_types {
+            if !db.types.contains_key(&(kit_id, type_id)) {
+                db.types.insert((kit_id, type_id), slots);
+                db.type_name_lookup.insert((kit_id, type_name.to_string()), type_id);
+            }
+        }
+
         tracing::info!(
             total_types = db.types.len(),
             "ManifestDb loaded"
@@ -2023,6 +2325,23 @@ impl ManifestDb {
     /// Get the total number of types in the database.
     pub fn type_count(&self) -> usize {
         self.types.len()
+    }
+
+    /// Iterate over all (kit_id, type_id) -> slots entries.
+    pub fn all_types(&self) -> impl Iterator<Item = (&(u8, u8), &Vec<ManifestSlot>)> {
+        self.types.iter()
+    }
+
+    /// Look up a type name by (kit_index, type_id).
+    ///
+    /// Reverse lookup through `type_name_lookup`.
+    pub fn type_name(&self, kit_id: u8, type_id: u8) -> Option<String> {
+        for ((k, name), &tid) in &self.type_name_lookup {
+            if *k == kit_id && tid == type_id {
+                return Some(name.clone());
+            }
+        }
+        None
     }
 
     /// Convert manifest slots to virtual slots (with default values).
