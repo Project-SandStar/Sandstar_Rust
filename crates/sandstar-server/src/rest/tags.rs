@@ -4,21 +4,31 @@
 //!
 //! - `GET  /api/tags`             — list all components with dynamic tags
 //! - `GET  /api/tags/{comp_id}`   — get all tags for a component
+//! - `GET  /api/tags/{comp_id}?computed=false` — exclude computed slots
 //! - `PUT  /api/tags/{comp_id}`   — set tags (merge/replace)
 //! - `DELETE /api/tags/{comp_id}/{key}` — remove a specific tag
+//! - `GET  /api/tags/stats`       — interner and store statistics
 
-use axum::extract::{Json, Path, State};
+use axum::extract::{Json, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get};
 use axum::Router;
+use serde::Deserialize;
 use std::collections::HashMap;
 
 use crate::sox::dyn_slots::DynValue;
 use crate::sox::DynSlotStoreHandle;
 
+/// Query parameters for GET /api/tags/{comp_id}.
+#[derive(Debug, Deserialize)]
+struct GetTagsQuery {
+    /// Include computed (virtual) slot values. Default: true.
+    computed: Option<bool>,
+}
+
 /// Convert a plain JSON value to DynValue automatically.
-fn json_to_dynvalue(val: &serde_json::Value) -> DynValue {
+pub fn json_to_dynvalue(val: &serde_json::Value) -> DynValue {
     match val {
         serde_json::Value::Null => DynValue::Null,
         serde_json::Value::Bool(b) => DynValue::Bool(*b),
@@ -40,6 +50,7 @@ fn json_to_dynvalue(val: &serde_json::Value) -> DynValue {
 pub fn router(store: DynSlotStoreHandle) -> Router {
     Router::new()
         .route("/api/tags", get(list_tags))
+        .route("/api/tags/stats", get(get_stats))
         .route("/api/tags/{comp_id}", get(get_tags).put(set_tags))
         .route("/api/tags/{comp_id}/{key}", delete(delete_tag))
         .with_state(store)
@@ -73,28 +84,63 @@ async fn list_tags(
 
 /// GET /api/tags/{comp_id} — get all dynamic tags for a component.
 ///
+/// Query params:
+/// - `computed=false` — exclude computed (virtual) slot values
+///
 /// Response: `{ "compId": 10, "tags": { "devEUI": {"type":"Str","val":"A8..."}, ... } }`
 async fn get_tags(
     State(store): State<DynSlotStoreHandle>,
     Path(comp_id): Path<u16>,
+    Query(query): Query<GetTagsQuery>,
 ) -> Response {
+    let include_computed = query.computed.unwrap_or(true);
     let store = store.read().expect("dyn_slots lock poisoned");
-    match store.get_all(comp_id) {
-        Some(tags) => {
-            let body = serde_json::json!({
-                "compId": comp_id,
-                "tags": tags,
-            });
-            Json(body).into_response()
-        }
-        None => {
-            let body = serde_json::json!({
-                "compId": comp_id,
-                "tags": {},
-            });
-            Json(body).into_response()
+
+    if include_computed {
+        let tags = store.get_all_with_computed(comp_id);
+        let body = serde_json::json!({
+            "compId": comp_id,
+            "tags": tags,
+        });
+        Json(body).into_response()
+    } else {
+        match store.get_all(comp_id) {
+            Some(tags) => {
+                let body = serde_json::json!({
+                    "compId": comp_id,
+                    "tags": tags,
+                });
+                Json(body).into_response()
+            }
+            None => {
+                let body = serde_json::json!({
+                    "compId": comp_id,
+                    "tags": {},
+                });
+                Json(body).into_response()
+            }
         }
     }
+}
+
+/// GET /api/tags/stats — interner and store statistics.
+///
+/// Response: `{ "totalTags": 42, "components": 5, "interner": { ... } }`
+async fn get_stats(
+    State(store): State<DynSlotStoreHandle>,
+) -> Response {
+    let store = store.read().expect("dyn_slots lock poisoned");
+    let stats = store.interner_stats();
+    let body = serde_json::json!({
+        "totalTags": store.total_count(),
+        "components": store.comp_ids().len(),
+        "interner": {
+            "internedCount": stats.interned_count,
+            "totalStringBytes": stats.total_string_bytes,
+            "preInterned": stats.pre_interned,
+        },
+    });
+    Json(body).into_response()
 }
 
 /// PUT /api/tags/{comp_id} — set dynamic tags for a component.
@@ -411,5 +457,91 @@ mod tests {
         .unwrap();
         assert_eq!(result["compId"], 999);
         assert_eq!(result["tags"].as_object().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn get_tags_includes_computed_by_default() {
+        let store = test_store();
+        {
+            let mut s = store.write().unwrap();
+            s.set(10, "dis".into(), DynValue::Str("Room Temp".into())).unwrap();
+            s.add_computed(10, crate::sox::dyn_slots::ComputedSlot {
+                name: "label".into(),
+                formula: crate::sox::dyn_slots::ComputedFormula::CopyTag("dis".into()),
+            });
+        }
+        let app = router(store);
+        let resp = app
+            .oneshot(Request::get("/api/tags/10").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let result: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap(),
+        )
+        .unwrap();
+        let tags = result["tags"].as_object().unwrap();
+        assert_eq!(tags.len(), 2);
+        // Both stored "dis" and computed "label" should be present.
+        assert!(tags.contains_key("dis"));
+        assert!(tags.contains_key("label"));
+    }
+
+    #[tokio::test]
+    async fn get_tags_computed_false_excludes_computed() {
+        let store = test_store();
+        {
+            let mut s = store.write().unwrap();
+            s.set(10, "dis".into(), DynValue::Str("Room Temp".into())).unwrap();
+            s.add_computed(10, crate::sox::dyn_slots::ComputedSlot {
+                name: "label".into(),
+                formula: crate::sox::dyn_slots::ComputedFormula::CopyTag("dis".into()),
+            });
+        }
+        let app = router(store);
+        let resp = app
+            .oneshot(
+                Request::get("/api/tags/10?computed=false")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let result: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap(),
+        )
+        .unwrap();
+        let tags = result["tags"].as_object().unwrap();
+        assert_eq!(tags.len(), 1);
+        assert!(tags.contains_key("dis"));
+        assert!(!tags.contains_key("label"));
+    }
+
+    #[tokio::test]
+    async fn get_stats_endpoint() {
+        let store = test_store();
+        {
+            let mut s = store.write().unwrap();
+            s.set(10, "dis".into(), DynValue::Str("Test".into())).unwrap();
+            s.set(20, "unit".into(), DynValue::Str("degF".into())).unwrap();
+        }
+        let app = router(store);
+        let resp = app
+            .oneshot(Request::get("/api/tags/stats").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let result: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["totalTags"], 2);
+        assert_eq!(result["components"], 2);
+        // Interner stats should be present.
+        let interner = &result["interner"];
+        assert!(interner["internedCount"].as_u64().unwrap() >= 28);
+        assert!(interner["totalStringBytes"].as_u64().unwrap() > 0);
+        assert!(interner["preInterned"].as_u64().unwrap() >= 28);
     }
 }

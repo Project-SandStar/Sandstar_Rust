@@ -28,7 +28,7 @@ use crate::sox::sox_handlers::{
     DEFAULT_KITS, SLOT_FLAG_ACTION, SLOT_FLAG_CONFIG,
 };
 use crate::sox::sox_protocol::SoxValueType;
-use crate::sox::SharedComponentTree;
+use crate::sox::{DynSlotStoreHandle, SharedComponentTree};
 
 // ── State ───────────────────────────────────────────────────
 
@@ -37,6 +37,8 @@ use crate::sox::SharedComponentTree;
 pub struct SoxApiState {
     pub tree: SharedComponentTree,
     pub manifest_db: Arc<ManifestDb>,
+    /// Optional dynamic tag store for runtime metadata on components.
+    pub dyn_store: Option<DynSlotStoreHandle>,
 }
 
 // ── JSON types ──────────────────────────────────────────────
@@ -93,6 +95,9 @@ struct CompDetailJson {
     is_system: bool,
     slots: Vec<SlotJson>,
     links: Vec<LinkJson>,
+    /// Dynamic tags from the side-car DynSlotStore (omitted when empty).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tags: Option<std::collections::HashMap<String, crate::sox::dyn_slots::DynValue>>,
 }
 
 #[derive(Deserialize)]
@@ -343,7 +348,11 @@ fn comp_to_tree_json(comp: &VirtualComponent, tree: &ComponentTree) -> TreeCompo
 }
 
 /// Build a CompDetailJson from a VirtualComponent.
-fn comp_to_detail_json(comp: &VirtualComponent, tree: &ComponentTree) -> CompDetailJson {
+fn comp_to_detail_json(
+    comp: &VirtualComponent,
+    tree: &ComponentTree,
+    dyn_store: Option<&DynSlotStoreHandle>,
+) -> CompDetailJson {
     let position = if let Some(meta_slot) = comp.slots.first() {
         decode_position(&meta_slot.value)
     } else {
@@ -373,6 +382,11 @@ fn comp_to_detail_json(comp: &VirtualComponent, tree: &ComponentTree) -> CompDet
             to_slot: l.to_slot,
         })
         .collect();
+    // Fetch dynamic tags from the side-car store if available.
+    let tags = dyn_store.and_then(|ds| {
+        let store = ds.read().ok()?;
+        store.get_all(comp.comp_id).cloned()
+    });
     CompDetailJson {
         comp_id: comp.comp_id,
         parent_id: comp.parent_id,
@@ -386,6 +400,7 @@ fn comp_to_detail_json(comp: &VirtualComponent, tree: &ComponentTree) -> CompDet
         is_system: is_system_comp(comp.comp_id),
         slots,
         links,
+        tags,
     }
 }
 
@@ -413,7 +428,7 @@ pub async fn get_comp(
 ) -> Response {
     let tree = state.tree.read().unwrap();
     match tree.get(id) {
-        Some(comp) => Json(comp_to_detail_json(comp, &tree)).into_response(),
+        Some(comp) => Json(comp_to_detail_json(comp, &tree, state.dyn_store.as_ref())).into_response(),
         None => (StatusCode::NOT_FOUND, format!("component {id} not found")).into_response(),
     }
 }

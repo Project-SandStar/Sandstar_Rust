@@ -646,13 +646,15 @@ The security audit identified issues across four severity levels. These MUST be 
 
 **Research doc:** [19_DYNAMIC_SLOTS.md](research/19_DYNAMIC_SLOTS.md)
 
-| Task | Description | Effort |
-|------|-------------|--------|
-| 13.0a | **DynSlotMap**: `HashMap<String, TagValue>` on Component struct for runtime tags. | [M] |
-| 13.0b | **Protocol metadata**: Store Modbus register address, BACnet object ID, MQTT topic, LoRaWAN devEUI as dynamic slots. | [M] |
-| 13.0c | **SOX/ROX protocol extension**: Serialize/deserialize dynamic slots over network. | [M] |
-| 13.0d | **Persistence**: Save/load dynamic slots in scode image or sidecar database. | [M] |
-| 13.0e | **Haystack tag integration**: Dynamic slots participate in Haystack filter queries. | [M] |
+| Task | Description | Effort | Status |
+|------|-------------|--------|--------|
+| 13.0a | **DynSlotStore**: Side-car `HashMap<u16, HashMap<String, DynValue>>` with typed values, memory limits (64/comp, 10K total). | [M] | COMPLETE |
+| 13.0b | **REST API**: GET/PUT/DELETE `/api/tags/{comp_id}` with merge/replace modes, plain JSON auto-conversion. | [M] | COMPLETE |
+| 13.0c | **Persistence**: Atomic JSON save (write .tmp then rename), load on startup, corrupt file recovery, version tag, auto-save every 5s. | [M] | COMPLETE |
+| 13.0d | **Component cleanup**: Tags auto-deleted when SOX component is deleted. | [S] | COMPLETE |
+| 13.0e | **Protocol metadata**: Store Modbus register address, BACnet object ID, MQTT topic, LoRaWAN devEUI as dynamic slots. | [M] | COMPLETE (via REST API) |
+| 13.0f | **SOX/ROX protocol extension**: Serialize/deserialize dynamic slots over network (readTags, setTags, deleteTag). | [M] | Not started |
+| 13.0g | **Haystack tag integration**: Dynamic slots participate in Haystack filter queries. | [M] | Not started |
 
 **Total effort:** 1-2 weeks
 **Blocked by:** Phase 12.0 (discovery creates the need for dynamic slots)
@@ -692,7 +694,7 @@ Remaining future tracks (post-production):
   ├── Phase 9.0:  roxWarp clustering       [XL, no blockers]
   ├── Phase 11.0: Sedona VM Rust port      [XL, may be unnecessary]
   ├── Phase 12.0: Driver Framework v2      [XL, needs 11.0]
-  └── Phase 13.0: Dynamic Slots            [L, needs 12.0]
+  └── Phase 13.0: Dynamic Slots            [L, needs 12.0, 13.0a-e COMPLETE]
 ```
 
 **Status:** PRODUCTION LIVE since 2026-03-18, v1.4.0 (20/20 SOX, 35 component types, visual DDC, full DDC loop verified, 1,637 tests). **Phase 14.0A (Web DDC Editor REST API) IN PROGRESS.**
@@ -732,7 +734,7 @@ Remaining future tracks (post-production):
 | 10.0E | Additional components library | Low | [M] | COMPLETE (20 + converter) | -- |
 | 11.0 | Sedona VM Rust port | Very Low | [XL] | Not started | 12, 13, 14, 17 |
 | **12.0** | **Driver Framework v2** | **Very Low** | **[XL]** | **In progress (12.0a,d complete; stubs for e)** | **18** |
-| **13.0** | **Dynamic Slots** | **Very Low** | **[L]** | **Not started** | **19** |
+| **13.0** | **Dynamic Slots** | **Very Low** | **[L]** | **In progress (13.0a-e complete; SOX/ROX + Haystack pending)** | **19** |
 
 ---
 
@@ -796,7 +798,7 @@ Deep gap analysis completed 2026-03-20 (3-agent, 20 documents vs full codebase).
 | 16 | roxWarp Protocol | 9.0 | 0% | Entirely unimplemented (future Phase 9.0) |
 | 17 | Name Length Analysis | 11.0c | 60% | Unlimited names via String; interning unnecessary at scale. **31-char Sedona-compat name validation enforced across all entry points** (REST, RoWS, SOX add/rename, editor JS) as of 2026-04-04. |
 | 18 | Driver Framework v2 | 12.0 | 55% | Driver trait + DriverManager + LocalIoDriver + REST endpoints done. Modbus/BACnet/MQTT stubs created. PollScheduler/WatchManager/async actor pending |
-| 19 | Dynamic Slots | 13.0 | 10% | Basic tags HashMap on channels; full DynSlotStore not needed yet |
+| 19 | Dynamic Slots | 13.0 | 60% | DynSlotStore with REST API, persistence (atomic save/load on startup), auto-save 5s, component cleanup, memory limits. SOX/ROX protocol extension and Haystack filter integration pending |
 
 **Key architectural divergence:** Custom Zinc/filter implementation instead of libhaystack dependency (docs 03/05); in-process bridge instead of 29-function C FFI (doc 06); channel-centric model instead of component-centric (docs 18/19). All are defensible engineering decisions that reduced complexity and external dependencies.
 

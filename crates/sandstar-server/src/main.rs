@@ -417,6 +417,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(rest::sox_api::SoxApiState {
             tree: h.tree.clone(),
             manifest_db: h.manifest_db.clone(),
+            dyn_store: Some(dyn_store.clone()),
         })
     } else {
         use sandstar_server::sox::sox_handlers::{ComponentTree, ManifestDb};
@@ -425,7 +426,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let tree = std::sync::Arc::new(std::sync::RwLock::new(
             ComponentTree::new_with_manifest(manifest_db.clone()),
         ));
-        Some(rest::sox_api::SoxApiState { tree, manifest_db })
+        Some(rest::sox_api::SoxApiState { tree, manifest_db, dyn_store: Some(dyn_store.clone()) })
     };
 
     // 8b2. Set up roxWarp cluster (optional, requires --cluster flag)

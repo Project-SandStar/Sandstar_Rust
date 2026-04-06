@@ -791,6 +791,7 @@ pub fn router_with_auth(
             .with_state(rows::RowsState {
                 tree: sox.tree.clone(),
                 manifest_db: sox.manifest_db.clone(),
+                dyn_store: sox.dyn_store.clone(),
             });
         app = app
             .merge(sox_api::public_router(sox.clone()))

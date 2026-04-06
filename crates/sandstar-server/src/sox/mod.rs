@@ -158,6 +158,16 @@ async fn run_sox_server(
         format!("{config_dir}/dyn_slots.json")
     };
 
+    // Load persisted dynamic tags from disk (survives restarts).
+    {
+        let mut ds = dyn_store_handle.write().unwrap();
+        match ds.load(&dyn_persist_path) {
+            Ok(0) => debug!("dyn_slots: no persisted tags to load"),
+            Ok(n) => info!(count = n, "dyn_slots: restored persisted tags"),
+            Err(e) => warn!("dyn_slots: failed to load persisted tags: {e}"),
+        }
+    }
+
     let mut subscriptions = SubscriptionManager::new();
 
     // Timers

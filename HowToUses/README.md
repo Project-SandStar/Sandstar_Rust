@@ -16,3 +16,5 @@ Quick reference for all Sandstar features, CLI flags, and API endpoints.
 | [08_CLI_COMMANDS.md](08_CLI_COMMANDS.md) | sandstar-cli commands |
 | [09_ALERTS.md](09_ALERTS.md) | Alert system configuration |
 | [10_DASHBOARD.md](10_DASHBOARD.md) | Web dashboard features |
+| [11_DRIVER_FRAMEWORK.md](11_DRIVER_FRAMEWORK.md) | Driver Framework v2 |
+| [12_DYNAMIC_TAGS.md](12_DYNAMIC_TAGS.md) | Dynamic tag system for runtime metadata |
