@@ -625,14 +625,14 @@ The security audit identified issues across four severity levels. These MUST be 
 
 **Research doc:** [18_SEDONA_DRIVER_FRAMEWORK_V2.md](research/18_SEDONA_DRIVER_FRAMEWORK_V2.md)
 
-| Task | Description | Effort |
-|------|-------------|--------|
-| 12.0a | **Driver trait**: `on_open()`, `on_close()`, `on_ping()`, `on_poll()`, `on_learn()` lifecycle callbacks. Status cascading (driver→point). | [L] |
-| 12.0b | **PollScheduler**: Polling buckets with automatic staggering. Replaces engine auto-poll-all pattern. | [M] |
-| 12.0c | **WatchManager**: Change-of-value subscriptions at the driver level. COV deadband support. | [M] |
-| 12.0d | **LocalIoDriver**: GPIO, ADC, I2C, PWM via Rust HAL crates. Replaces sysfs-based C drivers. | [L] |
-| 12.0e | **Protocol drivers**: ModbusDriver (TCP/RTU), BacnetDriver (IP/MSTP), MqttDriver (pub/sub). | [XL] |
-| 12.0f | **DriverManager**: Tokio actor orchestrating lifecycle, health monitoring, auto-reconnect. | [L] |
+| Task | Description | Effort | Status |
+|------|-------------|--------|--------|
+| 12.0a | **Driver trait**: `open()`, `close()`, `ping()`, `learn()`, `sync_cur()`, `write()` lifecycle callbacks. Status cascading (driver→point). `DriverManager` with register/remove/open_all/close_all/sync_all. REST endpoints (`/api/drivers`, status, learn). | [L] | **COMPLETE** |
+| 12.0b | **PollScheduler**: Polling buckets with automatic staggering. Replaces engine auto-poll-all pattern. | [M] | Not started |
+| 12.0c | **WatchManager**: Change-of-value subscriptions at the driver level. COV deadband support. | [M] | Not started |
+| 12.0d | **LocalIoDriver**: Channel-aware driver with direction/type/enable metadata, HAL bridge for GPIO/ADC/I2C/PWM. Learn returns all channels with tags. Write validates output direction. | [L] | **COMPLETE** |
+| 12.0e | **Protocol drivers**: ModbusDriver (TCP/RTU), BacnetDriver (IP/MSTP), MqttDriver (pub/sub). Stubs created with trait implementations. | [XL] | Stubs complete |
+| 12.0f | **DriverManager**: Tokio actor orchestrating lifecycle, health monitoring, auto-reconnect. | [L] | Sync version complete; async/actor pending |
 
 **Total effort:** 2-4 weeks
 **Blocked by:** Phase 11.0 (for Sedona compatibility layer)
@@ -731,7 +731,7 @@ Remaining future tracks (post-production):
 | 10.0A-D | Config-driven control engine | Medium | [M] | COMPLETE | -- |
 | 10.0E | Additional components library | Low | [M] | COMPLETE (20 + converter) | -- |
 | 11.0 | Sedona VM Rust port | Very Low | [XL] | Not started | 12, 13, 14, 17 |
-| **12.0** | **Driver Framework v2** | **Very Low** | **[XL]** | **Not started** | **18** |
+| **12.0** | **Driver Framework v2** | **Very Low** | **[XL]** | **In progress (12.0a,d complete; stubs for e)** | **18** |
 | **13.0** | **Dynamic Slots** | **Very Low** | **[L]** | **Not started** | **19** |
 
 ---
@@ -795,7 +795,7 @@ Deep gap analysis completed 2026-03-20 (3-agent, 20 documents vs full codebase).
 | 15 | SOX/WebSocket | 8.0A, 8.0A-SOX, 8.0B | 100% | WS + SCRAM + full SOX/DASP done (20/20 commands, pure Rust, 185 manifest types, dataflow engine, component persistence) |
 | 16 | roxWarp Protocol | 9.0 | 0% | Entirely unimplemented (future Phase 9.0) |
 | 17 | Name Length Analysis | 11.0c | 60% | Unlimited names via String; interning unnecessary at scale. **31-char Sedona-compat name validation enforced across all entry points** (REST, RoWS, SOX add/rename, editor JS) as of 2026-04-04. |
-| 18 | Driver Framework v2 | 12.0 | 30% | HAL traits + Linux drivers done; no async Driver trait/DriverManager |
+| 18 | Driver Framework v2 | 12.0 | 55% | Driver trait + DriverManager + LocalIoDriver + REST endpoints done. Modbus/BACnet/MQTT stubs created. PollScheduler/WatchManager/async actor pending |
 | 19 | Dynamic Slots | 13.0 | 10% | Basic tags HashMap on channels; full DynSlotStore not needed yet |
 
 **Key architectural divergence:** Custom Zinc/filter implementation instead of libhaystack dependency (docs 03/05); in-process bridge instead of 29-function C FFI (doc 06); channel-centric model instead of component-centric (docs 18/19). All are defensible engineering decisions that reduced complexity and external dependencies.

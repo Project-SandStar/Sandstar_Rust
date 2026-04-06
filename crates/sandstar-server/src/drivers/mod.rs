@@ -1,34 +1,62 @@
-//! Driver Framework v2 — core traits and LocalIoDriver.
+//! Driver Framework v2 — core traits, polling, watch subscriptions, and status inheritance.
 //!
 //! Provides a unified abstraction for hardware and protocol drivers. Each driver
 //! implements the [`Driver`] trait and is managed by the [`DriverManager`].
 //!
-//! This is the foundation layer. Modbus, BACnet, and MQTT drivers will be added
-//! as separate implementations of the `Driver` trait in future phases.
+//! ## Architecture (Haxall-inspired)
+//!
+//! - **Lifecycle callbacks**: `open`, `close`, `ping` for driver lifecycle
+//! - **Poll buckets**: [`PollScheduler`] batches point reads with stagger offsets
+//! - **Watch/COV**: [`DriverWatchManager`] tracks point subscriptions
+//! - **Status inheritance**: [`PointStatus`] inherits from parent driver by default
+//! - **Typed errors**: Distinguish config faults, comm errors, timeouts, etc.
+//!
+//! ## Available Drivers
+//!
+//! | Module | Driver | Status |
+//! |--------|--------|--------|
+//! | [`local_io`] | `LocalIoDriver` — BeagleBone GPIO/ADC/I2C/PWM via HAL | Active |
+//! | [`modbus`] | `ModbusDriver` — Modbus TCP/RTU | Stub |
+//! | [`bacnet`] | `BacnetDriver` — BACnet/IP | Stub |
+//! | [`mqtt`] | `MqttDriver` — MQTT pub/sub | Stub |
+
+pub mod local_io;
+pub mod modbus;
+pub mod bacnet;
+pub mod mqtt;
+pub mod poll_scheduler;
+pub mod watch_manager;
 
 use std::collections::HashMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+pub use poll_scheduler::PollScheduler;
+pub use watch_manager::DriverWatchManager;
+
 // ── Core Types ──────────────────────────────────────────────
 
 /// Unique driver instance identifier.
 pub type DriverId = String;
 
-/// Driver operational status.
+/// Driver operational status (cascades to child points via [`PointStatus`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DriverStatus {
     /// Driver not yet initialized.
     Pending,
     /// Driver running normally.
     Ok,
+    /// No recent data received within stale timeout.
+    Stale,
     /// Communication/hardware fault.
     Fault(String),
     /// Driver disabled by configuration.
     Disabled,
     /// Driver shut down.
     Down,
+    /// Initial data load / synchronization in progress.
+    Syncing,
 }
 
 impl fmt::Display for DriverStatus {
@@ -36,9 +64,11 @@ impl fmt::Display for DriverStatus {
         match self {
             Self::Pending => write!(f, "pending"),
             Self::Ok => write!(f, "ok"),
+            Self::Stale => write!(f, "stale"),
             Self::Fault(msg) => write!(f, "fault: {msg}"),
             Self::Disabled => write!(f, "disabled"),
             Self::Down => write!(f, "down"),
+            Self::Syncing => write!(f, "syncing"),
         }
     }
 }
@@ -51,15 +81,23 @@ pub struct DriverMeta {
     pub extra: HashMap<String, String>,
 }
 
-/// Driver error types.
+/// Driver error types (Haxall-inspired categorization).
 #[derive(Debug, Clone)]
 pub enum DriverError {
-    /// Configuration error (bad address, missing parameter).
+    /// Configuration error (bad address, missing parameter) — won't recover without fix.
     ConfigFault(String),
-    /// Communication error (timeout, connection refused).
+    /// Communication error (timeout, connection refused) — may recover on retry.
     CommFault(String),
     /// Feature not supported by this driver.
     NotSupported(&'static str),
+    /// Remote device/system reported an error status.
+    RemoteStatus(String),
+    /// Communication timeout waiting for response.
+    Timeout(String),
+    /// Internal driver error (logic bug, unexpected state).
+    Internal(String),
+    /// Hardware device not found or inaccessible.
+    HardwareNotFound(String),
 }
 
 impl fmt::Display for DriverError {
@@ -68,6 +106,10 @@ impl fmt::Display for DriverError {
             Self::ConfigFault(msg) => write!(f, "config fault: {msg}"),
             Self::CommFault(msg) => write!(f, "comm fault: {msg}"),
             Self::NotSupported(feat) => write!(f, "not supported: {feat}"),
+            Self::RemoteStatus(msg) => write!(f, "remote status: {msg}"),
+            Self::Timeout(msg) => write!(f, "timeout: {msg}"),
+            Self::Internal(msg) => write!(f, "internal error: {msg}"),
+            Self::HardwareNotFound(msg) => write!(f, "hardware not found: {msg}"),
         }
     }
 }
@@ -105,6 +147,40 @@ pub enum PollMode {
     Buckets,
     /// Manual polling (driver controls timing).
     Manual,
+}
+
+// ── Point Status (with inheritance) ────────────────────────
+
+/// Point-level status that can inherit from its parent driver.
+///
+/// By default, points inherit their driver's status. A point can
+/// override this with its own status (e.g., when a remote device
+/// reports a point-specific fault).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PointStatus {
+    /// Point has its own explicit status.
+    Own(DriverStatus),
+    /// Point inherits status from its parent driver (default).
+    Inherited,
+}
+
+impl PointStatus {
+    /// Resolve the effective status given the parent driver status.
+    ///
+    /// If the point has its own status, that takes precedence.
+    /// Otherwise, the driver status is used.
+    pub fn resolve(&self, driver_status: &DriverStatus) -> DriverStatus {
+        match self {
+            PointStatus::Own(s) => s.clone(),
+            PointStatus::Inherited => driver_status.clone(),
+        }
+    }
+}
+
+impl Default for PointStatus {
+    fn default() -> Self {
+        PointStatus::Inherited
+    }
 }
 
 // ── Driver Trait ────────────────────────────────────────────
@@ -152,13 +228,41 @@ pub trait Driver: Send + Sync {
     fn poll_mode(&self) -> PollMode {
         PollMode::Buckets
     }
+
+    /// Subscribe to change-of-value notifications for these points.
+    ///
+    /// Called when a client subscribes to point updates. For COV-capable
+    /// protocols (BACnet SubscribeCOV, MQTT topics), this establishes
+    /// the subscription on the remote system. Polling-based drivers can
+    /// use the default no-op implementation.
+    fn on_watch(&mut self, _points: &[DriverPointRef]) -> Result<(), DriverError> {
+        Ok(()) // Default: no-op (polling-based drivers don't need this)
+    }
+
+    /// Unsubscribe from change-of-value notifications.
+    ///
+    /// Called when all clients have unsubscribed from these points.
+    fn on_unwatch(&mut self, _points: &[DriverPointRef]) -> Result<(), DriverError> {
+        Ok(()) // Default: no-op
+    }
 }
 
 // ── DriverManager ───────────────────────────────────────────
 
-/// Manages all driver instances — lifecycle, polling, and dispatch.
+/// Manages all driver instances — lifecycle, polling, watch subscriptions, and dispatch.
+///
+/// Integrates [`PollScheduler`] for bucket-based polling and
+/// [`DriverWatchManager`] for COV subscription tracking.
 pub struct DriverManager {
     drivers: HashMap<DriverId, Box<dyn Driver>>,
+    /// Polling bucket scheduler.
+    poll_scheduler: PollScheduler,
+    /// COV subscription manager.
+    watch_manager: DriverWatchManager,
+    /// Per-point status overrides (point_id -> PointStatus).
+    point_statuses: HashMap<u32, PointStatus>,
+    /// Point-to-driver mapping for status inheritance.
+    point_driver_map: HashMap<u32, DriverId>,
 }
 
 impl DriverManager {
@@ -166,6 +270,10 @@ impl DriverManager {
     pub fn new() -> Self {
         Self {
             drivers: HashMap::new(),
+            poll_scheduler: PollScheduler::new(),
+            watch_manager: DriverWatchManager::new(),
+            point_statuses: HashMap::new(),
+            point_driver_map: HashMap::new(),
         }
     }
 
@@ -185,10 +293,14 @@ impl DriverManager {
 
     /// Remove a driver by ID. Calls `close()` before removing.
     ///
+    /// Also removes all poll buckets and watch subscriptions for this driver.
     /// Returns `true` if the driver was found and removed.
     pub fn remove(&mut self, id: &str) -> bool {
         if let Some(mut driver) = self.drivers.remove(id) {
             driver.close();
+            self.poll_scheduler.remove_driver(id);
+            // Remove point-driver mappings for this driver
+            self.point_driver_map.retain(|_, did| did != id);
             true
         } else {
             false
@@ -273,16 +385,178 @@ impl DriverManager {
     }
 
     /// Get a summary of all drivers (for REST API).
+    ///
+    /// Includes poll scheduler and watch manager statistics.
     pub fn driver_summaries(&self) -> Vec<DriverSummary> {
         self.drivers
             .values()
-            .map(|d| DriverSummary {
-                id: d.id().to_string(),
-                driver_type: d.driver_type().to_string(),
-                status: d.status().clone(),
-                poll_mode: format!("{:?}", d.poll_mode()),
+            .map(|d| {
+                let id = d.id().to_string();
+                let poll_buckets = self.poll_scheduler.buckets_for_driver(&id).len();
+                let poll_points: usize = self
+                    .poll_scheduler
+                    .buckets_for_driver(&id)
+                    .iter()
+                    .filter_map(|&idx| self.poll_scheduler.bucket(idx))
+                    .map(|b| b.points.len())
+                    .sum();
+                DriverSummary {
+                    id,
+                    driver_type: d.driver_type().to_string(),
+                    status: d.status().clone(),
+                    poll_mode: format!("{:?}", d.poll_mode()),
+                    poll_buckets,
+                    poll_points,
+                }
             })
             .collect()
+    }
+
+    // ── Poll Scheduler integration ─────────────────────────
+
+    /// Get a reference to the poll scheduler.
+    pub fn poll_scheduler(&self) -> &PollScheduler {
+        &self.poll_scheduler
+    }
+
+    /// Get a mutable reference to the poll scheduler.
+    pub fn poll_scheduler_mut(&mut self) -> &mut PollScheduler {
+        &mut self.poll_scheduler
+    }
+
+    // ── Watch Manager integration ──────────────────────────
+
+    /// Add a watch subscription for a subscriber on the given points.
+    ///
+    /// Calls `on_watch` on the appropriate drivers for any newly-watched points.
+    pub fn add_watch(&mut self, subscriber: &str, point_ids: &[u32]) {
+        // Track which points are newly watched (transition from unwatched)
+        let newly_watched: Vec<u32> = point_ids
+            .iter()
+            .filter(|&&pid| !self.watch_manager.is_watched(pid))
+            .copied()
+            .collect();
+
+        self.watch_manager.subscribe(subscriber, point_ids);
+
+        // Notify drivers about newly-watched points (grouped by driver)
+        if !newly_watched.is_empty() {
+            let mut by_driver: HashMap<DriverId, Vec<DriverPointRef>> = HashMap::new();
+            for pid in &newly_watched {
+                if let Some(driver_id) = self.point_driver_map.get(pid) {
+                    by_driver
+                        .entry(driver_id.clone())
+                        .or_default()
+                        .push(DriverPointRef {
+                            point_id: *pid,
+                            address: String::new(),
+                        });
+                }
+            }
+            for (driver_id, refs) in &by_driver {
+                if let Some(driver) = self.drivers.get_mut(driver_id) {
+                    let _ = driver.on_watch(refs);
+                }
+            }
+        }
+    }
+
+    /// Remove a watch subscription.
+    ///
+    /// Calls `on_unwatch` on drivers for points that are no longer watched by anyone.
+    pub fn remove_watch(&mut self, subscriber: &str, point_ids: &[u32]) {
+        // Identify points that will become completely unwatched
+        let will_unwatch: Vec<u32> = point_ids
+            .iter()
+            .filter(|&&pid| {
+                let subs = self.watch_manager.subscribers_for(pid);
+                // This point will be unwatched if the only subscriber is the one being removed
+                subs.len() == 1 && subs.contains(subscriber)
+            })
+            .copied()
+            .collect();
+
+        self.watch_manager.unsubscribe(subscriber, point_ids);
+
+        // Notify drivers about newly-unwatched points
+        if !will_unwatch.is_empty() {
+            let mut by_driver: HashMap<DriverId, Vec<DriverPointRef>> = HashMap::new();
+            for pid in &will_unwatch {
+                if let Some(driver_id) = self.point_driver_map.get(pid) {
+                    by_driver
+                        .entry(driver_id.clone())
+                        .or_default()
+                        .push(DriverPointRef {
+                            point_id: *pid,
+                            address: String::new(),
+                        });
+                }
+            }
+            for (driver_id, refs) in &by_driver {
+                if let Some(driver) = self.drivers.get_mut(driver_id) {
+                    let _ = driver.on_unwatch(refs);
+                }
+            }
+        }
+    }
+
+    /// Get a reference to the watch manager.
+    pub fn watch_manager(&self) -> &DriverWatchManager {
+        &self.watch_manager
+    }
+
+    // ── Point Status Inheritance ───────────────────────────
+
+    /// Register a point as belonging to a driver (for status inheritance).
+    pub fn register_point(&mut self, point_id: u32, driver_id: &str) {
+        self.point_driver_map
+            .insert(point_id, driver_id.to_string());
+    }
+
+    /// Set a point-specific status override.
+    pub fn set_point_status(&mut self, point_id: u32, status: PointStatus) {
+        self.point_statuses.insert(point_id, status);
+    }
+
+    /// Get the effective status of a point, considering inheritance.
+    ///
+    /// Returns `None` if the point is not registered with any driver.
+    pub fn effective_point_status(&self, point_id: u32) -> Option<DriverStatus> {
+        let driver_id = self.point_driver_map.get(&point_id)?;
+        let driver_status = self.drivers.get(driver_id)?.status();
+        let point_status = self
+            .point_statuses
+            .get(&point_id)
+            .cloned()
+            .unwrap_or_default();
+        Some(point_status.resolve(driver_status))
+    }
+
+    /// Get aggregated status for a driver and its inherited point statuses.
+    ///
+    /// Returns (driver_status, vec of (point_id, effective_status)) or None if driver not found.
+    pub fn driver_with_points_status(
+        &self,
+        driver_id: &str,
+    ) -> Option<(DriverStatus, Vec<(u32, DriverStatus)>)> {
+        let driver = self.drivers.get(driver_id)?;
+        let driver_status = driver.status().clone();
+
+        let point_statuses: Vec<(u32, DriverStatus)> = self
+            .point_driver_map
+            .iter()
+            .filter(|(_, did)| did.as_str() == driver_id)
+            .map(|(&pid, _)| {
+                let ps = self
+                    .point_statuses
+                    .get(&pid)
+                    .cloned()
+                    .unwrap_or_default();
+                (pid, ps.resolve(&driver_status))
+            })
+            .collect();
+
+        Some((driver_status, point_statuses))
     }
 }
 
@@ -300,6 +574,10 @@ pub struct DriverSummary {
     pub driver_type: String,
     pub status: DriverStatus,
     pub poll_mode: String,
+    /// Number of poll buckets assigned to this driver.
+    pub poll_buckets: usize,
+    /// Total number of points across all poll buckets.
+    pub poll_points: usize,
 }
 
 // ── LocalIoDriver ───────────────────────────────────────────
@@ -430,18 +708,30 @@ pub async fn list_drivers(
     Json(mgr.driver_summaries())
 }
 
-/// GET /api/drivers/{id}/status — get driver status.
+/// GET /api/drivers/{id}/status — get driver status with point statuses.
 pub async fn driver_status(
     Path(id): Path<String>,
     State(mgr): State<SharedDriverManager>,
 ) -> impl IntoResponse {
     let mgr = mgr.lock().expect("driver manager lock poisoned");
-    match mgr.driver_status(&id) {
-        Some(status) => Json(serde_json::json!({
-            "id": id,
-            "status": status,
-        }))
-        .into_response(),
+    match mgr.driver_with_points_status(&id) {
+        Some((status, point_statuses)) => {
+            let points: Vec<serde_json::Value> = point_statuses
+                .into_iter()
+                .map(|(pid, ps)| {
+                    serde_json::json!({
+                        "pointId": pid,
+                        "status": ps,
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({
+                "id": id,
+                "status": status,
+                "points": points,
+            }))
+            .into_response()
+        }
         None => (
             axum::http::StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": format!("driver '{id}' not found") })),
@@ -713,12 +1003,32 @@ mod tests {
     fn driver_status_display() {
         assert_eq!(DriverStatus::Pending.to_string(), "pending");
         assert_eq!(DriverStatus::Ok.to_string(), "ok");
+        assert_eq!(DriverStatus::Stale.to_string(), "stale");
         assert_eq!(
             DriverStatus::Fault("timeout".into()).to_string(),
             "fault: timeout"
         );
         assert_eq!(DriverStatus::Disabled.to_string(), "disabled");
         assert_eq!(DriverStatus::Down.to_string(), "down");
+        assert_eq!(DriverStatus::Syncing.to_string(), "syncing");
+    }
+
+    #[test]
+    fn driver_status_clone_and_eq() {
+        let statuses = vec![
+            DriverStatus::Pending,
+            DriverStatus::Ok,
+            DriverStatus::Stale,
+            DriverStatus::Fault("x".into()),
+            DriverStatus::Disabled,
+            DriverStatus::Down,
+            DriverStatus::Syncing,
+        ];
+        for s in &statuses {
+            assert_eq!(s, &s.clone());
+        }
+        assert_ne!(DriverStatus::Ok, DriverStatus::Stale);
+        assert_ne!(DriverStatus::Ok, DriverStatus::Syncing);
     }
 
     #[test]
@@ -728,7 +1038,15 @@ mod tests {
 
         let json = serde_json::to_string(&DriverStatus::Fault("bad".into())).unwrap();
         assert!(json.contains("bad"));
+
+        let json = serde_json::to_string(&DriverStatus::Stale).unwrap();
+        assert!(json.contains("Stale"));
+
+        let json = serde_json::to_string(&DriverStatus::Syncing).unwrap();
+        assert!(json.contains("Syncing"));
     }
+
+    // ── DriverError tests ─────────────────────────────────
 
     #[test]
     fn driver_error_display() {
@@ -740,6 +1058,217 @@ mod tests {
 
         let e = DriverError::NotSupported("learn");
         assert!(e.to_string().contains("not supported"));
+
+        let e = DriverError::RemoteStatus("device offline".into());
+        assert!(e.to_string().contains("remote status"));
+
+        let e = DriverError::Timeout("5s elapsed".into());
+        assert!(e.to_string().contains("timeout"));
+
+        let e = DriverError::Internal("unexpected state".into());
+        assert!(e.to_string().contains("internal error"));
+
+        let e = DriverError::HardwareNotFound("/dev/i2c-2".into());
+        assert!(e.to_string().contains("hardware not found"));
+    }
+
+    #[test]
+    fn driver_error_all_variants_are_errors() {
+        let errors: Vec<DriverError> = vec![
+            DriverError::ConfigFault("a".into()),
+            DriverError::CommFault("b".into()),
+            DriverError::NotSupported("c"),
+            DriverError::RemoteStatus("d".into()),
+            DriverError::Timeout("e".into()),
+            DriverError::Internal("f".into()),
+            DriverError::HardwareNotFound("g".into()),
+        ];
+        for e in &errors {
+            // All variants implement Display and Error
+            let _msg = e.to_string();
+            let _err: &dyn std::error::Error = e;
+        }
+    }
+
+    // ── PointStatus tests ─────────────────────────────────
+
+    #[test]
+    fn point_status_inherited_resolves_to_driver() {
+        let ps = PointStatus::Inherited;
+        assert_eq!(ps.resolve(&DriverStatus::Ok), DriverStatus::Ok);
+        assert_eq!(ps.resolve(&DriverStatus::Down), DriverStatus::Down);
+        assert_eq!(ps.resolve(&DriverStatus::Stale), DriverStatus::Stale);
+        assert_eq!(ps.resolve(&DriverStatus::Syncing), DriverStatus::Syncing);
+        assert_eq!(
+            ps.resolve(&DriverStatus::Fault("x".into())),
+            DriverStatus::Fault("x".into())
+        );
+    }
+
+    #[test]
+    fn point_status_own_overrides_driver() {
+        let ps = PointStatus::Own(DriverStatus::Fault("point-specific".into()));
+        // Even if driver is Ok, point has its own fault
+        assert_eq!(
+            ps.resolve(&DriverStatus::Ok),
+            DriverStatus::Fault("point-specific".into())
+        );
+    }
+
+    #[test]
+    fn point_status_default_is_inherited() {
+        assert_eq!(PointStatus::default(), PointStatus::Inherited);
+    }
+
+    #[test]
+    fn point_status_serialize() {
+        let json = serde_json::to_string(&PointStatus::Inherited).unwrap();
+        assert!(json.contains("Inherited"));
+
+        let json =
+            serde_json::to_string(&PointStatus::Own(DriverStatus::Ok)).unwrap();
+        assert!(json.contains("Own"));
+    }
+
+    // ── Status inheritance via DriverManager ───────────────
+
+    #[test]
+    fn manager_point_status_inheritance() {
+        let mut mgr = DriverManager::new();
+        mgr.register(Box::new(LocalIoDriver::new("io"))).unwrap();
+        mgr.open_all();
+
+        // Register points with the driver
+        mgr.register_point(100, "io");
+        mgr.register_point(200, "io");
+
+        // By default, points inherit driver status (Ok)
+        assert_eq!(
+            mgr.effective_point_status(100),
+            Some(DriverStatus::Ok)
+        );
+
+        // Override one point with its own status
+        mgr.set_point_status(200, PointStatus::Own(DriverStatus::Stale));
+        assert_eq!(
+            mgr.effective_point_status(200),
+            Some(DriverStatus::Stale)
+        );
+
+        // Point 100 still inherits
+        assert_eq!(
+            mgr.effective_point_status(100),
+            Some(DriverStatus::Ok)
+        );
+    }
+
+    #[test]
+    fn manager_point_status_unknown_point() {
+        let mgr = DriverManager::new();
+        assert_eq!(mgr.effective_point_status(999), None);
+    }
+
+    #[test]
+    fn manager_driver_with_points_status() {
+        let mut mgr = DriverManager::new();
+        mgr.register(Box::new(LocalIoDriver::new("io"))).unwrap();
+        mgr.open_all();
+
+        mgr.register_point(100, "io");
+        mgr.register_point(200, "io");
+        mgr.set_point_status(200, PointStatus::Own(DriverStatus::Fault("bad".into())));
+
+        let (ds, pts) = mgr.driver_with_points_status("io").unwrap();
+        assert_eq!(ds, DriverStatus::Ok);
+        assert_eq!(pts.len(), 2);
+
+        // Find point 100 (inherited Ok) and 200 (own Fault)
+        let p100 = pts.iter().find(|(pid, _)| *pid == 100).unwrap();
+        assert_eq!(p100.1, DriverStatus::Ok);
+        let p200 = pts.iter().find(|(pid, _)| *pid == 200).unwrap();
+        assert_eq!(p200.1, DriverStatus::Fault("bad".into()));
+    }
+
+    #[test]
+    fn manager_driver_with_points_status_unknown() {
+        let mgr = DriverManager::new();
+        assert!(mgr.driver_with_points_status("nonexistent").is_none());
+    }
+
+    // ── Watch Manager integration ─────────────────────────
+
+    #[test]
+    fn manager_add_and_remove_watch() {
+        let mut mgr = DriverManager::new();
+        mgr.register(Box::new(LocalIoDriver::new("io"))).unwrap();
+        mgr.open_all();
+        mgr.register_point(100, "io");
+
+        mgr.add_watch("client-1", &[100]);
+        assert!(mgr.watch_manager().is_watched(100));
+        assert_eq!(mgr.watch_manager().watch_count(), 1);
+
+        mgr.remove_watch("client-1", &[100]);
+        assert!(!mgr.watch_manager().is_watched(100));
+        assert_eq!(mgr.watch_manager().watch_count(), 0);
+    }
+
+    #[test]
+    fn manager_poll_scheduler_access() {
+        let mut mgr = DriverManager::new();
+        assert_eq!(mgr.poll_scheduler().bucket_count(), 0);
+
+        mgr.poll_scheduler_mut().add_bucket(
+            "drv-1",
+            std::time::Duration::from_secs(10),
+            vec![DriverPointRef {
+                point_id: 1,
+                address: "A".into(),
+            }],
+        );
+        assert_eq!(mgr.poll_scheduler().bucket_count(), 1);
+        assert_eq!(mgr.poll_scheduler().total_points(), 1);
+    }
+
+    #[test]
+    fn manager_remove_cleans_poll_buckets() {
+        let mut mgr = DriverManager::new();
+        mgr.register(Box::new(LocalIoDriver::new("io"))).unwrap();
+        mgr.open_all();
+
+        mgr.poll_scheduler_mut().add_bucket(
+            "io",
+            std::time::Duration::from_secs(5),
+            vec![DriverPointRef {
+                point_id: 1,
+                address: "A".into(),
+            }],
+        );
+        assert_eq!(mgr.poll_scheduler().bucket_count(), 1);
+
+        mgr.remove("io");
+        assert_eq!(mgr.poll_scheduler().bucket_count(), 0);
+    }
+
+    #[test]
+    fn manager_summaries_include_poll_stats() {
+        let mut mgr = DriverManager::new();
+        mgr.register(Box::new(LocalIoDriver::new("io"))).unwrap();
+        mgr.open_all();
+
+        mgr.poll_scheduler_mut().add_bucket(
+            "io",
+            std::time::Duration::from_secs(5),
+            vec![
+                DriverPointRef { point_id: 1, address: "A".into() },
+                DriverPointRef { point_id: 2, address: "B".into() },
+            ],
+        );
+
+        let summaries = mgr.driver_summaries();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].poll_buckets, 1);
+        assert_eq!(summaries[0].poll_points, 2);
     }
 
     // ── Default trait ──────────────────────────────────────
@@ -748,5 +1277,18 @@ mod tests {
     fn driver_manager_default() {
         let mgr = DriverManager::default();
         assert_eq!(mgr.driver_ids().len(), 0);
+    }
+
+    // ── on_watch / on_unwatch default impls ───────────────
+
+    #[test]
+    fn driver_on_watch_default_is_noop() {
+        let mut driver = LocalIoDriver::new("w");
+        let refs = vec![DriverPointRef {
+            point_id: 1,
+            address: "A".into(),
+        }];
+        assert!(driver.on_watch(&refs).is_ok());
+        assert!(driver.on_unwatch(&refs).is_ok());
     }
 }
