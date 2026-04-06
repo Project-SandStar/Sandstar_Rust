@@ -156,6 +156,12 @@ pub struct ComponentTree {
     /// Channel IDs that are output channels (direction = "out"/"AO"/"DO"/"do"/"ao").
     /// Populated at tree build time from ChannelInfo.direction.
     output_channel_ids: HashSet<i32>,
+    /// Reverse index: component name → comp_id for O(1) name lookups.
+    /// Updated on add, rename, and remove. Used by the channel bridge
+    /// ("chXXXX" ConstFloat matching) to avoid O(n) scans.
+    name_to_comp: HashMap<String, u16>,
+    /// Name intern table for deduplication and fast ID-based comparison.
+    pub name_table: super::name_intern::NameInternTable,
 }
 
 /// JSON persistence format for user-added SOX components.
@@ -182,6 +188,8 @@ impl ComponentTree {
             persist_path: None,
             component_state: HashMap::new(),
             output_channel_ids: HashSet::new(),
+            name_to_comp: HashMap::new(),
+            name_table: super::name_intern::NameInternTable::new(),
         }
     }
 
@@ -197,15 +205,25 @@ impl ComponentTree {
             dirty: false,
             persist_path: None,
             component_state: HashMap::new(),
+            name_to_comp: HashMap::new(),
+            name_table: super::name_intern::NameInternTable::new(),
         }
     }
 
     /// Add a component to the tree. Also registers it as a child of its parent.
+    ///
+    /// The component's name is interned in the name table and indexed in the
+    /// name-to-comp reverse map for O(1) lookups.
     pub fn add(&mut self, comp: VirtualComponent) {
         let comp_id = comp.comp_id;
         let parent_id = comp.parent_id;
         if comp_id >= self.next_id {
             self.next_id = comp_id + 1;
+        }
+        // Update name index and intern table.
+        if !comp.name.is_empty() {
+            self.name_to_comp.insert(comp.name.clone(), comp_id);
+            self.name_table.intern(&comp.name);
         }
         self.components.insert(comp_id, comp);
         // Register as child of parent (if parent exists and is not self).
@@ -257,17 +275,44 @@ impl ComponentTree {
         if let Some(parent) = self.components.get_mut(&comp.parent_id) {
             parent.children.retain(|&id| id != comp_id);
         }
+        // Remove from name index (only if this comp still owns the name mapping).
+        if let Some(&mapped_id) = self.name_to_comp.get(&comp.name) {
+            if mapped_id == comp_id {
+                self.name_to_comp.remove(&comp.name);
+            }
+        }
         Some(comp)
     }
 
     /// Rename a component. Returns true if found and renamed.
+    ///
+    /// Updates the name-to-comp reverse index and interns the new name.
     pub fn rename(&mut self, comp_id: u16, new_name: String) -> bool {
         if let Some(comp) = self.components.get_mut(&comp_id) {
-            comp.name = new_name;
+            // Remove old name from index (only if this comp owns it).
+            if let Some(&mapped_id) = self.name_to_comp.get(&comp.name) {
+                if mapped_id == comp_id {
+                    self.name_to_comp.remove(&comp.name);
+                }
+            }
+            comp.name = new_name.clone();
+            // Index and intern the new name.
+            if !new_name.is_empty() {
+                self.name_to_comp.insert(new_name.clone(), comp_id);
+                self.name_table.intern(&new_name);
+            }
             true
         } else {
             false
         }
+    }
+
+    /// Look up a component ID by name in O(1) via the reverse index.
+    ///
+    /// This is used by the channel bridge to find ConstFloat "chXXXX"
+    /// components without scanning all components.
+    pub fn lookup_by_name(&self, name: &str) -> Option<u16> {
+        self.name_to_comp.get(name).copied()
     }
 
     /// Check if adding a link from `from_comp` to `to_comp` would create a cycle.
@@ -659,6 +704,11 @@ impl ComponentTree {
         for comp in data.components {
             let comp_id = comp.comp_id;
             let parent_id = comp.parent_id;
+            // Update name index and intern table.
+            if !comp.name.is_empty() {
+                self.name_to_comp.insert(comp.name.clone(), comp_id);
+                self.name_table.intern(&comp.name);
+            }
             // Insert the component
             self.components.insert(comp_id, comp);
             // Register as child of parent
@@ -723,9 +773,10 @@ impl ComponentTree {
         // must pick up the new value so Sedona sees it and the bridge stays consistent.
         for (ch_id, value) in output_ch_values {
             let ch_name = format!("ch{ch_id}");
-            let cf_id = self.components.values()
-                .find(|c| self.user_added_ids.contains(&c.comp_id) && c.name == ch_name)
-                .map(|c| c.comp_id);
+            // O(1) lookup via name_to_comp reverse index (replaces O(n) scan).
+            let cf_id = self.name_to_comp.get(&ch_name)
+                .copied()
+                .filter(|id| self.user_added_ids.contains(id));
             if let Some(cf_id) = cf_id {
                 if let Some(comp) = self.components.get_mut(&cf_id) {
                     if let Some(out_slot) = comp.slots.get_mut(1) { // slot 1 = "out" for ConstFloat
@@ -3600,6 +3651,10 @@ fn handle_add(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
     let type_id = reader.read_u8().unwrap_or(0);
     let name = reader.read_str().unwrap_or_default();
 
+    if let Some(err) = validate_sox_name(&name) {
+        return error_msg(req.cmd, req.req_id, err);
+    }
+
     // Verify parent exists
     if tree.get(parent_id).is_none() {
         return error_msg(req.cmd, req.req_id, "bad compId");
@@ -3662,6 +3717,27 @@ fn handle_delete(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
     }
 }
 
+/// Max component name length for Sedona compatibility (31 chars).
+const MAX_NAME_LEN: usize = 31;
+
+/// Validate a component name: non-empty, max 31 chars, starts with letter,
+/// only letters/digits/underscores. Returns error message or None if valid.
+fn validate_sox_name(name: &str) -> Option<&'static str> {
+    if name.is_empty() {
+        return Some("name cannot be empty");
+    }
+    if name.len() > MAX_NAME_LEN {
+        return Some("name too long (max 31 chars)");
+    }
+    if !name.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        return Some("name must start with a letter");
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Some("name can only contain letters, numbers, and underscores");
+    }
+    None
+}
+
 /// rename ('r') — rename a component.
 ///
 /// Request: u2 compId, str newName
@@ -3673,6 +3749,10 @@ fn handle_rename(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
         None => return error_msg(req.cmd, req.req_id, "missing compId"),
     };
     let new_name = reader.read_str().unwrap_or_default();
+
+    if let Some(err) = validate_sox_name(&new_name) {
+        return error_msg(req.cmd, req.req_id, err);
+    }
 
     if tree.rename(comp_id, new_name.clone()) {
         if tree.is_user_added(comp_id) {
@@ -8159,5 +8239,105 @@ mod tests {
             other => panic!("expected Float for in2, got {other:?}"),
         }
         assert!(changed.contains(&tgt_id), "target should be in changed list after link exec");
+    }
+
+    // ── Name validation tests ──────────────────────────────
+
+    #[test]
+    fn validate_sox_name_valid() {
+        assert!(validate_sox_name("myComp").is_none());
+        assert!(validate_sox_name("a").is_none());
+        assert!(validate_sox_name("comp_1").is_none());
+        assert!(validate_sox_name("Add2").is_none());
+        assert!(validate_sox_name("A").is_none());
+    }
+
+    #[test]
+    fn validate_sox_name_empty() {
+        assert_eq!(validate_sox_name(""), Some("name cannot be empty"));
+    }
+
+    #[test]
+    fn validate_sox_name_too_long() {
+        let long = "a".repeat(32);
+        assert_eq!(validate_sox_name(&long), Some("name too long (max 31 chars)"));
+        // Exactly 31 should be fine
+        let exact = "a".repeat(31);
+        assert!(validate_sox_name(&exact).is_none());
+    }
+
+    #[test]
+    fn validate_sox_name_starts_digit() {
+        assert_eq!(validate_sox_name("1comp"), Some("name must start with a letter"));
+    }
+
+    #[test]
+    fn validate_sox_name_starts_underscore() {
+        assert_eq!(validate_sox_name("_comp"), Some("name must start with a letter"));
+    }
+
+    #[test]
+    fn validate_sox_name_special_chars() {
+        assert_eq!(
+            validate_sox_name("my-comp"),
+            Some("name can only contain letters, numbers, and underscores")
+        );
+        assert_eq!(
+            validate_sox_name("my comp"),
+            Some("name can only contain letters, numbers, and underscores")
+        );
+    }
+
+    #[test]
+    fn sox_rename_rejects_invalid_name() {
+        let mut tree = ComponentTree::new();
+        // Add a user component to rename
+        let comp = VirtualComponent {
+            comp_id: 100,
+            parent_id: 0,
+            name: "validName".to_string(),
+            type_name: "test::Comp".to_string(),
+            kit_id: 0,
+            type_id: 0,
+            children: Vec::new(),
+            slots: Vec::new(),
+            links: Vec::new(),
+        };
+        tree.add(comp);
+
+        // Try renaming with invalid name (starts with digit)
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&100u16.to_be_bytes()); // comp_id
+        payload.extend_from_slice(b"1bad\0"); // invalid name
+        let req = SoxRequest {
+            cmd: SoxCmd::Rename,
+            req_id: 1,
+            payload,
+        };
+        let resp = handle_rename(&req, &mut tree);
+        // Should fail — response cmd should be error ('!')
+        assert_ne!(resp.payload.first().copied(), Some(b'R'),
+            "rename with digit-first name should be rejected");
+    }
+
+    #[test]
+    fn sox_add_rejects_invalid_name() {
+        let mut tree = ComponentTree::new();
+
+        // Try adding with name that has special chars
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&0u16.to_be_bytes()); // parent_id = root
+        payload.push(0); // kit_id
+        payload.push(0); // type_id
+        payload.extend_from_slice(b"bad-name\0"); // invalid name (hyphen)
+        let req = SoxRequest {
+            cmd: SoxCmd::Add,
+            req_id: 1,
+            payload,
+        };
+        let resp = handle_add(&req, &mut tree);
+        // Should fail — response should not contain a new comp ID
+        assert_ne!(resp.payload.first().copied(), Some(b'A'),
+            "add with hyphenated name should be rejected");
     }
 }

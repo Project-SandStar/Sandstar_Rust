@@ -506,27 +506,15 @@ pub async fn delete_comp(
     }
 }
 
-/// Max component name length for Sedona editor compatibility.
-const MAX_NAME_LEN: usize = 31;
-
 /// PUT /api/sox/comp/{id}/name — rename a component.
 pub async fn rename_comp(
     State(state): State<SoxApiState>,
     Path(id): Path<u16>,
     Json(req): Json<RenameRequest>,
 ) -> Response {
-    // Validate name for Sedona compatibility
-    if req.name.is_empty() {
-        return (StatusCode::BAD_REQUEST, "name cannot be empty").into_response();
-    }
-    if req.name.len() > MAX_NAME_LEN {
-        return (StatusCode::BAD_REQUEST, format!("name too long (max {MAX_NAME_LEN} chars)")).into_response();
-    }
-    if !req.name.starts_with(|c: char| c.is_ascii_alphabetic()) {
-        return (StatusCode::BAD_REQUEST, "name must start with a letter").into_response();
-    }
-    if !req.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return (StatusCode::BAD_REQUEST, "name can only contain letters, numbers, and underscores").into_response();
+    // Centralised Sedona-compatible name validation.
+    if let Some(err) = crate::sox::name_intern::NameInternTable::validate_name(&req.name) {
+        return (StatusCode::BAD_REQUEST, err).into_response();
     }
     let mut tree = state.tree.write().unwrap();
     if tree.rename(id, req.name) {

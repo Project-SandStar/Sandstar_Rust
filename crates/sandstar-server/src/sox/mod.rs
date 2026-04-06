@@ -11,6 +11,7 @@
 
 pub mod dasp;
 pub mod dyn_slots;
+pub mod name_intern;
 pub mod sox_handlers;
 pub mod sox_protocol;
 

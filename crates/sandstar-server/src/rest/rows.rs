@@ -37,8 +37,6 @@ use super::sox_api::{
 const MAX_ROWS_CONNECTIONS: i64 = 16;
 const COV_INTERVAL_MS: u64 = 1000;
 const CLIENT_TIMEOUT_SECS: u64 = 120;
-const MAX_NAME_LEN: usize = 31;
-
 // ── State ──────────────────────────────────────────
 
 #[derive(Clone)]
@@ -821,20 +819,9 @@ fn make_pong(id: Option<&str>) -> Option<String> {
 
 // ── Name validation ────────────────────────────────
 
+/// Validate a component name using the centralised Sedona-compatible rules.
 fn validate_name(name: &str) -> Option<&'static str> {
-    if name.is_empty() {
-        return Some("name cannot be empty");
-    }
-    if name.len() > MAX_NAME_LEN {
-        return Some("name too long (max 31 chars)");
-    }
-    if !name.starts_with(|c: char| c.is_ascii_alphabetic()) {
-        return Some("name must start with a letter");
-    }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return Some("name can only contain letters, numbers, and underscores");
-    }
-    None
+    crate::sox::name_intern::NameInternTable::validate_name(name)
 }
 
 // ── Tests ──────────────────────────────────────────

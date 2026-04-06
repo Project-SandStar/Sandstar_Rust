@@ -609,7 +609,7 @@ The security audit identified issues across four severity levels. These MUST be 
 |------|-------------|--------|
 | 11.0a | **Bytecode interpreter**: Cell-based stack machine, 87 opcodes, 64KB type-safe memory. | [XL] |
 | 11.0b | **Native method framework**: Safe Rust trait replacing C function pointer table. | [L] |
-| 11.0c | **Name interning**: Replace 7-char name limit with interned strings (doc 17). | [M] |
+| 11.0c | **Name interning**: Replace 7-char name limit with interned strings (doc 17). 31-char name validation enforced at all entry points (REST, RoWS, SOX, editor). | [M] |
 | 11.0d | **Compatibility testing**: Verify all 29 standard kits produce identical output. | [L] |
 
 **Total effort:** 2-4 weeks
@@ -794,7 +794,7 @@ Deep gap analysis completed 2026-03-20 (3-agent, 20 documents vs full codebase).
 | 14 | Scalability Limits | 5.6, 7.0c | 80% | Rust engine fixes most; VM-internal limits unchanged |
 | 15 | SOX/WebSocket | 8.0A, 8.0A-SOX, 8.0B | 100% | WS + SCRAM + full SOX/DASP done (20/20 commands, pure Rust, 185 manifest types, dataflow engine, component persistence) |
 | 16 | roxWarp Protocol | 9.0 | 0% | Entirely unimplemented (future Phase 9.0) |
-| 17 | Name Length Analysis | 11.0c | 40% | Unlimited names via String; interning unnecessary at scale |
+| 17 | Name Length Analysis | 11.0c | 60% | Unlimited names via String; interning unnecessary at scale. **31-char Sedona-compat name validation enforced across all entry points** (REST, RoWS, SOX add/rename, editor JS) as of 2026-04-04. |
 | 18 | Driver Framework v2 | 12.0 | 30% | HAL traits + Linux drivers done; no async Driver trait/DriverManager |
 | 19 | Dynamic Slots | 13.0 | 10% | Basic tags HashMap on channels; full DynSlotStore not needed yet |
 
