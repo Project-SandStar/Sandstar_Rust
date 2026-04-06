@@ -16,10 +16,12 @@
 //! | Module | Driver | Status |
 //! |--------|--------|--------|
 //! | [`local_io`] | `LocalIoDriver` — BeagleBone GPIO/ADC/I2C/PWM via HAL | Active |
-//! | [`modbus`] | `ModbusDriver` — Modbus TCP/RTU | Stub |
+//! | [`modbus`] | `ModbusDriver` — Modbus TCP (frame-level I/O) | Active |
 //! | [`bacnet`] | `BacnetDriver` — BACnet/IP | Stub |
 //! | [`mqtt`] | `MqttDriver` — MQTT pub/sub | Stub |
 
+pub mod actor;
+pub mod async_driver;
 pub mod local_io;
 pub mod modbus;
 pub mod bacnet;
@@ -32,6 +34,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+pub use actor::{spawn_driver_actor, DriverCmd, DriverHandle};
+pub use async_driver::{AnyDriver, AsyncDriver};
 pub use poll_scheduler::PollScheduler;
 pub use watch_manager::DriverWatchManager;
 
@@ -765,6 +769,64 @@ pub async fn driver_learn(
     }
 }
 
+/// POST /api/drivers/{id}/write — write values to driver points.
+///
+/// Request body: `{"writes": [[pointId, value], ...]}`.
+/// Returns per-point results.
+pub async fn driver_write(
+    Path(id): Path<String>,
+    State(mgr): State<SharedDriverManager>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let writes: Vec<(u32, f64)> = match body.get("writes").and_then(|w| w.as_array()) {
+        Some(arr) => {
+            let mut out = Vec::with_capacity(arr.len());
+            for item in arr {
+                if let Some(pair) = item.as_array() {
+                    if pair.len() == 2 {
+                        if let (Some(pid), Some(val)) =
+                            (pair[0].as_u64(), pair[1].as_f64())
+                        {
+                            out.push((pid as u32, val));
+                        }
+                    }
+                }
+            }
+            out
+        }
+        None => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "expected {\"writes\": [[pointId, value], ...]}" })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut mgr = mgr.lock().expect("driver manager lock poisoned");
+    match mgr.write(&id, &writes) {
+        Ok(results) => {
+            let items: Vec<serde_json::Value> = results
+                .into_iter()
+                .map(|(pid, r)| match r {
+                    Ok(()) => serde_json::json!({"pointId": pid, "ok": true}),
+                    Err(e) => serde_json::json!({"pointId": pid, "ok": false, "error": e.to_string()}),
+                })
+                .collect();
+            Json(serde_json::json!({
+                "driverId": id,
+                "results": items,
+            }))
+            .into_response()
+        }
+        Err(e) => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 /// Build an Axum router for driver REST endpoints.
 ///
 /// Mount under the main router with `.merge(drivers::driver_router(mgr))`.
@@ -773,6 +835,7 @@ pub fn driver_router(mgr: SharedDriverManager) -> axum::Router {
         .route("/api/drivers", axum::routing::get(list_drivers))
         .route("/api/drivers/{id}/status", axum::routing::get(driver_status))
         .route("/api/drivers/{id}/learn", axum::routing::get(driver_learn))
+        .route("/api/drivers/{id}/write", axum::routing::post(driver_write))
         .with_state(mgr)
 }
 

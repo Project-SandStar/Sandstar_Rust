@@ -41,6 +41,7 @@ libc = { version = "0.2", optional = true }
 axum = { workspace = true }
 serde_json = { workspace = true }
 tower-http = { workspace = true }
+async-trait = { workspace = true }
 futures-util = "0.3"
 sha1 = "0.10"
 sha2 = "0.10"

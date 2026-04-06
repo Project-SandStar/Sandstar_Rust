@@ -4,7 +4,10 @@
 //! publish/subscribe on configurable topics for telemetry and control.
 //! Currently returns `DriverError::NotSupported` for I/O operations.
 
-use super::{Driver, DriverError, DriverMeta, DriverPointRef, DriverStatus, LearnGrid, PollMode};
+use async_trait::async_trait;
+
+use super::async_driver::AsyncDriver;
+use super::{DriverError, DriverMeta, DriverPointRef, DriverStatus, LearnGrid, PollMode};
 
 /// MQTT pub/sub driver (stub — not yet connected to broker).
 ///
@@ -33,7 +36,8 @@ impl MqttDriver {
     }
 }
 
-impl Driver for MqttDriver {
+#[async_trait]
+impl AsyncDriver for MqttDriver {
     fn driver_type(&self) -> &'static str {
         "mqtt"
     }
@@ -46,7 +50,7 @@ impl Driver for MqttDriver {
         &self.status
     }
 
-    fn open(&mut self) -> Result<DriverMeta, DriverError> {
+    async fn open(&mut self) -> Result<DriverMeta, DriverError> {
         self.status = DriverStatus::Fault("not implemented".into());
         Ok(DriverMeta {
             model: Some(format!("MQTT {}", self.broker_url)),
@@ -54,23 +58,29 @@ impl Driver for MqttDriver {
         })
     }
 
-    fn close(&mut self) {
+    async fn close(&mut self) {
         self.status = DriverStatus::Down;
     }
 
-    fn ping(&mut self) -> Result<DriverMeta, DriverError> {
+    async fn ping(&mut self) -> Result<DriverMeta, DriverError> {
         Err(DriverError::NotSupported("mqtt ping"))
     }
 
-    fn learn(&mut self, _path: Option<&str>) -> Result<LearnGrid, DriverError> {
+    async fn learn(&mut self, _path: Option<&str>) -> Result<LearnGrid, DriverError> {
         Err(DriverError::NotSupported("mqtt learn"))
     }
 
-    fn sync_cur(&mut self, _points: &[DriverPointRef]) -> Vec<(u32, Result<f64, DriverError>)> {
+    async fn sync_cur(
+        &mut self,
+        _points: &[DriverPointRef],
+    ) -> Vec<(u32, Result<f64, DriverError>)> {
         Vec::new()
     }
 
-    fn write(&mut self, _writes: &[(u32, f64)]) -> Vec<(u32, Result<(), DriverError>)> {
+    async fn write(
+        &mut self,
+        _writes: &[(u32, f64)],
+    ) -> Vec<(u32, Result<(), DriverError>)> {
         Vec::new()
     }
 
@@ -87,30 +97,30 @@ impl Driver for MqttDriver {
 mod tests {
     use super::*;
 
-    #[test]
-    fn mqtt_lifecycle() {
+    #[tokio::test]
+    async fn mqtt_lifecycle() {
         let mut d = MqttDriver::new("mq-1", "mqtt://broker:1883");
         assert_eq!(*d.status(), DriverStatus::Pending);
         assert_eq!(d.driver_type(), "mqtt");
 
-        let meta = d.open().unwrap();
+        let meta = d.open().await.unwrap();
         assert!(meta.model.unwrap().contains("MQTT"));
         assert!(matches!(d.status(), DriverStatus::Fault(_)));
 
-        d.close();
+        d.close().await;
         assert_eq!(*d.status(), DriverStatus::Down);
     }
 
-    #[test]
-    fn mqtt_learn_not_supported() {
+    #[tokio::test]
+    async fn mqtt_learn_not_supported() {
         let mut d = MqttDriver::new("mq-2", "mqtt://x:1883");
-        assert!(d.learn(None).is_err());
+        assert!(d.learn(None).await.is_err());
     }
 
-    #[test]
-    fn mqtt_ping_not_supported() {
+    #[tokio::test]
+    async fn mqtt_ping_not_supported() {
         let mut d = MqttDriver::new("mq-3", "mqtt://x:1883");
-        assert!(d.ping().is_err());
+        assert!(d.ping().await.is_err());
     }
 
     #[test]
@@ -125,10 +135,10 @@ mod tests {
         assert_eq!(d.broker_url(), "mqtts://secure:8883");
     }
 
-    #[test]
-    fn mqtt_sync_and_write_empty() {
+    #[tokio::test]
+    async fn mqtt_sync_and_write_empty() {
         let mut d = MqttDriver::new("mq-6", "mqtt://x:1883");
-        assert!(d.sync_cur(&[]).is_empty());
-        assert!(d.write(&[]).is_empty());
+        assert!(d.sync_cur(&[]).await.is_empty());
+        assert!(d.write(&[]).await.is_empty());
     }
 }
