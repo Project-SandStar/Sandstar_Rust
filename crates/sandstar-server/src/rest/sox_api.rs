@@ -423,6 +423,11 @@ pub async fn add_comp(
     State(state): State<SoxApiState>,
     Json(req): Json<AddCompRequest>,
 ) -> Response {
+    // Centralised Sedona-compatible name validation.
+    if let Some(err) = crate::sox::name_intern::NameInternTable::validate_name(&req.name) {
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
+
     let mut tree = state.tree.write().unwrap();
 
     // Validate parent exists.
@@ -738,6 +743,29 @@ pub async fn get_palette(State(state): State<SoxApiState>) -> Response {
     Json(entries).into_response()
 }
 
+/// GET /api/sox/names — interned name table statistics and entries.
+pub async fn get_names(State(state): State<SoxApiState>) -> Response {
+    let tree = state.tree.read().unwrap();
+    let (count, total_bytes, avg_length) = tree.name_table.stats();
+    let names: Vec<serde_json::Value> = tree.name_table
+        .all_names()
+        .into_iter()
+        .map(|(id, name)| {
+            serde_json::json!({
+                "id": id.0,
+                "name": name,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({
+        "count": count,
+        "totalBytes": total_bytes,
+        "avgLength": avg_length,
+        "names": names,
+    }))
+    .into_response()
+}
+
 /// Build the SOX API sub-router (public read + protected write routes).
 ///
 /// The caller is responsible for merging these into the main app
@@ -748,6 +776,7 @@ pub fn public_router(state: SoxApiState) -> axum::Router {
         .route("/api/sox/tree", get(get_tree))
         .route("/api/sox/comp/{id}", get(get_comp))
         .route("/api/sox/palette", get(get_palette))
+        .route("/api/sox/names", get(get_names))
         .with_state(state)
 }
 

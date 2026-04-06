@@ -173,6 +173,10 @@ pub struct PersistData {
     pub user_added_ids: Vec<u16>,
     /// The next available component ID counter.
     pub next_comp_id: u16,
+    /// Optional: interned name table for fast startup.
+    /// Old JSON files without this field work fine (defaults to empty).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub name_table: Vec<String>,
 }
 
 impl ComponentTree {
@@ -655,10 +659,18 @@ impl ComponentTree {
         // Also collect all links that involve user-added components
         // (already stored on the components themselves, so they serialize with the comp)
 
+        // Serialize the name table for fast restore on startup.
+        let name_entries: Vec<String> = self.name_table
+            .all_names()
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect();
+
         let data = PersistData {
             components: user_comps.into_iter().cloned().collect(),
             user_added_ids: self.user_added_ids.iter().copied().collect(),
             next_comp_id: self.next_id,
+            name_table: name_entries,
         };
 
         let json = serde_json::to_string_pretty(&data)
@@ -694,6 +706,11 @@ impl ComponentTree {
             .map_err(|e| format!("deserialize error ({path}): {e}"))?;
 
         let count = data.components.len();
+
+        // Restore interned name table entries (from persistence).
+        for name in &data.name_table {
+            self.name_table.intern(name);
+        }
 
         // Restore user_added_ids
         for &id in &data.user_added_ids {
@@ -8239,6 +8256,85 @@ mod tests {
             other => panic!("expected Float for in2, got {other:?}"),
         }
         assert!(changed.contains(&tgt_id), "target should be in changed list after link exec");
+    }
+
+    #[test]
+    fn persist_name_table_round_trip() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let persist_path = dir.path().join("sox_names.json");
+        let persist_str = persist_path.to_str().unwrap().to_string();
+
+        let channels = sample_channels();
+        let mut tree = ComponentTree::from_channels(&channels);
+        tree.set_persist_path(persist_str.clone());
+
+        // Add a user component (its name gets interned)
+        let id1 = tree.next_comp_id();
+        tree.add(VirtualComponent {
+            comp_id: id1,
+            parent_id: 6,
+            name: "nameTest".into(),
+            type_name: "Test".into(),
+            kit_id: 2,
+            type_id: 14,
+            children: Vec::new(),
+            slots: vec![VirtualSlot {
+                name: "out".into(),
+                type_id: SoxValueType::Float as u8,
+                flags: SLOT_FLAG_CONFIG,
+                value: SlotValue::Float(1.0),
+            }],
+            links: Vec::new(),
+        });
+        tree.mark_user_added(id1);
+        tree.mark_dirty();
+
+        // Verify the name is interned
+        assert!(tree.name_table.contains("nameTest"));
+        let original_count = tree.name_table.len();
+
+        // Save (includes name_table)
+        tree.save_user_components().expect("save should succeed");
+
+        // Verify the persisted JSON contains name_table
+        let json = std::fs::read_to_string(&persist_path).expect("read persist file");
+        let data: PersistData = serde_json::from_str(&json).expect("parse");
+        assert!(!data.name_table.is_empty(), "name_table should be non-empty in persistence");
+        assert!(data.name_table.contains(&"nameTest".to_string()));
+
+        // Load into a fresh tree
+        let mut tree2 = ComponentTree::from_channels(&channels);
+        tree2.set_persist_path(persist_str);
+        tree2.load_user_components().expect("load should succeed");
+
+        // Verify name_table restored
+        assert!(tree2.name_table.contains("nameTest"), "name should be re-interned from persistence");
+        assert!(tree2.name_table.len() >= original_count,
+            "restored name table should have at least as many entries");
+    }
+
+    #[test]
+    fn persist_backward_compat_no_name_table() {
+        // Verify that old persistence files without name_table still load correctly
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let persist_path = dir.path().join("sox_old.json");
+        let persist_str = persist_path.to_str().unwrap().to_string();
+
+        // Write old-format JSON (no name_table field)
+        let old_json = r#"{
+            "components": [],
+            "user_added_ids": [],
+            "next_comp_id": 100
+        }"#;
+        std::fs::write(&persist_path, old_json).expect("write old json");
+
+        let channels = sample_channels();
+        let mut tree = ComponentTree::from_channels(&channels);
+        tree.set_persist_path(persist_str);
+
+        // Should load without error — name_table defaults to empty
+        let loaded = tree.load_user_components().expect("load should succeed with old format");
+        assert_eq!(loaded, 0);
     }
 
     // ── Name validation tests ──────────────────────────────

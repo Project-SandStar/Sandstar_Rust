@@ -20,6 +20,10 @@ ws://<host>:8085/api/rows
 
 // Component palette
 {"op": "palette", "id": "r3"}
+
+// Name table (enables compact COV mode — slot names omitted in subsequent COV pushes)
+{"op": "nameTable", "id": "r4"}
+// Response: {"op":"result","id":"r4","ok":true,"data":{"names":[{"id":1,"name":"app"},...]}}
 ```
 
 ### Write Operations
@@ -27,13 +31,13 @@ ws://<host>:8085/api/rows
 // Write slot value
 {"op": "writeSlot", "id": "w1", "compId": 200, "slotIdx": 1, "value": 42.5}
 
-// Add component
+// Add component (Sedona name rules apply: max 31 chars, starts with letter, alphanumeric + underscore)
 {"op": "addComp", "id": "w2", "parentId": 6, "kitId": 2, "typeId": 14, "name": "myConst"}
 
 // Delete component
 {"op": "deleteComp", "id": "w3", "compId": 200}
 
-// Rename (max 31 chars)
+// Rename (Sedona name rules: max 31 chars, starts with letter, alphanumeric + underscore)
 {"op": "rename", "id": "w4", "compId": 200, "name": "newName"}
 
 // Update canvas position
@@ -97,6 +101,23 @@ ws://<host>:8085/api/rows
 {"op": "linkChanged", "action": "add", "fromComp": 200, "fromSlot": 1, "toComp": 201, "toSlot": 2}
 {"op": "linkChanged", "action": "delete", "fromComp": 200, "fromSlot": 1, "toComp": 201, "toSlot": 2}
 ```
+
+## Name Validation
+
+The `addComp` and `rename` operations validate names using centralised
+Sedona-compatible rules (from the `NameInternTable`):
+
+- Non-empty
+- Max 31 characters
+- First character must be an ASCII letter (`a-z`, `A-Z`)
+- Remaining characters: ASCII letters, digits, or underscore (`_`)
+
+Invalid names return an error response:
+```json
+{"op": "error", "id": "w2", "code": "BAD_REQUEST", "message": "name must start with a letter"}
+```
+
+See [02_REST_API.md](02_REST_API.md) for the full list of error messages.
 
 ## Connection Limits
 - Max 16 concurrent RoWS connections

@@ -80,6 +80,8 @@ async fn handle_rows_session(ws: WebSocket, state: RowsState) {
     let mut cov_cache: HashMap<u16, Vec<JsonValue>> = HashMap::new();
     // Cache of last-seen children per component for tree change detection
     let mut tree_cache: HashMap<u16, Vec<u16>> = HashMap::new();
+    // When true, COV messages use compact format (slot index + value only, no name).
+    let mut compact_cov: bool = false;
 
     let mut last_client_msg = Instant::now();
     let mut cov_timer = tokio::time::interval(Duration::from_millis(COV_INTERVAL_MS));
@@ -98,6 +100,7 @@ async fn handle_rows_session(ws: WebSocket, state: RowsState) {
                             &mut subscribed,
                             &mut cov_cache,
                             &mut tree_cache,
+                            &mut compact_cov,
                         );
                         if let Some(reply_json) = reply {
                             metrics.rows_messages_out.fetch_add(1, Ordering::Relaxed);
@@ -131,6 +134,7 @@ async fn handle_rows_session(ws: WebSocket, state: RowsState) {
                     &subscribed,
                     &mut cov_cache,
                     &mut tree_cache,
+                    compact_cov,
                 );
 
                 let mut disconnected = false;
@@ -157,6 +161,7 @@ fn build_cov_messages(
     subscribed: &HashSet<u16>,
     cov_cache: &mut HashMap<u16, Vec<JsonValue>>,
     tree_cache: &mut HashMap<u16, Vec<u16>>,
+    compact_cov: bool,
 ) -> Vec<String> {
     let tree = tree_handle.read().unwrap();
     let mut messages = Vec::new();
@@ -220,11 +225,20 @@ fn build_cov_messages(
                     .and_then(|c| c.get(idx))
                     .is_some_and(|cv| cv == val);
                 if is_new {
-                    changed_slots.push(serde_json::json!({
-                        "index": idx,
-                        "name": slot.name,
-                        "value": val,
-                    }));
+                    if compact_cov {
+                        // Compact mode: slot index + value only (no name).
+                        // Client already has slot names from readComp / nameTable.
+                        changed_slots.push(serde_json::json!({
+                            "i": idx,
+                            "v": val,
+                        }));
+                    } else {
+                        changed_slots.push(serde_json::json!({
+                            "index": idx,
+                            "name": slot.name,
+                            "value": val,
+                        }));
+                    }
                 }
             }
 
@@ -253,6 +267,7 @@ fn handle_client_msg(
     subscribed: &mut HashSet<u16>,
     cov_cache: &mut HashMap<u16, Vec<JsonValue>>,
     tree_cache: &mut HashMap<u16, Vec<u16>>,
+    compact_cov: &mut bool,
 ) -> Option<String> {
     let msg: JsonValue = match serde_json::from_str(text) {
         Ok(m) => m,
@@ -356,6 +371,7 @@ fn handle_client_msg(
                 _ => make_error(id.as_deref(), "BAD_REQUEST", "missing compId or slotIdx"),
             }
         }
+        "nameTable" => handle_name_table(state, id.as_deref(), compact_cov),
         "palette" => handle_palette(state, id.as_deref()),
         "subscribe" => {
             let comp_ids = msg.get("compIds")
@@ -665,6 +681,27 @@ fn handle_invoke(
     make_result(id, serde_json::json!({ "ok": true }))
 }
 
+fn handle_name_table(
+    state: &RowsState,
+    id: Option<&str>,
+    compact_cov: &mut bool,
+) -> Option<String> {
+    let tree = state.tree.read().unwrap();
+    let names: Vec<JsonValue> = tree.name_table
+        .all_names()
+        .into_iter()
+        .map(|(name_id, name)| {
+            serde_json::json!({
+                "id": name_id.0,
+                "name": name,
+            })
+        })
+        .collect();
+    // Enable compact COV mode for this session — the client now has the name table.
+    *compact_cov = true;
+    make_result(id, serde_json::json!({ "names": names }))
+}
+
 fn handle_palette(state: &RowsState, id: Option<&str>) -> Option<String> {
     let mut entries: Vec<JsonValue> = state
         .manifest_db
@@ -924,12 +961,14 @@ mod tests {
         let mut subscribed = HashSet::new();
         let mut cov_cache = HashMap::new();
         let mut tree_cache = HashMap::new();
+        let mut compact_cov = false;
         let reply = handle_client_msg(
             "not json at all",
             &state,
             &mut subscribed,
             &mut cov_cache,
             &mut tree_cache,
+            &mut compact_cov,
         );
         let v: JsonValue = serde_json::from_str(reply.as_deref().unwrap()).unwrap();
         assert_eq!(v["op"], "error");
@@ -942,12 +981,14 @@ mod tests {
         let mut subscribed = HashSet::new();
         let mut cov_cache = HashMap::new();
         let mut tree_cache = HashMap::new();
+        let mut compact_cov = false;
         let reply = handle_client_msg(
             r#"{"id":"1"}"#,
             &state,
             &mut subscribed,
             &mut cov_cache,
             &mut tree_cache,
+            &mut compact_cov,
         );
         let v: JsonValue = serde_json::from_str(reply.as_deref().unwrap()).unwrap();
         assert_eq!(v["op"], "error");
@@ -960,12 +1001,14 @@ mod tests {
         let mut subscribed = HashSet::new();
         let mut cov_cache = HashMap::new();
         let mut tree_cache = HashMap::new();
+        let mut compact_cov = false;
         let reply = handle_client_msg(
             r#"{"op":"foobar","id":"1"}"#,
             &state,
             &mut subscribed,
             &mut cov_cache,
             &mut tree_cache,
+            &mut compact_cov,
         );
         let v: JsonValue = serde_json::from_str(reply.as_deref().unwrap()).unwrap();
         assert_eq!(v["op"], "error");
@@ -979,12 +1022,14 @@ mod tests {
         let mut subscribed = HashSet::new();
         let mut cov_cache = HashMap::new();
         let mut tree_cache = HashMap::new();
+        let mut compact_cov = false;
         let reply = handle_client_msg(
             r#"{"op":"ping","id":"p1"}"#,
             &state,
             &mut subscribed,
             &mut cov_cache,
             &mut tree_cache,
+            &mut compact_cov,
         );
         let v: JsonValue = serde_json::from_str(reply.as_deref().unwrap()).unwrap();
         assert_eq!(v["op"], "pong");
@@ -997,12 +1042,14 @@ mod tests {
         let mut subscribed = HashSet::new();
         let mut cov_cache = HashMap::new();
         let mut tree_cache = HashMap::new();
+        let mut compact_cov = false;
         let reply = handle_client_msg(
             r#"{"op":"readTree","id":"t1"}"#,
             &state,
             &mut subscribed,
             &mut cov_cache,
             &mut tree_cache,
+            &mut compact_cov,
         );
         let v: JsonValue = serde_json::from_str(reply.as_deref().unwrap()).unwrap();
         assert_eq!(v["op"], "result");
@@ -1016,12 +1063,14 @@ mod tests {
         let mut subscribed = HashSet::new();
         let mut cov_cache = HashMap::new();
         let mut tree_cache = HashMap::new();
+        let mut compact_cov = false;
         let reply = handle_client_msg(
             r#"{"op":"readComp","compId":9999,"id":"c1"}"#,
             &state,
             &mut subscribed,
             &mut cov_cache,
             &mut tree_cache,
+            &mut compact_cov,
         );
         let v: JsonValue = serde_json::from_str(reply.as_deref().unwrap()).unwrap();
         assert_eq!(v["op"], "error");
@@ -1034,6 +1083,7 @@ mod tests {
         let mut subscribed = HashSet::new();
         let mut cov_cache = HashMap::new();
         let mut tree_cache = HashMap::new();
+        let mut compact_cov = false;
 
         // Subscribe
         let reply = handle_client_msg(
@@ -1042,6 +1092,7 @@ mod tests {
             &mut subscribed,
             &mut cov_cache,
             &mut tree_cache,
+            &mut compact_cov,
         );
         let v: JsonValue = serde_json::from_str(reply.as_deref().unwrap()).unwrap();
         assert_eq!(v["op"], "result");
@@ -1055,6 +1106,7 @@ mod tests {
             &mut subscribed,
             &mut cov_cache,
             &mut tree_cache,
+            &mut compact_cov,
         );
         let v: JsonValue = serde_json::from_str(reply.as_deref().unwrap()).unwrap();
         assert_eq!(v["op"], "result");
@@ -1069,12 +1121,14 @@ mod tests {
         let mut subscribed = HashSet::new();
         let mut cov_cache = HashMap::new();
         let mut tree_cache = HashMap::new();
+        let mut compact_cov = false;
         let reply = handle_client_msg(
             r#"{"op":"deleteComp","compId":3,"id":"d1"}"#,
             &state,
             &mut subscribed,
             &mut cov_cache,
             &mut tree_cache,
+            &mut compact_cov,
         );
         let v: JsonValue = serde_json::from_str(reply.as_deref().unwrap()).unwrap();
         assert_eq!(v["op"], "error");
@@ -1087,12 +1141,14 @@ mod tests {
         let mut subscribed = HashSet::new();
         let mut cov_cache = HashMap::new();
         let mut tree_cache = HashMap::new();
+        let mut compact_cov = false;
         let reply = handle_client_msg(
             r#"{"op":"rename","compId":10,"name":"1bad","id":"r1"}"#,
             &state,
             &mut subscribed,
             &mut cov_cache,
             &mut tree_cache,
+            &mut compact_cov,
         );
         let v: JsonValue = serde_json::from_str(reply.as_deref().unwrap()).unwrap();
         assert_eq!(v["op"], "error");
@@ -1105,12 +1161,14 @@ mod tests {
         let mut subscribed = HashSet::new();
         let mut cov_cache = HashMap::new();
         let mut tree_cache = HashMap::new();
+        let mut compact_cov = false;
         let reply = handle_client_msg(
             r#"{"op":"palette","id":"p1"}"#,
             &state,
             &mut subscribed,
             &mut cov_cache,
             &mut tree_cache,
+            &mut compact_cov,
         );
         let v: JsonValue = serde_json::from_str(reply.as_deref().unwrap()).unwrap();
         assert_eq!(v["op"], "result");
@@ -1148,14 +1206,14 @@ mod tests {
         let mut tree_cache_map = HashMap::new();
 
         // First call: should produce a COV (no cache)
-        let msgs = build_cov_messages(&tree_handle, &subscribed, &mut cov_cache, &mut tree_cache_map);
+        let msgs = build_cov_messages(&tree_handle, &subscribed, &mut cov_cache, &mut tree_cache_map, false);
         assert_eq!(msgs.len(), 1);
         let v: JsonValue = serde_json::from_str(&msgs[0]).unwrap();
         assert_eq!(v["op"], "cov");
         assert_eq!(v["compId"], 100);
 
         // Second call: no change, no COV
-        let msgs = build_cov_messages(&tree_handle, &subscribed, &mut cov_cache, &mut tree_cache_map);
+        let msgs = build_cov_messages(&tree_handle, &subscribed, &mut cov_cache, &mut tree_cache_map, false);
         assert!(msgs.is_empty());
 
         // Mutate value
@@ -1167,7 +1225,7 @@ mod tests {
         }
 
         // Third call: should detect change
-        let msgs = build_cov_messages(&tree_handle, &subscribed, &mut cov_cache, &mut tree_cache_map);
+        let msgs = build_cov_messages(&tree_handle, &subscribed, &mut cov_cache, &mut tree_cache_map, false);
         assert_eq!(msgs.len(), 1);
         let v: JsonValue = serde_json::from_str(&msgs[0]).unwrap();
         assert_eq!(v["op"], "cov");
@@ -1205,7 +1263,7 @@ mod tests {
         let mut tree_cache_map = HashMap::new();
 
         // Prime cache
-        let _ = build_cov_messages(&tree_handle, &subscribed, &mut cov_cache, &mut tree_cache_map);
+        let _ = build_cov_messages(&tree_handle, &subscribed, &mut cov_cache, &mut tree_cache_map, false);
 
         // Add a child
         {
@@ -1215,13 +1273,143 @@ mod tests {
             }
         }
 
-        let msgs = build_cov_messages(&tree_handle, &subscribed, &mut cov_cache, &mut tree_cache_map);
+        let msgs = build_cov_messages(&tree_handle, &subscribed, &mut cov_cache, &mut tree_cache_map, false);
         // Should have a treeChanged message
         let tree_msgs: Vec<&String> = msgs.iter().filter(|m| m.contains("treeChanged")).collect();
         assert_eq!(tree_msgs.len(), 1);
         let v: JsonValue = serde_json::from_str(tree_msgs[0]).unwrap();
         assert_eq!(v["action"], "childrenChanged");
         assert_eq!(v["compId"], 50);
+    }
+
+    #[test]
+    fn handle_name_table_returns_names_and_enables_compact() {
+        use crate::sox::sox_handlers::{
+            ComponentTree, ManifestDb, SlotValue, VirtualComponent, VirtualSlot,
+        };
+        use crate::sox::sox_protocol::SoxValueType;
+
+        let manifest_db = Arc::new(ManifestDb::load(""));
+        let mut tree_inner = ComponentTree::new_with_manifest(manifest_db.clone());
+        // Add a component so its name gets interned
+        tree_inner.add(VirtualComponent {
+            comp_id: 100,
+            parent_id: 0,
+            name: "myComp".into(),
+            type_name: "Test".into(),
+            kit_id: 2,
+            type_id: 14,
+            children: vec![],
+            slots: vec![VirtualSlot {
+                name: "out".into(),
+                type_id: SoxValueType::Float as u8,
+                flags: 0x04,
+                value: SlotValue::Float(1.0),
+            }],
+            links: vec![],
+        });
+
+        let tree_handle: SharedComponentTree =
+            Arc::new(std::sync::RwLock::new(tree_inner));
+        let state = RowsState {
+            tree: tree_handle,
+            manifest_db,
+        };
+        let mut subscribed = HashSet::new();
+        let mut cov_cache = HashMap::new();
+        let mut tree_cache = HashMap::new();
+        let mut compact_cov = false;
+
+        let reply = handle_client_msg(
+            r#"{"op":"nameTable","id":"n1"}"#,
+            &state,
+            &mut subscribed,
+            &mut cov_cache,
+            &mut tree_cache,
+            &mut compact_cov,
+        );
+        let v: JsonValue = serde_json::from_str(reply.as_deref().unwrap()).unwrap();
+        assert_eq!(v["op"], "result");
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["id"], "n1");
+
+        // The name table should contain "myComp"
+        let names = v["data"]["names"].as_array().unwrap();
+        assert!(!names.is_empty());
+        let has_my_comp = names.iter().any(|n| n["name"] == "myComp");
+        assert!(has_my_comp, "name table should contain 'myComp'");
+
+        // compact_cov should now be enabled
+        assert!(compact_cov, "compact_cov should be true after nameTable request");
+    }
+
+    #[test]
+    fn compact_cov_uses_short_keys() {
+        use crate::sox::sox_handlers::{
+            ComponentTree, ManifestDb, SlotValue, VirtualComponent, VirtualSlot,
+        };
+        use crate::sox::sox_protocol::SoxValueType;
+
+        let manifest_db = Arc::new(ManifestDb::load(""));
+        let mut tree_inner = ComponentTree::new_with_manifest(manifest_db.clone());
+        tree_inner.add(VirtualComponent {
+            comp_id: 200,
+            parent_id: 0,
+            name: "test".into(),
+            type_name: "Test".into(),
+            kit_id: 2,
+            type_id: 14,
+            children: vec![],
+            slots: vec![VirtualSlot {
+                name: "out".into(),
+                type_id: SoxValueType::Float as u8,
+                flags: 0x04,
+                value: SlotValue::Float(42.0),
+            }],
+            links: vec![],
+        });
+
+        let tree_handle: SharedComponentTree =
+            Arc::new(std::sync::RwLock::new(tree_inner));
+        let mut subscribed = HashSet::new();
+        subscribed.insert(200);
+        let mut cov_cache = HashMap::new();
+        let mut tree_cache_map = HashMap::new();
+
+        // First call with compact=false to prime cache
+        let _ = build_cov_messages(
+            &tree_handle,
+            &subscribed,
+            &mut cov_cache,
+            &mut tree_cache_map,
+            false,
+        );
+
+        // Mutate value
+        {
+            let mut t = tree_handle.write().unwrap();
+            if let Some(comp) = t.get_mut(200) {
+                comp.slots[0].value = SlotValue::Float(99.0);
+            }
+        }
+
+        // Compact COV should use "i" and "v" keys
+        let msgs = build_cov_messages(
+            &tree_handle,
+            &subscribed,
+            &mut cov_cache,
+            &mut tree_cache_map,
+            true,
+        );
+        assert_eq!(msgs.len(), 1);
+        let v: JsonValue = serde_json::from_str(&msgs[0]).unwrap();
+        assert_eq!(v["op"], "cov");
+        let slot = &v["slots"][0];
+        // Compact format uses "i" and "v" instead of "index", "name", "value"
+        assert!(slot.get("i").is_some(), "compact COV should have 'i' key");
+        assert!(slot.get("v").is_some(), "compact COV should have 'v' key");
+        assert!(slot.get("name").is_none(), "compact COV should not have 'name'");
+        assert!(slot.get("index").is_none(), "compact COV should not have 'index'");
     }
 
     // ── Test helpers ───────────────────────────

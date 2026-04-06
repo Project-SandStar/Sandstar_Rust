@@ -24,6 +24,8 @@ use super::cluster::{ClusterConfig, DeltaEngine, VersionedPoint};
 pub struct RoxWarpState {
     pub delta_engine: Arc<DeltaEngine>,
     pub config: ClusterConfig,
+    /// Optional reference to the SOX component tree for name table sharing.
+    pub sox_tree: Option<crate::sox::SharedComponentTree>,
 }
 
 // ── Wire Messages (JSON for Phase 1) ─────────────────
@@ -45,6 +47,9 @@ pub(crate) enum WarpMessage {
         #[serde(rename = "nodeId")]
         node_id: String,
         versions: HashMap<String, u64>,
+        /// Component name table entries from the SOX name intern table (optional).
+        #[serde(rename = "nameTable", default, skip_serializing_if = "Vec::is_empty")]
+        name_table: Vec<String>,
     },
     /// Keep-alive with optional load metrics.
     #[serde(rename = "warp:heartbeat")]
@@ -136,7 +141,7 @@ pub async fn roxwarp_upgrade(
         .map(|v| v == "trio")
         .unwrap_or(false);
     ws.on_upgrade(move |socket| {
-        handle_roxwarp_connection(socket, state.delta_engine, state.config, debug)
+        handle_roxwarp_connection(socket, state.delta_engine, state.config, state.sox_tree, debug)
     })
 }
 
@@ -153,6 +158,7 @@ async fn handle_roxwarp_connection(
     ws: WebSocket,
     delta_engine: Arc<DeltaEngine>,
     config: ClusterConfig,
+    sox_tree: Option<crate::sox::SharedComponentTree>,
     debug_mode: bool,
 ) {
     let (mut ws_tx, mut ws_rx) = ws.split();
@@ -170,11 +176,19 @@ async fn handle_roxwarp_connection(
         }
     };
 
-    // Phase 2: Send welcome with our version vector
+    // Phase 2: Send welcome with our version vector + name table
     let our_versions = delta_engine.get_version_vector().await;
+    let name_table_entries: Vec<String> = sox_tree
+        .as_ref()
+        .map(|tree| {
+            let t = tree.read().unwrap();
+            t.name_table.all_names().into_iter().map(|(_, n)| n).collect()
+        })
+        .unwrap_or_default();
     let welcome = WarpMessage::Welcome {
         node_id: config.node_id.clone(),
         versions: our_versions,
+        name_table: name_table_entries,
     };
     if send_message(&mut ws_tx, &welcome, debug_mode).await.is_err() {
         return;
@@ -725,6 +739,7 @@ mod tests {
         let msg = WarpMessage::Welcome {
             node_id: "responder".to_string(),
             versions: HashMap::new(),
+            name_table: vec![],
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"warp:welcome\""));

@@ -66,6 +66,9 @@ pub enum WarpMessage {
         /// String table entries for tag name compression (optional).
         #[serde(rename = "stringTable", default, skip_serializing_if = "Vec::is_empty")]
         string_table: Vec<String>,
+        /// Component name table entries from the SOX name intern table (optional).
+        #[serde(rename = "nameTable", default, skip_serializing_if = "Vec::is_empty")]
+        name_table: Vec<String>,
     },
 
     /// Handshake response from accepting peer.
@@ -79,6 +82,9 @@ pub enum WarpMessage {
         /// String table entries for tag name compression (optional).
         #[serde(rename = "stringTable", default, skip_serializing_if = "Vec::is_empty")]
         string_table: Vec<String>,
+        /// Component name table entries from the SOX name intern table (optional).
+        #[serde(rename = "nameTable", default, skip_serializing_if = "Vec::is_empty")]
+        name_table: Vec<String>,
     },
 
     /// Incremental state delta.
@@ -320,6 +326,7 @@ mod tests {
             versions: HashMap::from([("node-a".into(), 100)]),
             capabilities: capabilities::defaults(),
             string_table: vec![],
+            name_table: vec![],
         };
         let json = msg.to_json().unwrap();
         assert!(json.contains("\"type\":\"warp:hello\""));
@@ -337,6 +344,7 @@ mod tests {
             versions: HashMap::new(),
             capabilities: vec!["deltaSync".into()],
             string_table: vec![],
+            name_table: vec![],
         };
         let json = msg.to_json().unwrap();
         let decoded = WarpMessage::from_json(&json).unwrap();
@@ -467,6 +475,7 @@ mod tests {
             versions: HashMap::from([("node-a".into(), 100)]),
             capabilities: capabilities::defaults(),
             string_table: vec![],
+            name_table: vec![],
         };
         let bytes = msg.to_msgpack().unwrap();
         let decoded = WarpMessage::from_msgpack(&bytes).unwrap();
@@ -533,6 +542,7 @@ mod tests {
             versions: HashMap::new(),
             capabilities: vec![],
             string_table: vec![],
+            name_table: vec![],
         };
         assert_eq!(msg.type_tag(), "warp:hello");
 
@@ -685,6 +695,7 @@ mod tests {
             versions: HashMap::from([("node-a".into(), 100)]),
             capabilities: capabilities::defaults(),
             string_table: table.to_entries(),
+            name_table: vec![],
         };
         let json = msg.to_json().unwrap();
         assert!(json.contains("\"stringTable\""));
@@ -699,6 +710,7 @@ mod tests {
             versions: HashMap::new(),
             capabilities: vec![],
             string_table: vec![],
+            name_table: vec![],
         };
         let json = msg.to_json().unwrap();
         // Empty string table should be omitted from JSON
@@ -714,6 +726,7 @@ mod tests {
             versions: HashMap::from([("node-b".into(), 200)]),
             capabilities: vec!["deltaSync".into()],
             string_table: vec![],
+            name_table: vec![],
         };
         let bytes = msg.to_msgpack().unwrap();
         let decoded = WarpMessage::from_msgpack(&bytes).unwrap();

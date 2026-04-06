@@ -485,6 +485,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let rw_state = RoxWarpState {
             delta_engine,
             config: cluster_config.clone(),
+            sox_tree: sox_api_state.as_ref().map(|s| s.tree.clone()),
         };
 
         // Start separate roxWarp listener on cluster port (default 7443)

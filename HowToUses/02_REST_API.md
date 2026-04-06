@@ -63,6 +63,10 @@ curl http://localhost:8085/api/sox/comp/200
 
 # Available component types for palette
 curl http://localhost:8085/api/sox/palette
+
+# Interned name table (stats + all names)
+curl http://localhost:8085/api/sox/names
+# Response: {"count":42, "totalBytes":380, "avgLength":9.0, "names":[{"id":1,"name":"app"}, ...]}
 ```
 
 ### Dynamic Tags
@@ -104,7 +108,7 @@ curl "http://localhost:8085/api/pointWrite?channel=360"
 
 ### SOX Component CRUD
 ```bash
-# Add component (under control folder, parentId=6)
+# Add component (under control folder, parentId=6; Sedona name validation applies)
 curl -X POST http://localhost:8085/api/sox/comp \
   -H 'Content-Type: application/json' \
   -d '{"parentId": 6, "kitId": 2, "typeId": 14, "name": "myConst"}'
@@ -112,7 +116,7 @@ curl -X POST http://localhost:8085/api/sox/comp \
 # Delete component
 curl -X DELETE http://localhost:8085/api/sox/comp/200
 
-# Rename component (max 31 chars, Sedona compatible)
+# Rename component (Sedona name validation applies, see below)
 curl -X PUT http://localhost:8085/api/sox/comp/200/name \
   -H 'Content-Type: application/json' \
   -d '{"name": "newName"}'
@@ -168,6 +172,36 @@ curl -X POST http://localhost:8085/api/cluster/query \
   -H 'Content-Type: application/json' \
   -d '{"filter": "point and channel > 1000", "limit": 50}'
 ```
+
+## Name Validation (Name Interning)
+
+All component name operations (add, rename) enforce Sedona-compatible
+name validation via the centralised `NameInternTable`. The rules are:
+
+| Rule | Detail |
+|------|--------|
+| Non-empty | `""` is rejected |
+| Max 31 characters | Longer names return 400 |
+| Starts with ASCII letter | `a-z`, `A-Z` only (no digits, no underscore) |
+| Body chars | ASCII letters, digits, and underscore (`_`) only |
+
+Invalid names return `400 Bad Request` with a descriptive message:
+
+```
+"name cannot be empty"
+"name too long (max 31 chars)"
+"name must start with a letter"
+"name can only contain letters, numbers, and underscores"
+```
+
+Validation is enforced on:
+- `POST /api/sox/comp` (add component)
+- `PUT /api/sox/comp/{id}/name` (rename)
+- RoWS `addComp` and `rename` operations
+
+Internally, all component names are interned in a shared table for
+deduplication and fast lookup (2-byte `NameId` references). The intern
+table is populated automatically when components are added to the tree.
 
 ## WebSocket Endpoints
 
