@@ -143,33 +143,11 @@ impl NativeTable {
             table.register_stub(2, id);
         }
 
+        // ── Kit 3: serial (6 methods, placeholder) ────────────
+        crate::native_serial::register_serial(&mut table);
+
         // ── Kit 4: EacIo (23 methods, slot 0 is NULL in C) ──
-        table.set_kit_name(4, "EacIo");
-        // Slot 0 was NULL in the C table — register as Stub.
-        table.register_stub(4, 0);
-        // Slots 1-22: real implementations wrapping bridge.rs functions.
-        table.register(4, 1, kit4_bool_in_point_get);           // boolInPoint.get
-        table.register(4, 2, kit4_bool_out_point_set);          // boolOutPoint.set
-        table.register(4, 3, kit4_binary_value_point_set);      // binaryValuePoint.set
-        table.register(4, 4, kit4_analog_in_point_get);         // analogInPoint.get
-        table.register(4, 5, kit4_analog_out_point_set);        // analogOutPoint.set
-        table.register(4, 6, kit4_analog_value_point_set);      // analogValuePoint.set
-        table.register(4, 7, kit4_eacio_resolve_channel);       // eacio.resolveChannel
-        table.register(4, 8, kit4_eacio_get_record_count);      // eacio.getRecordCount
-        table.register(4, 9, kit4_eacio_get_cur_status);        // eacio.getCurStatus
-        table.register(4, 10, kit4_eacio_get_channel_name);     // eacio.getChannelName
-        table.register(4, 11, kit4_triac_point_set);            // triacPoint.set
-        table.register(4, 12, kit4_eacio_write_sedona_id);      // eacio.writeSedonaId
-        table.register(4, 13, kit4_eacio_write_sedona_type);    // eacio.writeSedonaType
-        table.register(4, 14, kit4_eacio_is_channel_enabled);   // eacio.isChannelEnabled
-        table.register(4, 15, kit4_eacio_get_bool_tag_value);   // eacio.getBoolTagValue
-        table.register(4, 16, kit4_eacio_get_number_tag_value); // eacio.getNumberTagValue
-        table.register(4, 17, kit4_eacio_get_string_tag_value); // eacio.getStringTagValue
-        table.register(4, 18, kit4_eacio_get_tag_type);         // eacio.getTagType
-        table.register(4, 19, kit4_eacio_get_level);            // eacio.getLevel
-        table.register(4, 20, kit4_eacio_get_level_value);      // eacio.getLevelValue
-        table.register(4, 21, kit4_eacio_get_channel_in);       // eacio.getChannelIn
-        table.register(4, 22, kit4_analog_value_point_get);     // analogValuePoint.get
+        crate::native_eacio::register_kit4_eacio(&mut table);
 
         // ── Kit 9: datetimeStd (3 methods) ───────────────────
         table.set_kit_name(9, "datetimeStd");
@@ -190,6 +168,8 @@ impl NativeTable {
         crate::native_file::register_kit0_file(&mut table);
         // crate::native_inet::register_kit2(&mut table);  // uncomment when ready
         crate::native_datetime::register_kit9(&mut table);
+        // Kit 3 (serial) and Kit 4 (EacIo) are registered above via
+        // their dedicated register functions — no need to re-register.
 
         table
     }
@@ -391,136 +371,8 @@ impl std::fmt::Debug for NativeTable {
     }
 }
 
-// ════════════════════════════════════════════════════════════════
-// Kit 4 (EacIo) native method wrappers
-// ════════════════════════════════════════════════════════════════
-//
-// These are thin shims that will eventually call into the engine bridge.
-// For now they return safe defaults — the real I/O dispatch happens through
-// the existing FFI bridge (bridge.rs) until the pure-Rust VM fully replaces
-// the C VM.  Each function matches one slot in kitNatives4[].
-
-fn kit4_bool_in_point_get(_ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult<i32> {
-    let _channel = params.first().copied().unwrap_or(0);
-    // TODO: Phase B — read from engine channel snapshot
-    Ok(0) // false
-}
-
-fn kit4_bool_out_point_set(_ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult<i32> {
-    let _channel = params.first().copied().unwrap_or(0);
-    let _value = params.get(1).copied().unwrap_or(0);
-    Ok(1) // success
-}
-
-fn kit4_binary_value_point_set(_ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult<i32> {
-    let _channel = params.first().copied().unwrap_or(0);
-    let _value = params.get(1).copied().unwrap_or(0);
-    Ok(1)
-}
-
-fn kit4_analog_in_point_get(_ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult<i32> {
-    let _channel = params.first().copied().unwrap_or(0);
-    // Return 0.0f as i32 bits
-    Ok(0_f32.to_bits() as i32)
-}
-
-fn kit4_analog_out_point_set(_ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult<i32> {
-    let _channel = params.first().copied().unwrap_or(0);
-    let _value = params.get(1).copied().unwrap_or(0);
-    Ok(1)
-}
-
-fn kit4_analog_value_point_set(_ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult<i32> {
-    let _channel = params.first().copied().unwrap_or(0);
-    let _value = params.get(1).copied().unwrap_or(0);
-    Ok(1)
-}
-
-fn kit4_eacio_resolve_channel(_ctx: &mut NativeContext<'_>, _params: &[i32]) -> VmResult<i32> {
-    Ok(-1) // not found
-}
-
-fn kit4_eacio_get_record_count(_ctx: &mut NativeContext<'_>, _params: &[i32]) -> VmResult<i32> {
-    Ok(0)
-}
-
-fn kit4_eacio_get_cur_status(_ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult<i32> {
-    let _channel = params.first().copied().unwrap_or(0);
-    Ok(0) // false — no status string written
-}
-
-fn kit4_eacio_get_channel_name(_ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult<i32> {
-    let _channel = params.first().copied().unwrap_or(0);
-    Ok(0) // false
-}
-
-fn kit4_triac_point_set(_ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult<i32> {
-    let _channel = params.first().copied().unwrap_or(0);
-    let _value = params.get(1).copied().unwrap_or(0);
-    Ok(1)
-}
-
-fn kit4_eacio_write_sedona_id(_ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult<i32> {
-    let _channel = params.first().copied().unwrap_or(0);
-    let _sedona_id = params.get(1).copied().unwrap_or(0);
-    Ok(0)
-}
-
-fn kit4_eacio_write_sedona_type(_ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult<i32> {
-    let _channel = params.first().copied().unwrap_or(0);
-    Ok(0)
-}
-
-fn kit4_eacio_is_channel_enabled(_ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult<i32> {
-    let _channel = params.first().copied().unwrap_or(0);
-    Ok(0) // false
-}
-
-fn kit4_eacio_get_bool_tag_value(_ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult<i32> {
-    let _channel = params.first().copied().unwrap_or(0);
-    Ok(0) // false
-}
-
-fn kit4_eacio_get_number_tag_value(
-    _ctx: &mut NativeContext<'_>,
-    params: &[i32],
-) -> VmResult<i32> {
-    let _channel = params.first().copied().unwrap_or(0);
-    Ok(0_f32.to_bits() as i32)
-}
-
-fn kit4_eacio_get_string_tag_value(
-    _ctx: &mut NativeContext<'_>,
-    _params: &[i32],
-) -> VmResult<i32> {
-    Ok(0) // void — writes to Str param
-}
-
-fn kit4_eacio_get_tag_type(_ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult<i32> {
-    let _channel = params.first().copied().unwrap_or(0);
-    Ok(0) // unknown type
-}
-
-fn kit4_eacio_get_level(_ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult<i32> {
-    let _channel = params.first().copied().unwrap_or(0);
-    Ok(17) // default level
-}
-
-fn kit4_eacio_get_level_value(_ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult<i32> {
-    let _channel = params.first().copied().unwrap_or(0);
-    let _level = params.get(1).copied().unwrap_or(0);
-    Ok(0_f32.to_bits() as i32)
-}
-
-fn kit4_eacio_get_channel_in(_ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult<i32> {
-    let _channel = params.first().copied().unwrap_or(0);
-    Ok(-1) // not virtual
-}
-
-fn kit4_analog_value_point_get(_ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult<i32> {
-    let _channel = params.first().copied().unwrap_or(0);
-    Ok(0_f32.to_bits() as i32)
-}
+// Kit 4 (EacIo) native methods are now in native_eacio.rs.
+// Kit 3 (serial) native methods are now in native_serial.rs.
 
 // ════════════════════════════════════════════════════════════════
 // Tests
@@ -852,20 +704,23 @@ mod tests {
         assert_eq!(t.call_wide(0, 14, &mut ctx, &[]).unwrap(), 1_000_000_000i64);
     }
 
-    // ── Kit 4 wrapper smoke tests ────────────────────────────
+    // ── Kit 4 smoke tests (via native_eacio module) ────────────
 
     #[test]
     fn kit4_bool_in_point_get_returns_zero() {
         let mut mem = Vec::new();
         let mut ctx = test_ctx(&mut mem);
-        assert_eq!(kit4_bool_in_point_get(&mut ctx, &[1113]).unwrap(), 0);
+        assert_eq!(
+            crate::native_eacio::eacio_bool_in_point_get(&mut ctx, &[1113]).unwrap(),
+            0,
+        );
     }
 
     #[test]
     fn kit4_analog_in_point_get_returns_zero_float() {
         let mut mem = Vec::new();
         let mut ctx = test_ctx(&mut mem);
-        let bits = kit4_analog_in_point_get(&mut ctx, &[1100]).unwrap();
+        let bits = crate::native_eacio::eacio_analog_in_point_get(&mut ctx, &[1100]).unwrap();
         assert_eq!(f32::from_bits(bits as u32), 0.0);
     }
 
@@ -873,28 +728,40 @@ mod tests {
     fn kit4_bool_out_point_set_returns_success() {
         let mut mem = Vec::new();
         let mut ctx = test_ctx(&mut mem);
-        assert_eq!(kit4_bool_out_point_set(&mut ctx, &[1113, 1]).unwrap(), 1);
+        assert_eq!(
+            crate::native_eacio::eacio_bool_out_point_set(&mut ctx, &[1113, 1]).unwrap(),
+            1,
+        );
     }
 
     #[test]
     fn kit4_eacio_resolve_channel_returns_not_found() {
         let mut mem = Vec::new();
         let mut ctx = test_ctx(&mut mem);
-        assert_eq!(kit4_eacio_resolve_channel(&mut ctx, &[]).unwrap(), -1);
+        assert_eq!(
+            crate::native_eacio::eacio_resolve_channel(&mut ctx, &[]).unwrap(),
+            -1,
+        );
     }
 
     #[test]
     fn kit4_eacio_get_level_returns_default() {
         let mut mem = Vec::new();
         let mut ctx = test_ctx(&mut mem);
-        assert_eq!(kit4_eacio_get_level(&mut ctx, &[1113]).unwrap(), 17);
+        assert_eq!(
+            crate::native_eacio::eacio_get_level(&mut ctx, &[1113]).unwrap(),
+            17,
+        );
     }
 
     #[test]
     fn kit4_eacio_get_channel_in_returns_not_virtual() {
         let mut mem = Vec::new();
         let mut ctx = test_ctx(&mut mem);
-        assert_eq!(kit4_eacio_get_channel_in(&mut ctx, &[1113]).unwrap(), -1);
+        assert_eq!(
+            crate::native_eacio::eacio_get_channel_in(&mut ctx, &[1113]).unwrap(),
+            -1,
+        );
     }
 
     // ── Debug formatting ─────────────────────────────────────

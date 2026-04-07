@@ -18,3 +18,4 @@ Quick reference for all Sandstar features, CLI flags, and API endpoints.
 | [10_DASHBOARD.md](10_DASHBOARD.md) | Web dashboard features |
 | [11_DRIVER_FRAMEWORK.md](11_DRIVER_FRAMEWORK.md) | Driver Framework v2 |
 | [12_DYNAMIC_TAGS.md](12_DYNAMIC_TAGS.md) | Dynamic tag system for runtime metadata |
+| [13_SEDONA_VM.md](13_SEDONA_VM.md) | Sedona VM Rust port: interpreter, native kits, bridge |

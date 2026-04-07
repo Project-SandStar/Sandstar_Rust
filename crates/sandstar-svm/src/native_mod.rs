@@ -25,6 +25,12 @@ pub fn register_all_natives(table: &mut NativeTable) {
     // Kit 2: inet — TCP/UDP sockets, crypto (uncomment when ready)
     // crate::native_inet::register_kit2(table);
 
+    // Kit 3: serial — SerialPort stub natives
+    crate::native_serial::register_serial(table);
+
+    // Kit 4: EacIo — bridge-aware point I/O and channel queries
+    crate::native_eacio::register_kit4_eacio(table);
+
     // Kit 9: datetimeStd — doNow, doSetClock, getUtcOffset
     crate::native_datetime::register_kit9(table);
 }
@@ -51,6 +57,18 @@ mod tests {
             table.implemented_count(0) >= 33,
             "expected >= 33 real kit 0 methods, got {}",
             table.implemented_count(0)
+        );
+
+        // Kit 3 (serial) should have 6 methods implemented
+        assert_eq!(
+            table.implemented_count(crate::native_serial::SERIAL_KIT_ID),
+            crate::native_serial::SERIAL_METHOD_COUNT as usize,
+        );
+
+        // Kit 4 (EacIo) should have 22 real methods (slot 0 is stub)
+        assert_eq!(
+            table.implemented_count(crate::native_eacio::EACIO_KIT_ID),
+            22,
         );
 
         // Kit 9 should have all 3 methods implemented

@@ -1620,6 +1620,7 @@ dependencies = [
  "chrono",
  "sandstar-engine",
  "sandstar-hal",
+ "smallvec",
  "tracing",
 ]
 

@@ -13,6 +13,7 @@
 //! `getInline`, and their `set*` counterparts.
 
 use crate::image_loader::ScodeImage;
+use crate::vm_config::AddressWidth;
 use crate::vm_error::{VmError, VmResult};
 
 /// VM memory model — holds scode (read-only) and data (read-write) segments.
@@ -24,6 +25,8 @@ pub struct VmMemory {
     data: Vec<u8>,
     /// Block size in bytes (typically 4)
     block_size: u8,
+    /// Address width for scode references (Block16 = classic, Byte32 = extended).
+    address_width: AddressWidth,
 }
 
 impl VmMemory {
@@ -43,7 +46,47 @@ impl VmMemory {
             code: image.code.clone(),
             data: vec![0u8; data_size as usize],
             block_size: image.header.block_size,
+            address_width: AddressWidth::Block16,
         })
+    }
+
+    /// Create from an scode image with an explicit address width.
+    ///
+    /// Use [`AddressWidth::Byte32`] to lift the 256KB scode limit.
+    pub fn from_image_extended(image: &ScodeImage, width: AddressWidth) -> VmResult<Self> {
+        let mut mem = Self::from_image(image)?;
+        mem.address_width = width;
+        Ok(mem)
+    }
+
+    /// Read an address from the code or data segment, respecting the
+    /// configured [`AddressWidth`].
+    ///
+    /// - **Block16**: reads a `u16` at `offset`, multiplies by `block_size`
+    ///   (classic Sedona — 256KB max).
+    /// - **Byte32**: reads a `u32` at `offset` as a raw byte address
+    ///   (extended — 4GB max).
+    #[inline]
+    pub fn read_addr(&self, segment: &[u8], offset: usize) -> VmResult<usize> {
+        match self.address_width {
+            AddressWidth::Block16 => {
+                let end = offset.checked_add(2).ok_or(VmError::NullPointer)?;
+                let slice = segment.get(offset..end).ok_or(VmError::NullPointer)?;
+                let block = u16::from_le_bytes([slice[0], slice[1]]);
+                Ok(self.block_to_addr(block))
+            }
+            AddressWidth::Byte32 => {
+                let end = offset.checked_add(4).ok_or(VmError::NullPointer)?;
+                let slice = segment.get(offset..end).ok_or(VmError::NullPointer)?;
+                Ok(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]) as usize)
+            }
+        }
+    }
+
+    /// Current address width.
+    #[inline]
+    pub fn address_width(&self) -> AddressWidth {
+        self.address_width
     }
 
     // =======================================================================
@@ -332,6 +375,7 @@ impl VmMemory {
 mod tests {
     use super::*;
     use crate::image_loader::{ScodeImage, SCODE_BLOCK_SIZE, SCODE_MAGIC, SCODE_MAJOR_VER, SCODE_MINOR_VER};
+    use crate::vm_config::AddressWidth;
 
     /// Build a minimal valid scode image with given code_size and data_size.
     fn make_image(code_size: u32, data_size: u32) -> ScodeImage {
@@ -828,5 +872,60 @@ mod tests {
         let mem = VmMemory::from_image(&image).unwrap();
         assert_eq!(mem.data_len(), 512);
         assert_eq!(mem.code_len(), 256);
+    }
+
+    // -----------------------------------------------------------------------
+    // Extended addressing (AddressWidth)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn default_address_width_is_block16() {
+        let image = make_image(128, 64);
+        let mem = VmMemory::from_image(&image).unwrap();
+        assert_eq!(mem.address_width(), AddressWidth::Block16);
+    }
+
+    #[test]
+    fn from_image_extended_sets_width() {
+        let image = make_image(128, 64);
+        let mem = VmMemory::from_image_extended(&image, AddressWidth::Byte32).unwrap();
+        assert_eq!(mem.address_width(), AddressWidth::Byte32);
+    }
+
+    #[test]
+    fn read_addr_block16() {
+        let image = make_image(128, 128);
+        let mem = VmMemory::from_image(&image).unwrap();
+        // Place a u16 block index = 10 in a buffer
+        let mut buf = vec![0u8; 16];
+        buf[0..2].copy_from_slice(&10u16.to_le_bytes());
+        let addr = mem.read_addr(&buf, 0).unwrap();
+        assert_eq!(addr, 10 * 4); // block_size = 4
+    }
+
+    #[test]
+    fn read_addr_byte32() {
+        let image = make_image(128, 128);
+        let mem = VmMemory::from_image_extended(&image, AddressWidth::Byte32).unwrap();
+        let mut buf = vec![0u8; 16];
+        buf[0..4].copy_from_slice(&12345u32.to_le_bytes());
+        let addr = mem.read_addr(&buf, 0).unwrap();
+        assert_eq!(addr, 12345);
+    }
+
+    #[test]
+    fn read_addr_block16_out_of_bounds() {
+        let image = make_image(64, 64);
+        let mem = VmMemory::from_image(&image).unwrap();
+        let buf = vec![0u8; 1]; // too small for u16
+        assert!(mem.read_addr(&buf, 0).is_err());
+    }
+
+    #[test]
+    fn read_addr_byte32_out_of_bounds() {
+        let image = make_image(64, 64);
+        let mem = VmMemory::from_image_extended(&image, AddressWidth::Byte32).unwrap();
+        let buf = vec![0u8; 3]; // too small for u32
+        assert!(mem.read_addr(&buf, 0).is_err());
     }
 }

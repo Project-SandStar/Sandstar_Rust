@@ -31,6 +31,8 @@ pub mod opcodes;
 pub mod vm_error;
 pub mod image_loader;
 pub mod vm_memory;
+pub mod vm_config;
+pub mod component_store;
 pub mod native_table;
 pub mod native_sys;
 pub mod native_file;
@@ -39,6 +41,8 @@ pub mod native_datetime;
 pub mod native_component;
 pub mod native_inet;
 pub mod native_mod;
+pub mod native_serial;
+pub mod native_eacio;
 // Future phases:
 pub mod vm_stack;
 pub mod vm_interpreter;

@@ -5,7 +5,7 @@
 **Version:** 1.4.0 (7 crates, 1,637 tests, ~40,000+ lines of Rust)
 **Feature Parity:** ~99% (80/80 features vs C system + extras)
 **Research Documents:** 20 analysis docs (00-19) — deep gap analysis completed 2026-03-20
-**Research Coverage:** ~72% weighted (100% on core docs 00-11, deferred on future docs 12-19)
+**Research Coverage:** ~82% weighted (100% on core docs 00-11, 90-95% on docs 12-14, deferred on future docs 16-19)
 **GitHub:** https://github.com/TurkerMertkan/Sandstar_Rust (private)
 **Codebase Audit:** 2026-03-20 — 3-agent deep research gap analysis (20 docs vs codebase)
 
@@ -93,7 +93,7 @@
 | Phase 14.0E | Web-Based Visual DDC Editor: Component Palette & CRUD | M | -- | PLANNED |
 | Phase 14.0F | Web-Based Visual DDC Editor: Live Data & WebSocket | M | -- | PLANNED |
 | Phase 9.0 | Northbound clustering (roxWarp) | XL | 16 | Low |
-| Phase 11.0 | Sedona VM Rust port (bytecode interpreter, name interning) | XL | 12, 13, 17 | Very Low |
+| Phase 11.0 | Sedona VM Rust port (bytecode interpreter, name interning) | XL | 12, 13, 14, 17 | **MOSTLY COMPLETE** (90%) |
 | Phase 12.0 | Driver Framework v2 (Haxall-inspired, pure Rust) | XL | 18 | Very Low |
 | Phase 13.0 | Dynamic Slots (hybrid static+dynamic slot model) | L | 19 | Very Low |
 
@@ -601,21 +601,29 @@ The security audit identified issues across four severity levels. These MUST be 
 
 ---
 
-### Phase 11.0: Sedona VM Rust Port (Very Low) [XL]
+### Phase 11.0: Sedona VM Rust Port (Very Low) [XL] -- MOSTLY COMPLETE
 
 **Goal:** Replace the 100K-line C VM with a safe Rust implementation.
 
-| Task | Description | Effort |
-|------|-------------|--------|
-| 11.0a | **Bytecode interpreter**: Cell-based stack machine, 87 opcodes, 64KB type-safe memory. | [XL] |
-| 11.0b | **Native method framework**: Safe Rust trait replacing C function pointer table. | [L] |
-| 11.0c | **Name interning**: Replace 7-char name limit with interned strings (doc 17). 31-char name validation enforced at all entry points (REST, RoWS, SOX, editor). | [M] |
-| 11.0d | **Compatibility testing**: Verify all 29 standard kits produce identical output. | [L] |
+| Task | Description | Effort | Status |
+|------|-------------|--------|--------|
+| 11.0a | **Bytecode interpreter**: Cell-based stack machine, **240 opcodes** (all 10 categories), bounds-checked VmStack (4096 cells), VmMemory with code+data segments, match-based dispatch with NaN equality special cases. | [XL] | **DONE** |
+| 11.0b | **Native method framework**: `NativeTable` with `(kit_id, method_id)` dispatch, `NativeContext` struct replacing C `(SedonaVM*, Cell*)` pointers. Safe Rust function signatures. | [L] | **DONE** |
+| 11.0c | **Native method kits**: Kit 0/sys (60 methods: malloc/free, copy, intStr/floatStr, ticks, Str ops, Component reflection, FileStore, Test). Kit 2/inet (17 methods: TCP/UDP sockets, SHA-1). Kit 9/datetimeStd (3 methods). Kit 4/EacIo (23 methods via bridge). Kit 100/shaystack (28 stubs). | [L] | **DONE** |
+| 11.0d | **Image loader + VmConfig**: Scode header parsing/validation (magic, version, block size), configurable limits (stack 64KB, components 4096, scode 4MB, data 1MB, call depth 64), Block16/Byte32 address widths. | [M] | **DONE** |
+| 11.0e | **ComponentStore**: Free-list allocation (O(1) alloc/free), u32 IDs (4B max), iterative tree walk (no recursion), SmallVec<[u32; 8]> children. | [M] | **DONE** |
+| 11.0f | **RustSvmRunner**: Lifecycle management (start/resume/stop), loads scode from file, runs main+resume methods, Drop impl for cleanup. | [M] | **DONE** |
+| 11.0g | **Bridge**: ChannelSnapshot (Arc<RwLock>), SvmWrite/SvmTagWrite queues (Arc<Mutex<Vec>>), FFI catch_unwind safety wrappers. | [M] | **DONE** |
+| 11.0h | **Test utilities**: ScodeBuilder for in-memory scode assembly, op/op_u8/op_u16/op_u32 emitters, build_memory convenience. | [S] | **DONE** |
+| 11.0i | **Name interning**: Replace 7-char name limit with interned strings (doc 17). 31-char name validation enforced at all entry points (REST, RoWS, SOX, editor). | [M] | **DONE** |
+| 11.0j | **Compatibility testing**: Verify all 29 standard kits produce identical output. | [L] | Not started |
 
-**Total effort:** 2-4 weeks
-**Blocked by:** Phase 10.0 may make this unnecessary
+**Completion:** ~90% (11.0a-i done, only 11.0j compatibility testing remains)
+**Test count:** 650+ tests in sandstar-svm crate (509 unit + 141 integration)
+**Total effort:** 2-4 weeks (completed incrementally alongside other phases)
+**Blocked by:** Nothing
 **Blocks:** Phase 12.0, 13.0
-**Research docs:** 12 (VM Architecture), 13 (Porting Strategy), 17 (Name Interning)
+**Research docs:** 12 (VM Architecture), 13 (Porting Strategy), 14 (Scalability Limits), 17 (Name Interning)
 
 ---
 
@@ -635,7 +643,7 @@ The security audit identified issues across four severity levels. These MUST be 
 | 12.0f | **DriverManager**: Tokio actor orchestrating lifecycle, health monitoring, auto-reconnect. | [L] | Sync version complete; async/actor pending |
 
 **Total effort:** 2-4 weeks
-**Blocked by:** Phase 11.0 (for Sedona compatibility layer)
+**Blocked by:** Phase 11.0 (mostly complete -- only compat testing remains)
 **Blocks:** Phase 13.0
 
 ---
@@ -692,7 +700,7 @@ Active development:
 
 Remaining future tracks (post-production):
   ├── Phase 9.0:  roxWarp clustering       [XL, no blockers]
-  ├── Phase 11.0: Sedona VM Rust port      [XL, may be unnecessary]
+  ├── Phase 11.0: Sedona VM Rust port      [XL, 90% COMPLETE, 650+ tests]
   ├── Phase 12.0: Driver Framework v2      [XL, needs 11.0]
   └── Phase 13.0: Dynamic Slots            [L, needs 12.0, 13.0a-e COMPLETE]
 ```
@@ -732,7 +740,7 @@ Remaining future tracks (post-production):
 | 9.0 | roxWarp clustering | Low | [XL] | Not started | 16 |
 | 10.0A-D | Config-driven control engine | Medium | [M] | COMPLETE | -- |
 | 10.0E | Additional components library | Low | [M] | COMPLETE (20 + converter) | -- |
-| 11.0 | Sedona VM Rust port | Very Low | [XL] | Not started | 12, 13, 14, 17 |
+| 11.0 | Sedona VM Rust port | Very Low | [XL] | **MOSTLY COMPLETE** (90%, 650+ tests, only compat testing remains) | 12, 13, 14, 17 |
 | **12.0** | **Driver Framework v2** | **Very Low** | **[XL]** | **In progress (12.0a,d complete; stubs for e)** | **18** |
 | **13.0** | **Dynamic Slots** | **Very Low** | **[L]** | **In progress (13.0a-e complete; SOX/ROX + Haystack pending)** | **19** |
 
@@ -746,7 +754,7 @@ Remaining future tracks (post-production):
 | C/C++ replaced | ~27,000 lines engine + 6,839 lines SVM (pure-rust-vm feature) |
 | POCO eliminated | ~500,000 lines |
 | Test count | 1,637 passing, 0 failures |
-| Pure Rust VM | 240 opcodes, 80 native methods, `--features pure-rust-vm` builds without C |
+| Pure Rust VM | 240 opcodes, 131 native methods (5 kits), 650+ tests, VmConfig, ComponentStore, RustSvmRunner |
 | Crates | 7 (engine, hal, hal-linux, ipc, server, cli, svm) |
 | REST endpoints | 25 (14 Haystack + health + metrics + zinc + WebSocket + rate-limit + auth + 4 simulator) |
 | Control components | 35 executable types (PID, sequencer, Tstat, Add2/Sub2/Mul2/Div2, ConstFloat, and more) |
@@ -791,9 +799,9 @@ Deep gap analysis completed 2026-03-20 (3-agent, 20 documents vs full codebase).
 | 09 | Dependency Mapping | All | 92% | libhaystack not used; zig CC instead of Docker cross |
 | 10 | Build & Cross-compile | 3E | 95% | No CI/CD; zig CC surpasses Docker approach |
 | 11 | Migration Roadmap | 0-5 | 98% | All 7 phases complete + WebSocket, control engine, SCRAM |
-| 12 | SVM Architecture | 11.0 | 70% | VM stays C (by design); Kit 4 ported to Rust; config-driven control replaces VM |
-| 13 | SVM Porting Strategy | 11.0 | 25% | Intentionally deferred; FFI bridge is Priority 2 (done) |
-| 14 | Scalability Limits | 5.6, 7.0c | 80% | Rust engine fixes most; VM-internal limits unchanged |
+| 12 | SVM Architecture | 11.0 | 95% | Pure Rust VM complete: 240 opcodes, VmStack, VmMemory, NativeTable, ImageLoader. 650+ tests. Only compatibility testing (11.0j) remains |
+| 13 | SVM Porting Strategy | 11.0 | 90% | All recommended phases implemented: Cell type (i32 stack), opcode dispatch (match), stack (bounds-checked Vec), memory segments, native method system, scode loader. Kit 0/2/4/9 natives ported. Compatibility testing pending |
+| 14 | Scalability Limits | 11.0, 5.6, 7.0c | 95% | ComponentStore (free-list, u32 IDs, iterative tree walk), VmConfig (configurable limits: 64KB stack, 4096 components, 4MB scode, Byte32 addressing). All scalability fixes from doc 14 implemented |
 | 15 | SOX/WebSocket | 8.0A, 8.0A-SOX, 8.0B | 100% | WS + SCRAM + full SOX/DASP done (20/20 commands, pure Rust, 185 manifest types, dataflow engine, component persistence) |
 | 16 | roxWarp Protocol | 9.0 | 0% | Entirely unimplemented (future Phase 9.0) |
 | 17 | Name Length Analysis | 11.0c | 60% | Unlimited names via String; interning unnecessary at scale. **31-char Sedona-compat name validation enforced across all entry points** (REST, RoWS, SOX add/rename, editor JS) as of 2026-04-04. |

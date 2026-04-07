@@ -168,15 +168,15 @@ pub struct SvmTagWrite {
 }
 
 /// Global engine bridge — set before SVM starts.
-static ENGINE_BRIDGE: std::sync::OnceLock<Arc<RwLock<ChannelSnapshot>>> =
+pub(crate) static ENGINE_BRIDGE: std::sync::OnceLock<Arc<RwLock<ChannelSnapshot>>> =
     std::sync::OnceLock::new();
 
 /// Write queue — SVM output operations sent to main loop.
-static WRITE_QUEUE: std::sync::OnceLock<Arc<Mutex<Vec<SvmWrite>>>> =
+pub(crate) static WRITE_QUEUE: std::sync::OnceLock<Arc<Mutex<Vec<SvmWrite>>>> =
     std::sync::OnceLock::new();
 
 /// Tag write queue — SVM tag updates sent to main loop.
-static TAG_WRITE_QUEUE: std::sync::OnceLock<Arc<Mutex<Vec<SvmTagWrite>>>> =
+pub(crate) static TAG_WRITE_QUEUE: std::sync::OnceLock<Arc<Mutex<Vec<SvmTagWrite>>>> =
     std::sync::OnceLock::new();
 
 /// Initialize the bridge with a shared snapshot.
