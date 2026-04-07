@@ -2718,10 +2718,23 @@ pub fn handle_sox_request(
     subscriptions: &mut SubscriptionManager,
     session_id: u16,
 ) -> SoxResponse {
+    handle_sox_request_with_dyn(request, tree, subscriptions, session_id, None)
+}
+
+/// Handle a SOX request with optional access to the dynamic slot store.
+///
+/// When `dyn_store` is provided, `readComp(what='d')` returns dynamic tags.
+pub fn handle_sox_request_with_dyn(
+    request: &SoxRequest,
+    tree: &mut ComponentTree,
+    subscriptions: &mut SubscriptionManager,
+    session_id: u16,
+    dyn_store: Option<&super::DynSlotStoreHandle>,
+) -> SoxResponse {
     match request.cmd {
         SoxCmd::ReadSchema => handle_read_schema(request),
         SoxCmd::ReadVersion => handle_read_version(request),
-        SoxCmd::ReadComp => handle_read_comp(request, tree),
+        SoxCmd::ReadComp => handle_read_comp(request, tree, dyn_store),
         SoxCmd::ReadProp => handle_read_prop(request, tree),
         SoxCmd::Subscribe => handle_subscribe(request, subscriptions, session_id, tree),
         SoxCmd::Unsubscribe => handle_unsubscribe(request, subscriptions, session_id),
@@ -3308,8 +3321,12 @@ fn handle_read_version(req: &SoxRequest) -> SoxResponse {
 
 /// readComp ('c') -- read a component tree node.
 ///
-/// Request payload: u2 compId, u1 what ('t'=tree, 'c'=config, 'r'=runtime, 'l'=links).
-fn handle_read_comp(req: &SoxRequest, tree: &ComponentTree) -> SoxResponse {
+/// Request payload: u2 compId, u1 what ('t'=tree, 'c'=config, 'r'=runtime, 'l'=links, 'd'=dynamic tags).
+///
+/// The `what='d'` mode is a Sandstar extension (not part of standard Sedona SOX).
+/// It returns dynamic tags from the side-car DynSlotStore encoded as:
+/// `u16 tag_count`, then for each tag: `null-terminated key + u8 type_code + value bytes`.
+fn handle_read_comp(req: &SoxRequest, tree: &ComponentTree, dyn_store: Option<&super::DynSlotStoreHandle>) -> SoxResponse {
     let mut reader = SoxReader::new(&req.payload);
     let comp_id = match reader.read_u16() {
         Some(id) => id,
@@ -3366,12 +3383,86 @@ fn handle_read_comp(req: &SoxRequest, tree: &ComponentTree) -> SoxResponse {
             }
             resp.write_u16(0xFFFF); // terminator
         }
+        b'd' => {
+            // Dynamic tags (Sandstar extension — not part of standard Sedona SOX).
+            // Encodes the component's dynamic tags from the side-car DynSlotStore.
+            handle_read_comp_dynamic(comp_id, dyn_store, &mut resp);
+        }
         _ => {
             // Unknown what — return empty
         }
     }
 
     resp
+}
+
+/// Encode dynamic tags from the DynSlotStore into a readComp response.
+///
+/// Wire format: `u16 tag_count`, then for each tag:
+///   - Null-terminated key string
+///   - `u8` type code (0=Null, 1=Marker, 2=Bool, 3=Int, 4=Float, 5=Str, 6=Ref)
+///   - Type-specific value bytes
+fn handle_read_comp_dynamic(
+    comp_id: u16,
+    dyn_store: Option<&super::DynSlotStoreHandle>,
+    response: &mut SoxResponse,
+) {
+    if let Some(store_handle) = dyn_store {
+        let store = store_handle.read().unwrap();
+        let tags = store.get_all_with_computed(comp_id);
+        response.write_u16(tags.len() as u16);
+        // Sort by key for deterministic wire order (important for tests and debugging).
+        let mut sorted: Vec<_> = tags.iter().collect();
+        sorted.sort_by_key(|(k, _)| k.as_str());
+        for (key, value) in sorted {
+            response.write_str(key);
+            encode_dyn_value(response, value);
+        }
+    } else {
+        response.write_u16(0); // no dynamic slot store — zero tags
+    }
+}
+
+/// Encode a single `DynValue` onto a SOX response payload.
+///
+/// Type codes:
+/// - 0 = Null
+/// - 1 = Marker (no value bytes)
+/// - 2 = Bool (`u8`: 0 or 1)
+/// - 3 = Int (`i32` big-endian, truncated from i64)
+/// - 4 = Float (`f32` big-endian, truncated from f64)
+/// - 5 = Str (null-terminated)
+/// - 6 = Ref (null-terminated)
+fn encode_dyn_value(response: &mut SoxResponse, value: &super::dyn_slots::DynValue) {
+    use super::dyn_slots::DynValue;
+    match value {
+        DynValue::Null => {
+            response.write_u8(0);
+        }
+        DynValue::Marker => {
+            response.write_u8(1);
+        }
+        DynValue::Bool(b) => {
+            response.write_u8(2);
+            response.write_u8(if *b { 1 } else { 0 });
+        }
+        DynValue::Int(i) => {
+            response.write_u8(3);
+            response.write_i32(*i as i32);
+        }
+        DynValue::Float(f) => {
+            response.write_u8(4);
+            response.write_f32(*f as f32);
+        }
+        DynValue::Str(s) => {
+            response.write_u8(5);
+            response.write_str(s);
+        }
+        DynValue::Ref(r) => {
+            response.write_u8(6);
+            response.write_str(r);
+        }
+    }
 }
 
 /// readProp ('r') — read a single property value.
@@ -4479,7 +4570,7 @@ mod tests {
             req_id: 1,
             payload,
         };
-        let resp = handle_read_comp(&req, &tree);
+        let resp = handle_read_comp(&req, &tree, None);
         assert_eq!(resp.cmd, b'C');
         let mut r = SoxReader::new(&resp.payload);
         assert_eq!(r.read_u16(), Some(0)); // comp_id
@@ -4504,7 +4595,7 @@ mod tests {
             req_id: 2,
             payload,
         };
-        let resp = handle_read_comp(&req, &tree);
+        let resp = handle_read_comp(&req, &tree, None);
         assert_eq!(resp.cmd, b'C');
         let mut r = SoxReader::new(&resp.payload);
         assert_eq!(r.read_u16(), Some(100));
@@ -4521,7 +4612,7 @@ mod tests {
             req_id: 3,
             payload,
         };
-        let resp = handle_read_comp(&req, &tree);
+        let resp = handle_read_comp(&req, &tree, None);
         assert_eq!(resp.cmd, b'!');
     }
 
@@ -4536,7 +4627,7 @@ mod tests {
             req_id: 4,
             payload,
         };
-        let resp = handle_read_comp(&req, &tree);
+        let resp = handle_read_comp(&req, &tree, None);
         assert_eq!(resp.cmd, b'C');
         // No links — payload should contain compId(0) + what('l') + 0xFFFF terminator
         // Payload: [0x00, 0x00, b'l', 0xFF, 0xFF]
@@ -4877,7 +4968,7 @@ mod tests {
             req_id: 50,
             payload: Vec::new(), // no comp_id
         };
-        let resp = handle_read_comp(&req, &tree);
+        let resp = handle_read_comp(&req, &tree, None);
         assert_eq!(resp.cmd, b'!');
     }
 
@@ -4892,7 +4983,7 @@ mod tests {
             req_id: 60,
             payload,
         };
-        let resp = handle_read_comp(&req, &tree);
+        let resp = handle_read_comp(&req, &tree, None);
         assert_eq!(resp.cmd, b'C');
         // Config mode: comp_id + what + config slot values (no tree structure)
         let mut r = SoxReader::new(&resp.payload);
@@ -5375,7 +5466,7 @@ mod tests {
         payload.extend_from_slice(&101u16.to_be_bytes());
         payload.push(b'l');
         let req = SoxRequest { cmd: SoxCmd::ReadComp, req_id: 15, payload };
-        let resp = handle_read_comp(&req, &tree);
+        let resp = handle_read_comp(&req, &tree, None);
         assert_eq!(resp.cmd, b'C');
         // Payload: u2 compId(101) + u1 what('l') + 2 links + u2 terminator
         // Each link: u2 fromComp + u1 fromSlot + u2 toComp + u1 toSlot = 6 bytes
@@ -8435,5 +8526,179 @@ mod tests {
         // Should fail — response should not contain a new comp ID
         assert_ne!(resp.payload.first().copied(), Some(b'A'),
             "add with hyphenated name should be rejected");
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // readComp what='d' (dynamic tags extension) tests
+    // ═══════════════════════════════════════════════════════════
+
+    use crate::sox::dyn_slots::{DynSlotStore, DynValue};
+    use crate::sox::DynSlotStoreHandle;
+
+    fn make_dyn_store() -> DynSlotStoreHandle {
+        Arc::new(std::sync::RwLock::new(DynSlotStore::with_defaults()))
+    }
+
+    #[test]
+    fn handle_read_comp_dynamic_no_tags() {
+        let tree = ComponentTree::from_channels(&sample_channels());
+        let store = make_dyn_store();
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&100u16.to_be_bytes()); // comp_id = first channel
+        payload.push(b'd');
+        let req = SoxRequest { cmd: SoxCmd::ReadComp, req_id: 1, payload };
+        let resp = handle_read_comp(&req, &tree, Some(&store));
+
+        assert_eq!(resp.cmd, b'C');
+        let mut r = SoxReader::new(&resp.payload);
+        assert_eq!(r.read_u16(), Some(100)); // comp_id
+        assert_eq!(r.read_u8(), Some(b'd')); // what echoed
+        assert_eq!(r.read_u16(), Some(0));   // zero tags
+        assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn handle_read_comp_dynamic_no_store() {
+        let tree = ComponentTree::from_channels(&sample_channels());
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&100u16.to_be_bytes());
+        payload.push(b'd');
+        let req = SoxRequest { cmd: SoxCmd::ReadComp, req_id: 2, payload };
+        let resp = handle_read_comp(&req, &tree, None);
+
+        assert_eq!(resp.cmd, b'C');
+        let mut r = SoxReader::new(&resp.payload);
+        assert_eq!(r.read_u16(), Some(100));
+        assert_eq!(r.read_u8(), Some(b'd'));
+        assert_eq!(r.read_u16(), Some(0)); // zero tags when no store
+    }
+
+    #[test]
+    fn handle_read_comp_dynamic_with_tags() {
+        let tree = ComponentTree::from_channels(&sample_channels());
+        let store = make_dyn_store();
+
+        // Set some tags on comp 100
+        {
+            let mut s = store.write().unwrap();
+            s.set(100, "modbusAddr".into(), DynValue::Int(40001)).unwrap();
+            s.set(100, "point".into(), DynValue::Marker).unwrap();
+            s.set(100, "enabled".into(), DynValue::Bool(true)).unwrap();
+        }
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&100u16.to_be_bytes());
+        payload.push(b'd');
+        let req = SoxRequest { cmd: SoxCmd::ReadComp, req_id: 3, payload };
+        let resp = handle_read_comp(&req, &tree, Some(&store));
+
+        assert_eq!(resp.cmd, b'C');
+        let mut r = SoxReader::new(&resp.payload);
+        assert_eq!(r.read_u16(), Some(100)); // comp_id
+        assert_eq!(r.read_u8(), Some(b'd')); // what
+        let count = r.read_u16().unwrap();
+        assert_eq!(count, 3); // three tags
+
+        // Tags are sorted by key: enabled, modbusAddr, point
+        // Tag 1: "enabled" Bool(true)
+        assert_eq!(r.read_str(), Some("enabled".into()));
+        assert_eq!(r.read_u8(), Some(2)); // type=Bool
+        assert_eq!(r.read_u8(), Some(1)); // true
+
+        // Tag 2: "modbusAddr" Int(40001)
+        assert_eq!(r.read_str(), Some("modbusAddr".into()));
+        assert_eq!(r.read_u8(), Some(3)); // type=Int
+        assert_eq!(r.read_i32(), Some(40001));
+
+        // Tag 3: "point" Marker
+        assert_eq!(r.read_str(), Some("point".into()));
+        assert_eq!(r.read_u8(), Some(1)); // type=Marker
+
+        assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn handle_read_comp_dynamic_all_value_types() {
+        let tree = ComponentTree::from_channels(&sample_channels());
+        let store = make_dyn_store();
+
+        {
+            let mut s = store.write().unwrap();
+            s.set(100, "a_null".into(), DynValue::Null).unwrap();
+            s.set(100, "b_marker".into(), DynValue::Marker).unwrap();
+            s.set(100, "c_bool".into(), DynValue::Bool(false)).unwrap();
+            s.set(100, "d_int".into(), DynValue::Int(-42)).unwrap();
+            s.set(100, "e_float".into(), DynValue::Float(3.14)).unwrap();
+            s.set(100, "f_str".into(), DynValue::Str("hello".into())).unwrap();
+            s.set(100, "g_ref".into(), DynValue::Ref("@p:r:abc".into())).unwrap();
+        }
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&100u16.to_be_bytes());
+        payload.push(b'd');
+        let req = SoxRequest { cmd: SoxCmd::ReadComp, req_id: 4, payload };
+        let resp = handle_read_comp(&req, &tree, Some(&store));
+
+        let mut r = SoxReader::new(&resp.payload);
+        r.read_u16(); // comp_id
+        r.read_u8();  // what
+
+        let count = r.read_u16().unwrap();
+        assert_eq!(count, 7);
+
+        // Sorted by key: a_null, b_marker, c_bool, d_int, e_float, f_str, g_ref
+
+        // a_null: type=0 (Null)
+        assert_eq!(r.read_str(), Some("a_null".into()));
+        assert_eq!(r.read_u8(), Some(0));
+
+        // b_marker: type=1 (Marker)
+        assert_eq!(r.read_str(), Some("b_marker".into()));
+        assert_eq!(r.read_u8(), Some(1));
+
+        // c_bool: type=2, val=0
+        assert_eq!(r.read_str(), Some("c_bool".into()));
+        assert_eq!(r.read_u8(), Some(2));
+        assert_eq!(r.read_u8(), Some(0));
+
+        // d_int: type=3, val=-42
+        assert_eq!(r.read_str(), Some("d_int".into()));
+        assert_eq!(r.read_u8(), Some(3));
+        assert_eq!(r.read_i32(), Some(-42));
+
+        // e_float: type=4, val=3.14
+        assert_eq!(r.read_str(), Some("e_float".into()));
+        assert_eq!(r.read_u8(), Some(4));
+        let f = r.read_f32().unwrap();
+        assert!((f - 3.14).abs() < 0.01);
+
+        // f_str: type=5, val="hello"
+        assert_eq!(r.read_str(), Some("f_str".into()));
+        assert_eq!(r.read_u8(), Some(5));
+        assert_eq!(r.read_str(), Some("hello".into()));
+
+        // g_ref: type=6, val="@p:r:abc"
+        assert_eq!(r.read_str(), Some("g_ref".into()));
+        assert_eq!(r.read_u8(), Some(6));
+        assert_eq!(r.read_str(), Some("@p:r:abc".into()));
+
+        assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn handle_read_comp_dynamic_unknown_comp() {
+        let tree = ComponentTree::from_channels(&sample_channels());
+        let store = make_dyn_store();
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&999u16.to_be_bytes()); // nonexistent comp
+        payload.push(b'd');
+        let req = SoxRequest { cmd: SoxCmd::ReadComp, req_id: 5, payload };
+        let resp = handle_read_comp(&req, &tree, Some(&store));
+
+        // Should return error (unknown comp)
+        assert_eq!(resp.cmd, b'!');
     }
 }

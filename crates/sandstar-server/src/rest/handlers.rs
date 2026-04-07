@@ -10,11 +10,13 @@ use axum::extract::{Path, Query, State};
 use axum::http::header::CONTENT_TYPE;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
+use axum::{Extension, Json};
 
 use super::error::AppError;
 use super::types::*;
 use super::EngineHandle;
+use crate::sox::DynSlotStoreHandle;
+use crate::sox::sox_handlers::CHANNEL_COMP_BASE;
 
 /// Check if the client wants Zinc wire format.
 fn wants_zinc(headers: &HeaderMap) -> bool {
@@ -66,10 +68,14 @@ pub async fn ops(headers: HeaderMap) -> Response {
 }
 
 /// GET /api/read — read channel(s) by id or filter.
+///
+/// When the SOX component tree and DynSlotStore are available (via Extensions),
+/// the Haystack filter evaluator also checks dynamic tags attached to components.
 pub async fn read(
     headers: HeaderMap,
     State(handle): State<EngineHandle>,
     Query(params): Query<ReadParams>,
+    dyn_store_ext: Option<Extension<DynSlotStoreHandle>>,
 ) -> Result<Response, AppError> {
     let zinc = wants_zinc(&headers);
 
@@ -93,18 +99,36 @@ pub async fn read(
             return Ok(Json(vec![channel_value_json(&val)]).into_response());
         }
 
-        // Parse Haystack filter and apply to channel list
+        // Parse Haystack filter and apply to channel list.
+        // When the DynSlotStore and component tree are available, the filter
+        // evaluator also checks dynamic tags attached to channel components.
         let all = handle.list_channels().await.map_err(AppError::from)?;
         let limit = params.limit.unwrap_or(100);
         let expr = super::filter::parse(filter);
+
+        // Build a channel-index → dyn_tags lookup if the DynSlotStore is available.
+        // Channel components have comp_id = CHANNEL_COMP_BASE + index.
+        let dyn_store_lock = dyn_store_ext.as_ref().map(|Extension(ds)| ds.read().unwrap());
+
         let matched: Vec<_> = all
-            .into_iter()
-            .filter(|ch| match &expr {
-                Ok(f) => super::filter::matches(f, ch),
+            .iter()
+            .enumerate()
+            .filter(|(i, ch)| match &expr {
+                Ok(f) => {
+                    let comp_id = CHANNEL_COMP_BASE + *i as u16;
+                    let tags = dyn_store_lock
+                        .as_ref()
+                        .and_then(|ds| ds.get_all(comp_id));
+                    super::filter::matches_with_tags(f, ch, tags)
+                }
                 Err(_) => matches_simple(ch, filter),
             })
+            .map(|(_, ch)| ch.clone())
             .take(limit)
             .collect();
+        // Drop the lock before building the response.
+        drop(dyn_store_lock);
+
         if zinc {
             return Ok(zinc_response(super::zinc_format::channels_to_zinc(&matched).to_zinc()));
         }

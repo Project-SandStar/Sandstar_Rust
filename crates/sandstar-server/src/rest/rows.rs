@@ -491,6 +491,20 @@ fn handle_client_msg(
                 _ => make_error(id.as_deref(), "BAD_REQUEST", "missing compId or key"),
             }
         }
+        "setFormat" => {
+            // setFormat allows the client to request Trio text encoding for responses.
+            // Currently accepted for forward-compatibility but JSON remains the default.
+            let format = msg.get("format").and_then(|v| v.as_str()).unwrap_or("json");
+            match format {
+                "json" | "trio" => {
+                    make_result(id.as_deref(), serde_json::json!({
+                        "format": format,
+                        "status": "ok",
+                    }))
+                }
+                _ => make_error(id.as_deref(), "BAD_REQUEST", &format!("unsupported format: {format}")),
+            }
+        }
         _ => make_error(id.as_deref(), "UNKNOWN_OP", &format!("unknown op: {op}")),
     }
 }

@@ -21,7 +21,7 @@ use crate::rest::EngineHandle;
 use crate::sox::dasp::DaspTransport;
 use crate::sox::dyn_slots::DynSlotStore;
 use crate::sox::sox_handlers::{
-    handle_sox_request, handle_put_chunk, is_put_transfer_active,
+    handle_sox_request_with_dyn, handle_put_chunk, is_put_transfer_active,
     parse_write_request, ComponentTree, ManifestDb, SubscriptionManager,
 };
 use std::sync::Arc;
@@ -256,7 +256,7 @@ async fn run_sox_server(
                             } else { 0 };
 
                             let response =
-                                handle_sox_request(&request, &mut tree, &mut subscriptions, session_id);
+                                handle_sox_request_with_dyn(&request, &mut tree, &mut subscriptions, session_id, Some(&dyn_store_handle));
                             let response_bytes = response.to_bytes();
                             if let Err(e) =
                                 transport.send_to_session(session_id, &response_bytes)

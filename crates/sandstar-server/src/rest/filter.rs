@@ -17,7 +17,11 @@
 //! value  = NUMBER | QUOTED_STRING | "true" | "false"
 //! ```
 
+use std::collections::HashMap;
+
 use sandstar_ipc::types::ChannelInfo;
+
+use crate::sox::dyn_slots::DynValue;
 
 // ── AST ─────────────────────────────────────────────────────
 
@@ -308,6 +312,66 @@ pub fn matches(expr: &Expr, ch: &ChannelInfo) -> bool {
         Expr::Cmp(tag, op, val) => cmp_tag(ch, tag, *op, val),
         Expr::And(l, r) => matches(l, ch) && matches(r, ch),
         Expr::Or(l, r) => matches(l, ch) || matches(r, ch),
+    }
+}
+
+/// Evaluate a filter expression against a ChannelInfo with dynamic tag fallback.
+///
+/// First checks static ChannelInfo fields, then falls back to the dynamic tag
+/// dictionary. This allows filters like `modbusAddr==40001` to match components
+/// that have `modbusAddr` set as a dynamic tag.
+pub fn matches_with_tags(expr: &Expr, ch: &ChannelInfo, tags: Option<&HashMap<String, DynValue>>) -> bool {
+    match tags {
+        None => matches(expr, ch),
+        Some(tags) => matches_with_tags_inner(expr, ch, tags),
+    }
+}
+
+fn matches_with_tags_inner(expr: &Expr, ch: &ChannelInfo, tags: &HashMap<String, DynValue>) -> bool {
+    match expr {
+        Expr::Has(tag) => has_tag(ch, tag) || has_dyn_tag(tags, tag),
+        Expr::Missing(tag) => !has_tag(ch, tag) && !has_dyn_tag(tags, tag),
+        Expr::Cmp(tag, op, val) => {
+            if cmp_tag(ch, tag, *op, val) {
+                return true;
+            }
+            cmp_dyn_tag(tags, tag, *op, val)
+        }
+        Expr::And(l, r) => matches_with_tags_inner(l, ch, tags) && matches_with_tags_inner(r, ch, tags),
+        Expr::Or(l, r) => matches_with_tags_inner(l, ch, tags) || matches_with_tags_inner(r, ch, tags),
+    }
+}
+
+/// Check if a dynamic tag exists (marker-style presence check).
+fn has_dyn_tag(tags: &HashMap<String, DynValue>, tag: &str) -> bool {
+    match tags.get(tag) {
+        Some(DynValue::Null) => false, // Null means absent
+        Some(_) => true,
+        None => false,
+    }
+}
+
+/// Compare a dynamic tag value against a filter value.
+fn cmp_dyn_tag(tags: &HashMap<String, DynValue>, tag: &str, op: CmpOp, val: &Value) -> bool {
+    let Some(dyn_val) = tags.get(tag) else { return false };
+    match (dyn_val, val) {
+        // Numeric comparisons: DynValue::Int or Float vs filter Num
+        (DynValue::Int(i), Value::Num(n)) => cmp_f64(*i as f64, op, *n),
+        (DynValue::Float(f), Value::Num(n)) => cmp_f64(*f, op, *n),
+        // String comparisons: DynValue::Str or Ref vs filter Str
+        (DynValue::Str(s), Value::Str(v)) => cmp_str(s, op, v),
+        (DynValue::Ref(r), Value::Str(v)) => cmp_str(r, op, v),
+        // Bool comparisons
+        (DynValue::Bool(b), Value::Bool(v)) => match op {
+            CmpOp::Eq => b == v,
+            CmpOp::Ne => b != v,
+            _ => false,
+        },
+        // Numeric string matching: try to compare DynValue::Str as number
+        (DynValue::Str(s), Value::Num(n)) => {
+            s.parse::<f64>().map(|f| cmp_f64(f, op, *n)).unwrap_or(false)
+        }
+        _ => false,
     }
 }
 
@@ -933,5 +997,149 @@ mod tests {
         ch_disabled.enabled = false;
         assert!(matches(&parse("enabled == false").unwrap(), &ch_disabled));
         assert!(!matches(&parse("enabled == true").unwrap(), &ch_disabled));
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Dynamic tag filter tests (matches_with_tags)
+    // ═══════════════════════════════════════════════════════════
+
+    fn make_tags(entries: &[(&str, DynValue)]) -> HashMap<String, DynValue> {
+        entries.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+    }
+
+    #[test]
+    fn test_dyn_tag_int_eq_match() {
+        let ch = test_channel(100, "AI1", "Analog", "In");
+        let tags = make_tags(&[("modbusAddr", DynValue::Int(40001))]);
+        let expr = parse("modbusAddr==40001").unwrap();
+        assert!(matches_with_tags(&expr, &ch, Some(&tags)));
+    }
+
+    #[test]
+    fn test_dyn_tag_int_eq_no_match() {
+        let ch = test_channel(100, "AI1", "Analog", "In");
+        let tags = make_tags(&[("modbusAddr", DynValue::Int(40001))]);
+        let expr = parse("modbusAddr==40002").unwrap();
+        assert!(!matches_with_tags(&expr, &ch, Some(&tags)));
+    }
+
+    #[test]
+    fn test_dyn_tag_missing_tag_no_match() {
+        let ch = test_channel(100, "AI1", "Analog", "In");
+        let tags = make_tags(&[("modbusAddr", DynValue::Int(40001))]);
+        let expr = parse("bacnetObj==100").unwrap();
+        assert!(!matches_with_tags(&expr, &ch, Some(&tags)));
+    }
+
+    #[test]
+    fn test_dyn_tag_marker_presence() {
+        let ch = test_channel(100, "AI1", "Analog", "In");
+        let tags = make_tags(&[("sensor", DynValue::Marker)]);
+        let expr = parse("sensor").unwrap();
+        assert!(matches_with_tags(&expr, &ch, Some(&tags)));
+    }
+
+    #[test]
+    fn test_dyn_tag_marker_absent() {
+        let ch = test_channel(100, "AI1", "Analog", "In");
+        let tags = make_tags(&[("sensor", DynValue::Marker)]);
+        let expr = parse("cmd").unwrap();
+        // "cmd" is not in static fields or dynamic tags — should match on
+        // has_tag label substring. Since "AI1" doesn't contain "cmd", this
+        // should be false.
+        assert!(!matches_with_tags(&expr, &ch, Some(&tags)));
+    }
+
+    #[test]
+    fn test_dyn_tag_string_eq() {
+        let ch = test_channel(100, "AI1", "Analog", "In");
+        let tags = make_tags(&[("dis", DynValue::Str("Zone Temperature".into()))]);
+        let expr = parse("dis==\"Zone Temperature\"").unwrap();
+        assert!(matches_with_tags(&expr, &ch, Some(&tags)));
+    }
+
+    #[test]
+    fn test_dyn_tag_float_comparison() {
+        let ch = test_channel(100, "AI1", "Analog", "In");
+        let tags = make_tags(&[("modbusScale", DynValue::Float(0.01))]);
+        let expr = parse("modbusScale < 1").unwrap();
+        assert!(matches_with_tags(&expr, &ch, Some(&tags)));
+    }
+
+    #[test]
+    fn test_dyn_tag_bool_eq() {
+        let ch = test_channel(100, "AI1", "Analog", "In");
+        let tags = make_tags(&[("writable", DynValue::Bool(true))]);
+        let expr = parse("writable == true").unwrap();
+        assert!(matches_with_tags(&expr, &ch, Some(&tags)));
+        let expr2 = parse("writable == false").unwrap();
+        assert!(!matches_with_tags(&expr2, &ch, Some(&tags)));
+    }
+
+    #[test]
+    fn test_dyn_tag_conjunction() {
+        let ch = test_channel(100, "AI1", "Analog", "In");
+        let tags = make_tags(&[
+            ("modbusAddr", DynValue::Int(40001)),
+            ("dis", DynValue::Str("Zone Temperature".into())),
+        ]);
+        let expr = parse("modbusAddr==40001 and dis==\"Zone Temperature\"").unwrap();
+        assert!(matches_with_tags(&expr, &ch, Some(&tags)));
+
+        let expr2 = parse("modbusAddr==40001 and dis==\"Outside Air\"").unwrap();
+        assert!(!matches_with_tags(&expr2, &ch, Some(&tags)));
+    }
+
+    #[test]
+    fn test_dyn_tag_disjunction() {
+        let ch = test_channel(100, "AI1", "Analog", "In");
+        let tags = make_tags(&[("dis", DynValue::Str("Zone Temperature".into()))]);
+        let expr = parse("dis==\"Zone Temperature\" or dis==\"Outside Air\"").unwrap();
+        assert!(matches_with_tags(&expr, &ch, Some(&tags)));
+    }
+
+    #[test]
+    fn test_dyn_tag_null_not_present() {
+        let ch = test_channel(100, "AI1", "Analog", "In");
+        let tags = make_tags(&[("nullTag", DynValue::Null)]);
+        // Null tag should NOT be treated as present for marker check
+        let expr = parse("nullTag").unwrap();
+        assert!(!matches_with_tags(&expr, &ch, Some(&tags)));
+    }
+
+    #[test]
+    fn test_dyn_tag_mixed_static_and_dynamic() {
+        let ch = test_channel(1113, "AI1 Thermistor", "Analog", "In");
+        let tags = make_tags(&[("modbusAddr", DynValue::Int(40001))]);
+        // Static property "analog" should still match, combined with dynamic tag
+        let expr = parse("analog and modbusAddr==40001").unwrap();
+        assert!(matches_with_tags(&expr, &ch, Some(&tags)));
+    }
+
+    #[test]
+    fn test_dyn_tag_none_tags_fallback() {
+        let ch = test_channel(1113, "AI1", "Analog", "In");
+        // When tags are None, should fall back to static matching only
+        let expr = parse("analog").unwrap();
+        assert!(matches_with_tags(&expr, &ch, None));
+        let expr2 = parse("modbusAddr==40001").unwrap();
+        assert!(!matches_with_tags(&expr2, &ch, None));
+    }
+
+    #[test]
+    fn test_dyn_tag_ref_string_match() {
+        let ch = test_channel(100, "AI1", "Analog", "In");
+        let tags = make_tags(&[("siteRef", DynValue::Ref("@site1".into()))]);
+        let expr = parse("siteRef==\"@site1\"").unwrap();
+        assert!(matches_with_tags(&expr, &ch, Some(&tags)));
+    }
+
+    #[test]
+    fn test_dyn_tag_not_missing() {
+        let ch = test_channel(100, "AI1", "Analog", "In");
+        let tags = make_tags(&[("sensor", DynValue::Marker)]);
+        // "not sensor" should be false when sensor is present
+        let expr = parse("not sensor").unwrap();
+        assert!(!matches_with_tags(&expr, &ch, Some(&tags)));
     }
 }

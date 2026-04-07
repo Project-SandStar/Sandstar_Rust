@@ -19,7 +19,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Json, Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
@@ -422,13 +422,46 @@ pub async fn get_tree(State(state): State<SoxApiState>) -> Response {
 }
 
 /// GET /api/sox/comp/{id} — single component detail.
+///
+/// Content negotiation: returns Trio text format when `Accept: text/trio` is
+/// present in the request headers. Default is JSON.
 pub async fn get_comp(
+    headers: HeaderMap,
     State(state): State<SoxApiState>,
     Path(id): Path<u16>,
 ) -> Response {
     let tree = state.tree.read().unwrap();
     match tree.get(id) {
-        Some(comp) => Json(comp_to_detail_json(comp, &tree, state.dyn_store.as_ref())).into_response(),
+        Some(comp) => {
+            let detail = comp_to_detail_json(comp, &tree, state.dyn_store.as_ref());
+
+            // Check Accept header for Trio format request
+            let wants_trio = headers
+                .get(axum::http::header::ACCEPT)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.contains(super::trio::TRIO_CONTENT_TYPE))
+                .unwrap_or(false);
+
+            if wants_trio {
+                // Convert to tag map and encode as Trio
+                let json_val = serde_json::to_value(&detail).unwrap_or_default();
+                let tags = match json_val {
+                    serde_json::Value::Object(map) => {
+                        map.into_iter().collect::<std::collections::HashMap<_, _>>()
+                    }
+                    _ => std::collections::HashMap::new(),
+                };
+                let trio_text = super::trio::encode_trio(&tags);
+                (
+                    StatusCode::OK,
+                    [(axum::http::header::CONTENT_TYPE, super::trio::TRIO_CONTENT_TYPE)],
+                    trio_text,
+                )
+                    .into_response()
+            } else {
+                Json(detail).into_response()
+            }
+        }
         None => (StatusCode::NOT_FOUND, format!("component {id} not found")).into_response(),
     }
 }

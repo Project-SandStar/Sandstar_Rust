@@ -15,6 +15,7 @@ pub mod sim;
 pub mod rows;
 pub mod sox_api;
 pub mod tags;
+pub mod trio;
 mod types;
 pub mod ws;
 pub mod zinc_format;
@@ -793,6 +794,11 @@ pub fn router_with_auth(
                 manifest_db: sox.manifest_db.clone(),
                 dyn_store: sox.dyn_store.clone(),
             });
+        // Make the DynSlotStore available as an Extension so that the
+        // Haystack filter evaluator in /api/read can check dynamic tags.
+        if let Some(ref ds) = sox.dyn_store {
+            app = app.layer(axum::Extension(ds.clone()));
+        }
         app = app
             .merge(sox_api::public_router(sox.clone()))
             .merge(sox_api::protected_router(sox))

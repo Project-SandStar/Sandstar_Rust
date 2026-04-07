@@ -43,6 +43,7 @@ pub mod native_inet;
 pub mod native_mod;
 pub mod native_serial;
 pub mod native_eacio;
+pub mod sab_validator;
 // Future phases:
 pub mod vm_stack;
 pub mod vm_interpreter;
