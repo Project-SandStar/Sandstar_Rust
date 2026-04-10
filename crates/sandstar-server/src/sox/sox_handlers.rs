@@ -24,10 +24,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
 use sandstar_ipc::types::ChannelInfo;
+use serde::{Deserialize, Serialize};
 
 use super::sox_protocol::{SoxCmd, SoxReader, SoxRequest, SoxResponse, SoxValueType};
+
+/// Batch of component slot updates: (comp_id, slot_updates, optional_state_update).
+type ComponentUpdates = Vec<(u16, Vec<(usize, SlotValue)>, Option<ComponentState>)>;
 
 // ---- Slot values ----
 
@@ -359,7 +362,12 @@ impl ComponentTree {
 
     /// Add a link to the tree. Returns true if the link was added (not a duplicate).
     pub fn add_link(&mut self, from_comp: u16, from_slot: u8, to_comp: u16, to_slot: u8) -> bool {
-        let link = Link { from_comp, from_slot, to_comp, to_slot };
+        let link = Link {
+            from_comp,
+            from_slot,
+            to_comp,
+            to_slot,
+        };
         // Store the link on BOTH components so the editor can render wires
         // from both the source and target sides.
         if let Some(comp) = self.components.get(&to_comp) {
@@ -371,7 +379,11 @@ impl ComponentTree {
         }
         // Reject if the link would create a cycle in the dataflow graph.
         if self.would_create_cycle(from_comp, to_comp) {
-            tracing::warn!(from_comp, to_comp, "SOX: link rejected — would create cycle");
+            tracing::warn!(
+                from_comp,
+                to_comp,
+                "SOX: link rejected — would create cycle"
+            );
             return false;
         }
         if let Some(comp) = self.components.get_mut(&to_comp) {
@@ -388,14 +400,27 @@ impl ComponentTree {
     }
 
     /// Remove a link from the tree. Returns true if the link was found and removed.
-    pub fn remove_link(&mut self, from_comp: u16, from_slot: u8, to_comp: u16, to_slot: u8) -> bool {
-        let link = Link { from_comp, from_slot, to_comp, to_slot };
+    pub fn remove_link(
+        &mut self,
+        from_comp: u16,
+        from_slot: u8,
+        to_comp: u16,
+        to_slot: u8,
+    ) -> bool {
+        let link = Link {
+            from_comp,
+            from_slot,
+            to_comp,
+            to_slot,
+        };
         let mut removed = false;
         // Remove from both components
         if let Some(comp) = self.components.get_mut(&to_comp) {
             let before = comp.links.len();
             comp.links.retain(|l| l != &link);
-            if comp.links.len() < before { removed = true; }
+            if comp.links.len() < before {
+                removed = true;
+            }
         }
         if from_comp != to_comp {
             if let Some(comp) = self.components.get_mut(&from_comp) {
@@ -459,7 +484,7 @@ impl ComponentTree {
             parent_id: NO_PARENT,
             name: "app".into(),
             type_name: "sys::App".into(),
-            kit_id: 0,  // sys
+            kit_id: 0,   // sys
             type_id: 10, // App
             children: Vec::new(),
             slots: vec![VirtualSlot {
@@ -477,7 +502,7 @@ impl ComponentTree {
             parent_id: 0,
             name: "service".into(),
             type_name: "sys::Folder".into(),
-            kit_id: 0,  // sys
+            kit_id: 0,   // sys
             type_id: 11, // Folder
             children: Vec::new(),
             slots: Vec::new(),
@@ -491,7 +516,7 @@ impl ComponentTree {
             name: "sox".into(),
             type_name: "sox::SoxService".into(),
             kit_id: 12, // sox
-            type_id: 1,  // SoxService
+            type_id: 1, // SoxService
             children: Vec::new(),
             slots: vec![VirtualSlot {
                 name: "port".into(),
@@ -508,7 +533,7 @@ impl ComponentTree {
             parent_id: 1,
             name: "users".into(),
             type_name: "sys::UserService".into(),
-            kit_id: 0,  // sys
+            kit_id: 0,   // sys
             type_id: 16, // UserService
             children: Vec::new(),
             slots: Vec::new(),
@@ -521,7 +546,7 @@ impl ComponentTree {
             parent_id: 1,
             name: "plat".into(),
             type_name: "sys::PlatformService".into(),
-            kit_id: 0,  // sys
+            kit_id: 0,   // sys
             type_id: 13, // PlatformService
             children: Vec::new(),
             slots: vec![VirtualSlot {
@@ -539,7 +564,7 @@ impl ComponentTree {
             parent_id: 0,
             name: "io".into(),
             type_name: "sys::Folder".into(),
-            kit_id: 0,  // sys
+            kit_id: 0,   // sys
             type_id: 11, // Folder
             children: Vec::new(),
             slots: Vec::new(),
@@ -552,7 +577,7 @@ impl ComponentTree {
             parent_id: 0,
             name: "control".into(),
             type_name: "sys::Folder".into(),
-            kit_id: 0,  // sys
+            kit_id: 0,   // sys
             type_id: 11, // Folder
             children: Vec::new(),
             slots: Vec::new(),
@@ -572,7 +597,7 @@ impl ComponentTree {
                 parent_id: 5, // io folder
                 name: format!("ch_{}", ch.id),
                 type_name: channel_type_name(&ch.direction),
-                kit_id: 1, // EacIo kit (index 1 in DEFAULT_KITS)
+                kit_id: 1,  // EacIo kit (index 1 in DEFAULT_KITS)
                 type_id: 0, // AnalogInput
                 children: Vec::new(),
                 slots: channel_slots_with_pos(ch, x, y),
@@ -652,7 +677,9 @@ impl ComponentTree {
     /// Channel-mapped and system components are excluded.
     pub fn save_user_components(&self) -> Result<(), String> {
         let path = self.resolve_persist_path();
-        let user_comps: Vec<&VirtualComponent> = self.user_added_ids.iter()
+        let user_comps: Vec<&VirtualComponent> = self
+            .user_added_ids
+            .iter()
             .filter_map(|id| self.components.get(id))
             .collect();
 
@@ -660,7 +687,8 @@ impl ComponentTree {
         // (already stored on the components themselves, so they serialize with the comp)
 
         // Serialize the name table for fast restore on startup.
-        let name_entries: Vec<String> = self.name_table
+        let name_entries: Vec<String> = self
+            .name_table
             .all_names()
             .into_iter()
             .map(|(_, name)| name)
@@ -673,17 +701,20 @@ impl ComponentTree {
             name_table: name_entries,
         };
 
-        let json = serde_json::to_string_pretty(&data)
-            .map_err(|e| format!("serialize error: {e}"))?;
+        let json =
+            serde_json::to_string_pretty(&data).map_err(|e| format!("serialize error: {e}"))?;
 
         // Write atomically: write to tmp file then rename
         let tmp_path = format!("{path}.tmp");
-        std::fs::write(&tmp_path, &json)
-            .map_err(|e| format!("write error ({tmp_path}): {e}"))?;
+        std::fs::write(&tmp_path, &json).map_err(|e| format!("write error ({tmp_path}): {e}"))?;
         std::fs::rename(&tmp_path, &path)
             .map_err(|e| format!("rename error ({tmp_path} -> {path}): {e}"))?;
 
-        tracing::info!(path, components = data.components.len(), "SOX: saved user components to disk");
+        tracing::info!(
+            path,
+            components = data.components.len(),
+            "SOX: saved user components to disk"
+        );
         Ok(())
     }
 
@@ -699,11 +730,11 @@ impl ComponentTree {
             return Ok(0);
         }
 
-        let json = std::fs::read_to_string(&path)
-            .map_err(|e| format!("read error ({path}): {e}"))?;
+        let json =
+            std::fs::read_to_string(&path).map_err(|e| format!("read error ({path}): {e}"))?;
 
-        let data: PersistData = serde_json::from_str(&json)
-            .map_err(|e| format!("deserialize error ({path}): {e}"))?;
+        let data: PersistData =
+            serde_json::from_str(&json).map_err(|e| format!("deserialize error ({path}): {e}"))?;
 
         let count = data.components.len();
 
@@ -749,7 +780,12 @@ impl ComponentTree {
             }
         }
 
-        tracing::info!(path, count, next_id = self.next_id, "SOX: loaded user components from disk");
+        tracing::info!(
+            path,
+            count,
+            next_id = self.next_id,
+            "SOX: loaded user components from disk"
+        );
         Ok(count)
     }
 
@@ -766,7 +802,9 @@ impl ComponentTree {
             if let Some(comp) = self.components.get_mut(&comp_id) {
                 let mut new_slots = channel_slots(ch);
                 // Preserve existing meta value (contains canvas position coordinates)
-                if let (Some(existing_meta), Some(new_meta)) = (comp.slots.first(), new_slots.first_mut()) {
+                if let (Some(existing_meta), Some(new_meta)) =
+                    (comp.slots.first(), new_slots.first_mut())
+                {
                     if existing_meta.name == "meta" && new_meta.name == "meta" {
                         new_meta.value = existing_meta.value.clone();
                     }
@@ -791,12 +829,15 @@ impl ComponentTree {
         for (ch_id, value) in output_ch_values {
             let ch_name = format!("ch{ch_id}");
             // O(1) lookup via name_to_comp reverse index (replaces O(n) scan).
-            let cf_id = self.name_to_comp.get(&ch_name)
+            let cf_id = self
+                .name_to_comp
+                .get(&ch_name)
                 .copied()
                 .filter(|id| self.user_added_ids.contains(id));
             if let Some(cf_id) = cf_id {
                 if let Some(comp) = self.components.get_mut(&cf_id) {
-                    if let Some(out_slot) = comp.slots.get_mut(1) { // slot 1 = "out" for ConstFloat
+                    if let Some(out_slot) = comp.slots.get_mut(1) {
+                        // slot 1 = "out" for ConstFloat
                         if out_slot.value != value {
                             out_slot.value = value;
                             changed.push(cf_id);
@@ -886,7 +927,7 @@ impl ComponentTree {
 
         // Phase 2: compute outputs
         // state_update: optional new ComponentState to write back after computation
-        let mut updates: Vec<(u16, Vec<(usize, SlotValue)>, Option<ComponentState>)> = Vec::new();
+        let mut updates: ComponentUpdates = Vec::new();
         for (comp_id, _kit_id, type_id) in &evaluations {
             if let Some(comp) = self.components.get(comp_id) {
                 let mut slot_updates: Vec<(usize, SlotValue)> = Vec::new();
@@ -977,7 +1018,13 @@ impl ComponentTree {
                         let inv = get_float(&comp.slots, 2);
                         let low = get_float(&comp.slots, 3);
                         let high = get_float(&comp.slots, 4);
-                        let clamped = if inv < low { low } else if inv > high { high } else { inv };
+                        let clamped = if inv < low {
+                            low
+                        } else if inv > high {
+                            high
+                        } else {
+                            inv
+                        };
                         slot_updates.push((1, SlotValue::Float(clamped)));
                     }
                     47 => {
@@ -1105,7 +1152,13 @@ impl ComponentTree {
                         let set = get_bool(&comp.slots, 2);
                         let reset = get_bool(&comp.slots, 3);
                         let current = get_bool(&comp.slots, 1);
-                        let new_out = if reset { false } else if set { true } else { current };
+                        let new_out = if reset {
+                            false
+                        } else if set {
+                            true
+                        } else {
+                            current
+                        };
                         slot_updates.push((1, SlotValue::Bool(new_out)));
                     }
 
@@ -1175,7 +1228,11 @@ impl ComponentTree {
                         // When in=false, reset counter, out=false immediately.
                         let input = get_bool(&comp.slots, 2);
                         let delay = get_float(&comp.slots, 3);
-                        let mut st = self.component_state.get(comp_id).cloned().unwrap_or_default();
+                        let mut st = self
+                            .component_state
+                            .get(comp_id)
+                            .cloned()
+                            .unwrap_or_default();
                         if input {
                             st.counter += 1;
                             let out = st.counter >= delay as i32;
@@ -1194,7 +1251,11 @@ impl ComponentTree {
                         // When in=true, reset counter, out=true immediately.
                         let input = get_bool(&comp.slots, 2);
                         let delay = get_float(&comp.slots, 3);
-                        let mut st = self.component_state.get(comp_id).cloned().unwrap_or_default();
+                        let mut st = self
+                            .component_state
+                            .get(comp_id)
+                            .cloned()
+                            .unwrap_or_default();
                         if !input {
                             st.counter += 1;
                             let out = st.counter < delay as i32;
@@ -1212,7 +1273,11 @@ impl ComponentTree {
                         // Count rising edges of in. If preset>0, reset to 0 at preset.
                         let input = get_bool(&comp.slots, 2);
                         let preset = get_int(&comp.slots, 3);
-                        let mut st = self.component_state.get(comp_id).cloned().unwrap_or_default();
+                        let mut st = self
+                            .component_state
+                            .get(comp_id)
+                            .cloned()
+                            .unwrap_or_default();
                         let current_out = get_int(&comp.slots, 1);
                         let mut new_out = current_out;
                         // Detect rising edge: prev=false, current=true
@@ -1235,7 +1300,11 @@ impl ComponentTree {
                         let max_val = get_float(&comp.slots, 3);
                         let step = get_float(&comp.slots, 4);
                         let current_out = get_float(&comp.slots, 1);
-                        let mut st = self.component_state.get(comp_id).cloned().unwrap_or_default();
+                        let mut st = self
+                            .component_state
+                            .get(comp_id)
+                            .cloned()
+                            .unwrap_or_default();
                         // Initialize direction if not set (0 means uninitialized)
                         if st.direction == 0 {
                             st.direction = 1; // start going up
@@ -1258,28 +1327,28 @@ impl ComponentTree {
                         //   meta=0, diff=1(float,config=deadband), isHeating=2(bool,config),
                         //   sp=3(float,config), cv=4(float,runtime=process variable),
                         //   out=5(bool,readonly), raise=6(bool,readonly), lower=7(bool,readonly)
-                        let diff = get_float(&comp.slots, 1);   // deadband
+                        let diff = get_float(&comp.slots, 1); // deadband
                         let is_heating = get_bool(&comp.slots, 2); // heating mode
-                        let sp = get_float(&comp.slots, 3);     // setpoint
-                        let cv = get_float(&comp.slots, 4);     // current value (PV)
+                        let sp = get_float(&comp.slots, 3); // setpoint
+                        let cv = get_float(&comp.slots, 4); // current value (PV)
                         let current_out = get_bool(&comp.slots, 5);
                         let half_db = diff / 2.0;
 
                         let (out, raise, lower) = if is_heating {
                             // Heating mode: turn on when cold, off when warm
                             if cv < sp - half_db {
-                                (true, true, false)  // need heat
+                                (true, true, false) // need heat
                             } else if cv > sp + half_db {
-                                (false, false, true)  // warm enough
+                                (false, false, true) // warm enough
                             } else {
                                 (current_out, false, false) // deadband
                             }
                         } else {
                             // Cooling mode: turn on when hot, off when cool
                             if cv > sp + half_db {
-                                (true, false, true)  // need cooling
+                                (true, false, true) // need cooling
                             } else if cv < sp - half_db {
-                                (false, true, false)  // cool enough
+                                (false, true, false) // cool enough
                             } else {
                                 (current_out, false, false) // deadband
                             }
@@ -1301,11 +1370,15 @@ impl ComponentTree {
                         let mut out = get_float(&comp.slots, 1);
                         if up {
                             out += step;
-                            if out > max_val { out = max_val; }
+                            if out > max_val {
+                                out = max_val;
+                            }
                         }
                         if dn {
                             out -= step;
-                            if out < min_val { out = min_val; }
+                            if out < min_val {
+                                out = min_val;
+                            }
                         }
                         slot_updates.push((1, SlotValue::Float(out)));
                     }
@@ -1353,7 +1426,9 @@ impl ComponentTree {
         for comp in self.components.values() {
             if comp.kit_id == 1 && comp.type_id == 100 {
                 let ch_id = get_int(&comp.slots, 1);
-                if ch_id > 0 { channel_bridges.push((comp.comp_id, ch_id, 2)); }
+                if ch_id > 0 {
+                    channel_bridges.push((comp.comp_id, ch_id, 2));
+                }
             } else if self.user_added_ids.contains(&comp.comp_id) && comp.name.starts_with("ch") {
                 let num_str = comp.name.trim_start_matches("ch").trim_start_matches('_');
                 if let Ok(ch_id) = num_str.parse::<i32>() {
@@ -1376,10 +1451,15 @@ impl ComponentTree {
 
         // INPUT channels: copy sensor value → ConstFloat
         for (comp_id, channel_id, out_slot_idx) in channel_bridges {
-            let sensor_value = self.components.values()
+            let sensor_value = self
+                .components
+                .values()
                 .find(|c| {
-                    self.is_channel_comp(c.comp_id) &&
-                    c.slots.get(2).map(|s| s.value == SlotValue::Int(channel_id)).unwrap_or(false)
+                    self.is_channel_comp(c.comp_id)
+                        && c.slots
+                            .get(2)
+                            .map(|s| s.value == SlotValue::Int(channel_id))
+                            .unwrap_or(false)
                 })
                 .and_then(|c| c.slots.get(6))
                 .map(|s| s.value.clone());
@@ -1399,16 +1479,23 @@ impl ComponentTree {
         // OUTPUT channels: copy ConstFloat value → channel component's out slot
         // (The actual hardware write happens in collect_channel_writes via the engine)
         for (comp_id, channel_id, slot_idx) in channel_writes {
-            let user_value = self.components.get(&comp_id)
+            let user_value = self
+                .components
+                .get(&comp_id)
                 .and_then(|c| c.slots.get(slot_idx))
                 .map(|s| s.value.clone());
 
             if let Some(value) = user_value {
                 // Find the channel component and update its out slot (6)
-                let ch_comp_id = self.components.values()
+                let ch_comp_id = self
+                    .components
+                    .values()
                     .find(|c| {
-                        self.is_channel_comp(c.comp_id) &&
-                        c.slots.get(2).map(|s| s.value == SlotValue::Int(channel_id)).unwrap_or(false)
+                        self.is_channel_comp(c.comp_id)
+                            && c.slots
+                                .get(2)
+                                .map(|s| s.value == SlotValue::Int(channel_id))
+                                .unwrap_or(false)
                     })
                     .map(|c| c.comp_id);
 
@@ -1461,9 +1548,10 @@ impl ComponentTree {
             // Allow forwarding if:
             // A) A link targets slot 6 (wire from logic component), OR
             // B) This is an output channel (bridge from ConstFloat "chXXXX")
-            let has_link_to_out = comp.links.iter().any(|link| {
-                link.to_comp == comp_id && link.to_slot == 6
-            });
+            let has_link_to_out = comp
+                .links
+                .iter()
+                .any(|link| link.to_comp == comp_id && link.to_slot == 6);
             let is_output = self.output_channel_ids.contains(&(channel_id as i32));
             if !has_link_to_out && !is_output {
                 continue;
@@ -1486,28 +1574,37 @@ impl ComponentTree {
 
 /// Extract a float value from a slot, coercing Int to f32 if needed.
 fn get_float(slots: &[VirtualSlot], idx: usize) -> f32 {
-    slots.get(idx).and_then(|s| match &s.value {
-        SlotValue::Float(v) => Some(*v),
-        SlotValue::Int(v) => Some(*v as f32),
-        _ => None,
-    }).unwrap_or(0.0)
+    slots
+        .get(idx)
+        .and_then(|s| match &s.value {
+            SlotValue::Float(v) => Some(*v),
+            SlotValue::Int(v) => Some(*v as f32),
+            _ => None,
+        })
+        .unwrap_or(0.0)
 }
 
 /// Extract a bool value from a slot.
 fn get_bool(slots: &[VirtualSlot], idx: usize) -> bool {
-    slots.get(idx).and_then(|s| match &s.value {
-        SlotValue::Bool(v) => Some(*v),
-        _ => None,
-    }).unwrap_or(false)
+    slots
+        .get(idx)
+        .and_then(|s| match &s.value {
+            SlotValue::Bool(v) => Some(*v),
+            _ => None,
+        })
+        .unwrap_or(false)
 }
 
 /// Extract an int value from a slot, coercing Float to i32 if needed.
 fn get_int(slots: &[VirtualSlot], idx: usize) -> i32 {
-    slots.get(idx).and_then(|s| match &s.value {
-        SlotValue::Int(v) => Some(*v),
-        SlotValue::Float(v) => Some(*v as i32),
-        _ => None,
-    }).unwrap_or(0)
+    slots
+        .get(idx)
+        .and_then(|s| match &s.value {
+            SlotValue::Int(v) => Some(*v),
+            SlotValue::Float(v) => Some(*v as i32),
+            _ => None,
+        })
+        .unwrap_or(0)
 }
 
 impl Default for ComponentTree {
@@ -1750,7 +1847,7 @@ pub fn decode_slot_value(reader: &mut SoxReader<'_>, type_id: u8) -> Option<Slot
             }
         }
         t if t == SoxValueType::Float as u8 => reader.read_f32().map(SlotValue::Float),
-        t if t == SoxValueType::Double as u8 => reader.read_f64().map(|v| SlotValue::Double(v)),
+        t if t == SoxValueType::Double as u8 => reader.read_f64().map(SlotValue::Double),
         t if t == SoxValueType::Buf as u8 => {
             let len = reader.read_u16()? as usize;
             let bytes = reader.read_bytes(len)?;
@@ -1758,9 +1855,7 @@ pub fn decode_slot_value(reader: &mut SoxReader<'_>, type_id: u8) -> Option<Slot
         }
         // Treat Byte/Short as Int for simplicity
         t if t == SoxValueType::Byte as u8 => reader.read_u8().map(|v| SlotValue::Int(v as i32)),
-        t if t == SoxValueType::Short as u8 => {
-            reader.read_u16().map(|v| SlotValue::Int(v as i32))
-        }
+        t if t == SoxValueType::Short as u8 => reader.read_u16().map(|v| SlotValue::Int(v as i32)),
         _ => Some(SlotValue::Null),
     }
 }
@@ -1778,21 +1873,81 @@ pub struct KitInfo {
 /// Default kit list matching the EacIo Sedona application (from shaystack/app/app.sax).
 /// Checksums extracted from kit filenames on device (name-CHECKSUM-version.kit).
 pub const DEFAULT_KITS: &[KitInfo] = &[
-    KitInfo { name: "sys",        checksum: 0xd3984c51, version: "1.2.28" },
-    KitInfo { name: "EacIo",     checksum: 0x6f9da65b, version: "1.2.30" },
-    KitInfo { name: "control",   checksum: 0x808b7db3, version: "1.2.28" },
-    KitInfo { name: "driver",    checksum: 0xb4cc82ce, version: "1.2.28" },
-    KitInfo { name: "func",      checksum: 0x821b7396, version: "1.2.28" },
-    KitInfo { name: "hvac",      checksum: 0x7264c67c, version: "1.2.28" },
-    KitInfo { name: "inet",      checksum: 0x25648ba7, version: "1.2.28" },
-    KitInfo { name: "logic",     checksum: 0x9fe95ce1, version: "1.2.28" },
-    KitInfo { name: "math",      checksum: 0xc22b255c, version: "1.2.28" },
-    KitInfo { name: "platUnix",  checksum: 0x751711ab, version: "1.2.28" },
-    KitInfo { name: "pricomp",   checksum: 0xb5cd6698, version: "1.2.28" },
-    KitInfo { name: "shaystack", checksum: 0xedf7a27c, version: "1.2"    },
-    KitInfo { name: "sox",       checksum: 0x397a84dd, version: "1.2.28" },
-    KitInfo { name: "types",     checksum: 0x10936551, version: "1.2.28" },
-    KitInfo { name: "web",       checksum: 0x0d0dd007, version: "1.2.29" },
+    KitInfo {
+        name: "sys",
+        checksum: 0xd3984c51,
+        version: "1.2.28",
+    },
+    KitInfo {
+        name: "EacIo",
+        checksum: 0x6f9da65b,
+        version: "1.2.30",
+    },
+    KitInfo {
+        name: "control",
+        checksum: 0x808b7db3,
+        version: "1.2.28",
+    },
+    KitInfo {
+        name: "driver",
+        checksum: 0xb4cc82ce,
+        version: "1.2.28",
+    },
+    KitInfo {
+        name: "func",
+        checksum: 0x821b7396,
+        version: "1.2.28",
+    },
+    KitInfo {
+        name: "hvac",
+        checksum: 0x7264c67c,
+        version: "1.2.28",
+    },
+    KitInfo {
+        name: "inet",
+        checksum: 0x25648ba7,
+        version: "1.2.28",
+    },
+    KitInfo {
+        name: "logic",
+        checksum: 0x9fe95ce1,
+        version: "1.2.28",
+    },
+    KitInfo {
+        name: "math",
+        checksum: 0xc22b255c,
+        version: "1.2.28",
+    },
+    KitInfo {
+        name: "platUnix",
+        checksum: 0x751711ab,
+        version: "1.2.28",
+    },
+    KitInfo {
+        name: "pricomp",
+        checksum: 0xb5cd6698,
+        version: "1.2.28",
+    },
+    KitInfo {
+        name: "shaystack",
+        checksum: 0xedf7a27c,
+        version: "1.2",
+    },
+    KitInfo {
+        name: "sox",
+        checksum: 0x397a84dd,
+        version: "1.2.28",
+    },
+    KitInfo {
+        name: "types",
+        checksum: 0x10936551,
+        version: "1.2.28",
+    },
+    KitInfo {
+        name: "web",
+        checksum: 0x0d0dd007,
+        version: "1.2.29",
+    },
 ];
 
 // ---- Manifest database ----
@@ -1857,7 +2012,10 @@ impl ManifestDb {
             } else if flat_checksum_path.exists() {
                 flat_checksum_path
             } else {
-                tracing::debug!(kit = kit.name, "manifest XML not found, using hardcoded fallback");
+                tracing::debug!(
+                    kit = kit.name,
+                    "manifest XML not found, using hardcoded fallback"
+                );
                 continue;
             };
 
@@ -1885,320 +2043,1533 @@ impl ManifestDb {
 
         // Register custom ChannelRead type (EacIo kit, type 100)
         // This allows users to bridge real sensor values into control logic
-        db.types.insert((1, 100), vec![
-            ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-            ManifestSlot { name: "channelId".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(0) },
-            ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-            ManifestSlot { name: "status".into(), type_id: SoxValueType::Buf as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Str(String::new()) },
-        ]);
-        db.type_name_lookup.insert((1, "ChannelRead".to_string()), 100);
+        db.types.insert(
+            (1, 100),
+            vec![
+                ManifestSlot {
+                    name: "meta".into(),
+                    type_id: SoxValueType::Int as u8,
+                    flags: SLOT_FLAG_CONFIG,
+                    default_value: SlotValue::Int(1),
+                },
+                ManifestSlot {
+                    name: "channelId".into(),
+                    type_id: SoxValueType::Int as u8,
+                    flags: SLOT_FLAG_CONFIG,
+                    default_value: SlotValue::Int(0),
+                },
+                ManifestSlot {
+                    name: "out".into(),
+                    type_id: SoxValueType::Float as u8,
+                    flags: SLOT_FLAG_RUNTIME,
+                    default_value: SlotValue::Float(0.0),
+                },
+                ManifestSlot {
+                    name: "status".into(),
+                    type_id: SoxValueType::Buf as u8,
+                    flags: SLOT_FLAG_RUNTIME,
+                    default_value: SlotValue::Str(String::new()),
+                },
+            ],
+        );
+        db.type_name_lookup
+            .insert((1, "ChannelRead".to_string()), 100);
 
         // Register hardcoded control types so the palette works even without manifest XMLs.
         // Only insert if not already loaded from a manifest file (manifests take priority).
         let hardcoded_types: Vec<(u8, u8, &str, Vec<ManifestSlot>)> = vec![
-            (2, 14, "ConstFloat", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "set".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_ACTION, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "setNull".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, default_value: SlotValue::Null },
-            ]),
-            (2, 15, "ConstInt", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(0) },
-                ManifestSlot { name: "set".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_ACTION, default_value: SlotValue::Int(0) },
-            ]),
-            (2, 13, "ConstBool", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "setTrue".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, default_value: SlotValue::Null },
-                ManifestSlot { name: "setFalse".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, default_value: SlotValue::Null },
-                ManifestSlot { name: "setNull".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, default_value: SlotValue::Null },
-            ]),
-            (2, 3, "Add2", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-            ]),
-            (2, 49, "Sub2", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-            ]),
-            (2, 37, "Mul2", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-            ]),
-            (2, 18, "Div2", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "div0".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-            ]),
-            (2, 56, "WriteBool", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "in".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "setTrue".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, default_value: SlotValue::Null },
-                ManifestSlot { name: "setFalse".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, default_value: SlotValue::Null },
-                ManifestSlot { name: "setNull".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, default_value: SlotValue::Null },
-            ]),
-            (2, 57, "WriteFloat", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "in".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "set".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_ACTION, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "setNull".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, default_value: SlotValue::Null },
-            ]),
-            (2, 58, "WriteInt", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "in".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(0) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Int(0) },
-                ManifestSlot { name: "set".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_ACTION, default_value: SlotValue::Int(0) },
-            ]),
+            (
+                2,
+                14,
+                "ConstFloat",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "set".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_ACTION,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "setNull".into(),
+                        type_id: SoxValueType::Void as u8,
+                        flags: SLOT_FLAG_ACTION,
+                        default_value: SlotValue::Null,
+                    },
+                ],
+            ),
+            (
+                2,
+                15,
+                "ConstInt",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(0),
+                    },
+                    ManifestSlot {
+                        name: "set".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_ACTION,
+                        default_value: SlotValue::Int(0),
+                    },
+                ],
+            ),
+            (
+                2,
+                13,
+                "ConstBool",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "setTrue".into(),
+                        type_id: SoxValueType::Void as u8,
+                        flags: SLOT_FLAG_ACTION,
+                        default_value: SlotValue::Null,
+                    },
+                    ManifestSlot {
+                        name: "setFalse".into(),
+                        type_id: SoxValueType::Void as u8,
+                        flags: SLOT_FLAG_ACTION,
+                        default_value: SlotValue::Null,
+                    },
+                    ManifestSlot {
+                        name: "setNull".into(),
+                        type_id: SoxValueType::Void as u8,
+                        flags: SLOT_FLAG_ACTION,
+                        default_value: SlotValue::Null,
+                    },
+                ],
+            ),
+            (
+                2,
+                3,
+                "Add2",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in1".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in2".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                ],
+            ),
+            (
+                2,
+                49,
+                "Sub2",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in1".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in2".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                ],
+            ),
+            (
+                2,
+                37,
+                "Mul2",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in1".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in2".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                ],
+            ),
+            (
+                2,
+                18,
+                "Div2",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in1".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in2".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "div0".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                ],
+            ),
+            (
+                2,
+                56,
+                "WriteBool",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "in".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "setTrue".into(),
+                        type_id: SoxValueType::Void as u8,
+                        flags: SLOT_FLAG_ACTION,
+                        default_value: SlotValue::Null,
+                    },
+                    ManifestSlot {
+                        name: "setFalse".into(),
+                        type_id: SoxValueType::Void as u8,
+                        flags: SLOT_FLAG_ACTION,
+                        default_value: SlotValue::Null,
+                    },
+                    ManifestSlot {
+                        name: "setNull".into(),
+                        type_id: SoxValueType::Void as u8,
+                        flags: SLOT_FLAG_ACTION,
+                        default_value: SlotValue::Null,
+                    },
+                ],
+            ),
+            (
+                2,
+                57,
+                "WriteFloat",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "in".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "set".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_ACTION,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "setNull".into(),
+                        type_id: SoxValueType::Void as u8,
+                        flags: SLOT_FLAG_ACTION,
+                        default_value: SlotValue::Null,
+                    },
+                ],
+            ),
+            (
+                2,
+                58,
+                "WriteInt",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "in".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(0),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Int(0),
+                    },
+                    ManifestSlot {
+                        name: "set".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_ACTION,
+                        default_value: SlotValue::Int(0),
+                    },
+                ],
+            ),
             // --- 4-input Arithmetic ---
-            (2, 4, "Add4", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in3".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in4".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-            ]),
-            (2, 50, "Sub4", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in3".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in4".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-            ]),
-            (2, 38, "Mul4", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in3".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in4".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-            ]),
+            (
+                2,
+                4,
+                "Add4",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in1".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in2".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in3".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in4".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                ],
+            ),
+            (
+                2,
+                50,
+                "Sub4",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in1".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in2".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in3".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in4".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                ],
+            ),
+            (
+                2,
+                38,
+                "Mul4",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in1".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in2".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in3".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in4".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                ],
+            ),
             // --- Unary Math ---
-            (2, 39, "Neg", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-            ]),
-            (2, 23, "FloatOffset", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "offset".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(0.0) },
-            ]),
-            (2, 34, "Max", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-            ]),
-            (2, 35, "Min", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-            ]),
-            (2, 32, "Limiter", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "lowLmt".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "highLmt".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(100.0) },
-            ]),
-            (2, 47, "Round", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "decimalPlaces".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(2) },
-            ]),
+            (
+                2,
+                39,
+                "Neg",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                ],
+            ),
+            (
+                2,
+                23,
+                "FloatOffset",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "offset".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                ],
+            ),
+            (
+                2,
+                34,
+                "Max",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in1".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in2".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                ],
+            ),
+            (
+                2,
+                35,
+                "Min",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in1".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in2".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                ],
+            ),
+            (
+                2,
+                32,
+                "Limiter",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "lowLmt".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "highLmt".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Float(100.0),
+                    },
+                ],
+            ),
+            (
+                2,
+                47,
+                "Round",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "decimalPlaces".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(2),
+                    },
+                ],
+            ),
             // --- Boolean Logic ---
-            (2, 5, "And2", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-            ]),
-            (2, 6, "And4", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "in3".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "in4".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-            ]),
-            (2, 42, "Or2", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-            ]),
-            (2, 43, "Or4", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "in3".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "in4".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-            ]),
-            (2, 40, "Not", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "in".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-            ]),
-            (2, 59, "Xor", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-            ]),
+            (
+                2,
+                5,
+                "And2",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "in1".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "in2".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                ],
+            ),
+            (
+                2,
+                6,
+                "And4",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "in1".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "in2".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "in3".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "in4".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                ],
+            ),
+            (
+                2,
+                42,
+                "Or2",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "in1".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "in2".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                ],
+            ),
+            (
+                2,
+                43,
+                "Or4",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "in1".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "in2".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "in3".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "in4".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                ],
+            ),
+            (
+                2,
+                40,
+                "Not",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "in".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                ],
+            ),
+            (
+                2,
+                59,
+                "Xor",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "in1".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "in2".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                ],
+            ),
             // --- Comparator ---
-            (2, 12, "Cmpr", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "xgy".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "xey".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "xly".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "x".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "y".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-            ]),
+            (
+                2,
+                12,
+                "Cmpr",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "xgy".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "xey".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "xly".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "x".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "y".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                ],
+            ),
             // --- Type Conversion ---
-            (2, 10, "B2P", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "in".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-            ]),
-            (2, 22, "F2I", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Int(0) },
-                ManifestSlot { name: "in".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-            ]),
-            (2, 26, "I2F", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Int(0) },
-            ]),
+            (
+                2,
+                10,
+                "B2P",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "in".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                ],
+            ),
+            (
+                2,
+                22,
+                "F2I",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Int(0),
+                    },
+                    ManifestSlot {
+                        name: "in".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                ],
+            ),
+            (
+                2,
+                26,
+                "I2F",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Int(0),
+                    },
+                ],
+            ),
             // --- Multiplexers / Switches ---
-            (2, 1, "ASW", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "sel".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-            ]),
-            (2, 11, "BSW", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "sel".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-            ]),
-            (2, 28, "ISW", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Int(0) },
-                ManifestSlot { name: "sel".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "in1".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Int(0) },
-                ManifestSlot { name: "in2".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Int(0) },
-            ]),
+            (
+                2,
+                1,
+                "ASW",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "sel".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "in1".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in2".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                ],
+            ),
+            (
+                2,
+                11,
+                "BSW",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "sel".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "in1".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "in2".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                ],
+            ),
+            (
+                2,
+                28,
+                "ISW",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Int(0),
+                    },
+                    ManifestSlot {
+                        name: "sel".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "in1".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Int(0),
+                    },
+                    ManifestSlot {
+                        name: "in2".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Int(0),
+                    },
+                ],
+            ),
             // --- Hysteresis / Latches ---
-            (2, 25, "Hysteresis", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "in".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "rising".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(75.0) },
-                ManifestSlot { name: "falling".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(70.0) },
-            ]),
-            (2, 48, "SRLatch", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "set".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "reset".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-            ]),
-            (2, 46, "Reset", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "in".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "inLow".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "inHigh".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(100.0) },
-                ManifestSlot { name: "outLow".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "outHigh".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(100.0) },
-            ]),
+            (
+                2,
+                25,
+                "Hysteresis",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "in".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "rising".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Float(75.0),
+                    },
+                    ManifestSlot {
+                        name: "falling".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Float(70.0),
+                    },
+                ],
+            ),
+            (
+                2,
+                48,
+                "SRLatch",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "set".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "reset".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                ],
+            ),
+            (
+                2,
+                46,
+                "Reset",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "in".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "inLow".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "inHigh".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Float(100.0),
+                    },
+                    ManifestSlot {
+                        name: "outLow".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "outHigh".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Float(100.0),
+                    },
+                ],
+            ),
             // --- Sequencer ---
-            (2, 31, "LSeq", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Int(0) },
-                ManifestSlot { name: "in".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "numStages".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(4) },
-                ManifestSlot { name: "rampTime".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(0.0) },
-            ]),
+            (
+                2,
+                31,
+                "LSeq",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Int(0),
+                    },
+                    ManifestSlot {
+                        name: "in".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "numStages".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(4),
+                    },
+                    ManifestSlot {
+                        name: "rampTime".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                ],
+            ),
             // --- Stateful: Timers ---
-            (2, 20, "DlyOn", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "in".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "delay".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(5.0) },
-            ]),
-            (2, 19, "DlyOff", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "in".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "delay".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(5.0) },
-            ]),
-            (2, 16, "Count", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Int(0) },
-                ManifestSlot { name: "in".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "preset".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(0) },
-            ]),
-            (2, 44, "Ramp", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "min".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "max".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(100.0) },
-                ManifestSlot { name: "step".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(1.0) },
-            ]),
+            (
+                2,
+                20,
+                "DlyOn",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "in".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "delay".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Float(5.0),
+                    },
+                ],
+            ),
+            (
+                2,
+                19,
+                "DlyOff",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "in".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "delay".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Float(5.0),
+                    },
+                ],
+            ),
+            (
+                2,
+                16,
+                "Count",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Int(0),
+                    },
+                    ManifestSlot {
+                        name: "in".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "preset".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(0),
+                    },
+                ],
+            ),
+            (
+                2,
+                44,
+                "Ramp",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "min".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "max".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Float(100.0),
+                    },
+                    ManifestSlot {
+                        name: "step".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Float(1.0),
+                    },
+                ],
+            ),
             // --- Tstat (Thermostat with deadband) ---
-            (2, 54, "Tstat", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "diff".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(2.0) },
-                ManifestSlot { name: "isHeating".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Bool(true) },
-                ManifestSlot { name: "sp".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(72.0) },
-                ManifestSlot { name: "cv".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "raise".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "lower".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-            ]),
+            (
+                2,
+                54,
+                "Tstat",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "diff".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Float(2.0),
+                    },
+                    ManifestSlot {
+                        name: "isHeating".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Bool(true),
+                    },
+                    ManifestSlot {
+                        name: "sp".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Float(72.0),
+                    },
+                    ManifestSlot {
+                        name: "cv".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "raise".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "lower".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                ],
+            ),
             // --- UpDn (Up/down accumulator) ---
-            (2, 55, "UpDn", vec![
-                ManifestSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Int(1) },
-                ManifestSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "up".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "dn".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, default_value: SlotValue::Bool(false) },
-                ManifestSlot { name: "step".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(1.0) },
-                ManifestSlot { name: "min".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(0.0) },
-                ManifestSlot { name: "max".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, default_value: SlotValue::Float(100.0) },
-            ]),
+            (
+                2,
+                55,
+                "UpDn",
+                vec![
+                    ManifestSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Int(1),
+                    },
+                    ManifestSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "up".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "dn".into(),
+                        type_id: SoxValueType::Bool as u8,
+                        flags: SLOT_FLAG_RUNTIME,
+                        default_value: SlotValue::Bool(false),
+                    },
+                    ManifestSlot {
+                        name: "step".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Float(1.0),
+                    },
+                    ManifestSlot {
+                        name: "min".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Float(0.0),
+                    },
+                    ManifestSlot {
+                        name: "max".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        default_value: SlotValue::Float(100.0),
+                    },
+                ],
+            ),
         ];
         for (kit_id, type_id, type_name, slots) in hardcoded_types {
-            if !db.types.contains_key(&(kit_id, type_id)) {
-                db.types.insert((kit_id, type_id), slots);
-                db.type_name_lookup.insert((kit_id, type_name.to_string()), type_id);
+            if let std::collections::hash_map::Entry::Vacant(e) = db.types.entry((kit_id, type_id))
+            {
+                e.insert(slots);
+                db.type_name_lookup
+                    .insert((kit_id, type_name.to_string()), type_id);
             }
         }
 
-        tracing::info!(
-            total_types = db.types.len(),
-            "ManifestDb loaded"
-        );
+        tracing::info!(total_types = db.types.len(), "ManifestDb loaded");
         db
     }
 
@@ -2246,11 +3617,17 @@ impl ManifestDb {
                         if let Some(type_id) = id {
                             // Register name → type_id for base type resolution
                             if !type_name.is_empty() {
-                                self.type_name_lookup.insert((kit_index, type_name), type_id);
+                                self.type_name_lookup
+                                    .insert((kit_index, type_name), type_id);
                             }
                             // Flush previous type if any
                             if let Some(prev_type_id) = current_type_id.take() {
-                                self.insert_type(kit_index, prev_type_id, &current_base, &current_slots);
+                                self.insert_type(
+                                    kit_index,
+                                    prev_type_id,
+                                    &current_base,
+                                    &current_slots,
+                                );
                                 count += 1;
                             }
                             current_type_id = Some(type_id);
@@ -2374,12 +3751,16 @@ impl ManifestDb {
     /// Resolve base type slots from a "kit::Type" string like "control::Add2".
     fn resolve_base_slots(&self, base: &str, _current_kit: u8) -> Option<Vec<ManifestSlot>> {
         let parts: Vec<&str> = base.split("::").collect();
-        if parts.len() != 2 { return None; }
+        if parts.len() != 2 {
+            return None;
+        }
         let kit_name = parts[0];
         let type_name = parts[1];
 
         let kit_idx = DEFAULT_KITS.iter().position(|k| k.name == kit_name)? as u8;
-        let tid = self.type_name_lookup.get(&(kit_idx, type_name.to_string()))?;
+        let tid = self
+            .type_name_lookup
+            .get(&(kit_idx, type_name.to_string()))?;
         self.types.get(&(kit_idx, *tid)).cloned()
     }
 
@@ -2472,7 +3853,7 @@ fn sedona_flags_to_slot_flags(flags_str: &str) -> u8 {
 fn parse_default_value(type_id: u8, default_str: Option<&str>) -> SlotValue {
     match default_str {
         None => default_for_type(type_id),
-        Some(s) if s.is_empty() => {
+        Some("") => {
             // Empty default: for Buf/Str types means empty string, otherwise zero
             if type_id == SoxValueType::Buf as u8 {
                 SlotValue::Str(String::new())
@@ -2480,33 +3861,19 @@ fn parse_default_value(type_id: u8, default_str: Option<&str>) -> SlotValue {
                 default_for_type(type_id)
             }
         }
-        Some(s) => {
-            match type_id {
-                t if t == SoxValueType::Bool as u8 => {
-                    SlotValue::Bool(s == "true" || s == "1")
-                }
-                t if t == SoxValueType::Int as u8 => {
-                    SlotValue::Int(s.parse().unwrap_or(0))
-                }
-                t if t == SoxValueType::Float as u8 => {
-                    SlotValue::Float(s.parse().unwrap_or(0.0))
-                }
-                t if t == SoxValueType::Double as u8 => {
-                    SlotValue::Double(s.parse().unwrap_or(0.0))
-                }
-                t if t == SoxValueType::Long as u8 => {
-                    SlotValue::Long(s.parse().unwrap_or(0))
-                }
-                t if t == SoxValueType::Byte as u8 || t == SoxValueType::Short as u8 => {
-                    SlotValue::Int(s.parse().unwrap_or(0))
-                }
-                t if t == SoxValueType::Buf as u8 => {
-                    SlotValue::Str(s.to_string())
-                }
-                t if t == SoxValueType::Void as u8 => SlotValue::Null,
-                _ => default_for_type(type_id),
+        Some(s) => match type_id {
+            t if t == SoxValueType::Bool as u8 => SlotValue::Bool(s == "true" || s == "1"),
+            t if t == SoxValueType::Int as u8 => SlotValue::Int(s.parse().unwrap_or(0)),
+            t if t == SoxValueType::Float as u8 => SlotValue::Float(s.parse().unwrap_or(0.0)),
+            t if t == SoxValueType::Double as u8 => SlotValue::Double(s.parse().unwrap_or(0.0)),
+            t if t == SoxValueType::Long as u8 => SlotValue::Long(s.parse().unwrap_or(0)),
+            t if t == SoxValueType::Byte as u8 || t == SoxValueType::Short as u8 => {
+                SlotValue::Int(s.parse().unwrap_or(0))
             }
-        }
+            t if t == SoxValueType::Buf as u8 => SlotValue::Str(s.to_string()),
+            t if t == SoxValueType::Void as u8 => SlotValue::Null,
+            _ => default_for_type(type_id),
+        },
     }
 }
 
@@ -2621,11 +3988,7 @@ impl SubscriptionManager {
     ///   byte 2-3: comp_id (u16 big-endian)
     ///   byte 4:   what ('r' for runtime)
     ///   bytes 5+: slot values in schema order (NO type bytes, NO count)
-    pub fn build_events(
-        &self,
-        changed_comps: &[u16],
-        tree: &ComponentTree,
-    ) -> Vec<(u16, Vec<u8>)> {
+    pub fn build_events(&self, changed_comps: &[u16], tree: &ComponentTree) -> Vec<(u16, Vec<u8>)> {
         let mut events = Vec::new();
         for &comp_id in changed_comps {
             // Only push COV events for channel-mapped components with valid manifest schemas.
@@ -2641,10 +4004,10 @@ impl SubscriptionManager {
             };
             // Build raw event bytes: ['e', 0xFF, comp_id, 'r', slot_values...]
             let mut payload = Vec::with_capacity(64);
-            payload.push(b'e');  // lowercase — unsolicited event
-            payload.push(0xFF);  // replyNum (unused for events)
+            payload.push(b'e'); // lowercase — unsolicited event
+            payload.push(0xFF); // replyNum (unused for events)
             payload.extend_from_slice(&comp_id.to_be_bytes());
-            payload.push(b'r');  // what = runtime
+            payload.push(b'r'); // what = runtime
 
             // Write slot values in schema order (NO type_id prefix, NO count)
             for slot in &comp.slots {
@@ -2669,11 +4032,7 @@ impl SubscriptionManager {
     /// Returns `(session_id, event_bytes)` pairs for each subscriber.
     /// The event contains only config-flagged slot values (what='c').
     /// Action slots are never serialized.
-    pub fn build_config_events(
-        &self,
-        comp_id: u16,
-        tree: &ComponentTree,
-    ) -> Vec<(u16, Vec<u8>)> {
+    pub fn build_config_events(&self, comp_id: u16, tree: &ComponentTree) -> Vec<(u16, Vec<u8>)> {
         let mut events = Vec::new();
         let Some(comp) = tree.get(comp_id) else {
             return events;
@@ -2691,8 +4050,12 @@ impl SubscriptionManager {
 
         // Write only config-flagged slot values in schema order
         for slot in &comp.slots {
-            if slot.flags & SLOT_FLAG_ACTION != 0 { continue; }
-            if slot.flags & SLOT_FLAG_CONFIG == 0 { continue; }
+            if slot.flags & SLOT_FLAG_ACTION != 0 {
+                continue;
+            }
+            if slot.flags & SLOT_FLAG_CONFIG == 0 {
+                continue;
+            }
             encode_slot_value_raw(&mut payload, &slot.value);
         }
 
@@ -2789,11 +4152,7 @@ const SOX_CHUNK_SIZE: usize = 256;
 const KITS_BASE_DIR: &str = "/home/eacio/sandstar/etc/kits";
 const MANIFESTS_DIR: &str = "/home/eacio/sandstar/etc/manifests";
 /// Allowed directories for file writes (put operations).
-const WRITE_ALLOWED_DIRS: &[&str] = &[
-    MANIFESTS_DIR,
-    "/home/eacio/sandstar/etc/config",
-    "/tmp",
-];
+const WRITE_ALLOWED_DIRS: &[&str] = &[MANIFESTS_DIR, "/home/eacio/sandstar/etc/config", "/tmp"];
 
 /// Return the list of allowed write directories, including the system temp dir on non-Linux.
 fn allowed_write_dirs() -> Vec<String> {
@@ -2826,7 +4185,8 @@ fn resolve_sox_uri(uri: &str) -> Result<String, &'static str> {
         Ok(format!("{}/{}", MANIFESTS_DIR, manifest_name))
     } else if let Some(kit_path) = uri.strip_prefix("/kits/") {
         Ok(format!("{}/{}", KITS_BASE_DIR, kit_path))
-    } else if uri.starts_with('/') || (cfg!(windows) && uri.len() >= 2 && uri.as_bytes()[1] == b':') {
+    } else if uri.starts_with('/') || (cfg!(windows) && uri.len() >= 2 && uri.as_bytes()[1] == b':')
+    {
         // Absolute path — used directly (validated later against allowed dirs)
         Ok(uri.to_string())
     } else {
@@ -2855,7 +4215,10 @@ fn validate_path(local_path: &str, allow_write: bool) -> Result<std::path::PathB
             }
             let canonical_parent = std::fs::canonicalize(parent).map_err(|_| "invalid path")?;
             let parent_str = canonical_parent.to_string_lossy();
-            if !write_dirs.iter().any(|d| parent_str.starts_with(d.as_str())) {
+            if !write_dirs
+                .iter()
+                .any(|d| parent_str.starts_with(d.as_str()))
+            {
                 return Err("invalid path");
             }
             // Return the full path with canonical parent + original filename
@@ -3037,7 +4400,9 @@ fn handle_file_read(req: &SoxRequest) -> SoxResponse {
             Some(s) => s + file.offset,
             None => return error_msg(SoxCmd::FileRead, req.req_id, "chunk out of range"),
         };
-        let end = (start + file.chunk_size).min(file.offset + file.file_size).min(file.data.len());
+        let end = (start + file.chunk_size)
+            .min(file.offset + file.file_size)
+            .min(file.data.len());
 
         if start < file.data.len() && start < file.offset + file.file_size {
             let mut resp = SoxResponse::success(SoxCmd::FileRead, req.req_id);
@@ -3060,7 +4425,12 @@ fn handle_file_close(req: &SoxRequest) -> SoxResponse {
     if let Some(ref file) = *xfer {
         if file.mode == SoxFileXferMode::Put {
             if let Some(ref path) = file.write_path {
-                tracing::info!(path, chunks = file.chunks_received, size = file.data.len(), "SOX: fileClose — flushing PUT to disk");
+                tracing::info!(
+                    path,
+                    chunks = file.chunks_received,
+                    size = file.data.len(),
+                    "SOX: fileClose — flushing PUT to disk"
+                );
                 if let Err(e) = std::fs::write(path, &file.data) {
                     tracing::error!(path, err = %e, "SOX: fileClose — failed to write file");
                     *xfer = None;
@@ -3118,7 +4488,10 @@ fn handle_file_write_chunk_inner(payload: &[u8], req_id: u8) -> SoxResponse {
 
         if write_end > file.data.len() {
             tracing::warn!(
-                chunk_num, chunk_data_size, write_start, write_end,
+                chunk_num,
+                chunk_data_size,
+                write_start,
+                write_end,
                 buf_len = file.data.len(),
                 "SOX: fileWrite chunk out of range"
             );
@@ -3196,7 +4569,10 @@ pub fn handle_put_chunk(payload: &[u8]) -> Option<SoxResponse> {
 
         if write_end > file.data.len() {
             tracing::warn!(
-                chunk_num, chunk_data_size, write_start, write_end,
+                chunk_num,
+                chunk_data_size,
+                write_start,
+                write_end,
                 buf_len = file.data.len(),
                 "SOX: put chunk out of range"
             );
@@ -3306,9 +4682,9 @@ fn handle_read_schema(req: &SoxRequest) -> SoxResponse {
 ///   u1 numProps, props[numProps] { str key, str value }
 fn handle_read_version(req: &SoxRequest) -> SoxResponse {
     let mut resp = SoxResponse::success(SoxCmd::ReadVersion, req.req_id);
-    resp.write_str("EacIo");   // platformId
-    resp.write_u8(0x00);       // scodeFlags
-    // Kit version strings (same order as readSchema)
+    resp.write_str("EacIo"); // platformId
+    resp.write_u8(0x00); // scodeFlags
+                         // Kit version strings (same order as readSchema)
     for kit in DEFAULT_KITS {
         resp.write_str(kit.version);
     }
@@ -3326,7 +4702,11 @@ fn handle_read_version(req: &SoxRequest) -> SoxResponse {
 /// The `what='d'` mode is a Sandstar extension (not part of standard Sedona SOX).
 /// It returns dynamic tags from the side-car DynSlotStore encoded as:
 /// `u16 tag_count`, then for each tag: `null-terminated key + u8 type_code + value bytes`.
-fn handle_read_comp(req: &SoxRequest, tree: &ComponentTree, dyn_store: Option<&super::DynSlotStoreHandle>) -> SoxResponse {
+fn handle_read_comp(
+    req: &SoxRequest,
+    tree: &ComponentTree,
+    dyn_store: Option<&super::DynSlotStoreHandle>,
+) -> SoxResponse {
     let mut reader = SoxReader::new(&req.payload);
     let comp_id = match reader.read_u16() {
         Some(id) => id,
@@ -3360,16 +4740,24 @@ fn handle_read_comp(req: &SoxRequest, tree: &ComponentTree, dyn_store: Option<&s
         b'c' => {
             // Config: only slots with CONFIG flag, in schema order.
             for slot in &comp.slots {
-                if slot.flags & SLOT_FLAG_ACTION != 0 { continue; }
-                if slot.flags & SLOT_FLAG_CONFIG == 0 { continue; } // skip non-config
+                if slot.flags & SLOT_FLAG_ACTION != 0 {
+                    continue;
+                }
+                if slot.flags & SLOT_FLAG_CONFIG == 0 {
+                    continue;
+                } // skip non-config
                 encode_slot_value(&mut resp, &slot.value);
             }
         }
         b'r' => {
             // Runtime: only slots WITHOUT CONFIG flag, in schema order.
             for slot in &comp.slots {
-                if slot.flags & SLOT_FLAG_ACTION != 0 { continue; }
-                if slot.flags & SLOT_FLAG_CONFIG != 0 { continue; } // skip config
+                if slot.flags & SLOT_FLAG_ACTION != 0 {
+                    continue;
+                }
+                if slot.flags & SLOT_FLAG_CONFIG != 0 {
+                    continue;
+                } // skip config
                 encode_slot_value(&mut resp, &slot.value);
             }
         }
@@ -3533,7 +4921,12 @@ fn handle_subscribe(
             subs.subscribe(session_id, id);
         }
 
-        tracing::info!(session = session_id, comp_id, what_byte = what, "SOX: doSubscribe (old protocol)");
+        tracing::info!(
+            session = session_id,
+            comp_id,
+            what_byte = what,
+            "SOX: doSubscribe (old protocol)"
+        );
 
         // Response includes component data (same as readComp)
         let mut resp = SoxResponse::success(SoxCmd::Subscribe, req.req_id);
@@ -3554,15 +4947,23 @@ fn handle_subscribe(
                 }
                 b'c' => {
                     for slot in &comp.slots {
-                        if slot.flags & SLOT_FLAG_ACTION != 0 { continue; }
-                        if slot.flags & SLOT_FLAG_CONFIG == 0 { continue; }
+                        if slot.flags & SLOT_FLAG_ACTION != 0 {
+                            continue;
+                        }
+                        if slot.flags & SLOT_FLAG_CONFIG == 0 {
+                            continue;
+                        }
                         encode_slot_value(&mut resp, &slot.value);
                     }
                 }
                 b'r' => {
                     for slot in &comp.slots {
-                        if slot.flags & SLOT_FLAG_ACTION != 0 { continue; }
-                        if slot.flags & SLOT_FLAG_CONFIG != 0 { continue; }
+                        if slot.flags & SLOT_FLAG_ACTION != 0 {
+                            continue;
+                        }
+                        if slot.flags & SLOT_FLAG_CONFIG != 0 {
+                            continue;
+                        }
                         encode_slot_value(&mut resp, &slot.value);
                     }
                 }
@@ -3602,7 +5003,13 @@ fn handle_subscribe(
         for &id in &all_ids {
             subs.subscribe(session_id, id);
         }
-        tracing::info!(session = session_id, mask, requested = comp_ids.len(), total = all_ids.len(), "SOX: batchSubscribe");
+        tracing::info!(
+            session = session_id,
+            mask,
+            requested = comp_ids.len(),
+            total = all_ids.len(),
+            "SOX: batchSubscribe"
+        );
 
         let mut resp = SoxResponse::success(SoxCmd::Subscribe, req.req_id);
         // remaining: number of pending events the client should wait for.
@@ -3668,80 +5075,258 @@ fn default_slots_for_type(kit_id: u8, type_id: u8) -> Vec<VirtualSlot> {
         // control::ConstInt (kit 2, type 15)
         // Manifest: meta(Int,config), out(Int,config), set(Int,action)
         (2, 15) => vec![
-            VirtualSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(1) },
-            VirtualSlot { name: "out".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(0) },
-            VirtualSlot { name: "set".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_ACTION, value: SlotValue::Int(0) },
-        ],
-        // control::Add2 (kit 2, type 3), Sub2 (49), Mul2 (37)
-        // Manifest: meta(Int,config), out(Float,runtime), in1(Float,runtime), in2(Float,runtime)
-        (2, 3) | (2, 49) | (2, 37) => vec![
-            VirtualSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(1) },
-            VirtualSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Float(0.0) },
-            VirtualSlot { name: "in1".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Float(0.0) },
-            VirtualSlot { name: "in2".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Float(0.0) },
-        ],
-        // control::Div2 (kit 2, type 18)
-        // Manifest: meta(Int,config), out(Float,runtime), in1(Float,runtime), in2(Float,runtime), div0(Bool,runtime)
-        (2, 18) => vec![
-            VirtualSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(1) },
-            VirtualSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Float(0.0) },
-            VirtualSlot { name: "in1".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Float(0.0) },
-            VirtualSlot { name: "in2".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Float(0.0) },
-            VirtualSlot { name: "div0".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Bool(false) },
-        ],
-        // control::ConstBool (kit 2, type 13)
-        // Manifest: meta, out(Bool,config), setTrue(Void,action), setFalse(Void,action), setNull(Void,action)
-        (2, 13) => vec![
-            VirtualSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(1) },
-            VirtualSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Bool(false) },
-            VirtualSlot { name: "setTrue".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, value: SlotValue::Null },
-            VirtualSlot { name: "setFalse".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, value: SlotValue::Null },
-            VirtualSlot { name: "setNull".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, value: SlotValue::Null },
-        ],
-        // control::WriteBool (kit 2, type 56)
-        // Manifest: meta, in(Bool,config), out(Bool,runtime), setTrue/setFalse/setNull(actions)
-        (2, 56) => vec![
-            VirtualSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(1) },
-            VirtualSlot { name: "in".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Bool(false) },
-            VirtualSlot { name: "out".into(), type_id: SoxValueType::Bool as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Bool(false) },
-            VirtualSlot { name: "setTrue".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, value: SlotValue::Null },
-            VirtualSlot { name: "setFalse".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, value: SlotValue::Null },
-            VirtualSlot { name: "setNull".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, value: SlotValue::Null },
-        ],
-        // control::WriteFloat (kit 2, type 57)
-        // Manifest: meta, in(Float,config), out(Float,runtime), set(Float,action), setNull(Void,action)
-        (2, 57) => vec![
-            VirtualSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(1) },
-            VirtualSlot { name: "in".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(0.0) },
-            VirtualSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Float(0.0) },
-            VirtualSlot { name: "set".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_ACTION, value: SlotValue::Float(0.0) },
-            VirtualSlot { name: "setNull".into(), type_id: SoxValueType::Void as u8, flags: SLOT_FLAG_ACTION, value: SlotValue::Null },
-        ],
-        // control::WriteInt (kit 2, type 58)
-        // Manifest: meta, in(Int,config), out(Int,runtime), set(Int,action)
-        (2, 58) => vec![
-            VirtualSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(1) },
-            VirtualSlot { name: "in".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(0) },
-            VirtualSlot { name: "out".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Int(0) },
-            VirtualSlot { name: "set".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_ACTION, value: SlotValue::Int(0) },
-        ],
-        // EacIo::ChannelRead (kit 1, type 100) — bridge sensor values to control logic
-        // User sets channelId (config), out auto-updates with live sensor value every tick
-        (1, 100) => vec![
-            VirtualSlot { name: "meta".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(1) },
-            VirtualSlot { name: "channelId".into(), type_id: SoxValueType::Int as u8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(0) },
-            VirtualSlot { name: "out".into(), type_id: SoxValueType::Float as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Float(0.0) },
-            VirtualSlot { name: "status".into(), type_id: SoxValueType::Buf as u8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Str(String::new()) },
-        ],
-        // Default: meta slot + auto-extend on write for unknown types
-        _ => vec![
             VirtualSlot {
                 name: "meta".into(),
                 type_id: SoxValueType::Int as u8,
                 flags: SLOT_FLAG_CONFIG,
                 value: SlotValue::Int(1),
             },
+            VirtualSlot {
+                name: "out".into(),
+                type_id: SoxValueType::Int as u8,
+                flags: SLOT_FLAG_CONFIG,
+                value: SlotValue::Int(0),
+            },
+            VirtualSlot {
+                name: "set".into(),
+                type_id: SoxValueType::Int as u8,
+                flags: SLOT_FLAG_ACTION,
+                value: SlotValue::Int(0),
+            },
         ],
+        // control::Add2 (kit 2, type 3), Sub2 (49), Mul2 (37)
+        // Manifest: meta(Int,config), out(Float,runtime), in1(Float,runtime), in2(Float,runtime)
+        (2, 3) | (2, 49) | (2, 37) => vec![
+            VirtualSlot {
+                name: "meta".into(),
+                type_id: SoxValueType::Int as u8,
+                flags: SLOT_FLAG_CONFIG,
+                value: SlotValue::Int(1),
+            },
+            VirtualSlot {
+                name: "out".into(),
+                type_id: SoxValueType::Float as u8,
+                flags: SLOT_FLAG_RUNTIME,
+                value: SlotValue::Float(0.0),
+            },
+            VirtualSlot {
+                name: "in1".into(),
+                type_id: SoxValueType::Float as u8,
+                flags: SLOT_FLAG_RUNTIME,
+                value: SlotValue::Float(0.0),
+            },
+            VirtualSlot {
+                name: "in2".into(),
+                type_id: SoxValueType::Float as u8,
+                flags: SLOT_FLAG_RUNTIME,
+                value: SlotValue::Float(0.0),
+            },
+        ],
+        // control::Div2 (kit 2, type 18)
+        // Manifest: meta(Int,config), out(Float,runtime), in1(Float,runtime), in2(Float,runtime), div0(Bool,runtime)
+        (2, 18) => vec![
+            VirtualSlot {
+                name: "meta".into(),
+                type_id: SoxValueType::Int as u8,
+                flags: SLOT_FLAG_CONFIG,
+                value: SlotValue::Int(1),
+            },
+            VirtualSlot {
+                name: "out".into(),
+                type_id: SoxValueType::Float as u8,
+                flags: SLOT_FLAG_RUNTIME,
+                value: SlotValue::Float(0.0),
+            },
+            VirtualSlot {
+                name: "in1".into(),
+                type_id: SoxValueType::Float as u8,
+                flags: SLOT_FLAG_RUNTIME,
+                value: SlotValue::Float(0.0),
+            },
+            VirtualSlot {
+                name: "in2".into(),
+                type_id: SoxValueType::Float as u8,
+                flags: SLOT_FLAG_RUNTIME,
+                value: SlotValue::Float(0.0),
+            },
+            VirtualSlot {
+                name: "div0".into(),
+                type_id: SoxValueType::Bool as u8,
+                flags: SLOT_FLAG_RUNTIME,
+                value: SlotValue::Bool(false),
+            },
+        ],
+        // control::ConstBool (kit 2, type 13)
+        // Manifest: meta, out(Bool,config), setTrue(Void,action), setFalse(Void,action), setNull(Void,action)
+        (2, 13) => vec![
+            VirtualSlot {
+                name: "meta".into(),
+                type_id: SoxValueType::Int as u8,
+                flags: SLOT_FLAG_CONFIG,
+                value: SlotValue::Int(1),
+            },
+            VirtualSlot {
+                name: "out".into(),
+                type_id: SoxValueType::Bool as u8,
+                flags: SLOT_FLAG_CONFIG,
+                value: SlotValue::Bool(false),
+            },
+            VirtualSlot {
+                name: "setTrue".into(),
+                type_id: SoxValueType::Void as u8,
+                flags: SLOT_FLAG_ACTION,
+                value: SlotValue::Null,
+            },
+            VirtualSlot {
+                name: "setFalse".into(),
+                type_id: SoxValueType::Void as u8,
+                flags: SLOT_FLAG_ACTION,
+                value: SlotValue::Null,
+            },
+            VirtualSlot {
+                name: "setNull".into(),
+                type_id: SoxValueType::Void as u8,
+                flags: SLOT_FLAG_ACTION,
+                value: SlotValue::Null,
+            },
+        ],
+        // control::WriteBool (kit 2, type 56)
+        // Manifest: meta, in(Bool,config), out(Bool,runtime), setTrue/setFalse/setNull(actions)
+        (2, 56) => vec![
+            VirtualSlot {
+                name: "meta".into(),
+                type_id: SoxValueType::Int as u8,
+                flags: SLOT_FLAG_CONFIG,
+                value: SlotValue::Int(1),
+            },
+            VirtualSlot {
+                name: "in".into(),
+                type_id: SoxValueType::Bool as u8,
+                flags: SLOT_FLAG_CONFIG,
+                value: SlotValue::Bool(false),
+            },
+            VirtualSlot {
+                name: "out".into(),
+                type_id: SoxValueType::Bool as u8,
+                flags: SLOT_FLAG_RUNTIME,
+                value: SlotValue::Bool(false),
+            },
+            VirtualSlot {
+                name: "setTrue".into(),
+                type_id: SoxValueType::Void as u8,
+                flags: SLOT_FLAG_ACTION,
+                value: SlotValue::Null,
+            },
+            VirtualSlot {
+                name: "setFalse".into(),
+                type_id: SoxValueType::Void as u8,
+                flags: SLOT_FLAG_ACTION,
+                value: SlotValue::Null,
+            },
+            VirtualSlot {
+                name: "setNull".into(),
+                type_id: SoxValueType::Void as u8,
+                flags: SLOT_FLAG_ACTION,
+                value: SlotValue::Null,
+            },
+        ],
+        // control::WriteFloat (kit 2, type 57)
+        // Manifest: meta, in(Float,config), out(Float,runtime), set(Float,action), setNull(Void,action)
+        (2, 57) => vec![
+            VirtualSlot {
+                name: "meta".into(),
+                type_id: SoxValueType::Int as u8,
+                flags: SLOT_FLAG_CONFIG,
+                value: SlotValue::Int(1),
+            },
+            VirtualSlot {
+                name: "in".into(),
+                type_id: SoxValueType::Float as u8,
+                flags: SLOT_FLAG_CONFIG,
+                value: SlotValue::Float(0.0),
+            },
+            VirtualSlot {
+                name: "out".into(),
+                type_id: SoxValueType::Float as u8,
+                flags: SLOT_FLAG_RUNTIME,
+                value: SlotValue::Float(0.0),
+            },
+            VirtualSlot {
+                name: "set".into(),
+                type_id: SoxValueType::Float as u8,
+                flags: SLOT_FLAG_ACTION,
+                value: SlotValue::Float(0.0),
+            },
+            VirtualSlot {
+                name: "setNull".into(),
+                type_id: SoxValueType::Void as u8,
+                flags: SLOT_FLAG_ACTION,
+                value: SlotValue::Null,
+            },
+        ],
+        // control::WriteInt (kit 2, type 58)
+        // Manifest: meta, in(Int,config), out(Int,runtime), set(Int,action)
+        (2, 58) => vec![
+            VirtualSlot {
+                name: "meta".into(),
+                type_id: SoxValueType::Int as u8,
+                flags: SLOT_FLAG_CONFIG,
+                value: SlotValue::Int(1),
+            },
+            VirtualSlot {
+                name: "in".into(),
+                type_id: SoxValueType::Int as u8,
+                flags: SLOT_FLAG_CONFIG,
+                value: SlotValue::Int(0),
+            },
+            VirtualSlot {
+                name: "out".into(),
+                type_id: SoxValueType::Int as u8,
+                flags: SLOT_FLAG_RUNTIME,
+                value: SlotValue::Int(0),
+            },
+            VirtualSlot {
+                name: "set".into(),
+                type_id: SoxValueType::Int as u8,
+                flags: SLOT_FLAG_ACTION,
+                value: SlotValue::Int(0),
+            },
+        ],
+        // EacIo::ChannelRead (kit 1, type 100) — bridge sensor values to control logic
+        // User sets channelId (config), out auto-updates with live sensor value every tick
+        (1, 100) => vec![
+            VirtualSlot {
+                name: "meta".into(),
+                type_id: SoxValueType::Int as u8,
+                flags: SLOT_FLAG_CONFIG,
+                value: SlotValue::Int(1),
+            },
+            VirtualSlot {
+                name: "channelId".into(),
+                type_id: SoxValueType::Int as u8,
+                flags: SLOT_FLAG_CONFIG,
+                value: SlotValue::Int(0),
+            },
+            VirtualSlot {
+                name: "out".into(),
+                type_id: SoxValueType::Float as u8,
+                flags: SLOT_FLAG_RUNTIME,
+                value: SlotValue::Float(0.0),
+            },
+            VirtualSlot {
+                name: "status".into(),
+                type_id: SoxValueType::Buf as u8,
+                flags: SLOT_FLAG_RUNTIME,
+                value: SlotValue::Str(String::new()),
+            },
+        ],
+        // Default: meta slot + auto-extend on write for unknown types
+        _ => vec![VirtualSlot {
+            name: "meta".into(),
+            type_id: SoxValueType::Int as u8,
+            flags: SLOT_FLAG_CONFIG,
+            value: SlotValue::Int(1),
+        }],
     }
 }
 
@@ -3976,14 +5561,24 @@ fn handle_invoke(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
     // Look up the action slot name and the "out" (or "in") slot type
     let (action_name, target_slot, target_type) = {
         let comp = tree.get(comp_id);
-        let action = comp.and_then(|c| c.slots.get(slot_id as usize)).map(|s| s.name.clone());
+        let action = comp
+            .and_then(|c| c.slots.get(slot_id as usize))
+            .map(|s| s.name.clone());
         // Find the writable output: "out" for Const*, "in" for Write*
         let target = comp.and_then(|c| {
-            c.slots.iter().find(|s| s.name == "out" && s.flags & SLOT_FLAG_ACTION == 0)
-                .or_else(|| c.slots.iter().find(|s| s.name == "in" && s.flags & SLOT_FLAG_ACTION == 0))
+            c.slots
+                .iter()
+                .find(|s| s.name == "out" && s.flags & SLOT_FLAG_ACTION == 0)
+                .or_else(|| {
+                    c.slots
+                        .iter()
+                        .find(|s| s.name == "in" && s.flags & SLOT_FLAG_ACTION == 0)
+                })
         });
         let tname = target.map(|s| s.name.clone()).unwrap_or_default();
-        let ttype = target.map(|s| s.type_id).unwrap_or(SoxValueType::Float as u8);
+        let ttype = target
+            .map(|s| s.type_id)
+            .unwrap_or(SoxValueType::Float as u8);
         (action.unwrap_or_default(), tname, ttype)
     };
 
@@ -4052,7 +5647,8 @@ fn handle_write(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
 
     // Determine the slot type from the existing component schema.
     // If the slot doesn't exist yet, try to decode as float (most common).
-    let type_id = tree.get(comp_id)
+    let type_id = tree
+        .get(comp_id)
         .and_then(|c| c.slots.get(slot_id as usize))
         .map(|s| s.type_id)
         .unwrap_or(SoxValueType::Float as u8);
@@ -4074,7 +5670,7 @@ fn handle_write(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
         while comp.slots.len() <= slot_id as usize {
             comp.slots.push(VirtualSlot {
                 name: format!("slot{}", comp.slots.len()),
-                type_id: type_id,
+                type_id,
                 flags: SLOT_FLAG_RUNTIME,
                 value: SlotValue::Null,
             });
@@ -4105,7 +5701,8 @@ pub fn parse_write_request(req: &SoxRequest, tree: &ComponentTree) -> Option<Wri
     let mut reader = SoxReader::new(&req.payload);
     let comp_id = reader.read_u16()?;
     let slot_id = reader.read_u8()?;
-    let type_id = tree.get(comp_id)
+    let type_id = tree
+        .get(comp_id)
         .and_then(|c| c.slots.get(slot_id as usize))
         .map(|s| s.type_id)
         .unwrap_or(SoxValueType::Float as u8);
@@ -4344,7 +5941,10 @@ mod tests {
         assert_eq!(ch.slots[8].name, "enabled");
 
         // meta encodes canvas position: x=2, y=2 for first channel (index 0)
-        assert_eq!(ch.slots[0].value, SlotValue::Int(encode_meta_with_pos(2, 2))); // meta with position
+        assert_eq!(
+            ch.slots[0].value,
+            SlotValue::Int(encode_meta_with_pos(2, 2))
+        ); // meta with position
         assert_eq!(ch.slots[2].value, SlotValue::Int(1113)); // channel
         assert_eq!(ch.slots[6].value, SlotValue::Float(72.5)); // out
         assert_eq!(ch.slots[8].value, SlotValue::Bool(true)); // enabled
@@ -4713,7 +6313,7 @@ mod tests {
         let events = subs.build_events(&[100], &tree);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].0, 1); // session_id
-        // Event payload starts with 'e' (lowercase unsolicited event), 0xFF
+                                    // Event payload starts with 'e' (lowercase unsolicited event), 0xFF
         assert_eq!(events[0].1[0], b'e');
         assert_eq!(events[0].1[1], 0xFF);
     }
@@ -4810,7 +6410,7 @@ mod tests {
         };
         let resp = handle_sox_request(&req, &mut tree, &mut subs, 1);
         assert_eq!(resp.cmd, b'W'); // success — slot auto-created
-        // Verify the slot was created with the written value
+                                    // Verify the slot was created with the written value
         let comp = tree.get(100).unwrap();
         assert!(comp.slots.len() > 99);
         assert_eq!(comp.slots[99].value, SlotValue::Float(42.0));
@@ -4989,8 +6589,8 @@ mod tests {
         let mut r = SoxReader::new(&resp.payload);
         assert_eq!(r.read_u16(), Some(100)); // comp_id
         assert_eq!(r.read_u8(), Some(b'c')); // what byte echoed back
-        // Config slots: meta (Int with position encoding) and pointQuery (Str="")
-        // meta: i4(encode_meta_with_pos(2, 2)) for first channel (index 0)
+                                             // Config slots: meta (Int with position encoding) and pointQuery (Str="")
+                                             // meta: i4(encode_meta_with_pos(2, 2)) for first channel (index 0)
         assert_eq!(r.read_i32(), Some(encode_meta_with_pos(2, 2)));
         // pointQuery: u2(1) + 0x00 (empty string with null terminator)
         assert_eq!(r.read_u16(), Some(1)); // size=1 (just the null)
@@ -5132,8 +6732,11 @@ mod tests {
         assert_eq!(sedona_flags_to_slot_flags("a"), SLOT_FLAG_ACTION);
         assert_eq!(sedona_flags_to_slot_flags("cs"), SLOT_FLAG_CONFIG); // config + string hint
         assert_eq!(sedona_flags_to_slot_flags("s"), SLOT_FLAG_RUNTIME); // string hint alone = runtime
-        assert_eq!(sedona_flags_to_slot_flags(""), SLOT_FLAG_RUNTIME);  // no flags = runtime
-        assert_eq!(sedona_flags_to_slot_flags("o"), SLOT_FLAG_OPERATOR | SLOT_FLAG_RUNTIME);
+        assert_eq!(sedona_flags_to_slot_flags(""), SLOT_FLAG_RUNTIME); // no flags = runtime
+        assert_eq!(
+            sedona_flags_to_slot_flags("o"),
+            SLOT_FLAG_OPERATOR | SLOT_FLAG_RUNTIME
+        );
     }
 
     #[test]
@@ -5143,12 +6746,30 @@ mod tests {
         let bool_type = SoxValueType::Bool as u8;
         let buf_type = SoxValueType::Buf as u8;
 
-        assert_eq!(parse_default_value(int_type, Some("42")), SlotValue::Int(42));
-        assert_eq!(parse_default_value(float_type, Some("3.14")), SlotValue::Float(3.14));
-        assert_eq!(parse_default_value(bool_type, Some("true")), SlotValue::Bool(true));
-        assert_eq!(parse_default_value(bool_type, Some("false")), SlotValue::Bool(false));
-        assert_eq!(parse_default_value(buf_type, Some("hello")), SlotValue::Str("hello".into()));
-        assert_eq!(parse_default_value(buf_type, Some("")), SlotValue::Str(String::new()));
+        assert_eq!(
+            parse_default_value(int_type, Some("42")),
+            SlotValue::Int(42)
+        );
+        assert_eq!(
+            parse_default_value(float_type, Some("3.14")),
+            SlotValue::Float(3.14)
+        );
+        assert_eq!(
+            parse_default_value(bool_type, Some("true")),
+            SlotValue::Bool(true)
+        );
+        assert_eq!(
+            parse_default_value(bool_type, Some("false")),
+            SlotValue::Bool(false)
+        );
+        assert_eq!(
+            parse_default_value(buf_type, Some("hello")),
+            SlotValue::Str("hello".into())
+        );
+        assert_eq!(
+            parse_default_value(buf_type, Some("")),
+            SlotValue::Str(String::new())
+        );
         assert_eq!(parse_default_value(int_type, None), SlotValue::Int(0));
         assert_eq!(parse_default_value(float_type, None), SlotValue::Float(0.0));
     }
@@ -5220,9 +6841,9 @@ mod tests {
         // Add a ConstFloat (kit=2, type=14) under control folder
         let mut payload = Vec::new();
         payload.extend_from_slice(&6u16.to_be_bytes()); // parentId=6
-        payload.push(2);  // kitId=2 (control)
+        payload.push(2); // kitId=2 (control)
         payload.push(14); // typeId=14 (ConstFloat)
-        // name (null-terminated)
+                          // name (null-terminated)
         payload.extend_from_slice(b"myConst\0");
 
         let req = SoxRequest {
@@ -5263,7 +6884,7 @@ mod tests {
         // Add a ConstFloat without manifest — should use hardcoded fallback
         let mut payload = Vec::new();
         payload.extend_from_slice(&0u16.to_be_bytes()); // parentId=0
-        payload.push(2);  // kitId=2 (control)
+        payload.push(2); // kitId=2 (control)
         payload.push(14); // typeId=14 (ConstFloat)
         payload.extend_from_slice(b"c\0");
 
@@ -5297,7 +6918,11 @@ mod tests {
         }
         let db = ManifestDb::load(manifests_dir);
         // Should have loaded types from multiple kits
-        assert!(db.type_count() > 20, "Expected >20 types, got {}", db.type_count());
+        assert!(
+            db.type_count() > 20,
+            "Expected >20 types, got {}",
+            db.type_count()
+        );
 
         // Verify specific types we know exist
         // sys::Component (kit=0, type=9)
@@ -5379,7 +7004,11 @@ mod tests {
         payload.push(6); // fromSlotId
         payload.extend_from_slice(&101u16.to_be_bytes()); // toCompId
         payload.push(1); // toSlotId
-        let req = SoxRequest { cmd: SoxCmd::Link, req_id: 10, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::Link,
+            req_id: 10,
+            payload,
+        };
         let resp = handle_link(&req, &mut tree);
         assert_eq!(resp.cmd, b'L');
         assert_eq!(resp.req_id, 10);
@@ -5405,7 +7034,11 @@ mod tests {
         payload.push(6);
         payload.extend_from_slice(&101u16.to_be_bytes());
         payload.push(1);
-        let req = SoxRequest { cmd: SoxCmd::Link, req_id: 11, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::Link,
+            req_id: 11,
+            payload,
+        };
         let resp = handle_link(&req, &mut tree);
         assert_eq!(resp.cmd, b'L');
         assert_eq!(tree.get(101).unwrap().links.len(), 0);
@@ -5422,7 +7055,11 @@ mod tests {
         payload.push(6);
         payload.extend_from_slice(&101u16.to_be_bytes());
         payload.push(1);
-        let req = SoxRequest { cmd: SoxCmd::Link, req_id: 12, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::Link,
+            req_id: 12,
+            payload,
+        };
         let resp = handle_link(&req, &mut tree);
         assert_eq!(resp.cmd, b'!'); // error
     }
@@ -5436,7 +7073,11 @@ mod tests {
         payload.push(6);
         payload.extend_from_slice(&101u16.to_be_bytes());
         payload.push(1);
-        let req = SoxRequest { cmd: SoxCmd::Link, req_id: 13, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::Link,
+            req_id: 13,
+            payload,
+        };
         let resp = handle_link(&req, &mut tree);
         assert_eq!(resp.cmd, b'!'); // error — link not found
     }
@@ -5450,7 +7091,11 @@ mod tests {
         payload.push(6);
         payload.extend_from_slice(&101u16.to_be_bytes());
         payload.push(1);
-        let req = SoxRequest { cmd: SoxCmd::Link, req_id: 14, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::Link,
+            req_id: 14,
+            payload,
+        };
         let resp = handle_link(&req, &mut tree);
         assert_eq!(resp.cmd, b'!');
     }
@@ -5465,7 +7110,11 @@ mod tests {
         let mut payload = Vec::new();
         payload.extend_from_slice(&101u16.to_be_bytes());
         payload.push(b'l');
-        let req = SoxRequest { cmd: SoxCmd::ReadComp, req_id: 15, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::ReadComp,
+            req_id: 15,
+            payload,
+        };
         let resp = handle_read_comp(&req, &tree, None);
         assert_eq!(resp.cmd, b'C');
         // Payload: u2 compId(101) + u1 what('l') + 2 links + u2 terminator
@@ -5478,7 +7127,7 @@ mod tests {
         assert_eq!(p[5], 6); // fromSlot
         assert_eq!(u16::from_be_bytes([p[6], p[7]]), 101); // toComp
         assert_eq!(p[8], 1); // toSlot
-        // Second link
+                             // Second link
         assert_eq!(u16::from_be_bytes([p[9], p[10]]), 100);
         assert_eq!(p[11], 7);
         assert_eq!(u16::from_be_bytes([p[12], p[13]]), 101);
@@ -5495,7 +7144,10 @@ mod tests {
         // The io folder (comp 5) has children from sample_channels
         let io = tree.get(5).unwrap();
         let original_children = io.children.clone();
-        assert!(original_children.len() >= 2, "need at least 2 children to reorder");
+        assert!(
+            original_children.len() >= 2,
+            "need at least 2 children to reorder"
+        );
         // Reverse the children order
         let mut reversed = original_children.clone();
         reversed.reverse();
@@ -5505,7 +7157,11 @@ mod tests {
         for &id in &reversed {
             payload.extend_from_slice(&id.to_be_bytes());
         }
-        let req = SoxRequest { cmd: SoxCmd::Reorder, req_id: 20, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::Reorder,
+            req_id: 20,
+            payload,
+        };
         let resp = handle_reorder(&req, &mut tree);
         assert_eq!(resp.cmd, b'O');
         assert_eq!(tree.get(5).unwrap().children, reversed);
@@ -5519,7 +7175,11 @@ mod tests {
         payload.extend_from_slice(&5u16.to_be_bytes()); // parentId = io folder
         payload.push(1); // count
         payload.extend_from_slice(&999u16.to_be_bytes()); // bogus child
-        let req = SoxRequest { cmd: SoxCmd::Reorder, req_id: 21, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::Reorder,
+            req_id: 21,
+            payload,
+        };
         let resp = handle_reorder(&req, &mut tree);
         assert_eq!(resp.cmd, b'!');
     }
@@ -5530,7 +7190,11 @@ mod tests {
         let mut payload = Vec::new();
         payload.extend_from_slice(&999u16.to_be_bytes()); // nonexistent parent
         payload.push(0); // count=0
-        let req = SoxRequest { cmd: SoxCmd::Reorder, req_id: 22, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::Reorder,
+            req_id: 22,
+            payload,
+        };
         let resp = handle_reorder(&req, &mut tree);
         assert_eq!(resp.cmd, b'!');
     }
@@ -5557,7 +7221,13 @@ mod tests {
 
     /// Helper: create an Add2 component (kit_id=2, type_id=3) with standard slots:
     /// slot 0 = meta (Int), slot 1 = out (Float), slot 2 = in1 (Float), slot 3 = in2 (Float)
-    fn make_math_comp(comp_id: u16, parent_id: u16, name: &str, kit_id: u8, type_id: u8) -> VirtualComponent {
+    fn make_math_comp(
+        comp_id: u16,
+        parent_id: u16,
+        name: &str,
+        kit_id: u8,
+        type_id: u8,
+    ) -> VirtualComponent {
         VirtualComponent {
             comp_id,
             parent_id,
@@ -5567,17 +7237,42 @@ mod tests {
             type_id,
             children: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "out".into(), type_id: 4, flags: 0, value: SlotValue::Float(0.0) },
-                VirtualSlot { name: "in1".into(), type_id: 4, flags: 0, value: SlotValue::Float(0.0) },
-                VirtualSlot { name: "in2".into(), type_id: 4, flags: 0, value: SlotValue::Float(0.0) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 4,
+                    flags: 0,
+                    value: SlotValue::Float(0.0),
+                },
+                VirtualSlot {
+                    name: "in1".into(),
+                    type_id: 4,
+                    flags: 0,
+                    value: SlotValue::Float(0.0),
+                },
+                VirtualSlot {
+                    name: "in2".into(),
+                    type_id: 4,
+                    flags: 0,
+                    value: SlotValue::Float(0.0),
+                },
             ],
             links: Vec::new(),
         }
     }
 
     /// Helper: create a simple component with a single float output slot at index 1
-    fn make_source_comp(comp_id: u16, parent_id: u16, name: &str, out_value: f32) -> VirtualComponent {
+    fn make_source_comp(
+        comp_id: u16,
+        parent_id: u16,
+        name: &str,
+        out_value: f32,
+    ) -> VirtualComponent {
         VirtualComponent {
             comp_id,
             parent_id,
@@ -5587,8 +7282,18 @@ mod tests {
             type_id: 255, // arbitrary non-executable type
             children: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "out".into(), type_id: 4, flags: 0, value: SlotValue::Float(out_value) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 4,
+                    flags: 0,
+                    value: SlotValue::Float(out_value),
+                },
             ],
             links: Vec::new(),
         }
@@ -5707,7 +7412,12 @@ mod tests {
         let mut tree = ComponentTree::new();
         let mut div = make_math_comp(200, NO_PARENT, "div", 2, 18);
         // Add div0 slot at index 4
-        div.slots.push(VirtualSlot { name: "div0".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) });
+        div.slots.push(VirtualSlot {
+            name: "div0".into(),
+            type_id: 0,
+            flags: 0,
+            value: SlotValue::Bool(false),
+        });
         div.slots[2].value = SlotValue::Float(100.0);
         div.slots[3].value = SlotValue::Float(4.0);
         tree.add(div);
@@ -5729,7 +7439,12 @@ mod tests {
     fn execute_components_div2_by_zero() {
         let mut tree = ComponentTree::new();
         let mut div = make_math_comp(200, NO_PARENT, "div", 2, 18);
-        div.slots.push(VirtualSlot { name: "div0".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) });
+        div.slots.push(VirtualSlot {
+            name: "div0".into(),
+            type_id: 0,
+            flags: 0,
+            value: SlotValue::Bool(false),
+        });
         div.slots[2].value = SlotValue::Float(100.0);
         div.slots[3].value = SlotValue::Float(0.0); // divide by zero
         tree.add(div);
@@ -5771,32 +7486,89 @@ mod tests {
     }
 
     // ---- Helper: create a math component with N float input slots ----
-    fn make_math_comp_n(comp_id: u16, parent_id: u16, name: &str, kit_id: u8, type_id: u8, num_inputs: usize) -> VirtualComponent {
+    fn make_math_comp_n(
+        comp_id: u16,
+        parent_id: u16,
+        name: &str,
+        kit_id: u8,
+        type_id: u8,
+        num_inputs: usize,
+    ) -> VirtualComponent {
         let mut slots = vec![
-            VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-            VirtualSlot { name: "out".into(), type_id: 4, flags: 0, value: SlotValue::Float(0.0) },
+            VirtualSlot {
+                name: "meta".into(),
+                type_id: 1,
+                flags: 0,
+                value: SlotValue::Int(0),
+            },
+            VirtualSlot {
+                name: "out".into(),
+                type_id: 4,
+                flags: 0,
+                value: SlotValue::Float(0.0),
+            },
         ];
         for i in 0..num_inputs {
-            slots.push(VirtualSlot { name: format!("in{}", i + 1), type_id: 4, flags: 0, value: SlotValue::Float(0.0) });
+            slots.push(VirtualSlot {
+                name: format!("in{}", i + 1),
+                type_id: 4,
+                flags: 0,
+                value: SlotValue::Float(0.0),
+            });
         }
         VirtualComponent {
-            comp_id, parent_id, name: name.into(), type_name: format!("math::{name}"),
-            kit_id, type_id, children: Vec::new(), slots, links: Vec::new(),
+            comp_id,
+            parent_id,
+            name: name.into(),
+            type_name: format!("math::{name}"),
+            kit_id,
+            type_id,
+            children: Vec::new(),
+            slots,
+            links: Vec::new(),
         }
     }
 
     /// Helper: create a bool-logic component with N bool input slots
-    fn make_bool_comp(comp_id: u16, name: &str, kit_id: u8, type_id: u8, num_inputs: usize) -> VirtualComponent {
+    fn make_bool_comp(
+        comp_id: u16,
+        name: &str,
+        kit_id: u8,
+        type_id: u8,
+        num_inputs: usize,
+    ) -> VirtualComponent {
         let mut slots = vec![
-            VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-            VirtualSlot { name: "out".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
+            VirtualSlot {
+                name: "meta".into(),
+                type_id: 1,
+                flags: 0,
+                value: SlotValue::Int(0),
+            },
+            VirtualSlot {
+                name: "out".into(),
+                type_id: 0,
+                flags: 0,
+                value: SlotValue::Bool(false),
+            },
         ];
         for i in 0..num_inputs {
-            slots.push(VirtualSlot { name: format!("in{}", i + 1), type_id: 0, flags: 0, value: SlotValue::Bool(false) });
+            slots.push(VirtualSlot {
+                name: format!("in{}", i + 1),
+                type_id: 0,
+                flags: 0,
+                value: SlotValue::Bool(false),
+            });
         }
         VirtualComponent {
-            comp_id, parent_id: NO_PARENT, name: name.into(), type_name: format!("logic::{name}"),
-            kit_id, type_id, children: Vec::new(), slots, links: Vec::new(),
+            comp_id,
+            parent_id: NO_PARENT,
+            name: name.into(),
+            type_name: format!("logic::{name}"),
+            kit_id,
+            type_id,
+            children: Vec::new(),
+            slots,
+            links: Vec::new(),
         }
     }
 
@@ -5813,7 +7585,10 @@ mod tests {
         tree.add(c);
         let changed = tree.execute_components();
         assert!(changed.contains(&200));
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(10.0));
+        assert_eq!(
+            tree.get(200).unwrap().slots[1].value,
+            SlotValue::Float(10.0)
+        );
     }
 
     #[test]
@@ -5827,7 +7602,10 @@ mod tests {
         tree.add(c);
         let changed = tree.execute_components();
         assert!(changed.contains(&200));
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(40.0));
+        assert_eq!(
+            tree.get(200).unwrap().slots[1].value,
+            SlotValue::Float(40.0)
+        );
     }
 
     #[test]
@@ -5841,7 +7619,10 @@ mod tests {
         tree.add(c);
         let changed = tree.execute_components();
         assert!(changed.contains(&200));
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(120.0));
+        assert_eq!(
+            tree.get(200).unwrap().slots[1].value,
+            SlotValue::Float(120.0)
+        );
     }
 
     // ---- Unary Math tests ----
@@ -5854,7 +7635,10 @@ mod tests {
         tree.add(c);
         let changed = tree.execute_components();
         assert!(changed.contains(&200));
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(-42.5));
+        assert_eq!(
+            tree.get(200).unwrap().slots[1].value,
+            SlotValue::Float(-42.5)
+        );
     }
 
     #[test]
@@ -5866,7 +7650,10 @@ mod tests {
         tree.add(c);
         let changed = tree.execute_components();
         assert!(changed.contains(&200));
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(15.5));
+        assert_eq!(
+            tree.get(200).unwrap().slots[1].value,
+            SlotValue::Float(15.5)
+        );
     }
 
     #[test]
@@ -5896,7 +7683,7 @@ mod tests {
         let mut tree = ComponentTree::new();
         let mut c = make_math_comp_n(200, NO_PARENT, "lim", 2, 32, 3);
         c.slots[2].value = SlotValue::Float(-5.0); // in
-        c.slots[3].value = SlotValue::Float(0.0);  // lowLmt
+        c.slots[3].value = SlotValue::Float(0.0); // lowLmt
         c.slots[4].value = SlotValue::Float(100.0); // highLmt
         tree.add(c);
         tree.execute_components();
@@ -5912,7 +7699,10 @@ mod tests {
         c.slots[4].value = SlotValue::Float(100.0);
         tree.add(c);
         tree.execute_components();
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(100.0));
+        assert_eq!(
+            tree.get(200).unwrap().slots[1].value,
+            SlotValue::Float(100.0)
+        );
     }
 
     #[test]
@@ -5924,7 +7714,10 @@ mod tests {
         c.slots[4].value = SlotValue::Float(100.0);
         tree.add(c);
         tree.execute_components();
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(50.0));
+        assert_eq!(
+            tree.get(200).unwrap().slots[1].value,
+            SlotValue::Float(50.0)
+        );
     }
 
     #[test]
@@ -5932,7 +7725,12 @@ mod tests {
         let mut tree = ComponentTree::new();
         let mut c = make_math_comp_n(200, NO_PARENT, "rnd", 2, 47, 1);
         // Add decimalPlaces config slot at index 3
-        c.slots.push(VirtualSlot { name: "decimalPlaces".into(), type_id: 1, flags: 0, value: SlotValue::Int(2) });
+        c.slots.push(VirtualSlot {
+            name: "decimalPlaces".into(),
+            type_id: 1,
+            flags: 0,
+            value: SlotValue::Int(2),
+        });
         c.slots[2].value = SlotValue::Float(3.14159);
         tree.add(c);
         tree.execute_components();
@@ -5964,7 +7762,10 @@ mod tests {
         c.slots[3].value = SlotValue::Bool(false);
         tree.add(c);
         tree.execute_components();
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false));
+        assert_eq!(
+            tree.get(200).unwrap().slots[1].value,
+            SlotValue::Bool(false)
+        );
     }
 
     #[test]
@@ -5977,7 +7778,10 @@ mod tests {
         c.slots[5].value = SlotValue::Bool(false);
         tree.add(c);
         tree.execute_components();
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false));
+        assert_eq!(
+            tree.get(200).unwrap().slots[1].value,
+            SlotValue::Bool(false)
+        );
     }
 
     #[test]
@@ -5997,7 +7801,10 @@ mod tests {
         let c = make_bool_comp(200, "or4", 2, 43, 4);
         tree.add(c);
         tree.execute_components();
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false));
+        assert_eq!(
+            tree.get(200).unwrap().slots[1].value,
+            SlotValue::Bool(false)
+        );
     }
 
     #[test]
@@ -6029,7 +7836,10 @@ mod tests {
         c.slots[3].value = SlotValue::Bool(true);
         tree.add(c);
         tree.execute_components();
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false));
+        assert_eq!(
+            tree.get(200).unwrap().slots[1].value,
+            SlotValue::Bool(false)
+        );
     }
 
     // ---- Comparator test ----
@@ -6039,22 +7849,57 @@ mod tests {
         let mut tree = ComponentTree::new();
         // Cmpr: meta=0, xgy=1, xey=2, xly=3, x=4, y=5
         let c = VirtualComponent {
-            comp_id: 200, parent_id: NO_PARENT, name: "cmpr".into(),
-            type_name: "math::Cmpr".into(), kit_id: 2, type_id: 12,
-            children: Vec::new(), links: Vec::new(),
+            comp_id: 200,
+            parent_id: NO_PARENT,
+            name: "cmpr".into(),
+            type_name: "math::Cmpr".into(),
+            kit_id: 2,
+            type_id: 12,
+            children: Vec::new(),
+            links: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "xgy".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
-                VirtualSlot { name: "xey".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
-                VirtualSlot { name: "xly".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
-                VirtualSlot { name: "x".into(), type_id: 4, flags: 0, value: SlotValue::Float(10.0) },
-                VirtualSlot { name: "y".into(), type_id: 4, flags: 0, value: SlotValue::Float(5.0) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "xgy".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(false),
+                },
+                VirtualSlot {
+                    name: "xey".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(false),
+                },
+                VirtualSlot {
+                    name: "xly".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(false),
+                },
+                VirtualSlot {
+                    name: "x".into(),
+                    type_id: 4,
+                    flags: 0,
+                    value: SlotValue::Float(10.0),
+                },
+                VirtualSlot {
+                    name: "y".into(),
+                    type_id: 4,
+                    flags: 0,
+                    value: SlotValue::Float(5.0),
+                },
             ],
         };
         tree.add(c);
         tree.execute_components();
         let comp = tree.get(200).unwrap();
-        assert_eq!(comp.slots[1].value, SlotValue::Bool(true),  "x > y");
+        assert_eq!(comp.slots[1].value, SlotValue::Bool(true), "x > y");
         assert_eq!(comp.slots[2].value, SlotValue::Bool(false), "x == y");
         assert_eq!(comp.slots[3].value, SlotValue::Bool(false), "x < y");
     }
@@ -6063,23 +7908,58 @@ mod tests {
     fn execute_cmpr_equal() {
         let mut tree = ComponentTree::new();
         let c = VirtualComponent {
-            comp_id: 200, parent_id: NO_PARENT, name: "cmpr".into(),
-            type_name: "math::Cmpr".into(), kit_id: 2, type_id: 12,
-            children: Vec::new(), links: Vec::new(),
+            comp_id: 200,
+            parent_id: NO_PARENT,
+            name: "cmpr".into(),
+            type_name: "math::Cmpr".into(),
+            kit_id: 2,
+            type_id: 12,
+            children: Vec::new(),
+            links: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "xgy".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
-                VirtualSlot { name: "xey".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
-                VirtualSlot { name: "xly".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
-                VirtualSlot { name: "x".into(), type_id: 4, flags: 0, value: SlotValue::Float(7.0) },
-                VirtualSlot { name: "y".into(), type_id: 4, flags: 0, value: SlotValue::Float(7.0) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "xgy".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(false),
+                },
+                VirtualSlot {
+                    name: "xey".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(false),
+                },
+                VirtualSlot {
+                    name: "xly".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(false),
+                },
+                VirtualSlot {
+                    name: "x".into(),
+                    type_id: 4,
+                    flags: 0,
+                    value: SlotValue::Float(7.0),
+                },
+                VirtualSlot {
+                    name: "y".into(),
+                    type_id: 4,
+                    flags: 0,
+                    value: SlotValue::Float(7.0),
+                },
             ],
         };
         tree.add(c);
         tree.execute_components();
         let comp = tree.get(200).unwrap();
         assert_eq!(comp.slots[1].value, SlotValue::Bool(false), "x > y");
-        assert_eq!(comp.slots[2].value, SlotValue::Bool(true),  "x == y");
+        assert_eq!(comp.slots[2].value, SlotValue::Bool(true), "x == y");
         assert_eq!(comp.slots[3].value, SlotValue::Bool(false), "x < y");
     }
 
@@ -6099,13 +7979,33 @@ mod tests {
     fn execute_f2i() {
         let mut tree = ComponentTree::new();
         let mut c = VirtualComponent {
-            comp_id: 200, parent_id: NO_PARENT, name: "f2i".into(),
-            type_name: "math::F2I".into(), kit_id: 2, type_id: 22,
-            children: Vec::new(), links: Vec::new(),
+            comp_id: 200,
+            parent_id: NO_PARENT,
+            name: "f2i".into(),
+            type_name: "math::F2I".into(),
+            kit_id: 2,
+            type_id: 22,
+            children: Vec::new(),
+            links: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "out".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "in".into(), type_id: 4, flags: 0, value: SlotValue::Float(42.7) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "in".into(),
+                    type_id: 4,
+                    flags: 0,
+                    value: SlotValue::Float(42.7),
+                },
             ],
         };
         tree.add(c);
@@ -6117,18 +8017,41 @@ mod tests {
     fn execute_i2f() {
         let mut tree = ComponentTree::new();
         let c = VirtualComponent {
-            comp_id: 200, parent_id: NO_PARENT, name: "i2f".into(),
-            type_name: "math::I2F".into(), kit_id: 2, type_id: 26,
-            children: Vec::new(), links: Vec::new(),
+            comp_id: 200,
+            parent_id: NO_PARENT,
+            name: "i2f".into(),
+            type_name: "math::I2F".into(),
+            kit_id: 2,
+            type_id: 26,
+            children: Vec::new(),
+            links: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "out".into(), type_id: 4, flags: 0, value: SlotValue::Float(0.0) },
-                VirtualSlot { name: "in".into(), type_id: 1, flags: 0, value: SlotValue::Int(99) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 4,
+                    flags: 0,
+                    value: SlotValue::Float(0.0),
+                },
+                VirtualSlot {
+                    name: "in".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(99),
+                },
             ],
         };
         tree.add(c);
         tree.execute_components();
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(99.0));
+        assert_eq!(
+            tree.get(200).unwrap().slots[1].value,
+            SlotValue::Float(99.0)
+        );
     }
 
     // ---- Multiplexer tests ----
@@ -6137,55 +8060,151 @@ mod tests {
     fn execute_asw_sel_false() {
         let mut tree = ComponentTree::new();
         let c = VirtualComponent {
-            comp_id: 200, parent_id: NO_PARENT, name: "asw".into(),
-            type_name: "math::ASW".into(), kit_id: 2, type_id: 1,
-            children: Vec::new(), links: Vec::new(),
+            comp_id: 200,
+            parent_id: NO_PARENT,
+            name: "asw".into(),
+            type_name: "math::ASW".into(),
+            kit_id: 2,
+            type_id: 1,
+            children: Vec::new(),
+            links: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "out".into(), type_id: 4, flags: 0, value: SlotValue::Float(0.0) },
-                VirtualSlot { name: "sel".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
-                VirtualSlot { name: "in1".into(), type_id: 4, flags: 0, value: SlotValue::Float(10.0) },
-                VirtualSlot { name: "in2".into(), type_id: 4, flags: 0, value: SlotValue::Float(20.0) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 4,
+                    flags: 0,
+                    value: SlotValue::Float(0.0),
+                },
+                VirtualSlot {
+                    name: "sel".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(false),
+                },
+                VirtualSlot {
+                    name: "in1".into(),
+                    type_id: 4,
+                    flags: 0,
+                    value: SlotValue::Float(10.0),
+                },
+                VirtualSlot {
+                    name: "in2".into(),
+                    type_id: 4,
+                    flags: 0,
+                    value: SlotValue::Float(20.0),
+                },
             ],
         };
         tree.add(c);
         tree.execute_components();
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(10.0));
+        assert_eq!(
+            tree.get(200).unwrap().slots[1].value,
+            SlotValue::Float(10.0)
+        );
     }
 
     #[test]
     fn execute_asw_sel_true() {
         let mut tree = ComponentTree::new();
         let c = VirtualComponent {
-            comp_id: 200, parent_id: NO_PARENT, name: "asw".into(),
-            type_name: "math::ASW".into(), kit_id: 2, type_id: 1,
-            children: Vec::new(), links: Vec::new(),
+            comp_id: 200,
+            parent_id: NO_PARENT,
+            name: "asw".into(),
+            type_name: "math::ASW".into(),
+            kit_id: 2,
+            type_id: 1,
+            children: Vec::new(),
+            links: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "out".into(), type_id: 4, flags: 0, value: SlotValue::Float(0.0) },
-                VirtualSlot { name: "sel".into(), type_id: 0, flags: 0, value: SlotValue::Bool(true) },
-                VirtualSlot { name: "in1".into(), type_id: 4, flags: 0, value: SlotValue::Float(10.0) },
-                VirtualSlot { name: "in2".into(), type_id: 4, flags: 0, value: SlotValue::Float(20.0) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 4,
+                    flags: 0,
+                    value: SlotValue::Float(0.0),
+                },
+                VirtualSlot {
+                    name: "sel".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(true),
+                },
+                VirtualSlot {
+                    name: "in1".into(),
+                    type_id: 4,
+                    flags: 0,
+                    value: SlotValue::Float(10.0),
+                },
+                VirtualSlot {
+                    name: "in2".into(),
+                    type_id: 4,
+                    flags: 0,
+                    value: SlotValue::Float(20.0),
+                },
             ],
         };
         tree.add(c);
         tree.execute_components();
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(20.0));
+        assert_eq!(
+            tree.get(200).unwrap().slots[1].value,
+            SlotValue::Float(20.0)
+        );
     }
 
     #[test]
     fn execute_bsw() {
         let mut tree = ComponentTree::new();
         let c = VirtualComponent {
-            comp_id: 200, parent_id: NO_PARENT, name: "bsw".into(),
-            type_name: "logic::BSW".into(), kit_id: 2, type_id: 11,
-            children: Vec::new(), links: Vec::new(),
+            comp_id: 200,
+            parent_id: NO_PARENT,
+            name: "bsw".into(),
+            type_name: "logic::BSW".into(),
+            kit_id: 2,
+            type_id: 11,
+            children: Vec::new(),
+            links: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "out".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
-                VirtualSlot { name: "sel".into(), type_id: 0, flags: 0, value: SlotValue::Bool(true) },
-                VirtualSlot { name: "in1".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
-                VirtualSlot { name: "in2".into(), type_id: 0, flags: 0, value: SlotValue::Bool(true) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(false),
+                },
+                VirtualSlot {
+                    name: "sel".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(true),
+                },
+                VirtualSlot {
+                    name: "in1".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(false),
+                },
+                VirtualSlot {
+                    name: "in2".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(true),
+                },
             ],
         };
         tree.add(c);
@@ -6197,15 +8216,45 @@ mod tests {
     fn execute_isw() {
         let mut tree = ComponentTree::new();
         let c = VirtualComponent {
-            comp_id: 200, parent_id: NO_PARENT, name: "isw".into(),
-            type_name: "math::ISW".into(), kit_id: 2, type_id: 28,
-            children: Vec::new(), links: Vec::new(),
+            comp_id: 200,
+            parent_id: NO_PARENT,
+            name: "isw".into(),
+            type_name: "math::ISW".into(),
+            kit_id: 2,
+            type_id: 28,
+            children: Vec::new(),
+            links: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "out".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "sel".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
-                VirtualSlot { name: "in1".into(), type_id: 1, flags: 0, value: SlotValue::Int(42) },
-                VirtualSlot { name: "in2".into(), type_id: 1, flags: 0, value: SlotValue::Int(99) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "sel".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(false),
+                },
+                VirtualSlot {
+                    name: "in1".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(42),
+                },
+                VirtualSlot {
+                    name: "in2".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(99),
+                },
             ],
         };
         tree.add(c);
@@ -6219,15 +8268,45 @@ mod tests {
     fn execute_hysteresis_rising() {
         let mut tree = ComponentTree::new();
         let c = VirtualComponent {
-            comp_id: 200, parent_id: NO_PARENT, name: "hyst".into(),
-            type_name: "control::Hysteresis".into(), kit_id: 2, type_id: 25,
-            children: Vec::new(), links: Vec::new(),
+            comp_id: 200,
+            parent_id: NO_PARENT,
+            name: "hyst".into(),
+            type_name: "control::Hysteresis".into(),
+            kit_id: 2,
+            type_id: 25,
+            children: Vec::new(),
+            links: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "out".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
-                VirtualSlot { name: "in".into(), type_id: 2, flags: 0, value: SlotValue::Float(75.0) },
-                VirtualSlot { name: "rising".into(), type_id: 2, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(72.0) },
-                VirtualSlot { name: "falling".into(), type_id: 2, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(68.0) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(false),
+                },
+                VirtualSlot {
+                    name: "in".into(),
+                    type_id: 2,
+                    flags: 0,
+                    value: SlotValue::Float(75.0),
+                },
+                VirtualSlot {
+                    name: "rising".into(),
+                    type_id: 2,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Float(72.0),
+                },
+                VirtualSlot {
+                    name: "falling".into(),
+                    type_id: 2,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Float(68.0),
+                },
             ],
         };
         tree.add(c);
@@ -6240,15 +8319,45 @@ mod tests {
     fn execute_hysteresis_deadband() {
         let mut tree = ComponentTree::new();
         let c = VirtualComponent {
-            comp_id: 200, parent_id: NO_PARENT, name: "hyst".into(),
-            type_name: "control::Hysteresis".into(), kit_id: 2, type_id: 25,
-            children: Vec::new(), links: Vec::new(),
+            comp_id: 200,
+            parent_id: NO_PARENT,
+            name: "hyst".into(),
+            type_name: "control::Hysteresis".into(),
+            kit_id: 2,
+            type_id: 25,
+            children: Vec::new(),
+            links: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "out".into(), type_id: 0, flags: 0, value: SlotValue::Bool(true) },
-                VirtualSlot { name: "in".into(), type_id: 2, flags: 0, value: SlotValue::Float(70.0) },
-                VirtualSlot { name: "rising".into(), type_id: 2, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(72.0) },
-                VirtualSlot { name: "falling".into(), type_id: 2, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(68.0) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(true),
+                },
+                VirtualSlot {
+                    name: "in".into(),
+                    type_id: 2,
+                    flags: 0,
+                    value: SlotValue::Float(70.0),
+                },
+                VirtualSlot {
+                    name: "rising".into(),
+                    type_id: 2,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Float(72.0),
+                },
+                VirtualSlot {
+                    name: "falling".into(),
+                    type_id: 2,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Float(68.0),
+                },
             ],
         };
         tree.add(c);
@@ -6261,35 +8370,93 @@ mod tests {
     fn execute_hysteresis_falling() {
         let mut tree = ComponentTree::new();
         let c = VirtualComponent {
-            comp_id: 200, parent_id: NO_PARENT, name: "hyst".into(),
-            type_name: "control::Hysteresis".into(), kit_id: 2, type_id: 25,
-            children: Vec::new(), links: Vec::new(),
+            comp_id: 200,
+            parent_id: NO_PARENT,
+            name: "hyst".into(),
+            type_name: "control::Hysteresis".into(),
+            kit_id: 2,
+            type_id: 25,
+            children: Vec::new(),
+            links: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "out".into(), type_id: 0, flags: 0, value: SlotValue::Bool(true) },
-                VirtualSlot { name: "in".into(), type_id: 2, flags: 0, value: SlotValue::Float(65.0) },
-                VirtualSlot { name: "rising".into(), type_id: 2, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(72.0) },
-                VirtualSlot { name: "falling".into(), type_id: 2, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(68.0) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(true),
+                },
+                VirtualSlot {
+                    name: "in".into(),
+                    type_id: 2,
+                    flags: 0,
+                    value: SlotValue::Float(65.0),
+                },
+                VirtualSlot {
+                    name: "rising".into(),
+                    type_id: 2,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Float(72.0),
+                },
+                VirtualSlot {
+                    name: "falling".into(),
+                    type_id: 2,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Float(68.0),
+                },
             ],
         };
         tree.add(c);
         tree.execute_components();
         // in=65, out=true, 65 < falling(68) → switches to false
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false));
+        assert_eq!(
+            tree.get(200).unwrap().slots[1].value,
+            SlotValue::Bool(false)
+        );
     }
 
     #[test]
     fn execute_sr_latch_set() {
         let mut tree = ComponentTree::new();
         let c = VirtualComponent {
-            comp_id: 200, parent_id: NO_PARENT, name: "sr".into(),
-            type_name: "control::SRLatch".into(), kit_id: 2, type_id: 48,
-            children: Vec::new(), links: Vec::new(),
+            comp_id: 200,
+            parent_id: NO_PARENT,
+            name: "sr".into(),
+            type_name: "control::SRLatch".into(),
+            kit_id: 2,
+            type_id: 48,
+            children: Vec::new(),
+            links: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "out".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
-                VirtualSlot { name: "set".into(), type_id: 0, flags: 0, value: SlotValue::Bool(true) },
-                VirtualSlot { name: "reset".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(false),
+                },
+                VirtualSlot {
+                    name: "set".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(true),
+                },
+                VirtualSlot {
+                    name: "reset".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(false),
+                },
             ],
         };
         tree.add(c);
@@ -6301,74 +8468,188 @@ mod tests {
     fn execute_sr_latch_reset_wins() {
         let mut tree = ComponentTree::new();
         let c = VirtualComponent {
-            comp_id: 200, parent_id: NO_PARENT, name: "sr".into(),
-            type_name: "control::SRLatch".into(), kit_id: 2, type_id: 48,
-            children: Vec::new(), links: Vec::new(),
+            comp_id: 200,
+            parent_id: NO_PARENT,
+            name: "sr".into(),
+            type_name: "control::SRLatch".into(),
+            kit_id: 2,
+            type_id: 48,
+            children: Vec::new(),
+            links: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "out".into(), type_id: 0, flags: 0, value: SlotValue::Bool(true) },
-                VirtualSlot { name: "set".into(), type_id: 0, flags: 0, value: SlotValue::Bool(true) },
-                VirtualSlot { name: "reset".into(), type_id: 0, flags: 0, value: SlotValue::Bool(true) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(true),
+                },
+                VirtualSlot {
+                    name: "set".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(true),
+                },
+                VirtualSlot {
+                    name: "reset".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(true),
+                },
             ],
         };
         tree.add(c);
         tree.execute_components();
         // reset wins over set
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false));
+        assert_eq!(
+            tree.get(200).unwrap().slots[1].value,
+            SlotValue::Bool(false)
+        );
     }
 
     #[test]
     fn execute_reset_remap() {
         let mut tree = ComponentTree::new();
         let c = VirtualComponent {
-            comp_id: 200, parent_id: NO_PARENT, name: "rst".into(),
-            type_name: "control::Reset".into(), kit_id: 2, type_id: 46,
-            children: Vec::new(), links: Vec::new(),
+            comp_id: 200,
+            parent_id: NO_PARENT,
+            name: "rst".into(),
+            type_name: "control::Reset".into(),
+            kit_id: 2,
+            type_id: 46,
+            children: Vec::new(),
+            links: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "out".into(), type_id: 2, flags: 0, value: SlotValue::Float(0.0) },
-                VirtualSlot { name: "in".into(), type_id: 2, flags: 0, value: SlotValue::Float(50.0) },
-                VirtualSlot { name: "inLow".into(), type_id: 2, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(0.0) },
-                VirtualSlot { name: "inHigh".into(), type_id: 2, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(100.0) },
-                VirtualSlot { name: "outLow".into(), type_id: 2, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(55.0) },
-                VirtualSlot { name: "outHigh".into(), type_id: 2, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(85.0) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 2,
+                    flags: 0,
+                    value: SlotValue::Float(0.0),
+                },
+                VirtualSlot {
+                    name: "in".into(),
+                    type_id: 2,
+                    flags: 0,
+                    value: SlotValue::Float(50.0),
+                },
+                VirtualSlot {
+                    name: "inLow".into(),
+                    type_id: 2,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Float(0.0),
+                },
+                VirtualSlot {
+                    name: "inHigh".into(),
+                    type_id: 2,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Float(100.0),
+                },
+                VirtualSlot {
+                    name: "outLow".into(),
+                    type_id: 2,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Float(55.0),
+                },
+                VirtualSlot {
+                    name: "outHigh".into(),
+                    type_id: 2,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Float(85.0),
+                },
             ],
         };
         tree.add(c);
         tree.execute_components();
         // 50% of [0,100] → 50% of [55,85] = 70.0
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(70.0));
+        assert_eq!(
+            tree.get(200).unwrap().slots[1].value,
+            SlotValue::Float(70.0)
+        );
     }
 
     #[test]
     fn execute_write_float_passthrough() {
         let mut tree = ComponentTree::new();
         let c = VirtualComponent {
-            comp_id: 200, parent_id: NO_PARENT, name: "wf".into(),
-            type_name: "control::WriteFloat".into(), kit_id: 2, type_id: 57,
-            children: Vec::new(), links: Vec::new(),
+            comp_id: 200,
+            parent_id: NO_PARENT,
+            name: "wf".into(),
+            type_name: "control::WriteFloat".into(),
+            kit_id: 2,
+            type_id: 57,
+            children: Vec::new(),
+            links: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "out".into(), type_id: 2, flags: 0, value: SlotValue::Float(0.0) },
-                VirtualSlot { name: "in".into(), type_id: 2, flags: 0, value: SlotValue::Float(42.5) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 2,
+                    flags: 0,
+                    value: SlotValue::Float(0.0),
+                },
+                VirtualSlot {
+                    name: "in".into(),
+                    type_id: 2,
+                    flags: 0,
+                    value: SlotValue::Float(42.5),
+                },
             ],
         };
         tree.add(c);
         tree.execute_components();
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(42.5));
+        assert_eq!(
+            tree.get(200).unwrap().slots[1].value,
+            SlotValue::Float(42.5)
+        );
     }
 
     #[test]
     fn execute_write_bool_passthrough() {
         let mut tree = ComponentTree::new();
         let c = VirtualComponent {
-            comp_id: 200, parent_id: NO_PARENT, name: "wb".into(),
-            type_name: "control::WriteBool".into(), kit_id: 2, type_id: 56,
-            children: Vec::new(), links: Vec::new(),
+            comp_id: 200,
+            parent_id: NO_PARENT,
+            name: "wb".into(),
+            type_name: "control::WriteBool".into(),
+            kit_id: 2,
+            type_id: 56,
+            children: Vec::new(),
+            links: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "out".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
-                VirtualSlot { name: "in".into(), type_id: 0, flags: 0, value: SlotValue::Bool(true) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(false),
+                },
+                VirtualSlot {
+                    name: "in".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(true),
+                },
             ],
         };
         tree.add(c);
@@ -6380,14 +8661,39 @@ mod tests {
     fn execute_lseq() {
         let mut tree = ComponentTree::new();
         let c = VirtualComponent {
-            comp_id: 200, parent_id: NO_PARENT, name: "seq".into(),
-            type_name: "control::LSeq".into(), kit_id: 2, type_id: 31,
-            children: Vec::new(), links: Vec::new(),
+            comp_id: 200,
+            parent_id: NO_PARENT,
+            name: "seq".into(),
+            type_name: "control::LSeq".into(),
+            kit_id: 2,
+            type_id: 31,
+            children: Vec::new(),
+            links: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "out".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "in".into(), type_id: 2, flags: 0, value: SlotValue::Float(0.6) },
-                VirtualSlot { name: "numStages".into(), type_id: 1, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(4) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "in".into(),
+                    type_id: 2,
+                    flags: 0,
+                    value: SlotValue::Float(0.6),
+                },
+                VirtualSlot {
+                    name: "numStages".into(),
+                    type_id: 1,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Int(4),
+                },
             ],
         };
         tree.add(c);
@@ -6401,14 +8707,39 @@ mod tests {
     /// Helper: create a DlyOn component (kit_id=2, type_id=20)
     fn make_dlyon(comp_id: u16, input: bool, delay: f32) -> VirtualComponent {
         VirtualComponent {
-            comp_id, parent_id: NO_PARENT, name: "dlyon".into(),
-            type_name: "control::DlyOn".into(), kit_id: 2, type_id: 20,
-            children: Vec::new(), links: Vec::new(),
+            comp_id,
+            parent_id: NO_PARENT,
+            name: "dlyon".into(),
+            type_name: "control::DlyOn".into(),
+            kit_id: 2,
+            type_id: 20,
+            children: Vec::new(),
+            links: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "out".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
-                VirtualSlot { name: "in".into(), type_id: 0, flags: 0, value: SlotValue::Bool(input) },
-                VirtualSlot { name: "delay".into(), type_id: 4, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(delay) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(false),
+                },
+                VirtualSlot {
+                    name: "in".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(input),
+                },
+                VirtualSlot {
+                    name: "delay".into(),
+                    type_id: 4,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Float(delay),
+                },
             ],
         }
     }
@@ -6416,14 +8747,39 @@ mod tests {
     /// Helper: create a DlyOff component (kit_id=2, type_id=19)
     fn make_dlyoff(comp_id: u16, input: bool, delay: f32) -> VirtualComponent {
         VirtualComponent {
-            comp_id, parent_id: NO_PARENT, name: "dlyoff".into(),
-            type_name: "control::DlyOff".into(), kit_id: 2, type_id: 19,
-            children: Vec::new(), links: Vec::new(),
+            comp_id,
+            parent_id: NO_PARENT,
+            name: "dlyoff".into(),
+            type_name: "control::DlyOff".into(),
+            kit_id: 2,
+            type_id: 19,
+            children: Vec::new(),
+            links: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "out".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
-                VirtualSlot { name: "in".into(), type_id: 0, flags: 0, value: SlotValue::Bool(input) },
-                VirtualSlot { name: "delay".into(), type_id: 4, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(delay) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(false),
+                },
+                VirtualSlot {
+                    name: "in".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(input),
+                },
+                VirtualSlot {
+                    name: "delay".into(),
+                    type_id: 4,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Float(delay),
+                },
             ],
         }
     }
@@ -6431,14 +8787,39 @@ mod tests {
     /// Helper: create a Count component (kit_id=2, type_id=16)
     fn make_count(comp_id: u16, input: bool, preset: i32) -> VirtualComponent {
         VirtualComponent {
-            comp_id, parent_id: NO_PARENT, name: "count".into(),
-            type_name: "control::Count".into(), kit_id: 2, type_id: 16,
-            children: Vec::new(), links: Vec::new(),
+            comp_id,
+            parent_id: NO_PARENT,
+            name: "count".into(),
+            type_name: "control::Count".into(),
+            kit_id: 2,
+            type_id: 16,
+            children: Vec::new(),
+            links: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "out".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "in".into(), type_id: 0, flags: 0, value: SlotValue::Bool(input) },
-                VirtualSlot { name: "preset".into(), type_id: 1, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(preset) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "in".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(input),
+                },
+                VirtualSlot {
+                    name: "preset".into(),
+                    type_id: 1,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Int(preset),
+                },
             ],
         }
     }
@@ -6446,15 +8827,45 @@ mod tests {
     /// Helper: create a Ramp component (kit_id=2, type_id=44)
     fn make_ramp(comp_id: u16, min: f32, max: f32, step: f32) -> VirtualComponent {
         VirtualComponent {
-            comp_id, parent_id: NO_PARENT, name: "ramp".into(),
-            type_name: "control::Ramp".into(), kit_id: 2, type_id: 44,
-            children: Vec::new(), links: Vec::new(),
+            comp_id,
+            parent_id: NO_PARENT,
+            name: "ramp".into(),
+            type_name: "control::Ramp".into(),
+            kit_id: 2,
+            type_id: 44,
+            children: Vec::new(),
+            links: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "out".into(), type_id: 4, flags: 0, value: SlotValue::Float(min) },
-                VirtualSlot { name: "min".into(), type_id: 4, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(min) },
-                VirtualSlot { name: "max".into(), type_id: 4, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(max) },
-                VirtualSlot { name: "step".into(), type_id: 4, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(step) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 4,
+                    flags: 0,
+                    value: SlotValue::Float(min),
+                },
+                VirtualSlot {
+                    name: "min".into(),
+                    type_id: 4,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Float(min),
+                },
+                VirtualSlot {
+                    name: "max".into(),
+                    type_id: 4,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Float(max),
+                },
+                VirtualSlot {
+                    name: "step".into(),
+                    type_id: 4,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Float(step),
+                },
             ],
         }
     }
@@ -6463,36 +8874,129 @@ mod tests {
     /// Real manifest: meta=0, diff=1(deadband), isHeating=2, sp=3, cv=4, out=5, raise=6, lower=7
     fn make_tstat(comp_id: u16, sp: f32, cv: f32, diff: f32) -> VirtualComponent {
         VirtualComponent {
-            comp_id, parent_id: NO_PARENT, name: "tstat".into(),
-            type_name: "control::Tstat".into(), kit_id: 2, type_id: 54,
-            children: Vec::new(), links: Vec::new(),
+            comp_id,
+            parent_id: NO_PARENT,
+            name: "tstat".into(),
+            type_name: "control::Tstat".into(),
+            kit_id: 2,
+            type_id: 54,
+            children: Vec::new(),
+            links: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "diff".into(), type_id: 4, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(diff) },
-                VirtualSlot { name: "isHeating".into(), type_id: 0, flags: SLOT_FLAG_CONFIG, value: SlotValue::Bool(true) },
-                VirtualSlot { name: "sp".into(), type_id: 4, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(sp) },
-                VirtualSlot { name: "cv".into(), type_id: 4, flags: 0, value: SlotValue::Float(cv) },
-                VirtualSlot { name: "out".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
-                VirtualSlot { name: "raise".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
-                VirtualSlot { name: "lower".into(), type_id: 0, flags: 0, value: SlotValue::Bool(false) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "diff".into(),
+                    type_id: 4,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Float(diff),
+                },
+                VirtualSlot {
+                    name: "isHeating".into(),
+                    type_id: 0,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Bool(true),
+                },
+                VirtualSlot {
+                    name: "sp".into(),
+                    type_id: 4,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Float(sp),
+                },
+                VirtualSlot {
+                    name: "cv".into(),
+                    type_id: 4,
+                    flags: 0,
+                    value: SlotValue::Float(cv),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(false),
+                },
+                VirtualSlot {
+                    name: "raise".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(false),
+                },
+                VirtualSlot {
+                    name: "lower".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(false),
+                },
             ],
         }
     }
 
     /// Helper: create an UpDn component (kit_id=2, type_id=55)
-    fn make_updn(comp_id: u16, out: f32, up: bool, dn: bool, step: f32, min: f32, max: f32) -> VirtualComponent {
+    fn make_updn(
+        comp_id: u16,
+        out: f32,
+        up: bool,
+        dn: bool,
+        step: f32,
+        min: f32,
+        max: f32,
+    ) -> VirtualComponent {
         VirtualComponent {
-            comp_id, parent_id: NO_PARENT, name: "updn".into(),
-            type_name: "control::UpDn".into(), kit_id: 2, type_id: 55,
-            children: Vec::new(), links: Vec::new(),
+            comp_id,
+            parent_id: NO_PARENT,
+            name: "updn".into(),
+            type_name: "control::UpDn".into(),
+            kit_id: 2,
+            type_id: 55,
+            children: Vec::new(),
+            links: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "out".into(), type_id: 4, flags: 0, value: SlotValue::Float(out) },
-                VirtualSlot { name: "up".into(), type_id: 0, flags: 0, value: SlotValue::Bool(up) },
-                VirtualSlot { name: "dn".into(), type_id: 0, flags: 0, value: SlotValue::Bool(dn) },
-                VirtualSlot { name: "step".into(), type_id: 4, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(step) },
-                VirtualSlot { name: "min".into(), type_id: 4, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(min) },
-                VirtualSlot { name: "max".into(), type_id: 4, flags: SLOT_FLAG_CONFIG, value: SlotValue::Float(max) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 4,
+                    flags: 0,
+                    value: SlotValue::Float(out),
+                },
+                VirtualSlot {
+                    name: "up".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(up),
+                },
+                VirtualSlot {
+                    name: "dn".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Bool(dn),
+                },
+                VirtualSlot {
+                    name: "step".into(),
+                    type_id: 4,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Float(step),
+                },
+                VirtualSlot {
+                    name: "min".into(),
+                    type_id: 4,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Float(min),
+                },
+                VirtualSlot {
+                    name: "max".into(),
+                    type_id: 4,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Float(max),
+                },
             ],
         }
     }
@@ -6503,12 +9007,18 @@ mod tests {
     fn dlyon_stays_false_before_delay() {
         let mut tree = ComponentTree::new();
         tree.add(make_dlyon(200, true, 3.0)); // delay=3 seconds
-        // Tick 1: counter=1, delay=3 -> out=false
+                                              // Tick 1: counter=1, delay=3 -> out=false
         tree.execute_components();
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false));
+        assert_eq!(
+            tree.get(200).unwrap().slots[1].value,
+            SlotValue::Bool(false)
+        );
         // Tick 2: counter=2 -> still false
         tree.execute_components();
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false));
+        assert_eq!(
+            tree.get(200).unwrap().slots[1].value,
+            SlotValue::Bool(false)
+        );
     }
 
     #[test]
@@ -6527,14 +9037,20 @@ mod tests {
         tree.add(make_dlyon(200, true, 3.0));
         tree.execute_components(); // tick 1
         tree.execute_components(); // tick 2
-        // Now set input to false
+                                   // Now set input to false
         tree.get_mut(200).unwrap().slots[2].value = SlotValue::Bool(false);
         tree.execute_components();
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false));
+        assert_eq!(
+            tree.get(200).unwrap().slots[1].value,
+            SlotValue::Bool(false)
+        );
         // Set back to true — counter should have reset, so need 3 more ticks
         tree.get_mut(200).unwrap().slots[2].value = SlotValue::Bool(true);
         tree.execute_components(); // tick 1 after reset
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false));
+        assert_eq!(
+            tree.get(200).unwrap().slots[1].value,
+            SlotValue::Bool(false)
+        );
     }
 
     #[test]
@@ -6542,7 +9058,10 @@ mod tests {
         let mut tree = ComponentTree::new();
         tree.add(make_dlyon(200, false, 1.0));
         tree.execute_components();
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false));
+        assert_eq!(
+            tree.get(200).unwrap().slots[1].value,
+            SlotValue::Bool(false)
+        );
     }
 
     // --- DlyOff tests ---
@@ -6569,7 +9088,10 @@ mod tests {
         tree.execute_components(); // tick 1
         tree.execute_components(); // tick 2
         tree.execute_components(); // tick 3: counter=3 >= 3 -> out=false
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(false));
+        assert_eq!(
+            tree.get(200).unwrap().slots[1].value,
+            SlotValue::Bool(false)
+        );
     }
 
     #[test]
@@ -6578,7 +9100,7 @@ mod tests {
         tree.add(make_dlyoff(200, false, 3.0));
         tree.execute_components(); // tick 1 with in=false
         tree.execute_components(); // tick 2
-        // Set input back to true
+                                   // Set input back to true
         tree.get_mut(200).unwrap().slots[2].value = SlotValue::Bool(true);
         tree.execute_components(); // in=true -> out=true, counter reset
         assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Bool(true));
@@ -6634,7 +9156,7 @@ mod tests {
     fn ramp_goes_up_then_reverses() {
         let mut tree = ComponentTree::new();
         tree.add(make_ramp(200, 0.0, 10.0, 3.0)); // min=0, max=10, step=3
-        // Start at 0.0, direction=up
+                                                  // Start at 0.0, direction=up
         tree.execute_components(); // 0 + 3 = 3.0
         assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(3.0));
         tree.execute_components(); // 3 + 3 = 6.0
@@ -6642,7 +9164,10 @@ mod tests {
         tree.execute_components(); // 6 + 3 = 9.0
         assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(9.0));
         tree.execute_components(); // 9 + 3 = 12.0 >= 10 -> clamped to 10.0, direction reverses
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(10.0));
+        assert_eq!(
+            tree.get(200).unwrap().slots[1].value,
+            SlotValue::Float(10.0)
+        );
         tree.execute_components(); // 10 - 3 = 7.0 (now going down)
         assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(7.0));
     }
@@ -6670,9 +9195,12 @@ mod tests {
         // isHeating=true, sp=72, cv=65, diff=4 -> half=2 -> cv < 72-2=70 -> out=true (need heat)
         tree.add(make_tstat(200, 72.0, 65.0, 4.0));
         tree.execute_components();
-        assert_eq!(tree.get(200).unwrap().slots[5].value, SlotValue::Bool(true));  // out=on
-        assert_eq!(tree.get(200).unwrap().slots[6].value, SlotValue::Bool(true));  // raise
-        assert_eq!(tree.get(200).unwrap().slots[7].value, SlotValue::Bool(false)); // not lower
+        assert_eq!(tree.get(200).unwrap().slots[5].value, SlotValue::Bool(true)); // out=on
+        assert_eq!(tree.get(200).unwrap().slots[6].value, SlotValue::Bool(true)); // raise
+        assert_eq!(
+            tree.get(200).unwrap().slots[7].value,
+            SlotValue::Bool(false)
+        ); // not lower
     }
 
     #[test]
@@ -6681,8 +9209,12 @@ mod tests {
         // isHeating=true, sp=72, cv=80, diff=4 -> half=2 -> cv > 72+2=74 -> out=false (warm enough)
         tree.add(make_tstat(200, 72.0, 80.0, 4.0));
         tree.execute_components();
-        assert_eq!(tree.get(200).unwrap().slots[5].value, SlotValue::Bool(false)); // out=off
-        assert_eq!(tree.get(200).unwrap().slots[7].value, SlotValue::Bool(true));  // lower
+        assert_eq!(
+            tree.get(200).unwrap().slots[5].value,
+            SlotValue::Bool(false)
+        ); // out=off
+        assert_eq!(tree.get(200).unwrap().slots[7].value, SlotValue::Bool(true));
+        // lower
     }
 
     #[test]
@@ -6692,7 +9224,10 @@ mod tests {
         tree.add(make_tstat(200, 72.0, 71.0, 4.0));
         tree.execute_components();
         // Within deadband, keeps initial state (out=false)
-        assert_eq!(tree.get(200).unwrap().slots[5].value, SlotValue::Bool(false));
+        assert_eq!(
+            tree.get(200).unwrap().slots[5].value,
+            SlotValue::Bool(false)
+        );
     }
 
     #[test]
@@ -6732,7 +9267,10 @@ mod tests {
         let mut tree = ComponentTree::new();
         tree.add(make_updn(200, 9.5, true, false, 1.0, 0.0, 10.0));
         tree.execute_components();
-        assert_eq!(tree.get(200).unwrap().slots[1].value, SlotValue::Float(10.0));
+        assert_eq!(
+            tree.get(200).unwrap().slots[1].value,
+            SlotValue::Float(10.0)
+        );
     }
 
     #[test]
@@ -6800,7 +9338,7 @@ mod tests {
         tree.add(make_source_comp(201, NO_PARENT, "c3", 3.0));
         tree.add(make_source_comp(203, NO_PARENT, "c7", 7.0));
         tree.add(make_math_comp(202, NO_PARENT, "mul", 2, 37)); // Mul2
-        tree.add(make_math_comp(204, NO_PARENT, "add", 2, 3));  // Add2
+        tree.add(make_math_comp(204, NO_PARENT, "add", 2, 3)); // Add2
 
         tree.add_link(200, 1, 202, 2); // src -> mul.in1
         tree.add_link(201, 1, 202, 3); // c3 -> mul.in2
@@ -6832,7 +9370,12 @@ mod tests {
     // ---- File transfer tests ----
 
     /// Helper: build a fileOpen request payload with given method, uri, fileSize, chunkSize
-    fn build_file_open_payload(method: &str, uri: &str, file_size: u32, chunk_size: u16) -> Vec<u8> {
+    fn build_file_open_payload(
+        method: &str,
+        uri: &str,
+        file_size: u32,
+        chunk_size: u16,
+    ) -> Vec<u8> {
         let mut payload = Vec::new();
         // str method (null-terminated)
         payload.extend_from_slice(method.as_bytes());
@@ -6880,7 +9423,11 @@ mod tests {
     fn file_open_put_bad_method() {
         let _guard = lock_file_xfer();
         let payload = build_file_open_payload("x", "/tmp/test.txt", 10, 256);
-        let req = SoxRequest { cmd: SoxCmd::FileOpen, req_id: 1, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::FileOpen,
+            req_id: 1,
+            payload,
+        };
         let resp = handle_file_open(&req);
         assert_eq!(resp.cmd, b'!', "expected error for bad method");
     }
@@ -6889,7 +9436,11 @@ mod tests {
     fn file_open_put_path_traversal_rejected() {
         let _guard = lock_file_xfer();
         let payload = build_file_open_payload("p", "/tmp/../etc/passwd", 10, 256);
-        let req = SoxRequest { cmd: SoxCmd::FileOpen, req_id: 2, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::FileOpen,
+            req_id: 2,
+            payload,
+        };
         let resp = handle_file_open(&req);
         assert_eq!(resp.cmd, b'!', "expected error for path traversal");
     }
@@ -6898,7 +9449,11 @@ mod tests {
     fn file_open_put_null_byte_rejected() {
         let _guard = lock_file_xfer();
         let payload = build_file_open_payload("p", "/tmp/test\0evil", 10, 256);
-        let req = SoxRequest { cmd: SoxCmd::FileOpen, req_id: 3, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::FileOpen,
+            req_id: 3,
+            payload,
+        };
         let resp = handle_file_open(&req);
         // The null byte in the URI means read_str will stop at the \0,
         // so the uri will be "/tmp/test" — but the path itself is fine.
@@ -6912,7 +9467,11 @@ mod tests {
         let _guard = lock_file_xfer();
         // 11MB exceeds the 10MB limit
         let payload = build_file_open_payload("p", "/tmp/bigfile", 11 * 1024 * 1024, 256);
-        let req = SoxRequest { cmd: SoxCmd::FileOpen, req_id: 4, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::FileOpen,
+            req_id: 4,
+            payload,
+        };
         let resp = handle_file_open(&req);
         assert_eq!(resp.cmd, b'!', "expected error for oversized file");
     }
@@ -6922,7 +9481,11 @@ mod tests {
         let _guard = lock_file_xfer();
         // Attempt to write a chunk without an active transfer
         let payload = build_file_write_chunk_payload(0, &[1, 2, 3]);
-        let req = SoxRequest { cmd: SoxCmd::FileWrite, req_id: 5, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::FileWrite,
+            req_id: 5,
+            payload,
+        };
         let resp = handle_file_write(&req);
         assert_eq!(resp.cmd, b'!', "expected error when no transfer active");
     }
@@ -6947,7 +9510,11 @@ mod tests {
 
         let chunk_data = vec![0xAA; 10];
         let payload = build_file_write_chunk_payload(0, &chunk_data);
-        let req = SoxRequest { cmd: SoxCmd::FileWrite, req_id: 6, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::FileWrite,
+            req_id: 6,
+            payload,
+        };
         let resp = handle_file_write(&req);
         assert_eq!(resp.cmd, b'H', "expected success response 'H'");
 
@@ -6958,7 +9525,6 @@ mod tests {
             assert_eq!(file.data, vec![0xAA; 10]);
             assert_eq!(file.chunks_received, 1);
         }
-
     }
 
     #[test]
@@ -6981,10 +9547,13 @@ mod tests {
         // Chunk 1 would start at offset 10, but data only holds 10 bytes
         let chunk_data = vec![0xBB; 5];
         let payload = build_file_write_chunk_payload(1, &chunk_data);
-        let req = SoxRequest { cmd: SoxCmd::FileWrite, req_id: 7, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::FileWrite,
+            req_id: 7,
+            payload,
+        };
         let resp = handle_file_write(&req);
         assert_eq!(resp.cmd, b'!', "expected error for out-of-range chunk");
-
     }
 
     #[test]
@@ -7006,13 +9575,21 @@ mod tests {
 
         // Chunk 0: first 10 bytes
         let payload0 = build_file_write_chunk_payload(0, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-        let req0 = SoxRequest { cmd: SoxCmd::FileWrite, req_id: 8, payload: payload0 };
+        let req0 = SoxRequest {
+            cmd: SoxCmd::FileWrite,
+            req_id: 8,
+            payload: payload0,
+        };
         let resp0 = handle_file_write(&req0);
         assert_eq!(resp0.cmd, b'H');
 
         // Chunk 1: next 10 bytes
         let payload1 = build_file_write_chunk_payload(1, &[11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
-        let req1 = SoxRequest { cmd: SoxCmd::FileWrite, req_id: 9, payload: payload1 };
+        let req1 = SoxRequest {
+            cmd: SoxCmd::FileWrite,
+            req_id: 9,
+            payload: payload1,
+        };
         let resp1 = handle_file_write(&req1);
         assert_eq!(resp1.cmd, b'H');
 
@@ -7023,7 +9600,6 @@ mod tests {
             assert_eq!(file.data, expected);
             assert_eq!(file.chunks_received, 2);
         }
-
     }
 
     #[test]
@@ -7043,7 +9619,11 @@ mod tests {
             });
         }
 
-        let req = SoxRequest { cmd: SoxCmd::FileClose, req_id: 10, payload: vec![] };
+        let req = SoxRequest {
+            cmd: SoxCmd::FileClose,
+            req_id: 10,
+            payload: vec![],
+        };
         let resp = handle_file_close(&req);
         assert_eq!(resp.cmd, b'Z');
 
@@ -7077,7 +9657,11 @@ mod tests {
             });
         }
 
-        let req = SoxRequest { cmd: SoxCmd::FileClose, req_id: 11, payload: vec![] };
+        let req = SoxRequest {
+            cmd: SoxCmd::FileClose,
+            req_id: 11,
+            payload: vec![],
+        };
         let resp = handle_file_close(&req);
         assert_eq!(resp.cmd, b'Z');
 
@@ -7145,7 +9729,6 @@ mod tests {
             assert_eq!(&file.data[0..4], &[0xCA, 0xFE, 0xBA, 0xBE]);
             assert_eq!(file.chunks_received, 1);
         }
-
     }
 
     #[test]
@@ -7153,7 +9736,11 @@ mod tests {
         let mut payload = Vec::new();
         payload.push(0x00); // empty "from"
         payload.push(0x00); // empty "to"
-        let req = SoxRequest { cmd: SoxCmd::FileRename, req_id: 12, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::FileRename,
+            req_id: 12,
+            payload,
+        };
         let resp = handle_file_rename(&req);
         assert_eq!(resp.cmd, b'!', "expected error for empty paths");
     }
@@ -7163,7 +9750,11 @@ mod tests {
         let mut payload = Vec::new();
         payload.extend_from_slice(b"/tmp/../etc/shadow\0");
         payload.extend_from_slice(b"/tmp/renamed\0");
-        let req = SoxRequest { cmd: SoxCmd::FileRename, req_id: 13, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::FileRename,
+            req_id: 13,
+            payload,
+        };
         let resp = handle_file_rename(&req);
         assert_eq!(resp.cmd, b'!', "expected error for path traversal");
     }
@@ -7190,7 +9781,11 @@ mod tests {
         payload.extend_from_slice(to_str.as_bytes());
         payload.push(0x00);
 
-        let req = SoxRequest { cmd: SoxCmd::FileRename, req_id: 14, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::FileRename,
+            req_id: 14,
+            payload,
+        };
         let resp = handle_file_rename(&req);
         assert_eq!(resp.cmd, b'B', "expected success response 'B'");
 
@@ -7222,7 +9817,11 @@ mod tests {
         payload.extend_from_slice(to_str.as_bytes());
         payload.push(0x00);
 
-        let req = SoxRequest { cmd: SoxCmd::FileRename, req_id: 15, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::FileRename,
+            req_id: 15,
+            payload,
+        };
         let resp = handle_file_rename(&req);
         assert_eq!(resp.cmd, b'!', "expected error for non-existent source");
     }
@@ -7245,10 +9844,13 @@ mod tests {
         }
 
         let payload = build_file_write_chunk_payload(0, &[1, 2, 3]);
-        let req = SoxRequest { cmd: SoxCmd::FileWrite, req_id: 16, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::FileWrite,
+            req_id: 16,
+            payload,
+        };
         let resp = handle_file_write(&req);
         assert_eq!(resp.cmd, b'!', "expected error when in get mode");
-
     }
 
     #[test]
@@ -7280,18 +9882,30 @@ mod tests {
 
         // Write chunk 0: "Hello, S"
         let payload0 = build_file_write_chunk_payload(0, &file_data[0..8]);
-        let req0 = SoxRequest { cmd: SoxCmd::FileWrite, req_id: 20, payload: payload0 };
+        let req0 = SoxRequest {
+            cmd: SoxCmd::FileWrite,
+            req_id: 20,
+            payload: payload0,
+        };
         let resp0 = handle_file_write(&req0);
         assert_eq!(resp0.cmd, b'H');
 
         // Write chunk 1: "andstar!"
         let payload1 = build_file_write_chunk_payload(1, &file_data[8..16]);
-        let req1 = SoxRequest { cmd: SoxCmd::FileWrite, req_id: 21, payload: payload1 };
+        let req1 = SoxRequest {
+            cmd: SoxCmd::FileWrite,
+            req_id: 21,
+            payload: payload1,
+        };
         let resp1 = handle_file_write(&req1);
         assert_eq!(resp1.cmd, b'H');
 
         // Close — should flush to disk
-        let close_req = SoxRequest { cmd: SoxCmd::FileClose, req_id: 22, payload: vec![] };
+        let close_req = SoxRequest {
+            cmd: SoxCmd::FileClose,
+            req_id: 22,
+            payload: vec![],
+        };
         let close_resp = handle_file_close(&close_req);
         assert_eq!(close_resp.cmd, b'Z');
 
@@ -7325,14 +9939,12 @@ mod tests {
             kit_id: 5,
             type_id: 1,
             children: Vec::new(),
-            slots: vec![
-                VirtualSlot {
-                    name: "out".into(),
-                    type_id: SoxValueType::Float as u8,
-                    flags: SLOT_FLAG_CONFIG,
-                    value: SlotValue::Float(72.5),
-                },
-            ],
+            slots: vec![VirtualSlot {
+                name: "out".into(),
+                type_id: SoxValueType::Float as u8,
+                flags: SLOT_FLAG_CONFIG,
+                value: SlotValue::Float(72.5),
+            }],
             links: Vec::new(),
         });
         tree.mark_user_added(id1);
@@ -7410,8 +10022,14 @@ mod tests {
 
         // Verify parent registered children
         let control = tree2.get(6).expect("control folder should exist");
-        assert!(control.children.contains(&id1), "control should contain user comp 1");
-        assert!(control.children.contains(&id2), "control should contain user comp 2");
+        assert!(
+            control.children.contains(&id1),
+            "control should contain user comp 1"
+        );
+        assert!(
+            control.children.contains(&id2),
+            "control should contain user comp 2"
+        );
     }
 
     #[test]
@@ -7430,7 +10048,11 @@ mod tests {
 
         let json = std::fs::read_to_string(&persist_path).expect("read");
         let data: PersistData = serde_json::from_str(&json).expect("parse");
-        assert_eq!(data.components.len(), 0, "channel components should NOT be saved");
+        assert_eq!(
+            data.components.len(),
+            0,
+            "channel components should NOT be saved"
+        );
         assert_eq!(data.user_added_ids.len(), 0);
     }
 
@@ -7452,14 +10074,12 @@ mod tests {
             kit_id: 99,
             type_id: 1,
             children: Vec::new(),
-            slots: vec![
-                VirtualSlot {
-                    name: "val".into(),
-                    type_id: SoxValueType::Int as u8,
-                    flags: SLOT_FLAG_CONFIG,
-                    value: SlotValue::Int(42),
-                },
-            ],
+            slots: vec![VirtualSlot {
+                name: "val".into(),
+                type_id: SoxValueType::Int as u8,
+                flags: SLOT_FLAG_CONFIG,
+                value: SlotValue::Int(42),
+            }],
             links: Vec::new(),
         });
         tree.mark_user_added(id);
@@ -7501,7 +10121,9 @@ mod tests {
         let mut tree = ComponentTree::new();
         tree.set_persist_path(persist_str);
 
-        let loaded = tree.load_user_components().expect("load should succeed even with no file");
+        let loaded = tree
+            .load_user_components()
+            .expect("load should succeed even with no file");
         assert_eq!(loaded, 0);
     }
 
@@ -7562,14 +10184,54 @@ mod tests {
             type_id: 1,
             children: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "b".into(), type_id: 1, flags: 0, value: SlotValue::Bool(true) },
-                VirtualSlot { name: "i".into(), type_id: 2, flags: 0, value: SlotValue::Int(-42) },
-                VirtualSlot { name: "l".into(), type_id: 3, flags: 0, value: SlotValue::Long(123456789) },
-                VirtualSlot { name: "f".into(), type_id: 4, flags: 0, value: SlotValue::Float(3.14) },
-                VirtualSlot { name: "d".into(), type_id: 5, flags: 0, value: SlotValue::Double(2.71828) },
-                VirtualSlot { name: "s".into(), type_id: 7, flags: 0, value: SlotValue::Str("hello".into()) },
-                VirtualSlot { name: "buf".into(), type_id: 8, flags: 0, value: SlotValue::Buf(vec![1,2,3]) },
-                VirtualSlot { name: "n".into(), type_id: 0, flags: 0, value: SlotValue::Null },
+                VirtualSlot {
+                    name: "b".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Bool(true),
+                },
+                VirtualSlot {
+                    name: "i".into(),
+                    type_id: 2,
+                    flags: 0,
+                    value: SlotValue::Int(-42),
+                },
+                VirtualSlot {
+                    name: "l".into(),
+                    type_id: 3,
+                    flags: 0,
+                    value: SlotValue::Long(123456789),
+                },
+                VirtualSlot {
+                    name: "f".into(),
+                    type_id: 4,
+                    flags: 0,
+                    value: SlotValue::Float(3.14),
+                },
+                VirtualSlot {
+                    name: "d".into(),
+                    type_id: 5,
+                    flags: 0,
+                    value: SlotValue::Double(2.71828),
+                },
+                VirtualSlot {
+                    name: "s".into(),
+                    type_id: 7,
+                    flags: 0,
+                    value: SlotValue::Str("hello".into()),
+                },
+                VirtualSlot {
+                    name: "buf".into(),
+                    type_id: 8,
+                    flags: 0,
+                    value: SlotValue::Buf(vec![1, 2, 3]),
+                },
+                VirtualSlot {
+                    name: "n".into(),
+                    type_id: 0,
+                    flags: 0,
+                    value: SlotValue::Null,
+                },
             ],
             links: Vec::new(),
         });
@@ -7588,7 +10250,7 @@ mod tests {
         assert_eq!(comp.slots[3].value, SlotValue::Float(3.14));
         assert_eq!(comp.slots[4].value, SlotValue::Double(2.71828));
         assert_eq!(comp.slots[5].value, SlotValue::Str("hello".into()));
-        assert_eq!(comp.slots[6].value, SlotValue::Buf(vec![1,2,3]));
+        assert_eq!(comp.slots[6].value, SlotValue::Buf(vec![1, 2, 3]));
         assert_eq!(comp.slots[7].value, SlotValue::Null);
     }
 
@@ -7623,7 +10285,10 @@ mod tests {
         tree2.load_user_components().expect("load");
 
         let new_id = tree2.next_comp_id();
-        assert!(new_id > id, "next_comp_id ({new_id}) should be > loaded id ({id})");
+        assert!(
+            new_id > id,
+            "next_comp_id ({new_id}) should be > loaded id ({id})"
+        );
     }
 
     // ---- Cycle detection tests ----
@@ -7690,7 +10355,11 @@ mod tests {
         }
         // Chain: 200→201→202→…→209 (no cycle)
         for id in 200..209u16 {
-            assert!(tree.add_link(id, 0, id + 1, 0), "link {id}->{} should succeed", id + 1);
+            assert!(
+                tree.add_link(id, 0, id + 1, 0),
+                "link {id}->{} should succeed",
+                id + 1
+            );
         }
         // Adding 209→200 would create a cycle — rejected
         assert!(!tree.add_link(209, 0, 200, 0));
@@ -7710,7 +10379,11 @@ mod tests {
         payload.push(0); // fromSlotId
         payload.extend_from_slice(&100u16.to_be_bytes()); // toCompId
         payload.push(0); // toSlotId
-        let req = SoxRequest { cmd: SoxCmd::Link, req_id: 50, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::Link,
+            req_id: 50,
+            payload,
+        };
         let resp = handle_link(&req, &mut tree);
         assert_eq!(resp.cmd, b'!'); // error response
     }
@@ -7719,7 +10392,13 @@ mod tests {
 
     /// Helper: create a channel component with the standard slot layout.
     /// Slot 2 = channel ID (Int), Slot 6 = out (Float).
-    fn make_channel_comp(comp_id: u16, parent_id: u16, name: &str, channel_id: i32, out_value: f32) -> VirtualComponent {
+    fn make_channel_comp(
+        comp_id: u16,
+        parent_id: u16,
+        name: &str,
+        channel_id: i32,
+        out_value: f32,
+    ) -> VirtualComponent {
         VirtualComponent {
             comp_id,
             parent_id,
@@ -7729,15 +10408,60 @@ mod tests {
             type_id: 0,
             children: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(1) },
-                VirtualSlot { name: "channelName".into(), type_id: 8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Str(name.into()) },
-                VirtualSlot { name: "channel".into(), type_id: 1, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Int(channel_id) },
-                VirtualSlot { name: "pointQuery".into(), type_id: 8, flags: SLOT_FLAG_CONFIG, value: SlotValue::Str(String::new()) },
-                VirtualSlot { name: "pointQuerySize".into(), type_id: 1, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Int(0) },
-                VirtualSlot { name: "pointQueryStatus".into(), type_id: 0, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Bool(false) },
-                VirtualSlot { name: "out".into(), type_id: 4, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Float(out_value) },
-                VirtualSlot { name: "curStatus".into(), type_id: 8, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Str("ok".into()) },
-                VirtualSlot { name: "enabled".into(), type_id: 0, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Bool(true) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Int(1),
+                },
+                VirtualSlot {
+                    name: "channelName".into(),
+                    type_id: 8,
+                    flags: SLOT_FLAG_RUNTIME,
+                    value: SlotValue::Str(name.into()),
+                },
+                VirtualSlot {
+                    name: "channel".into(),
+                    type_id: 1,
+                    flags: SLOT_FLAG_RUNTIME,
+                    value: SlotValue::Int(channel_id),
+                },
+                VirtualSlot {
+                    name: "pointQuery".into(),
+                    type_id: 8,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Str(String::new()),
+                },
+                VirtualSlot {
+                    name: "pointQuerySize".into(),
+                    type_id: 1,
+                    flags: SLOT_FLAG_RUNTIME,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "pointQueryStatus".into(),
+                    type_id: 0,
+                    flags: SLOT_FLAG_RUNTIME,
+                    value: SlotValue::Bool(false),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 4,
+                    flags: SLOT_FLAG_RUNTIME,
+                    value: SlotValue::Float(out_value),
+                },
+                VirtualSlot {
+                    name: "curStatus".into(),
+                    type_id: 8,
+                    flags: SLOT_FLAG_RUNTIME,
+                    value: SlotValue::Str("ok".into()),
+                },
+                VirtualSlot {
+                    name: "enabled".into(),
+                    type_id: 0,
+                    flags: SLOT_FLAG_RUNTIME,
+                    value: SlotValue::Bool(true),
+                },
             ],
             links: Vec::new(),
         }
@@ -7796,7 +10520,10 @@ mod tests {
         tree.add_link(200, 1, CHANNEL_COMP_BASE, 0);
 
         let writes = tree.collect_channel_writes(&[CHANNEL_COMP_BASE]);
-        assert!(writes.is_empty(), "link to non-out slot should not produce channel write");
+        assert!(
+            writes.is_empty(),
+            "link to non-out slot should not produce channel write"
+        );
     }
 
     #[test]
@@ -7809,7 +10536,10 @@ mod tests {
         tree.add(src);
 
         let writes = tree.collect_channel_writes(&[200]);
-        assert!(writes.is_empty(), "non-channel comp should not produce channel write");
+        assert!(
+            writes.is_empty(),
+            "non-channel comp should not produce channel write"
+        );
     }
 
     #[test]
@@ -7847,7 +10577,8 @@ mod tests {
         // Second round of link propagation to push add.out to channel.out
         let link_changed2 = tree.execute_links();
 
-        let all_changed: Vec<u16> = link_changed.iter()
+        let all_changed: Vec<u16> = link_changed
+            .iter()
             .chain(comp_changed.iter())
             .chain(link_changed2.iter())
             .copied()
@@ -7856,7 +10587,11 @@ mod tests {
         let writes = tree.collect_channel_writes(&all_changed);
         assert_eq!(writes.len(), 1);
         assert_eq!(writes[0].0, 2001);
-        assert!((writes[0].1 - 80.0).abs() < 0.001, "expected 80.0, got {}", writes[0].1);
+        assert!(
+            (writes[0].1 - 80.0).abs() < 0.001,
+            "expected 80.0, got {}",
+            writes[0].1
+        );
     }
 
     // ---- Sensor bridge (chXXXX naming) tests ----
@@ -7905,10 +10640,15 @@ mod tests {
 
         let comp = tree.get(200).unwrap();
         match &comp.slots[1].value {
-            SlotValue::Float(v) => assert!((*v - 0.0).abs() < 0.001, "out should stay 0.0, got {v}"),
+            SlotValue::Float(v) => {
+                assert!((*v - 0.0).abs() < 0.001, "out should stay 0.0, got {v}")
+            }
             other => panic!("expected Float, got {other:?}"),
         }
-        assert!(!changed.contains(&200), "no change expected for unmatched channel");
+        assert!(
+            !changed.contains(&200),
+            "no change expected for unmatched channel"
+        );
     }
 
     #[test]
@@ -7928,10 +10668,15 @@ mod tests {
 
         let comp = tree.get(200).unwrap();
         match &comp.slots[1].value {
-            SlotValue::Float(v) => assert!((*v - 0.0).abs() < 0.001, "out should stay 0.0, got {v}"),
+            SlotValue::Float(v) => {
+                assert!((*v - 0.0).abs() < 0.001, "out should stay 0.0, got {v}")
+            }
             other => panic!("expected Float, got {other:?}"),
         }
-        assert!(!changed.contains(&200), "cheese should not trigger sensor bridge");
+        assert!(
+            !changed.contains(&200),
+            "cheese should not trigger sensor bridge"
+        );
     }
 
     #[test]
@@ -7951,10 +10696,16 @@ mod tests {
 
         let comp = tree.get(200).unwrap();
         match &comp.slots[1].value {
-            SlotValue::Float(v) => assert!((*v - 0.0).abs() < 0.001, "out should stay 0.0 for ch0, got {v}"),
+            SlotValue::Float(v) => assert!(
+                (*v - 0.0).abs() < 0.001,
+                "out should stay 0.0 for ch0, got {v}"
+            ),
             other => panic!("expected Float, got {other:?}"),
         }
-        assert!(!changed.contains(&200), "ch0 should not trigger sensor bridge");
+        assert!(
+            !changed.contains(&200),
+            "ch0 should not trigger sensor bridge"
+        );
     }
 
     #[test]
@@ -7987,8 +10738,14 @@ mod tests {
         let mut tree = ComponentTree::from_channels(&channels);
 
         // Verify output_channel_ids was populated
-        assert!(tree.output_channel_ids.contains(&360), "ch360 should be in output_channel_ids");
-        assert!(!tree.output_channel_ids.contains(&1113), "ch1113 should NOT be in output_channel_ids");
+        assert!(
+            tree.output_channel_ids.contains(&360),
+            "ch360 should be in output_channel_ids"
+        );
+        assert!(
+            !tree.output_channel_ids.contains(&1113),
+            "ch1113 should NOT be in output_channel_ids"
+        );
 
         // Add a user ConstFloat named "ch360" with value 1.0 (user wants output ON)
         let cf_id = tree.next_comp_id();
@@ -8001,8 +10758,18 @@ mod tests {
             type_id: 100,
             children: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 4, flags: SLOT_FLAG_CONFIG, value: SlotValue::Int(1) },
-                VirtualSlot { name: "out".into(), type_id: 5, flags: SLOT_FLAG_RUNTIME, value: SlotValue::Float(1.0) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 4,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Int(1),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 5,
+                    flags: SLOT_FLAG_RUNTIME,
+                    value: SlotValue::Float(1.0),
+                },
             ],
             links: Vec::new(),
         });
@@ -8058,9 +10825,24 @@ mod tests {
             type_id: 1,
             children: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "out".into(), type_id: 4, flags: 0, value: SlotValue::Float(42.0) },
-                VirtualSlot { name: "save".into(), type_id: 4, flags: SLOT_FLAG_ACTION, value: SlotValue::Null },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 4,
+                    flags: 0,
+                    value: SlotValue::Float(42.0),
+                },
+                VirtualSlot {
+                    name: "save".into(),
+                    type_id: 4,
+                    flags: SLOT_FLAG_ACTION,
+                    value: SlotValue::Null,
+                },
             ],
             links: Vec::new(),
         });
@@ -8072,13 +10854,20 @@ mod tests {
         let mut payload = Vec::new();
         payload.extend_from_slice(&id1.to_be_bytes()); // comp_id
         payload.push(2); // slot_id = index 2 ("save")
-        let req = SoxRequest { cmd: SoxCmd::Invoke, req_id: 99, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::Invoke,
+            req_id: 99,
+            payload,
+        };
         let resp = handle_invoke(&req, &mut tree);
 
         // Should succeed
         assert_ne!(resp.cmd, b'!', "invoke save should not return error");
         // Persistence file should exist
-        assert!(persist_path.exists(), "save action should create persistence file");
+        assert!(
+            persist_path.exists(),
+            "save action should create persistence file"
+        );
     }
 
     #[test]
@@ -8102,9 +10891,24 @@ mod tests {
             type_id: 1,
             children: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "out".into(), type_id: 4, flags: 0, value: SlotValue::Float(10.0) },
-                VirtualSlot { name: "hibernate".into(), type_id: 4, flags: SLOT_FLAG_ACTION, value: SlotValue::Null },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 4,
+                    flags: 0,
+                    value: SlotValue::Float(10.0),
+                },
+                VirtualSlot {
+                    name: "hibernate".into(),
+                    type_id: 4,
+                    flags: SLOT_FLAG_ACTION,
+                    value: SlotValue::Null,
+                },
             ],
             links: Vec::new(),
         });
@@ -8113,11 +10917,18 @@ mod tests {
         let mut payload = Vec::new();
         payload.extend_from_slice(&id1.to_be_bytes()); // comp_id
         payload.push(2); // slot_id = index 2 ("hibernate")
-        let req = SoxRequest { cmd: SoxCmd::Invoke, req_id: 98, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::Invoke,
+            req_id: 98,
+            payload,
+        };
         let resp = handle_invoke(&req, &mut tree);
 
         assert_ne!(resp.cmd, b'!', "invoke hibernate should not return error");
-        assert!(persist_path.exists(), "hibernate action should create persistence file");
+        assert!(
+            persist_path.exists(),
+            "hibernate action should create persistence file"
+        );
     }
 
     // ---- Manifest slot inheritance tests ----
@@ -8143,7 +10954,11 @@ mod tests {
         db.parse_kit_manifest(xml_control, 2); // kit_index=2 for control
 
         let slots = db.get_slots(2, 49).expect("Add4 should be in manifest");
-        assert_eq!(slots.len(), 6, "Add4 should have 6 slots: meta, out, in1, in2, in3, in4");
+        assert_eq!(
+            slots.len(),
+            6,
+            "Add4 should have 6 slots: meta, out, in1, in2, in3, in4"
+        );
         assert_eq!(slots[0].name, "meta");
         assert_eq!(slots[1].name, "out");
         assert_eq!(slots[2].name, "in1");
@@ -8172,7 +10987,11 @@ mod tests {
         db.parse_kit_manifest(xml_control, 2);
 
         let slots = db.get_slots(2, 50).expect("Sub4 should be in manifest");
-        assert_eq!(slots.len(), 6, "Sub4 should have 6 slots: meta, out, in1, in2, in3, in4");
+        assert_eq!(
+            slots.len(),
+            6,
+            "Sub4 should have 6 slots: meta, out, in1, in2, in3, in4"
+        );
         assert_eq!(slots[0].name, "meta");
         assert_eq!(slots[1].name, "out");
         assert_eq!(slots[2].name, "in1");
@@ -8195,7 +11014,9 @@ mod tests {
         let mut db = ManifestDb::new();
         db.parse_kit_manifest(xml, 2);
 
-        let slots = db.get_slots(2, 99).expect("CustomComp should be in manifest");
+        let slots = db
+            .get_slots(2, 99)
+            .expect("CustomComp should be in manifest");
         assert!(slots.len() >= 2, "should have at least meta + value");
         assert_eq!(slots[0].name, "meta", "meta should be prepended");
         assert_eq!(slots[1].name, "value");
@@ -8219,7 +11040,10 @@ mod tests {
 
         let writes = tree.collect_channel_writes(&[CHANNEL_COMP_BASE]);
         assert_eq!(writes.len(), 1);
-        assert!((writes[0].1 - 99.9).abs() < 0.001, "Double should coerce to f64");
+        assert!(
+            (writes[0].1 - 99.9).abs() < 0.001,
+            "Double should coerce to f64"
+        );
     }
 
     #[test]
@@ -8238,7 +11062,10 @@ mod tests {
 
         let writes = tree.collect_channel_writes(&[CHANNEL_COMP_BASE]);
         assert_eq!(writes.len(), 1);
-        assert!((writes[0].1 - 42.0).abs() < 0.001, "Int should coerce to f64");
+        assert!(
+            (writes[0].1 - 42.0).abs() < 0.001,
+            "Int should coerce to f64"
+        );
     }
 
     // ---- Persistence round-trip with links ----
@@ -8265,8 +11092,18 @@ mod tests {
             type_id: 14,
             children: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "out".into(), type_id: 4, flags: 0, value: SlotValue::Float(55.5) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 4,
+                    flags: 0,
+                    value: SlotValue::Float(55.5),
+                },
             ],
             links: Vec::new(),
         });
@@ -8283,10 +11120,30 @@ mod tests {
             type_id: 3,
             children: Vec::new(),
             slots: vec![
-                VirtualSlot { name: "meta".into(), type_id: 1, flags: 0, value: SlotValue::Int(0) },
-                VirtualSlot { name: "out".into(), type_id: 4, flags: 0, value: SlotValue::Float(0.0) },
-                VirtualSlot { name: "in1".into(), type_id: 4, flags: 0, value: SlotValue::Float(0.0) },
-                VirtualSlot { name: "in2".into(), type_id: 4, flags: 0, value: SlotValue::Float(0.0) },
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: 1,
+                    flags: 0,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: 4,
+                    flags: 0,
+                    value: SlotValue::Float(0.0),
+                },
+                VirtualSlot {
+                    name: "in1".into(),
+                    type_id: 4,
+                    flags: 0,
+                    value: SlotValue::Float(0.0),
+                },
+                VirtualSlot {
+                    name: "in2".into(),
+                    type_id: 4,
+                    flags: 0,
+                    value: SlotValue::Float(0.0),
+                },
             ],
             links: Vec::new(),
         });
@@ -8315,7 +11172,11 @@ mod tests {
         // Verify target component has links restored
         let tgt_loaded = tree2.get(tgt_id).expect("target should exist");
         assert_eq!(tgt_loaded.name, "linkTgt");
-        assert!(tgt_loaded.links.len() >= 2, "target should have 2 links, got {}", tgt_loaded.links.len());
+        assert!(
+            tgt_loaded.links.len() >= 2,
+            "target should have 2 links, got {}",
+            tgt_loaded.links.len()
+        );
 
         // Check specific link details
         let link1 = tgt_loaded.links.iter().find(|l| l.to_slot == 2);
@@ -8339,14 +11200,23 @@ mod tests {
         // src.out(55.5) should propagate to tgt.in1 and tgt.in2
         let tgt_after = tree2.get(tgt_id).unwrap();
         match &tgt_after.slots[2].value {
-            SlotValue::Float(v) => assert!((*v - 55.5).abs() < 0.001, "in1 should be 55.5 after link exec"),
+            SlotValue::Float(v) => assert!(
+                (*v - 55.5).abs() < 0.001,
+                "in1 should be 55.5 after link exec"
+            ),
             other => panic!("expected Float for in1, got {other:?}"),
         }
         match &tgt_after.slots[3].value {
-            SlotValue::Float(v) => assert!((*v - 55.5).abs() < 0.001, "in2 should be 55.5 after link exec"),
+            SlotValue::Float(v) => assert!(
+                (*v - 55.5).abs() < 0.001,
+                "in2 should be 55.5 after link exec"
+            ),
             other => panic!("expected Float for in2, got {other:?}"),
         }
-        assert!(changed.contains(&tgt_id), "target should be in changed list after link exec");
+        assert!(
+            changed.contains(&tgt_id),
+            "target should be in changed list after link exec"
+        );
     }
 
     #[test]
@@ -8390,7 +11260,10 @@ mod tests {
         // Verify the persisted JSON contains name_table
         let json = std::fs::read_to_string(&persist_path).expect("read persist file");
         let data: PersistData = serde_json::from_str(&json).expect("parse");
-        assert!(!data.name_table.is_empty(), "name_table should be non-empty in persistence");
+        assert!(
+            !data.name_table.is_empty(),
+            "name_table should be non-empty in persistence"
+        );
         assert!(data.name_table.contains(&"nameTest".to_string()));
 
         // Load into a fresh tree
@@ -8399,9 +11272,14 @@ mod tests {
         tree2.load_user_components().expect("load should succeed");
 
         // Verify name_table restored
-        assert!(tree2.name_table.contains("nameTest"), "name should be re-interned from persistence");
-        assert!(tree2.name_table.len() >= original_count,
-            "restored name table should have at least as many entries");
+        assert!(
+            tree2.name_table.contains("nameTest"),
+            "name should be re-interned from persistence"
+        );
+        assert!(
+            tree2.name_table.len() >= original_count,
+            "restored name table should have at least as many entries"
+        );
     }
 
     #[test]
@@ -8424,7 +11302,9 @@ mod tests {
         tree.set_persist_path(persist_str);
 
         // Should load without error — name_table defaults to empty
-        let loaded = tree.load_user_components().expect("load should succeed with old format");
+        let loaded = tree
+            .load_user_components()
+            .expect("load should succeed with old format");
         assert_eq!(loaded, 0);
     }
 
@@ -8447,7 +11327,10 @@ mod tests {
     #[test]
     fn validate_sox_name_too_long() {
         let long = "a".repeat(32);
-        assert_eq!(validate_sox_name(&long), Some("name too long (max 31 chars)"));
+        assert_eq!(
+            validate_sox_name(&long),
+            Some("name too long (max 31 chars)")
+        );
         // Exactly 31 should be fine
         let exact = "a".repeat(31);
         assert!(validate_sox_name(&exact).is_none());
@@ -8455,12 +11338,18 @@ mod tests {
 
     #[test]
     fn validate_sox_name_starts_digit() {
-        assert_eq!(validate_sox_name("1comp"), Some("name must start with a letter"));
+        assert_eq!(
+            validate_sox_name("1comp"),
+            Some("name must start with a letter")
+        );
     }
 
     #[test]
     fn validate_sox_name_starts_underscore() {
-        assert_eq!(validate_sox_name("_comp"), Some("name must start with a letter"));
+        assert_eq!(
+            validate_sox_name("_comp"),
+            Some("name must start with a letter")
+        );
     }
 
     #[test]
@@ -8503,8 +11392,11 @@ mod tests {
         };
         let resp = handle_rename(&req, &mut tree);
         // Should fail — response cmd should be error ('!')
-        assert_ne!(resp.payload.first().copied(), Some(b'R'),
-            "rename with digit-first name should be rejected");
+        assert_ne!(
+            resp.payload.first().copied(),
+            Some(b'R'),
+            "rename with digit-first name should be rejected"
+        );
     }
 
     #[test]
@@ -8524,8 +11416,11 @@ mod tests {
         };
         let resp = handle_add(&req, &mut tree);
         // Should fail — response should not contain a new comp ID
-        assert_ne!(resp.payload.first().copied(), Some(b'A'),
-            "add with hyphenated name should be rejected");
+        assert_ne!(
+            resp.payload.first().copied(),
+            Some(b'A'),
+            "add with hyphenated name should be rejected"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -8547,14 +11442,18 @@ mod tests {
         let mut payload = Vec::new();
         payload.extend_from_slice(&100u16.to_be_bytes()); // comp_id = first channel
         payload.push(b'd');
-        let req = SoxRequest { cmd: SoxCmd::ReadComp, req_id: 1, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::ReadComp,
+            req_id: 1,
+            payload,
+        };
         let resp = handle_read_comp(&req, &tree, Some(&store));
 
         assert_eq!(resp.cmd, b'C');
         let mut r = SoxReader::new(&resp.payload);
         assert_eq!(r.read_u16(), Some(100)); // comp_id
         assert_eq!(r.read_u8(), Some(b'd')); // what echoed
-        assert_eq!(r.read_u16(), Some(0));   // zero tags
+        assert_eq!(r.read_u16(), Some(0)); // zero tags
         assert_eq!(r.remaining(), 0);
     }
 
@@ -8565,7 +11464,11 @@ mod tests {
         let mut payload = Vec::new();
         payload.extend_from_slice(&100u16.to_be_bytes());
         payload.push(b'd');
-        let req = SoxRequest { cmd: SoxCmd::ReadComp, req_id: 2, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::ReadComp,
+            req_id: 2,
+            payload,
+        };
         let resp = handle_read_comp(&req, &tree, None);
 
         assert_eq!(resp.cmd, b'C');
@@ -8583,7 +11486,8 @@ mod tests {
         // Set some tags on comp 100
         {
             let mut s = store.write().unwrap();
-            s.set(100, "modbusAddr".into(), DynValue::Int(40001)).unwrap();
+            s.set(100, "modbusAddr".into(), DynValue::Int(40001))
+                .unwrap();
             s.set(100, "point".into(), DynValue::Marker).unwrap();
             s.set(100, "enabled".into(), DynValue::Bool(true)).unwrap();
         }
@@ -8591,7 +11495,11 @@ mod tests {
         let mut payload = Vec::new();
         payload.extend_from_slice(&100u16.to_be_bytes());
         payload.push(b'd');
-        let req = SoxRequest { cmd: SoxCmd::ReadComp, req_id: 3, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::ReadComp,
+            req_id: 3,
+            payload,
+        };
         let resp = handle_read_comp(&req, &tree, Some(&store));
 
         assert_eq!(resp.cmd, b'C');
@@ -8631,19 +11539,25 @@ mod tests {
             s.set(100, "c_bool".into(), DynValue::Bool(false)).unwrap();
             s.set(100, "d_int".into(), DynValue::Int(-42)).unwrap();
             s.set(100, "e_float".into(), DynValue::Float(3.14)).unwrap();
-            s.set(100, "f_str".into(), DynValue::Str("hello".into())).unwrap();
-            s.set(100, "g_ref".into(), DynValue::Ref("@p:r:abc".into())).unwrap();
+            s.set(100, "f_str".into(), DynValue::Str("hello".into()))
+                .unwrap();
+            s.set(100, "g_ref".into(), DynValue::Ref("@p:r:abc".into()))
+                .unwrap();
         }
 
         let mut payload = Vec::new();
         payload.extend_from_slice(&100u16.to_be_bytes());
         payload.push(b'd');
-        let req = SoxRequest { cmd: SoxCmd::ReadComp, req_id: 4, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::ReadComp,
+            req_id: 4,
+            payload,
+        };
         let resp = handle_read_comp(&req, &tree, Some(&store));
 
         let mut r = SoxReader::new(&resp.payload);
         r.read_u16(); // comp_id
-        r.read_u8();  // what
+        r.read_u8(); // what
 
         let count = r.read_u16().unwrap();
         assert_eq!(count, 7);
@@ -8695,7 +11609,11 @@ mod tests {
         let mut payload = Vec::new();
         payload.extend_from_slice(&999u16.to_be_bytes()); // nonexistent comp
         payload.push(b'd');
-        let req = SoxRequest { cmd: SoxCmd::ReadComp, req_id: 5, payload };
+        let req = SoxRequest {
+            cmd: SoxCmd::ReadComp,
+            req_id: 5,
+            payload,
+        };
         let resp = handle_read_comp(&req, &tree, Some(&store));
 
         // Should return error (unknown comp)

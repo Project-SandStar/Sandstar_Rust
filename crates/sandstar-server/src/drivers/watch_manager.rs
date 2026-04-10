@@ -95,17 +95,12 @@ impl DriverWatchManager {
 
     /// Get all subscribers watching a given point.
     pub fn subscribers_for(&self, point_id: u32) -> HashSet<String> {
-        self.watches
-            .get(&point_id)
-            .cloned()
-            .unwrap_or_default()
+        self.watches.get(&point_id).cloned().unwrap_or_default()
     }
 
     /// Check if any subscriber is watching this point.
     pub fn is_watched(&self, point_id: u32) -> bool {
-        self.watches
-            .get(&point_id)
-            .map_or(false, |s| !s.is_empty())
+        self.watches.get(&point_id).is_some_and(|s| !s.is_empty())
     }
 
     /// Total number of active watch entries (sum of all point->subscriber pairs).

@@ -26,9 +26,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use clap::Parser;
 use sandstar_engine::{Engine, Notification};
 use sandstar_hal::{HalControl, HalDiagnostics, HalRead, HalWrite};
-use sandstar_server::{alerts, args, cmd_handler, config, control, dispatch, history, ipc, loader, logging, metrics, pid, reload, rest, sd_notify, signal, tls, watchdog};
 use sandstar_server::control::ControlRunner;
 use sandstar_server::history::HistoryPoint;
+use sandstar_server::{
+    alerts, args, cmd_handler, config, control, dispatch, history, ipc, loader, logging, metrics,
+    pid, reload, rest, sd_notify, signal, tls, watchdog,
+};
 #[cfg(feature = "svm")]
 use sandstar_svm::{ChannelInfo, ChannelSnapshot, RustSvmRunner};
 use tokio::sync::mpsc;
@@ -39,9 +42,13 @@ use tracing::{error, info, warn};
 // Compile-time assertions: types moved into spawn_blocking must be Send.
 fn _assert_send<T: Send>() {}
 #[allow(dead_code)]
-fn _check_engine_send() { _assert_send::<Engine<Hal>>(); }
+fn _check_engine_send() {
+    _assert_send::<Engine<Hal>>();
+}
 #[allow(dead_code)]
-fn _check_control_runner_send() { _assert_send::<control::ControlRunner>(); }
+fn _check_control_runner_send() {
+    _assert_send::<control::ControlRunner>();
+}
 
 /// Results returned from the blocking poll thread.
 type PollResult = (Engine<Hal>, ControlRunner, Vec<Notification>, Duration);
@@ -63,26 +70,41 @@ compile_error!("Cannot enable both `linux-hal` and `simulator-hal` features — 
 #[cfg(not(any(feature = "mock-hal", feature = "linux-hal", feature = "simulator-hal")))]
 compile_error!("Must enable one of: `mock-hal`, `linux-hal`, `simulator-hal`");
 
-#[cfg(all(feature = "mock-hal", not(feature = "linux-hal"), not(feature = "simulator-hal")))]
+#[cfg(all(
+    feature = "mock-hal",
+    not(feature = "linux-hal"),
+    not(feature = "simulator-hal")
+))]
 type Hal = sandstar_hal::mock::MockHal;
 
 #[cfg(feature = "linux-hal")]
 type Hal = sandstar_hal_linux::LinuxHal;
 
-#[cfg(all(feature = "simulator-hal", not(feature = "mock-hal"), not(feature = "linux-hal")))]
+#[cfg(all(
+    feature = "simulator-hal",
+    not(feature = "mock-hal"),
+    not(feature = "linux-hal")
+))]
 type Hal = sandstar_hal::simulator::SimulatorHal;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 0a. Install panic hook — logs location before abort (release uses panic="abort")
     std::panic::set_hook(Box::new(|info| {
-        let location = info.location().map(|l| format!("{}:{}", l.file(), l.line()));
-        let msg = info.payload()
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()));
+        let msg = info
+            .payload()
             .downcast_ref::<&str>()
             .copied()
             .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
             .unwrap_or("<no message>");
-        eprintln!("PANIC at {}: {}", location.as_deref().unwrap_or("unknown"), msg);
+        eprintln!(
+            "PANIC at {}: {}",
+            location.as_deref().unwrap_or("unknown"),
+            msg
+        );
     }));
 
     // 0. Ignore SIGPIPE to prevent crashes on broken IPC/TCP connections.
@@ -249,7 +271,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start_time = Instant::now();
     let channel_count = engine.channels.count();
     let poll_count = engine.polls.count();
-    info!(channels = channel_count, polls = poll_count, "engine initialized");
+    info!(
+        channels = channel_count,
+        polls = poll_count,
+        "engine initialized"
+    );
 
     // 5a. Load control configuration (PID loops, sequencers)
     let control_runner = if args.no_control || config.read_only {
@@ -258,21 +284,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         ControlRunner::new()
     } else {
-        let control_path = args.control_config.clone()
+        let control_path = args
+            .control_config
+            .clone()
             .or_else(|| config.config_dir.as_ref().map(|d| d.join("control.toml")));
         match control_path {
-            Some(path) if path.exists() => {
-                match ControlRunner::load(&path) {
-                    Ok(runner) => {
-                        info!(loops = runner.loop_count(), "control engine loaded");
-                        runner
-                    }
-                    Err(e) => {
-                        error!(error = %e, "failed to load control config, running without control");
-                        ControlRunner::new()
-                    }
+            Some(path) if path.exists() => match ControlRunner::load(&path) {
+                Ok(runner) => {
+                    info!(loops = runner.loop_count(), "control engine loaded");
+                    runner
                 }
-            }
+                Err(e) => {
+                    error!(error = %e, "failed to load control config, running without control");
+                    ControlRunner::new()
+                }
+            },
             _ => {
                 info!("no control.toml found, control engine disabled");
                 ControlRunner::new()
@@ -284,13 +310,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut history_store = history::HistoryStore::new(1000);
 
     // 5b2. Set up alert manager for channel fault/down notifications
-    let alerts_config_path = std::env::var("SANDSTAR_ALERTS_CONFIG")
-        .unwrap_or_else(|_| {
-            config.config_dir
-                .as_ref()
-                .map(|d| d.join("alerts.json").to_string_lossy().into_owned())
-                .unwrap_or_else(|| "alerts.json".to_string())
-        });
+    let alerts_config_path = std::env::var("SANDSTAR_ALERTS_CONFIG").unwrap_or_else(|_| {
+        config
+            .config_dir
+            .as_ref()
+            .map(|d| d.join("alerts.json").to_string_lossy().into_owned())
+            .unwrap_or_else(|| "alerts.json".to_string())
+    });
     let alert_manager: alerts::SharedAlertManager = Arc::new(Mutex::new({
         let mut mgr = alerts::AlertManager::load(std::path::Path::new(&alerts_config_path));
         mgr.set_device_info(format!(
@@ -343,8 +369,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 6. Set up poll interval
-    let mut poll_timer =
-        tokio::time::interval(Duration::from_millis(config.poll_interval_ms));
+    let mut poll_timer = tokio::time::interval(Duration::from_millis(config.poll_interval_ms));
     poll_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // 6b. Set up watch expiry timer (cleans stale watches every 60 seconds)
@@ -421,18 +446,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
     } else {
         use sandstar_server::sox::sox_handlers::{ComponentTree, ManifestDb};
-        let dir = args.manifests_dir.clone().unwrap_or_else(|| String::new());
+        let dir = args.manifests_dir.clone().unwrap_or_default();
         let manifest_db = std::sync::Arc::new(ManifestDb::load(&dir));
-        let tree = std::sync::Arc::new(std::sync::RwLock::new(
-            ComponentTree::new_with_manifest(manifest_db.clone()),
-        ));
-        Some(rest::sox_api::SoxApiState { tree, manifest_db, dyn_store: Some(dyn_store.clone()) })
+        let tree = std::sync::Arc::new(std::sync::RwLock::new(ComponentTree::new_with_manifest(
+            manifest_db.clone(),
+        )));
+        Some(rest::sox_api::SoxApiState {
+            tree,
+            manifest_db,
+            dyn_store: Some(dyn_store.clone()),
+        })
     };
 
     // 8b2. Set up roxWarp cluster (optional, requires --cluster flag)
     let roxwarp_state: Option<sandstar_server::roxwarp::RoxWarpState> = if args.cluster {
-        use sandstar_server::roxwarp::{ClusterConfig, ClusterManager, RoxWarpState};
         use sandstar_server::roxwarp::cluster::DeltaEngine;
+        use sandstar_server::roxwarp::{ClusterConfig, ClusterManager, RoxWarpState};
 
         let mut cluster_config = if let Some(ref config_path) = args.cluster_config {
             ClusterConfig::load(config_path)
@@ -464,11 +493,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let delta_engine = Arc::new(DeltaEngine::new(cluster_config.node_id.clone()));
         let cluster_handle = EngineHandle::new(cmd_tx.clone());
-        let manager = ClusterManager::new(
-            cluster_config.clone(),
-            delta_engine.clone(),
-            cluster_handle,
-        );
+        let manager =
+            ClusterManager::new(cluster_config.clone(), delta_engine.clone(), cluster_handle);
 
         info!(
             node_id = %cluster_config.node_id,
@@ -497,7 +523,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             use axum::Router;
 
             let cluster_app = Router::new()
-                .route("/roxwarp", get(sandstar_server::roxwarp::handler::roxwarp_upgrade))
+                .route(
+                    "/roxwarp",
+                    get(sandstar_server::roxwarp::handler::roxwarp_upgrade),
+                )
                 .with_state(rw_state_for_listener);
 
             let bind_addr: std::net::SocketAddr = format!("0.0.0.0:{cluster_port}")
@@ -505,9 +534,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("valid cluster bind address");
 
             // Build mTLS server config if certificates are configured
-            if let (Some(ref cert), Some(ref key), Some(ref ca)) =
-                (&cluster_config.cert_path, &cluster_config.key_path, &cluster_config.ca_path)
-            {
+            if let (Some(ref cert), Some(ref key), Some(ref ca)) = (
+                &cluster_config.cert_path,
+                &cluster_config.key_path,
+                &cluster_config.ca_path,
+            ) {
                 match sandstar_server::roxwarp::mtls::build_mtls_server_config(cert, key, ca) {
                     Ok(server_tls_config) => {
                         info!(port = cluster_port, "roxWarp: starting mTLS listener");
@@ -529,7 +560,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 return;
                             }
                         };
-                        info!(port = cluster_port, "roxWarp: listening (plain WS, mTLS config failed)");
+                        info!(
+                            port = cluster_port,
+                            "roxWarp: listening (plain WS, mTLS config failed)"
+                        );
                         axum::serve(listener, cluster_app).await.ok();
                     }
                 }
@@ -584,9 +618,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             app = app.merge(rest::sim::router(sim_state.clone()));
         }
 
-        let addr: std::net::SocketAddr = format!("{}:{}", args.http_bind, args.http_port)
-            .parse()
-            .map_err(|e| format!("invalid bind address '{}': {}", args.http_bind, e))?;
+        let addr: std::net::SocketAddr =
+            format!("{}:{}", args.http_bind, args.http_port)
+                .parse()
+                .map_err(|e| format!("invalid bind address '{}': {}", args.http_bind, e))?;
 
         #[cfg(feature = "tls")]
         if tls_enabled {
@@ -595,7 +630,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tls::validate_tls_files(cert_path, key_path)
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
-            let tls_config = tls::load_rustls_config(cert_path, key_path).await
+            let tls_config = tls::load_rustls_config(cert_path, key_path)
+                .await
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
             info!(
@@ -998,7 +1034,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let uptime = start_time.elapsed();
-    let reason = if ipc_shutdown { "IPC command" } else { "signal" };
+    let reason = if ipc_shutdown {
+        "IPC command"
+    } else {
+        "signal"
+    };
     info!(uptime_secs = uptime.as_secs(), reason, "engine stopped");
     if let Some(ref mut eng) = engine {
         if let Err(e) = eng.hal.shutdown() {
@@ -1032,8 +1072,7 @@ async fn start_http_server(
     } else {
         info!(
             port = local_addr.port(),
-            "REST API listening on http://{} (no rate limit)",
-            local_addr,
+            "REST API listening on http://{} (no rate limit)", local_addr,
         );
     }
     tokio::spawn(async move {

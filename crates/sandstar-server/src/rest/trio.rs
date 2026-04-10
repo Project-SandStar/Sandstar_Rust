@@ -190,13 +190,14 @@ fn parse_trio_value(val: &str) -> Value {
         return Value::String(val.to_string());
     }
     // Date: YYYY-MM-DD
-    if val.len() == 10 && val.chars().nth(4) == Some('-') && val.chars().nth(7) == Some('-') {
-        if val[..4].parse::<u16>().is_ok()
-            && val[5..7].parse::<u8>().is_ok()
-            && val[8..10].parse::<u8>().is_ok()
-        {
-            return Value::String(val.to_string());
-        }
+    if val.len() == 10
+        && val.chars().nth(4) == Some('-')
+        && val.chars().nth(7) == Some('-')
+        && val[..4].parse::<u16>().is_ok()
+        && val[5..7].parse::<u8>().is_ok()
+        && val[8..10].parse::<u8>().is_ok()
+    {
+        return Value::String(val.to_string());
     }
     // Time: HH:MM:SS
     if val.len() >= 8

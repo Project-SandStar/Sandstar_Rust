@@ -22,9 +22,9 @@
 
 pub mod actor;
 pub mod async_driver;
+pub mod bacnet;
 pub mod local_io;
 pub mod modbus;
-pub mod bacnet;
 pub mod mqtt;
 pub mod poll_scheduler;
 pub mod watch_manager;
@@ -43,6 +43,9 @@ pub use watch_manager::DriverWatchManager;
 
 /// Unique driver instance identifier.
 pub type DriverId = String;
+
+/// Result of writing to driver points: per-point write results.
+pub type WritePointsResult = Result<Vec<(u32, Result<(), DriverError>)>, DriverError>;
 
 /// Driver operational status (cascades to child points via [`PointStatus`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -160,11 +163,12 @@ pub enum PollMode {
 /// By default, points inherit their driver's status. A point can
 /// override this with its own status (e.g., when a remote device
 /// reports a point-specific fault).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub enum PointStatus {
     /// Point has its own explicit status.
     Own(DriverStatus),
     /// Point inherits status from its parent driver (default).
+    #[default]
     Inherited,
 }
 
@@ -178,12 +182,6 @@ impl PointStatus {
             PointStatus::Own(s) => s.clone(),
             PointStatus::Inherited => driver_status.clone(),
         }
-    }
-}
-
-impl Default for PointStatus {
-    fn default() -> Self {
-        PointStatus::Inherited
     }
 }
 
@@ -353,28 +351,19 @@ impl DriverManager {
     }
 
     /// Discover points from a specific driver.
-    pub fn learn(
-        &mut self,
-        driver_id: &str,
-        path: Option<&str>,
-    ) -> Result<LearnGrid, DriverError> {
+    pub fn learn(&mut self, driver_id: &str, path: Option<&str>) -> Result<LearnGrid, DriverError> {
         self.drivers
             .get_mut(driver_id)
-            .ok_or_else(|| {
-                DriverError::ConfigFault(format!("driver '{driver_id}' not found"))
-            })?
+            .ok_or_else(|| DriverError::ConfigFault(format!("driver '{driver_id}' not found")))?
             .learn(path)
     }
 
     /// Write to points via a specific driver.
-    pub fn write(
-        &mut self,
-        driver_id: &str,
-        writes: &[(u32, f64)],
-    ) -> Result<Vec<(u32, Result<(), DriverError>)>, DriverError> {
-        let driver = self.drivers.get_mut(driver_id).ok_or_else(|| {
-            DriverError::ConfigFault(format!("driver '{driver_id}' not found"))
-        })?;
+    pub fn write(&mut self, driver_id: &str, writes: &[(u32, f64)]) -> WritePointsResult {
+        let driver = self
+            .drivers
+            .get_mut(driver_id)
+            .ok_or_else(|| DriverError::ConfigFault(format!("driver '{driver_id}' not found")))?;
         Ok(driver.write(writes))
     }
 
@@ -551,11 +540,7 @@ impl DriverManager {
             .iter()
             .filter(|(_, did)| did.as_str() == driver_id)
             .map(|(&pid, _)| {
-                let ps = self
-                    .point_statuses
-                    .get(&pid)
-                    .cloned()
-                    .unwrap_or_default();
+                let ps = self.point_statuses.get(&pid).cloned().unwrap_or_default();
                 (pid, ps.resolve(&driver_status))
             })
             .collect();
@@ -618,7 +603,12 @@ impl LocalIoDriver {
     }
 
     /// Add a point to this driver.
-    pub fn add_point(&mut self, point_id: u32, address: impl Into<String>, kind: impl Into<String>) {
+    pub fn add_point(
+        &mut self,
+        point_id: u32,
+        address: impl Into<String>,
+        kind: impl Into<String>,
+    ) {
         self.points.push(LocalIoPoint {
             point_id,
             address: address.into(),
@@ -681,10 +671,7 @@ impl Driver for LocalIoDriver {
         // The actual hardware reads are done by the engine's HAL.
         // This returns 0.0 as a placeholder — the engine poll loop
         // is the real source of truth for local I/O values.
-        points
-            .iter()
-            .map(|p| (p.point_id, Ok(0.0)))
-            .collect()
+        points.iter().map(|p| (p.point_id, Ok(0.0))).collect()
     }
 
     fn write(&mut self, writes: &[(u32, f64)]) -> Vec<(u32, Result<(), DriverError>)> {
@@ -705,9 +692,7 @@ use std::sync::{Arc, Mutex};
 pub type SharedDriverManager = Arc<Mutex<DriverManager>>;
 
 /// GET /api/drivers — list all registered drivers with status.
-pub async fn list_drivers(
-    State(mgr): State<SharedDriverManager>,
-) -> impl IntoResponse {
+pub async fn list_drivers(State(mgr): State<SharedDriverManager>) -> impl IntoResponse {
     let mgr = mgr.lock().expect("driver manager lock poisoned");
     Json(mgr.driver_summaries())
 }
@@ -784,9 +769,7 @@ pub async fn driver_write(
             for item in arr {
                 if let Some(pair) = item.as_array() {
                     if pair.len() == 2 {
-                        if let (Some(pid), Some(val)) =
-                            (pair[0].as_u64(), pair[1].as_f64())
-                        {
+                        if let (Some(pid), Some(val)) = (pair[0].as_u64(), pair[1].as_f64()) {
                             out.push((pid as u32, val));
                         }
                     }
@@ -810,7 +793,9 @@ pub async fn driver_write(
                 .into_iter()
                 .map(|(pid, r)| match r {
                     Ok(()) => serde_json::json!({"pointId": pid, "ok": true}),
-                    Err(e) => serde_json::json!({"pointId": pid, "ok": false, "error": e.to_string()}),
+                    Err(e) => {
+                        serde_json::json!({"pointId": pid, "ok": false, "error": e.to_string()})
+                    }
                 })
                 .collect();
             Json(serde_json::json!({
@@ -833,7 +818,10 @@ pub async fn driver_write(
 pub fn driver_router(mgr: SharedDriverManager) -> axum::Router {
     axum::Router::new()
         .route("/api/drivers", axum::routing::get(list_drivers))
-        .route("/api/drivers/{id}/status", axum::routing::get(driver_status))
+        .route(
+            "/api/drivers/{id}/status",
+            axum::routing::get(driver_status),
+        )
         .route("/api/drivers/{id}/learn", axum::routing::get(driver_learn))
         .route("/api/drivers/{id}/write", axum::routing::post(driver_write))
         .with_state(mgr)
@@ -1188,8 +1176,7 @@ mod tests {
         let json = serde_json::to_string(&PointStatus::Inherited).unwrap();
         assert!(json.contains("Inherited"));
 
-        let json =
-            serde_json::to_string(&PointStatus::Own(DriverStatus::Ok)).unwrap();
+        let json = serde_json::to_string(&PointStatus::Own(DriverStatus::Ok)).unwrap();
         assert!(json.contains("Own"));
     }
 
@@ -1206,23 +1193,14 @@ mod tests {
         mgr.register_point(200, "io");
 
         // By default, points inherit driver status (Ok)
-        assert_eq!(
-            mgr.effective_point_status(100),
-            Some(DriverStatus::Ok)
-        );
+        assert_eq!(mgr.effective_point_status(100), Some(DriverStatus::Ok));
 
         // Override one point with its own status
         mgr.set_point_status(200, PointStatus::Own(DriverStatus::Stale));
-        assert_eq!(
-            mgr.effective_point_status(200),
-            Some(DriverStatus::Stale)
-        );
+        assert_eq!(mgr.effective_point_status(200), Some(DriverStatus::Stale));
 
         // Point 100 still inherits
-        assert_eq!(
-            mgr.effective_point_status(100),
-            Some(DriverStatus::Ok)
-        );
+        assert_eq!(mgr.effective_point_status(100), Some(DriverStatus::Ok));
     }
 
     #[test]
@@ -1323,8 +1301,14 @@ mod tests {
             "io",
             std::time::Duration::from_secs(5),
             vec![
-                DriverPointRef { point_id: 1, address: "A".into() },
-                DriverPointRef { point_id: 2, address: "B".into() },
+                DriverPointRef {
+                    point_id: 1,
+                    address: "A".into(),
+                },
+                DriverPointRef {
+                    point_id: 2,
+                    address: "B".into(),
+                },
             ],
         );
 

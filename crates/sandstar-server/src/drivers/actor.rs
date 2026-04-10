@@ -33,6 +33,14 @@ use super::{
     PointStatus,
 };
 
+// ── Type Aliases (clippy::type_complexity) ───────────────
+/// Result of syncing all driver points: (driver_id, point_id, read_result).
+type SyncAllResult = Vec<(DriverId, u32, Result<f64, DriverError>)>;
+/// Result of writing to driver points: per-point write results.
+type WriteResult = Result<Vec<(u32, Result<(), DriverError>)>, DriverError>;
+/// Detailed driver status with per-point statuses.
+type DetailedDriverStatus = Option<(DriverStatus, Vec<(u32, DriverStatus)>)>;
+
 // ── Commands ──────────────────────────────────────────────
 
 /// Commands accepted by the [`DriverManagerActor`].
@@ -54,13 +62,11 @@ pub enum DriverCmd {
         reply: oneshot::Sender<Vec<(DriverId, Result<DriverMeta, DriverError>)>>,
     },
     /// Close (shut down) all registered drivers.
-    CloseAll {
-        reply: oneshot::Sender<()>,
-    },
+    CloseAll { reply: oneshot::Sender<()> },
     /// Sync (read) current values for specified driver/point pairs.
     SyncAll {
         point_map: HashMap<DriverId, Vec<DriverPointRef>>,
-        reply: oneshot::Sender<Vec<(DriverId, u32, Result<f64, DriverError>)>>,
+        reply: oneshot::Sender<SyncAllResult>,
     },
     /// Discover points from a specific driver.
     Learn {
@@ -72,7 +78,7 @@ pub enum DriverCmd {
     Write {
         driver_id: String,
         writes: Vec<(u32, f64)>,
-        reply: oneshot::Sender<Result<Vec<(u32, Result<(), DriverError>)>, DriverError>>,
+        reply: oneshot::Sender<WriteResult>,
     },
     /// Get summary info for all drivers.
     Status {
@@ -81,12 +87,10 @@ pub enum DriverCmd {
     /// Get detailed status for a specific driver and its points.
     DriverStatus {
         id: String,
-        reply: oneshot::Sender<Option<(DriverStatus, Vec<(u32, DriverStatus)>)>>,
+        reply: oneshot::Sender<DetailedDriverStatus>,
     },
     /// List all registered driver IDs.
-    ListIds {
-        reply: oneshot::Sender<Vec<String>>,
-    },
+    ListIds { reply: oneshot::Sender<Vec<String>> },
     /// Get status of a specific driver.
     GetDriverStatus {
         id: String,
@@ -283,10 +287,7 @@ impl DriverHandle {
     }
 
     /// Get the status of a specific driver.
-    pub async fn get_driver_status(
-        &self,
-        id: &str,
-    ) -> Result<Option<DriverStatus>, DriverError> {
+    pub async fn get_driver_status(&self, id: &str) -> Result<Option<DriverStatus>, DriverError> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(DriverCmd::GetDriverStatus {
@@ -300,11 +301,7 @@ impl DriverHandle {
     }
 
     /// Register a point as belonging to a driver.
-    pub async fn register_point(
-        &self,
-        point_id: u32,
-        driver_id: &str,
-    ) -> Result<(), DriverError> {
+    pub async fn register_point(&self, point_id: u32, driver_id: &str) -> Result<(), DriverError> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(DriverCmd::RegisterPoint {
@@ -511,9 +508,10 @@ impl DriverManagerInner {
         driver_id: &str,
         writes: &[(u32, f64)],
     ) -> Result<Vec<(u32, Result<(), DriverError>)>, DriverError> {
-        let driver = self.drivers.get_mut(driver_id).ok_or_else(|| {
-            DriverError::ConfigFault(format!("driver '{driver_id}' not found"))
-        })?;
+        let driver = self
+            .drivers
+            .get_mut(driver_id)
+            .ok_or_else(|| DriverError::ConfigFault(format!("driver '{driver_id}' not found")))?;
         Ok(driver.write(writes).await)
     }
 
@@ -562,11 +560,7 @@ impl DriverManagerInner {
             .iter()
             .filter(|(_, did)| did.as_str() == driver_id)
             .map(|(&pid, _)| {
-                let ps = self
-                    .point_statuses
-                    .get(&pid)
-                    .cloned()
-                    .unwrap_or_default();
+                let ps = self.point_statuses.get(&pid).cloned().unwrap_or_default();
                 (pid, ps.resolve(&driver_status))
             })
             .collect();
@@ -725,9 +719,7 @@ pub fn spawn_driver_actor(buffer: usize) -> DriverHandle {
                     driver_id,
                     reply,
                 } => {
-                    inner
-                        .point_driver_map
-                        .insert(point_id, driver_id);
+                    inner.point_driver_map.insert(point_id, driver_id);
                     let _ = reply.send(());
                 }
                 DriverCmd::SetPointStatus {
@@ -825,16 +817,10 @@ mod tests {
         fn ping(&mut self) -> Result<DriverMeta, DriverError> {
             Ok(DriverMeta::default())
         }
-        fn sync_cur(
-            &mut self,
-            points: &[DriverPointRef],
-        ) -> Vec<(u32, Result<f64, DriverError>)> {
+        fn sync_cur(&mut self, points: &[DriverPointRef]) -> Vec<(u32, Result<f64, DriverError>)> {
             points.iter().map(|p| (p.point_id, Ok(0.0))).collect()
         }
-        fn write(
-            &mut self,
-            writes: &[(u32, f64)],
-        ) -> Vec<(u32, Result<(), DriverError>)> {
+        fn write(&mut self, writes: &[(u32, f64)]) -> Vec<(u32, Result<(), DriverError>)> {
             writes.iter().map(|(id, _)| (*id, Ok(()))).collect()
         }
     }
