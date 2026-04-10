@@ -37,10 +37,7 @@ impl ServerConfig {
     ///
     /// Clap handles the priority: CLI arg > env var > default.
     pub fn from_args(args: &ServerArgs) -> Self {
-        let config_dir = args
-            .config_dir
-            .clone()
-            .filter(|p| p.exists());
+        let config_dir = args.config_dir.clone().filter(|p| p.exists());
 
         // Canonicalize the config directory to prevent path traversal attacks
         // (e.g., SANDSTAR_CONFIG_DIR="../../../etc")
@@ -112,7 +109,9 @@ fn canonicalize_config_dir(dir: Option<PathBuf>) -> Option<PathBuf> {
     // On Windows, canonicalize adds a \\?\ prefix, so we strip it for comparison.
     let original_str = original.to_string_lossy();
     let canonical_str = canonical.to_string_lossy();
-    let canonical_stripped = canonical_str.strip_prefix(r"\\?\").unwrap_or(&canonical_str);
+    let canonical_stripped = canonical_str
+        .strip_prefix(r"\\?\")
+        .unwrap_or(&canonical_str);
 
     if original_str != canonical_stripped {
         warn!(
@@ -134,11 +133,46 @@ pub fn load_demo_channels(engine: &mut sandstar_engine::Engine<sandstar_hal::moc
     use sandstar_engine::channel::{Channel, ChannelDirection, ChannelType};
     use sandstar_engine::value::ValueConv;
     let channels = [
-        (1113, ChannelType::Analog, ChannelDirection::In, 0, 0, "AI1 Thermistor 10K"),
-        (1200, ChannelType::Analog, ChannelDirection::In, 0, 1, "AI2 0-10V"),
-        (612, ChannelType::I2c, ChannelDirection::In, 2, 0x40, "I2C SDP610 CFM"),
-        (2001, ChannelType::Digital, ChannelDirection::Out, 0, 47, "DO1 Relay"),
-        (2002, ChannelType::Pwm, ChannelDirection::Out, 0, 0, "PWM1 Fan Speed"),
+        (
+            1113,
+            ChannelType::Analog,
+            ChannelDirection::In,
+            0,
+            0,
+            "AI1 Thermistor 10K",
+        ),
+        (
+            1200,
+            ChannelType::Analog,
+            ChannelDirection::In,
+            0,
+            1,
+            "AI2 0-10V",
+        ),
+        (
+            612,
+            ChannelType::I2c,
+            ChannelDirection::In,
+            2,
+            0x40,
+            "I2C SDP610 CFM",
+        ),
+        (
+            2001,
+            ChannelType::Digital,
+            ChannelDirection::Out,
+            0,
+            47,
+            "DO1 Relay",
+        ),
+        (
+            2002,
+            ChannelType::Pwm,
+            ChannelDirection::Out,
+            0,
+            0,
+            "PWM1 Fan Speed",
+        ),
     ];
 
     for (id, ct, dir, dev, addr, label) in channels {
@@ -162,7 +196,9 @@ pub fn load_demo_channels(engine: &mut sandstar_engine::Engine<sandstar_hal::moc
 /// Sets up the same demo channels as mock-hal mode, but injects initial
 /// sensor values via the shared simulator state.
 #[cfg(feature = "simulator-hal")]
-pub fn load_demo_channels(engine: &mut sandstar_engine::Engine<sandstar_hal::simulator::SimulatorHal>) {
+pub fn load_demo_channels(
+    engine: &mut sandstar_engine::Engine<sandstar_hal::simulator::SimulatorHal>,
+) {
     use sandstar_engine::channel::{Channel, ChannelDirection, ChannelType};
     use sandstar_engine::value::ValueConv;
     use sandstar_hal::simulator::ReadKey;
@@ -170,21 +206,98 @@ pub fn load_demo_channels(engine: &mut sandstar_engine::Engine<sandstar_hal::sim
     // Physical I/O channels (match BASemulator mapping)
     let channels = [
         // Analog inputs — 4 temperature/voltage sensors
-        (1113, ChannelType::Analog, ChannelDirection::In, 0u32, 0u32, "AI1 Thermistor 10K"),
-        (1200, ChannelType::Analog, ChannelDirection::In, 0, 1, "AI2 Discharge Air"),
-        (1300, ChannelType::Analog, ChannelDirection::In, 0, 2, "AI3 Outdoor Air"),
-        (1400, ChannelType::Analog, ChannelDirection::In, 0, 3, "AI4 Return Air"),
+        (
+            1113,
+            ChannelType::Analog,
+            ChannelDirection::In,
+            0u32,
+            0u32,
+            "AI1 Thermistor 10K",
+        ),
+        (
+            1200,
+            ChannelType::Analog,
+            ChannelDirection::In,
+            0,
+            1,
+            "AI2 Discharge Air",
+        ),
+        (
+            1300,
+            ChannelType::Analog,
+            ChannelDirection::In,
+            0,
+            2,
+            "AI3 Outdoor Air",
+        ),
+        (
+            1400,
+            ChannelType::Analog,
+            ChannelDirection::In,
+            0,
+            3,
+            "AI4 Return Air",
+        ),
         // I2C airflow sensor
-        (612, ChannelType::I2c, ChannelDirection::In, 2, 0x40, "I2C SDP810 CFM"),
+        (
+            612,
+            ChannelType::I2c,
+            ChannelDirection::In,
+            2,
+            0x40,
+            "I2C SDP810 CFM",
+        ),
         // Digital input — occupancy
-        (2100, ChannelType::Digital, ChannelDirection::In, 0, 40, "DI1 Occupancy"),
+        (
+            2100,
+            ChannelType::Digital,
+            ChannelDirection::In,
+            0,
+            40,
+            "DI1 Occupancy",
+        ),
         // Digital outputs — 4 cooling stages
-        (2001, ChannelType::Digital, ChannelDirection::Out, 0, 45, "DO1 Cool Stage 1"),
-        (2002, ChannelType::Digital, ChannelDirection::Out, 0, 46, "DO2 Cool Stage 2"),
-        (2003, ChannelType::Digital, ChannelDirection::Out, 0, 47, "DO3 Cool Stage 3"),
-        (2004, ChannelType::Digital, ChannelDirection::Out, 0, 48, "DO4 Cool Stage 4"),
+        (
+            2001,
+            ChannelType::Digital,
+            ChannelDirection::Out,
+            0,
+            45,
+            "DO1 Cool Stage 1",
+        ),
+        (
+            2002,
+            ChannelType::Digital,
+            ChannelDirection::Out,
+            0,
+            46,
+            "DO2 Cool Stage 2",
+        ),
+        (
+            2003,
+            ChannelType::Digital,
+            ChannelDirection::Out,
+            0,
+            47,
+            "DO3 Cool Stage 3",
+        ),
+        (
+            2004,
+            ChannelType::Digital,
+            ChannelDirection::Out,
+            0,
+            48,
+            "DO4 Cool Stage 4",
+        ),
         // PWM output — fan speed
-        (2005, ChannelType::Pwm, ChannelDirection::Out, 4, 0, "PWM1 Fan Speed"),
+        (
+            2005,
+            ChannelType::Pwm,
+            ChannelDirection::Out,
+            4,
+            0,
+            "PWM1 Fan Speed",
+        ),
     ];
 
     for (id, ct, dir, dev, addr, label) in channels {
@@ -209,7 +322,16 @@ pub fn load_demo_channels(engine: &mut sandstar_engine::Engine<sandstar_hal::sim
     ];
 
     for (id, ct, label) in virtuals {
-        let ch = Channel::new(id, ct, ChannelDirection::Out, 0, 0, false, ValueConv::default(), label);
+        let ch = Channel::new(
+            id,
+            ct,
+            ChannelDirection::Out,
+            0,
+            0,
+            false,
+            ValueConv::default(),
+            label,
+        );
         if let Err(e) = engine.channels.add(ch) {
             tracing::warn!(channel = id, err = %e, "failed to add virtual channel");
         }
@@ -220,12 +342,43 @@ pub fn load_demo_channels(engine: &mut sandstar_engine::Engine<sandstar_hal::sim
     // so we inject engineering units (°F, CFM) rather than raw ADC counts.
     let state = engine.hal.shared_state();
     let mut s = state.write().expect("sim state lock poisoned");
-    s.reads.insert(ReadKey::Analog { device: 0, address: 0 }, 70.0);    // 70°F zone temp
-    s.reads.insert(ReadKey::Analog { device: 0, address: 1 }, 55.0);    // 55°F discharge air
-    s.reads.insert(ReadKey::Analog { device: 0, address: 2 }, 85.0);    // 85°F outdoor air
-    s.reads.insert(ReadKey::Analog { device: 0, address: 3 }, 68.0);    // 68°F return air
-    s.reads.insert(ReadKey::I2c { device: 2, address: 0x40, label: "I2C SDP810 CFM".to_string() }, 500.0);
-    s.digital_reads.insert(40, true);  // Occupied
+    s.reads.insert(
+        ReadKey::Analog {
+            device: 0,
+            address: 0,
+        },
+        70.0,
+    ); // 70°F zone temp
+    s.reads.insert(
+        ReadKey::Analog {
+            device: 0,
+            address: 1,
+        },
+        55.0,
+    ); // 55°F discharge air
+    s.reads.insert(
+        ReadKey::Analog {
+            device: 0,
+            address: 2,
+        },
+        85.0,
+    ); // 85°F outdoor air
+    s.reads.insert(
+        ReadKey::Analog {
+            device: 0,
+            address: 3,
+        },
+        68.0,
+    ); // 68°F return air
+    s.reads.insert(
+        ReadKey::I2c {
+            device: 2,
+            address: 0x40,
+            label: "I2C SDP810 CFM".to_string(),
+        },
+        500.0,
+    );
+    s.digital_reads.insert(40, true); // Occupied
 }
 
 #[cfg(test)]
@@ -259,7 +412,10 @@ mod tests {
         let file = dir.path().join("afile.txt");
         std::fs::write(&file, "hello").unwrap();
         let result = canonicalize_config_dir(Some(file));
-        assert!(result.is_none(), "file (not a directory) should return None");
+        assert!(
+            result.is_none(),
+            "file (not a directory) should return None"
+        );
     }
 
     #[test]

@@ -17,9 +17,7 @@ impl HupSignal {
     pub fn new() -> std::io::Result<Self> {
         #[cfg(unix)]
         {
-            let inner = tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::hangup(),
-            )?;
+            let inner = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
             Ok(Self { inner })
         }
         #[cfg(not(unix))]

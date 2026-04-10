@@ -344,7 +344,7 @@ mod tests {
         let table = NameInternTable::new();
         assert_eq!(table.stats(), (0, 0, 0.0));
 
-        table.intern("ab");   // 2 bytes
+        table.intern("ab"); // 2 bytes
         table.intern("cdef"); // 4 bytes
         let (count, total, avg) = table.stats();
         assert_eq!(count, 2);

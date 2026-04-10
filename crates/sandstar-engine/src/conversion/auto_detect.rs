@@ -38,11 +38,7 @@ fn variant_to_tag(variant: u32) -> Option<&'static str> {
 /// 4. Find table by tag, set table_index + low/high/min/max from table data
 ///
 /// Returns true if detection succeeded.
-pub fn auto_detect_sensor(
-    channel: ChannelId,
-    conv: &mut ValueConv,
-    tables: &TableStore,
-) -> bool {
+pub fn auto_detect_sensor(channel: ChannelId, conv: &mut ValueConv, tables: &TableStore) -> bool {
     // Skip if table already configured (e.g., from database.zinc loader
     // with explicit low/high/min/max for custom sensor calibration).
     if conv.table_index.is_some() && conv.low.is_some() && conv.high.is_some() {

@@ -176,8 +176,7 @@ pub fn decode_with_table(
     table: &StringTable,
 ) -> Result<TrioDict, super::RoxWarpError> {
     let raw: HashMap<String, super::binary_trio::TrioValue> =
-        rmp_serde::from_slice(bytes)
-            .map_err(|e| super::RoxWarpError::Decode(e.to_string()))?;
+        rmp_serde::from_slice(bytes).map_err(|e| super::RoxWarpError::Decode(e.to_string()))?;
 
     let mut dict = TrioDict::new();
     for (key, val) in raw {
@@ -259,9 +258,9 @@ mod tests {
         let mut table = StringTable::new();
         let initial = table.len();
         let peer_entries = vec![
-            "type".to_string(),     // already exists
-            "curVal".to_string(),   // new
-            "navName".to_string(),  // new
+            "type".to_string(),    // already exists
+            "curVal".to_string(),  // new
+            "navName".to_string(), // new
         ];
         let added = table.merge(&peer_entries);
         assert_eq!(added, 2);
@@ -348,7 +347,9 @@ mod tests {
         );
         assert_eq!(
             decoded.get("custom_tag").unwrap(),
-            &TrioValue::Str { val: "hello".into() }
+            &TrioValue::Str {
+                val: "hello".into()
+            }
         );
     }
 

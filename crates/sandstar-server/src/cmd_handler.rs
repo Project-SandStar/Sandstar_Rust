@@ -10,8 +10,8 @@ use sandstar_engine::Engine;
 use sandstar_hal::{HalDiagnostics, HalRead, HalWrite};
 use tracing::{debug, warn};
 
-use crate::history::HistoryStore;
 use crate::config::ServerConfig;
+use crate::history::HistoryStore;
 use crate::reload;
 use crate::rest::{ChannelValue, EngineCmd, WatchResponse};
 
@@ -65,7 +65,9 @@ pub fn expire_stale_watches(watches: &mut HashMap<String, WatchState>) {
         let age = now.duration_since(w.last_activity).as_secs();
         if age > WATCH_LEASE_SECS {
             debug!(watch_id = %id, age_secs = age, "watch expired (inactive)");
-            crate::metrics::metrics().watch_active.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            crate::metrics::metrics()
+                .watch_active
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             false
         } else {
             true
@@ -233,9 +235,7 @@ pub fn handle_engine_cmd<H: HalRead + HalWrite + HalDiagnostics>(
             let wid = match watch_id {
                 Some(id) if ctx.watches.contains_key(&id) => id,
                 _ if ctx.watches.len() >= MAX_WATCHES => {
-                    let _ = reply.send(Err(format!(
-                        "watch limit reached (max {})", MAX_WATCHES
-                    )));
+                    let _ = reply.send(Err(format!("watch limit reached (max {})", MAX_WATCHES)));
                     return;
                 }
                 _ => {
@@ -251,7 +251,9 @@ pub fn handle_engine_cmd<H: HalRead + HalWrite + HalDiagnostics>(
                         },
                     );
                     debug!(watch_id = %id, "created new watch");
-                    crate::metrics::metrics().watch_active.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    crate::metrics::metrics()
+                        .watch_active
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     id
                 }
             };
@@ -264,7 +266,9 @@ pub fn handle_engine_cmd<H: HalRead + HalWrite + HalDiagnostics>(
                         watch.channels.push(ch_id);
                     }
                     if let Ok(val) = read_channel_value(engine, ch_id) {
-                        watch.last_values.insert(ch_id, (val.cur, val.status.clone()));
+                        watch
+                            .last_values
+                            .insert(ch_id, (val.cur, val.status.clone()));
                         rows.push(val);
                     }
                 }
@@ -287,7 +291,9 @@ pub fn handle_engine_cmd<H: HalRead + HalWrite + HalDiagnostics>(
             if close {
                 if ctx.watches.remove(&watch_id).is_some() {
                     debug!(watch_id = %watch_id, "watch closed");
-                    crate::metrics::metrics().watch_active.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    crate::metrics::metrics()
+                        .watch_active
+                        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                     let _ = reply.send(Ok(()));
                 } else {
                     let _ = reply.send(Err(format!("watch {} not found", watch_id)));
@@ -324,7 +330,9 @@ pub fn handle_engine_cmd<H: HalRead + HalWrite + HalDiagnostics>(
                             }
                         };
                         if changed {
-                            watch.last_values.insert(ch_id, (val.cur, val.status.clone()));
+                            watch
+                                .last_values
+                                .insert(ch_id, (val.cur, val.status.clone()));
                             rows.push(val);
                         }
                     }
@@ -363,15 +371,21 @@ pub fn handle_engine_cmd<H: HalRead + HalWrite + HalDiagnostics>(
                 .count();
             let i2c_backoff_active = engine.i2c_backoff.len();
 
-            let last_us = m.poll_duration_us_last.load(std::sync::atomic::Ordering::Relaxed);
-            let max_us = m.poll_duration_us_max.load(std::sync::atomic::Ordering::Relaxed);
+            let last_us = m
+                .poll_duration_us_last
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let max_us = m
+                .poll_duration_us_max
+                .load(std::sync::atomic::Ordering::Relaxed);
 
             let _ = reply.send(sandstar_ipc::types::DiagnosticsInfo {
                 uptime_secs: uptime.as_secs(),
                 poll_count: m.poll_count.load(std::sync::atomic::Ordering::Relaxed),
                 last_poll_duration_ms: last_us / 1000,
                 max_poll_duration_ms: max_us / 1000,
-                poll_overrun_count: m.poll_overrun_count.load(std::sync::atomic::Ordering::Relaxed),
+                poll_overrun_count: m
+                    .poll_overrun_count
+                    .load(std::sync::atomic::Ordering::Relaxed),
                 poll_interval_ms: ctx.config.poll_interval_ms,
                 channels_total: engine.channels.count(),
                 channels_fault,
@@ -386,9 +400,9 @@ pub fn handle_engine_cmd<H: HalRead + HalWrite + HalDiagnostics>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sandstar_engine::Engine;
     use sandstar_engine::channel::{Channel, ChannelDirection, ChannelType};
     use sandstar_engine::value::ValueConv;
+    use sandstar_engine::Engine;
     use sandstar_hal::mock::MockHal;
     use tokio::sync::oneshot;
 
@@ -832,7 +846,11 @@ mod tests {
             &mut ctx,
         );
         let result = rx.blocking_recv().unwrap();
-        assert!(result.is_ok(), "write should succeed on non-read-only server: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "write should succeed on non-read-only server: {:?}",
+            result.err()
+        );
 
         // Verify the write stuck by reading write levels
         let mut ctx = make_ctx(&config, &mut watches, &mut counter, &history);
@@ -919,7 +937,11 @@ mod tests {
         let result = rx.blocking_recv().unwrap();
         assert!(result.is_ok());
         let msg = result.unwrap();
-        assert!(msg.contains("poll complete"), "should report poll complete: {}", msg);
+        assert!(
+            msg.contains("poll complete"),
+            "should report poll complete: {}",
+            msg
+        );
     }
 
     #[test]
@@ -951,7 +973,12 @@ mod tests {
         handle_engine_cmd(EngineCmd::AboutInfo { reply }, &mut engine, &mut ctx);
         let (boot, now) = rx.blocking_recv().unwrap();
         // boot should be <= now (boot is now - uptime)
-        assert!(boot <= now, "boot time {} should be <= current time {}", boot, now);
+        assert!(
+            boot <= now,
+            "boot time {} should be <= current time {}",
+            boot,
+            now
+        );
         // Both should be nonzero (we're past 1970)
         assert!(now > 0, "current time should be nonzero");
     }
@@ -965,12 +992,15 @@ mod tests {
         use crate::history::HistoryPoint;
         use sandstar_engine::EngineStatus;
         for i in 0..5 {
-            history.record(1113, HistoryPoint {
-                ts: 1000 + i,
-                cur: 72.0 + i as f64,
-                raw: 2048.0,
-                status: EngineStatus::Ok,
-            });
+            history.record(
+                1113,
+                HistoryPoint {
+                    ts: 1000 + i,
+                    cur: 72.0 + i as f64,
+                    raw: 2048.0,
+                    status: EngineStatus::Ok,
+                },
+            );
         }
         let mut watches = HashMap::new();
         let mut counter = 0u64;
@@ -1059,6 +1089,9 @@ mod tests {
         let (reply, rx) = oneshot::channel();
         handle_engine_cmd(EngineCmd::Diagnostics { reply }, &mut engine, &mut ctx);
         let info = rx.blocking_recv().unwrap();
-        assert_eq!(info.i2c_backoff_active, 1, "should have one I2C sensor in backoff");
+        assert_eq!(
+            info.i2c_backoff_active, 1,
+            "should have one I2C sensor in backoff"
+        );
     }
 }

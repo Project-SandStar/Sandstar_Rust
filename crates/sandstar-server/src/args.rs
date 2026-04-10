@@ -28,7 +28,12 @@ pub struct ServerArgs {
     pub socket: String,
 
     /// Poll interval in milliseconds.
-    #[arg(long, short = 'p', env = "SANDSTAR_POLL_INTERVAL_MS", default_value_t = 1000)]
+    #[arg(
+        long,
+        short = 'p',
+        env = "SANDSTAR_POLL_INTERVAL_MS",
+        default_value_t = 1000
+    )]
     pub poll_interval_ms: u64,
 
     /// Log level filter (e.g., "info", "debug", "sandstar_engine=debug,info").
@@ -188,10 +193,7 @@ mod tests {
             "debug",
             "--no-pid-file",
         ]);
-        assert_eq!(
-            args.config_dir,
-            Some(PathBuf::from("/etc/sandstar"))
-        );
+        assert_eq!(args.config_dir, Some(PathBuf::from("/etc/sandstar")));
         assert_eq!(args.poll_interval_ms, 500);
         assert_eq!(args.log_level, "debug");
         assert!(args.no_pid_file);
@@ -228,17 +230,9 @@ mod tests {
 
     #[test]
     fn test_short_flags() {
-        let args = ServerArgs::parse_from([
-            "sandstar-engine-server",
-            "-c",
-            "/etc/sandstar",
-            "-p",
-            "250",
-        ]);
-        assert_eq!(
-            args.config_dir,
-            Some(PathBuf::from("/etc/sandstar"))
-        );
+        let args =
+            ServerArgs::parse_from(["sandstar-engine-server", "-c", "/etc/sandstar", "-p", "250"]);
+        assert_eq!(args.config_dir, Some(PathBuf::from("/etc/sandstar")));
         assert_eq!(args.poll_interval_ms, 250);
     }
 
@@ -273,21 +267,13 @@ mod tests {
 
     #[test]
     fn test_rate_limit_custom() {
-        let args = ServerArgs::parse_from([
-            "sandstar-engine-server",
-            "--rate-limit",
-            "50",
-        ]);
+        let args = ServerArgs::parse_from(["sandstar-engine-server", "--rate-limit", "50"]);
         assert_eq!(args.rate_limit, 50);
     }
 
     #[test]
     fn test_rate_limit_unlimited() {
-        let args = ServerArgs::parse_from([
-            "sandstar-engine-server",
-            "--rate-limit",
-            "0",
-        ]);
+        let args = ServerArgs::parse_from(["sandstar-engine-server", "--rate-limit", "0"]);
         assert_eq!(args.rate_limit, 0);
     }
 
@@ -314,11 +300,8 @@ mod tests {
     #[test]
     fn test_tls_cert_only() {
         // It's valid to parse --tls-cert without --tls-key (validation happens at runtime)
-        let args = ServerArgs::parse_from([
-            "sandstar-engine-server",
-            "--tls-cert",
-            "/path/to/cert.pem",
-        ]);
+        let args =
+            ServerArgs::parse_from(["sandstar-engine-server", "--tls-cert", "/path/to/cert.pem"]);
         assert!(args.tls_cert.is_some());
         assert!(args.tls_key.is_none());
     }

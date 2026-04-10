@@ -30,8 +30,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 /// Read the next text-frame JSON from a WS stream (5s timeout).
 async fn read_ws_json(
-    ws_rx: &mut (impl StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
-             + Unpin),
+    ws_rx: &mut (impl StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin),
 ) -> serde_json::Value {
     let msg = tokio::time::timeout(Duration::from_secs(5), ws_rx.next())
         .await
@@ -299,11 +298,7 @@ async fn stress_channel_filter_large_dataset() {
             .send()
             .await
             .unwrap();
-        assert_eq!(
-            resp.status(),
-            200,
-            "channel {id} should be readable"
-        );
+        assert_eq!(resp.status(), 200, "channel {id} should be readable");
     }
 }
 
@@ -410,7 +405,11 @@ async fn stress_concurrent_writes_20() {
             .send()
             .await
             .unwrap();
-        assert_eq!(resp.status(), 200, "pointWrite read for channel {id} should return 200");
+        assert_eq!(
+            resp.status(),
+            200,
+            "pointWrite read for channel {id} should return 200"
+        );
         let body: serde_json::Value = resp.json().await.unwrap();
         // Response is a flat array of 17 levels
         let levels = body.as_array();
@@ -622,11 +621,7 @@ async fn stress_malformed_requests() {
     }
 
     // Server should still be alive
-    let resp = client
-        .get(server.url("/api/status"))
-        .send()
-        .await
-        .unwrap();
+    let resp = client.get(server.url("/api/status")).send().await.unwrap();
     assert_eq!(
         resp.status(),
         200,
@@ -693,7 +688,10 @@ async fn stress_ws_rapid_subscribe_unsubscribe() {
     )
     .await;
     let pong = read_ws_json(&mut ws_rx).await;
-    assert_eq!(pong["op"], "pong", "WS should still be alive after 50 sub/unsub cycles");
+    assert_eq!(
+        pong["op"], "pong",
+        "WS should still be alive after 50 sub/unsub cycles"
+    );
 }
 
 // C12. Max WS connections — open connections until rejected, verify limit is enforced
@@ -951,7 +949,10 @@ async fn stress_sequencer_stage_cycling() {
     // Force all off by going well below 0
     let stages = seq.execute(-50.0);
     let active = stages.iter().filter(|&&s| s).count();
-    assert_eq!(active, 0, "all stages should be off at -50 (below hysteresis band)");
+    assert_eq!(
+        active, 0,
+        "all stages should be off at -50 (below hysteresis band)"
+    );
 
     // Rapid cycling between -50 and 150 — 200 times
     // Use values beyond the range to overcome hysteresis dead bands
@@ -964,7 +965,10 @@ async fn stress_sequencer_stage_cycling() {
             assert_eq!(active, 4, "all stages should be on at 150% (above range)");
         } else {
             let active = stages.iter().filter(|&&s| s).count();
-            assert_eq!(active, 0, "all stages should be off at -50% (below hysteresis)");
+            assert_eq!(
+                active, 0,
+                "all stages should be off at -50% (below hysteresis)"
+            );
         }
     }
 
@@ -973,7 +977,11 @@ async fn stress_sequencer_stage_cycling() {
     for i in 0..=100 {
         let _ = seq16.execute(i as f64);
     }
-    assert_eq!(seq16.active_count(), 16, "all 16 stages should be on at 100%");
+    assert_eq!(
+        seq16.active_count(),
+        16,
+        "all 16 stages should be on at 100%"
+    );
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1026,9 +1034,9 @@ async fn stress_rate_limiter_server_integration() {
 
     // Spawn cmd loop (reuse the common pattern but inline for this test)
     tokio::spawn(async move {
+        use sandstar_server::auth::AuthStore;
         use sandstar_server::cmd_handler::{self, CmdContext, WatchState};
         use sandstar_server::config::ServerConfig;
-        use sandstar_server::auth::AuthStore;
         use std::collections::HashMap;
 
         let mut engine = setup_demo_engine();
@@ -1116,11 +1124,7 @@ async fn stress_invalid_auth_flood() {
     }
 
     // Verify server is still functional with correct token
-    let resp = client
-        .get(server.url("/api/status"))
-        .send()
-        .await
-        .unwrap();
+    let resp = client.get(server.url("/api/status")).send().await.unwrap();
     assert_eq!(
         resp.status(),
         200,
@@ -1223,10 +1227,7 @@ async fn stress_priority_array_boundary_levels() {
 
     // Level 255 (extreme) — should be no-op
     let result = pa.set_level(255, Some(42.0), "invalid", 0.0);
-    assert_eq!(
-        result.effective_value, None,
-        "level 255 should be ignored"
-    );
+    assert_eq!(result.effective_value, None, "level 255 should be ignored");
 
     // Valid levels should still work
     pa.set_level(1, Some(10.0), "valid", 0.0);

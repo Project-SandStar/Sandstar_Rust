@@ -212,9 +212,7 @@ impl ComponentStore {
 
     /// Check whether a given ID is currently occupied.
     pub fn contains(&self, id: u32) -> bool {
-        self.slots
-            .get(id as usize)
-            .is_some_and(|s| s.is_some())
+        self.slots.get(id as usize).is_some_and(|s| s.is_some())
     }
 }
 

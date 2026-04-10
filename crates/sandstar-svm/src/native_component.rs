@@ -95,8 +95,7 @@ fn resolve_slot(ctx: &NativeContext<'_>, slot_code_offset: usize) -> VmResult<(u
             code_len: code.len(),
         });
     }
-    let type_bix =
-        u16::from_le_bytes([code[type_bix_offset], code[type_bix_offset + 1]]);
+    let type_bix = u16::from_le_bytes([code[type_bix_offset], code[type_bix_offset + 1]]);
 
     // Read handle from Slot descriptor at code[slot + 6..slot + 8]
     let handle_offset = slot_code_offset + 6;
@@ -106,8 +105,7 @@ fn resolve_slot(ctx: &NativeContext<'_>, slot_code_offset: usize) -> VmResult<(u
             code_len: code.len(),
         });
     }
-    let handle =
-        u16::from_le_bytes([code[handle_offset], code[handle_offset + 1]]);
+    let handle = u16::from_le_bytes([code[handle_offset], code[handle_offset + 1]]);
 
     // Resolve Type descriptor: type_code_offset = type_bix * block_size
     let type_code_offset = (type_bix as usize) * block_size;
@@ -128,10 +126,7 @@ fn resolve_slot(ctx: &NativeContext<'_>, slot_code_offset: usize) -> VmResult<(u
 
 #[inline]
 fn data_u8(memory: &[u8], addr: usize) -> VmResult<u8> {
-    memory
-        .get(addr)
-        .copied()
-        .ok_or(VmError::NullPointer)
+    memory.get(addr).copied().ok_or(VmError::NullPointer)
 }
 
 #[inline]
@@ -683,17 +678,14 @@ mod tests {
         let slot_offset: usize = 8;
         // type block index at slot + 4 = offset 12
         code[12..14].copy_from_slice(&1u16.to_le_bytes()); // block index 1
-        // handle at slot + 6 = offset 14
+                                                           // handle at slot + 6 = offset 14
         code[14..16].copy_from_slice(&handle.to_le_bytes());
 
         (code, slot_offset)
     }
 
     /// Create a NativeContext with both data and code segments.
-    fn make_ctx<'a>(
-        data: &'a mut Vec<u8>,
-        code: &'a [u8],
-    ) -> NativeContext<'a> {
+    fn make_ctx<'a>(data: &'a mut Vec<u8>, code: &'a [u8]) -> NativeContext<'a> {
         NativeContext::with_code(data, code, TEST_BLOCK_SIZE)
     }
 
@@ -1061,8 +1053,7 @@ mod tests {
         assert_eq!(changed, 1);
 
         let stored = i64::from_le_bytes([
-            data[10], data[11], data[12], data[13],
-            data[14], data[15], data[16], data[17],
+            data[10], data[11], data[12], data[13], data[14], data[15], data[16], data[17],
         ]);
         assert_eq!(stored, val);
     }
@@ -1171,20 +1162,50 @@ mod tests {
         register_kit0_component(&mut table);
 
         // Verify specific slots are implemented (not stubs)
-        assert!(table.is_implemented(0, 22), "invokeVoid should be implemented");
+        assert!(
+            table.is_implemented(0, 22),
+            "invokeVoid should be implemented"
+        );
         assert!(table.is_implemented(0, 29), "getBool should be implemented");
         assert!(table.is_implemented(0, 30), "getInt should be implemented");
         assert!(table.is_implemented(0, 31), "getLong should be implemented");
-        assert!(table.is_implemented(0, 32), "getFloat should be implemented");
-        assert!(table.is_implemented(0, 33), "getDouble should be implemented");
+        assert!(
+            table.is_implemented(0, 32),
+            "getFloat should be implemented"
+        );
+        assert!(
+            table.is_implemented(0, 33),
+            "getDouble should be implemented"
+        );
         assert!(table.is_implemented(0, 34), "getBuf should be implemented");
-        assert!(table.is_implemented(0, 35), "doSetBool should be implemented");
-        assert!(table.is_implemented(0, 36), "doSetInt should be implemented");
-        assert!(table.is_implemented(0, 37), "doSetLong should be implemented");
-        assert!(table.is_implemented(0, 38), "doSetFloat should be implemented");
-        assert!(table.is_implemented(0, 39), "doSetDouble should be implemented");
-        assert!(table.is_implemented(0, 40), "Type.malloc should be implemented");
-        assert!(table.is_implemented(0, 55), "Test.doMain should be implemented");
+        assert!(
+            table.is_implemented(0, 35),
+            "doSetBool should be implemented"
+        );
+        assert!(
+            table.is_implemented(0, 36),
+            "doSetInt should be implemented"
+        );
+        assert!(
+            table.is_implemented(0, 37),
+            "doSetLong should be implemented"
+        );
+        assert!(
+            table.is_implemented(0, 38),
+            "doSetFloat should be implemented"
+        );
+        assert!(
+            table.is_implemented(0, 39),
+            "doSetDouble should be implemented"
+        );
+        assert!(
+            table.is_implemented(0, 40),
+            "Type.malloc should be implemented"
+        );
+        assert!(
+            table.is_implemented(0, 55),
+            "Test.doMain should be implemented"
+        );
     }
 
     #[test]

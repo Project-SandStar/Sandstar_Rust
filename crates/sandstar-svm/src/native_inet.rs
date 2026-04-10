@@ -181,8 +181,7 @@ pub fn tcp_connect(ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult<i32>
             match TcpStream::connect(sock_addr) {
                 Ok(stream) => {
                     let _ = stream.set_nonblocking(true);
-                    let handle =
-                        with_sockets(|s| s.insert_tcp(TcpSocketState::Connecting(stream)));
+                    let handle = with_sockets(|s| s.insert_tcp(TcpSocketState::Connecting(stream)));
                     store_handle_at(ctx.memory, _self_ptr as usize, handle);
                     Ok(1)
                 }
@@ -954,31 +953,31 @@ fn is_would_block_or_in_progress(e: &io::Error) -> bool {
 /// table, replacing the stubs that were registered by `NativeTable::with_defaults()`.
 pub fn register_kit2(table: &mut NativeTable) {
     // TCP Client
-    table.register(2, 0, tcp_connect);           // TcpSocket.connect
-    table.register(2, 1, tcp_finish_connect);    // TcpSocket.finishConnect
-    table.register(2, 2, tcp_write);             // TcpSocket.write
-    table.register(2, 3, tcp_read);              // TcpSocket.read
-    table.register(2, 4, tcp_close);             // TcpSocket.close
+    table.register(2, 0, tcp_connect); // TcpSocket.connect
+    table.register(2, 1, tcp_finish_connect); // TcpSocket.finishConnect
+    table.register(2, 2, tcp_write); // TcpSocket.write
+    table.register(2, 3, tcp_read); // TcpSocket.read
+    table.register(2, 4, tcp_close); // TcpSocket.close
 
     // TCP Server
-    table.register(2, 5, tcp_server_bind);       // TcpServerSocket.bind
-    table.register(2, 6, tcp_server_accept);     // TcpServerSocket.accept
-    table.register(2, 7, tcp_server_close);      // TcpServerSocket.close
+    table.register(2, 5, tcp_server_bind); // TcpServerSocket.bind
+    table.register(2, 6, tcp_server_accept); // TcpServerSocket.accept
+    table.register(2, 7, tcp_server_close); // TcpServerSocket.close
 
     // UDP
-    table.register(2, 8, udp_open);              // UdpSocket.open
-    table.register(2, 9, udp_bind);              // UdpSocket.bind
-    table.register(2, 10, udp_send);             // UdpSocket.send
-    table.register(2, 11, udp_receive);          // UdpSocket.receive
-    table.register(2, 12, udp_close);            // UdpSocket.close
-    table.register(2, 13, udp_max_packet_size);  // UdpSocket.maxPacketSize
+    table.register(2, 8, udp_open); // UdpSocket.open
+    table.register(2, 9, udp_bind); // UdpSocket.bind
+    table.register(2, 10, udp_send); // UdpSocket.send
+    table.register(2, 11, udp_receive); // UdpSocket.receive
+    table.register(2, 12, udp_close); // UdpSocket.close
+    table.register(2, 13, udp_max_packet_size); // UdpSocket.maxPacketSize
     table.register(2, 14, udp_ideal_packet_size); // UdpSocket.idealPacketSize
 
     // Crypto
-    table.register(2, 15, crypto_sha1);          // Crypto.sha1
+    table.register(2, 15, crypto_sha1); // Crypto.sha1
 
     // UDP multicast (must be after other UDP slots for correct ordering)
-    table.register(2, 16, udp_join);             // UdpSocket.join
+    table.register(2, 16, udp_join); // UdpSocket.join
 }
 
 /// Reset the global socket store, closing all sockets.
@@ -1017,8 +1016,8 @@ mod tests {
         assert_eq!(
             digest,
             [
-                0xda, 0x39, 0xa3, 0xee, 0x5e, 0x6b, 0x4b, 0x0d, 0x32, 0x55,
-                0xbf, 0xef, 0x95, 0x60, 0x18, 0x90, 0xaf, 0xd8, 0x07, 0x09,
+                0xda, 0x39, 0xa3, 0xee, 0x5e, 0x6b, 0x4b, 0x0d, 0x32, 0x55, 0xbf, 0xef, 0x95, 0x60,
+                0x18, 0x90, 0xaf, 0xd8, 0x07, 0x09,
             ]
         );
     }
@@ -1030,8 +1029,8 @@ mod tests {
         assert_eq!(
             digest,
             [
-                0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e,
-                0x25, 0x71, 0x78, 0x50, 0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d,
+                0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e, 0x25, 0x71, 0x78, 0x50,
+                0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d,
             ]
         );
     }
@@ -1045,8 +1044,8 @@ mod tests {
         assert_eq!(
             digest,
             [
-                0x84, 0x98, 0x3e, 0x44, 0x1c, 0x3b, 0xd2, 0x6e, 0xba, 0xae,
-                0x4a, 0xa1, 0xf9, 0x51, 0x29, 0xe5, 0xe5, 0x46, 0x70, 0xf1,
+                0x84, 0x98, 0x3e, 0x44, 0x1c, 0x3b, 0xd2, 0x6e, 0xba, 0xae, 0x4a, 0xa1, 0xf9, 0x51,
+                0x29, 0xe5, 0xe5, 0x46, 0x70, 0xf1,
             ]
         );
     }
@@ -1059,8 +1058,8 @@ mod tests {
         assert_eq!(
             digest,
             [
-                0x86, 0xf7, 0xe4, 0x37, 0xfa, 0xa5, 0xa7, 0xfc, 0xe1, 0x5d,
-                0x1d, 0xdc, 0xb9, 0xea, 0xea, 0xea, 0x37, 0x76, 0x67, 0xb8,
+                0x86, 0xf7, 0xe4, 0x37, 0xfa, 0xa5, 0xa7, 0xfc, 0xe1, 0x5d, 0x1d, 0xdc, 0xb9, 0xea,
+                0xea, 0xea, 0x37, 0x76, 0x67, 0xb8,
             ]
         );
     }
@@ -1073,8 +1072,8 @@ mod tests {
         assert_eq!(
             digest,
             [
-                0x2f, 0xd4, 0xe1, 0xc6, 0x7a, 0x2d, 0x28, 0xfc, 0xed, 0x84,
-                0x9e, 0xe1, 0xbb, 0x76, 0xe7, 0x39, 0x1b, 0x93, 0xeb, 0x12,
+                0x2f, 0xd4, 0xe1, 0xc6, 0x7a, 0x2d, 0x28, 0xfc, 0xed, 0x84, 0x9e, 0xe1, 0xbb, 0x76,
+                0xe7, 0x39, 0x1b, 0x93, 0xeb, 0x12,
             ]
         );
     }
@@ -1100,8 +1099,8 @@ mod tests {
 
         // Check the digest at offset 200
         let expected: [u8; 20] = [
-            0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e,
-            0x25, 0x71, 0x78, 0x50, 0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d,
+            0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e, 0x25, 0x71, 0x78, 0x50,
+            0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d,
         ];
         assert_eq!(&ctx.memory[200..220], &expected);
     }
@@ -1126,8 +1125,8 @@ mod tests {
         crypto_sha1(&mut ctx, &params).unwrap();
 
         let expected: [u8; 20] = [
-            0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e,
-            0x25, 0x71, 0x78, 0x50, 0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d,
+            0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e, 0x25, 0x71, 0x78, 0x50,
+            0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d,
         ];
         assert_eq!(&ctx.memory[205..225], &expected);
     }
@@ -1157,7 +1156,7 @@ mod tests {
         let mut ctx = NativeContext::new(&mut mem);
         let result = tcp_close(&mut ctx, &[0]).unwrap();
         assert_eq!(result, 0); // void return
-        // closed should be set to true
+                               // closed should be set to true
         assert_eq!(mem[0], 1);
     }
 
@@ -1193,7 +1192,7 @@ mod tests {
         // Use port 0 for OS-assigned port
         let result = tcp_server_bind(&mut ctx, &[0, 0]).unwrap();
         assert_eq!(result, 1); // true — success
-        // closed should be set to false
+                               // closed should be set to false
         assert_eq!(mem[0], 0);
         // handle should be > 0
         let handle = read_i32(&mem, 4);

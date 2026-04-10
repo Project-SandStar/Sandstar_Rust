@@ -77,10 +77,7 @@ impl AsyncDriver for MqttDriver {
         Vec::new()
     }
 
-    async fn write(
-        &mut self,
-        _writes: &[(u32, f64)],
-    ) -> Vec<(u32, Result<(), DriverError>)> {
+    async fn write(&mut self, _writes: &[(u32, f64)]) -> Vec<(u32, Result<(), DriverError>)> {
         Vec::new()
     }
 

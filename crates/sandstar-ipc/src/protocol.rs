@@ -134,7 +134,7 @@ mod tests {
         let result: io::Result<Option<EngineCommand>> = read_frame(&mut cursor);
         // Should return None (EOF during length read) or UnexpectedEof
         match result {
-            Ok(None) => {} // clean EOF
+            Ok(None) => {}                                           // clean EOF
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {} // also acceptable
             other => panic!("expected EOF/None, got: {:?}", other),
         }
@@ -177,7 +177,10 @@ mod tests {
         let mut cursor = Cursor::new(buf);
         let result: io::Result<Option<EngineCommand>> = read_frame(&mut cursor);
         // Zero bytes can't deserialize to an EngineCommand — should be InvalidData
-        assert!(result.is_err(), "zero-length frame should error on deserialize");
+        assert!(
+            result.is_err(),
+            "zero-length frame should error on deserialize"
+        );
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
     }
 
@@ -430,7 +433,11 @@ mod tests {
         write_frame(&mut buf, &cmd).unwrap();
 
         // Verify the frame is quite small (Shutdown has no fields)
-        assert!(buf.len() < 20, "Shutdown frame should be small, got {} bytes", buf.len());
+        assert!(
+            buf.len() < 20,
+            "Shutdown frame should be small, got {} bytes",
+            buf.len()
+        );
 
         let mut cursor = Cursor::new(&buf);
         let decoded: EngineCommand = read_frame(&mut cursor).unwrap().unwrap();

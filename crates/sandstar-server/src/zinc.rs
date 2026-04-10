@@ -329,8 +329,7 @@ mod tests {
 
     #[test]
     fn test_ref_value() {
-        let input =
-            "ver:\"3.0\"\nid,channel\n@p:abc-123 \"My Point\",612\n";
+        let input = "ver:\"3.0\"\nid,channel\n@p:abc-123 \"My Point\",612\n";
         let grid = ZincGrid::parse(input).unwrap();
         assert_eq!(grid.integer(0, "channel", -1), 612);
         assert!(!grid.is_null(0, "id"));

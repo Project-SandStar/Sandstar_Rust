@@ -50,9 +50,9 @@ impl Default for VmConfig {
     /// 256KB.  Use [`VmConfig::sedona_compat`] for strict classic limits.
     fn default() -> Self {
         Self {
-            max_stack_size: 64 * 1024,          // 64KB  (4x Sedona)
+            max_stack_size: 64 * 1024,           // 64KB  (4x Sedona)
             max_components: 4096,                // 4096  (16x Sedona)
-            max_code_size: 4 * 1024 * 1024,     // 4MB   (16x Sedona)
+            max_code_size: 4 * 1024 * 1024,      // 4MB   (16x Sedona)
             max_data_size: 1024 * 1024,          // 1MB   (16x Sedona)
             max_call_depth: 64,                  // 64    (4x Sedona)
             max_steps_per_tick: 1_000_000,       // 1M steps
@@ -65,10 +65,10 @@ impl VmConfig {
     /// Sedona-compatible defaults — same limits as the original C VM.
     pub fn sedona_compat() -> Self {
         Self {
-            max_stack_size: 16 * 1024,       // 16KB
+            max_stack_size: 16 * 1024, // 16KB
             max_components: 256,
-            max_code_size: 256 * 1024,       // 256KB
-            max_data_size: 64 * 1024,        // 64KB
+            max_code_size: 256 * 1024, // 256KB
+            max_data_size: 64 * 1024,  // 64KB
             max_call_depth: 16,
             max_steps_per_tick: 100_000,
             address_width: AddressWidth::Block16,

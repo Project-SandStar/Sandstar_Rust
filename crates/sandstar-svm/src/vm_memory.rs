@@ -37,9 +37,7 @@ impl VmMemory {
     pub fn from_image(image: &ScodeImage) -> VmResult<Self> {
         let data_size = image.header.data_size;
         if data_size == 0 {
-            return Err(VmError::BadImage(
-                "data_size is 0 in scode header".into(),
-            ));
+            return Err(VmError::BadImage("data_size is 0 in scode header".into()));
         }
 
         Ok(VmMemory {
@@ -96,10 +94,13 @@ impl VmMemory {
     /// Read a `u8` from the code segment at an absolute byte offset.
     #[inline]
     pub fn code_u8(&self, offset: usize) -> VmResult<u8> {
-        self.code.get(offset).copied().ok_or(VmError::PcOutOfBounds {
-            pc: offset,
-            code_len: self.code.len(),
-        })
+        self.code
+            .get(offset)
+            .copied()
+            .ok_or(VmError::PcOutOfBounds {
+                pc: offset,
+                code_len: self.code.len(),
+            })
     }
 
     /// Read a little-endian `u16` from the code segment.
@@ -374,7 +375,9 @@ impl VmMemory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::image_loader::{ScodeImage, SCODE_BLOCK_SIZE, SCODE_MAGIC, SCODE_MAJOR_VER, SCODE_MINOR_VER};
+    use crate::image_loader::{
+        ScodeImage, SCODE_BLOCK_SIZE, SCODE_MAGIC, SCODE_MAJOR_VER, SCODE_MINOR_VER,
+    };
     use crate::vm_config::AddressWidth;
 
     /// Build a minimal valid scode image with given code_size and data_size.

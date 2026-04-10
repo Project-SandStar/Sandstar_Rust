@@ -112,10 +112,7 @@ impl SaxConverter {
                     if tag == "comp" {
                         let attrs = Self::parse_attrs(e);
                         let comp_name = attrs.get("name").cloned().unwrap_or_default();
-                        let id: u32 = attrs
-                            .get("id")
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(0);
+                        let id: u32 = attrs.get("id").and_then(|v| v.parse().ok()).unwrap_or(0);
                         let comp_type = attrs.get("type").cloned().unwrap_or_default();
 
                         let full_path = if path_stack.is_empty() {
@@ -168,10 +165,7 @@ impl SaxConverter {
                         // Self-closing <comp ... /> — treat as leaf.
                         let attrs = Self::parse_attrs(e);
                         let comp_name = attrs.get("name").cloned().unwrap_or_default();
-                        let id: u32 = attrs
-                            .get("id")
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(0);
+                        let id: u32 = attrs.get("id").and_then(|v| v.parse().ok()).unwrap_or(0);
                         let comp_type = attrs.get("type").cloned().unwrap_or_default();
 
                         let full_path = if path_stack.is_empty() {
@@ -277,8 +271,7 @@ impl SaxConverter {
         if let Some(comp) = self.components.get(source_path.as_str()) {
             if comp.comp_type == "control::WriteFloat" && source_slot == "out" {
                 // Follow the WriteFloat's input.
-                if let Some(result) =
-                    self.follow_link_backward_depth(source_path, "in", depth + 1)
+                if let Some(result) = self.follow_link_backward_depth(source_path, "in", depth + 1)
                 {
                     return Some(result);
                 }
@@ -313,8 +306,7 @@ impl SaxConverter {
             if let Some(comp) = self.components.get(target_path.as_str()) {
                 if comp.comp_type == "control::WriteFloat" && target_slot == "in" {
                     // Follow through the WriteFloat's output.
-                    let mut fwd =
-                        self.follow_link_forward_depth(target_path, "out", depth + 1);
+                    let mut fwd = self.follow_link_forward_depth(target_path, "out", depth + 1);
                     results.append(&mut fwd);
                     continue;
                 }
@@ -465,22 +457,36 @@ impl SaxConverter {
         let lp = self.components.get(lp_path)?;
         consumed.insert(lp_path.to_string());
 
-        let kp: f64 = lp.props.get("kp").and_then(|v| v.parse().ok()).unwrap_or(1.0);
-        let ki: f64 = lp.props.get("ki").and_then(|v| v.parse().ok()).unwrap_or(0.0);
-        let kd: f64 = lp.props.get("kd").and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        let kp: f64 = lp
+            .props
+            .get("kp")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1.0);
+        let ki: f64 = lp
+            .props
+            .get("ki")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0);
+        let kd: f64 = lp
+            .props
+            .get("kd")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0);
 
         // Follow .cv input backward to find feedback channel.
-        let feedback_channel = self
-            .follow_link_backward(lp_path, "cv")
-            .and_then(|(src_path, _)| {
-                let comp = self.components.get(&src_path)?;
-                if comp.comp_type == "EacIo::AnalogInput" {
-                    consumed.insert(src_path.clone());
-                    comp.props.get("channel").and_then(|v| v.parse::<u32>().ok())
-                } else {
-                    None
-                }
-            });
+        let feedback_channel =
+            self.follow_link_backward(lp_path, "cv")
+                .and_then(|(src_path, _)| {
+                    let comp = self.components.get(&src_path)?;
+                    if comp.comp_type == "EacIo::AnalogInput" {
+                        consumed.insert(src_path.clone());
+                        comp.props
+                            .get("channel")
+                            .and_then(|v| v.parse::<u32>().ok())
+                    } else {
+                        None
+                    }
+                });
 
         // Follow .sp input backward to find setpoint channel.
         let (setpoint_channel, _sp_write_level) = self
@@ -611,10 +617,7 @@ impl SaxConverter {
         if hysteresis.is_some() || !output_channels.is_empty() {
             section.push('\n');
             section.push_str("[loop.sequencer]\n");
-            section.push_str(&format!(
-                "hysteresis = {:.1}\n",
-                hysteresis.unwrap_or(0.5)
-            ));
+            section.push_str(&format!("hysteresis = {:.1}\n", hysteresis.unwrap_or(0.5)));
         }
 
         Some(section)
@@ -635,7 +638,10 @@ impl SaxConverter {
             .to_lowercase();
 
         let mut section = String::new();
-        section.push_str(&format!("# Converted from {} (id={})\n", comp.path, comp.id));
+        section.push_str(&format!(
+            "# Converted from {} (id={})\n",
+            comp.path, comp.id
+        ));
         section.push_str("[[component]]\n");
         section.push_str(&format!("name = \"{comp_name}\"\n"));
 

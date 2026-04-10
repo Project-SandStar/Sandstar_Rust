@@ -567,7 +567,10 @@ fn execute_component(kind: &mut ComponentKind, inputs: &[f64], now: Instant) -> 
                     .unwrap_or_default()
                     .as_secs();
                 let secs_in_day = now_time % 86400;
-                ((secs_in_day / 3600) as u8, ((secs_in_day % 3600) / 60) as u8)
+                (
+                    (secs_in_day / 3600) as u8,
+                    ((secs_in_day % 3600) / 60) as u8,
+                )
             };
             Some(c.evaluate(hour, minute))
         }
@@ -580,7 +583,10 @@ fn execute_component(kind: &mut ComponentKind, inputs: &[f64], now: Instant) -> 
                     .unwrap_or_default()
                     .as_secs();
                 let secs_in_day = now_time % 86400;
-                ((secs_in_day / 3600) as u8, ((secs_in_day % 3600) / 60) as u8)
+                (
+                    (secs_in_day / 3600) as u8,
+                    ((secs_in_day % 3600) / 60) as u8,
+                )
             };
             let out = c.evaluate(hour, minute);
             Some(if out { 1.0 } else { 0.0 })
@@ -650,7 +656,10 @@ fn build_component_kind(cc: &ComponentConfig) -> Result<ComponentKind, String> {
         }
         "const_float" => {
             let val = cc.value.ok_or_else(|| {
-                format!("component '{}': const_float requires 'value' field", cc.name)
+                format!(
+                    "component '{}': const_float requires 'value' field",
+                    cc.name
+                )
             })?;
             Ok(ComponentKind::ConstFloat(val))
         }
@@ -755,10 +764,7 @@ fn build_component_kind(cc: &ComponentConfig) -> Result<ComponentKind, String> {
         "or2" => Ok(ComponentKind::Or2(Or2::new())),
         "not" => Ok(ComponentKind::Not(Not::new())),
         "sr_latch" => Ok(ComponentKind::SRLatch(SRLatch::new())),
-        other => Err(format!(
-            "component '{}': unknown type '{}'",
-            cc.name, other
-        )),
+        other => Err(format!("component '{}': unknown type '{}'", cc.name, other)),
     }
 }
 
@@ -784,8 +790,8 @@ mod tests {
                 id,
                 ChannelType::Analog,
                 dir,
-                0,       // device
-                id,      // address = channel ID (unique per channel)
+                0,  // device
+                id, // address = channel ID (unique per channel)
                 false,
                 ValueConv::default(),
                 &format!("ch{}", id),
@@ -863,9 +869,7 @@ hysteresis = 0.5
     fn test_load_missing_file() {
         let result = ControlRunner::load(Path::new("/nonexistent/control.toml"));
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .contains("failed to read"));
+        assert!(result.unwrap_err().contains("failed to read"));
     }
 
     #[test]
@@ -924,7 +928,11 @@ kp = 1.0
         .unwrap();
 
         let runner = ControlRunner::load(&path).unwrap();
-        assert_eq!(runner.loop_count(), 0, "loop with no outputs should be skipped");
+        assert_eq!(
+            runner.loop_count(),
+            0,
+            "loop with no outputs should be skipped"
+        );
     }
 
     #[test]
@@ -975,8 +983,8 @@ output_channels = [3]
         ]);
 
         // Seed MockHal so channel_read returns real values through the HAL pipeline.
-        seed_hal_value(&engine, 4, 77.0);   // feedback = 77F (zone temp)
-        seed_hal_value(&engine, 75, 70.0);  // setpoint = 70F
+        seed_hal_value(&engine, 4, 77.0); // feedback = 77F (zone temp)
+        seed_hal_value(&engine, 75, 70.0); // setpoint = 70F
 
         // Create control runner with one loop.
         let mut runner = ControlRunner::new();
@@ -1182,14 +1190,14 @@ output_channels = [3]
 
         // Check that channel 35 was written with the PID output.
         let ch35 = engine.channels.get(35).unwrap();
-        assert!(ch35.priority_array.is_some(), "output should have been written");
+        assert!(
+            ch35.priority_array.is_some(),
+            "output should have been written"
+        );
         let pa = ch35.priority_array.as_ref().unwrap();
         let levels = pa.levels();
         let written = levels[7].value; // level 8 -> index 7
-        assert!(
-            written.is_some(),
-            "level 8 should have a value"
-        );
+        assert!(written.is_some(), "level 8 should have a value");
         let val = written.unwrap();
         assert!(
             (val - 60.0).abs() < 0.5,
@@ -1225,7 +1233,9 @@ write_level = 8
         assert_eq!(comp.name, "const_setpoint");
         assert_eq!(comp.output_channel, 75);
         assert_eq!(comp.write_level, 8);
-        assert!(matches!(comp.kind, ComponentKind::ConstFloat(v) if (v - 70.0).abs() < f64::EPSILON));
+        assert!(
+            matches!(comp.kind, ComponentKind::ConstFloat(v) if (v - 70.0).abs() < f64::EPSILON)
+        );
     }
 
     #[test]
@@ -1407,7 +1417,10 @@ output_channel = 1
 
         // 100.0 / 4.0 = 25.0
         let ch22 = engine.channels.get(22).unwrap();
-        assert!(ch22.priority_array.is_some(), "output should have been written");
+        assert!(
+            ch22.priority_array.is_some(),
+            "output should have been written"
+        );
         let pa = ch22.priority_array.as_ref().unwrap();
         let val = pa.levels()[7].value.unwrap();
         assert!(
@@ -1419,9 +1432,7 @@ output_channel = 1
 
     #[test]
     fn test_component_ramp_integration() {
-        let mut engine = make_engine(&[
-            (30, ChannelDirection::Out),
-        ]);
+        let mut engine = make_engine(&[(30, ChannelDirection::Out)]);
 
         let mut ramp = Ramp::new();
         ramp.min = 0.0;
@@ -1443,19 +1454,19 @@ output_channel = 1
         runner.execute(&mut engine, t0);
 
         let ch30 = engine.channels.get(30).unwrap();
-        let val0 = ch30.priority_array.as_ref().unwrap().levels()[7].value.unwrap();
-        assert!(
-            val0.abs() < 0.001,
-            "ramp should start at 0.0, got {}",
-            val0
-        );
+        let val0 = ch30.priority_array.as_ref().unwrap().levels()[7]
+            .value
+            .unwrap();
+        assert!(val0.abs() < 0.001, "ramp should start at 0.0, got {}", val0);
 
         // At 500ms: should be ~50.
         let t1 = t0 + Duration::from_millis(500);
         runner.execute(&mut engine, t1);
 
         let ch30 = engine.channels.get(30).unwrap();
-        let val1 = ch30.priority_array.as_ref().unwrap().levels()[7].value.unwrap();
+        let val1 = ch30.priority_array.as_ref().unwrap().levels()[7]
+            .value
+            .unwrap();
         assert!(
             (val1 - 50.0).abs() < 1.0,
             "ramp should be ~50.0 at 500ms, got {}",
@@ -1466,9 +1477,9 @@ output_channel = 1
     #[test]
     fn test_component_schedule_integration() {
         let mut engine = make_engine(&[
-            (100, ChannelDirection::In),  // hour channel
-            (101, ChannelDirection::In),  // minute channel
-            (75, ChannelDirection::Out),  // output
+            (100, ChannelDirection::In), // hour channel
+            (101, ChannelDirection::In), // minute channel
+            (75, ChannelDirection::Out), // output
         ]);
 
         // Simulate time 12:00 via input channels.
@@ -1478,8 +1489,16 @@ output_channel = 1
         let mut sched = DailyScheduleFloat::new();
         sched.default_value = 72.0;
         sched.entries = vec![
-            ScheduleEntry { hour: 6, minute: 0, value: 70.0 },
-            ScheduleEntry { hour: 18, minute: 0, value: 76.0 },
+            ScheduleEntry {
+                hour: 6,
+                minute: 0,
+                value: 70.0,
+            },
+            ScheduleEntry {
+                hour: 18,
+                minute: 0,
+                value: 76.0,
+            },
         ];
 
         let mut runner = ControlRunner::new();
@@ -1497,7 +1516,9 @@ output_channel = 1
 
         // At 12:00, the 06:00 entry (70.0) is the latest that has passed.
         let ch75 = engine.channels.get(75).unwrap();
-        let val = ch75.priority_array.as_ref().unwrap().levels()[7].value.unwrap();
+        let val = ch75.priority_array.as_ref().unwrap().levels()[7]
+            .value
+            .unwrap();
         assert!(
             (val - 70.0).abs() < 0.001,
             "schedule at 12:00 should output 70.0, got {}",
@@ -1565,9 +1586,7 @@ write_level = 8
 
     #[test]
     fn test_component_disabled_skips_execution() {
-        let mut engine = make_engine(&[
-            (1, ChannelDirection::Out),
-        ]);
+        let mut engine = make_engine(&[(1, ChannelDirection::Out)]);
 
         let mut runner = ControlRunner::new();
         runner.components.push(ComponentInstance {
@@ -1591,9 +1610,7 @@ write_level = 8
 
     #[test]
     fn test_component_const_float_execution() {
-        let mut engine = make_engine(&[
-            (75, ChannelDirection::Out),
-        ]);
+        let mut engine = make_engine(&[(75, ChannelDirection::Out)]);
 
         let mut runner = ControlRunner::new();
         runner.components.push(ComponentInstance {
@@ -1610,7 +1627,9 @@ write_level = 8
 
         let ch75 = engine.channels.get(75).unwrap();
         assert!(ch75.priority_array.is_some());
-        let val = ch75.priority_array.as_ref().unwrap().levels()[7].value.unwrap();
+        let val = ch75.priority_array.as_ref().unwrap().levels()[7]
+            .value
+            .unwrap();
         assert!(
             (val - 70.0).abs() < f64::EPSILON,
             "const_float should output 70.0, got {}",
@@ -1643,7 +1662,9 @@ write_level = 8
         runner.execute(&mut engine, t0);
 
         let ch3 = engine.channels.get(3).unwrap();
-        let val = ch3.priority_array.as_ref().unwrap().levels()[7].value.unwrap();
+        let val = ch3.priority_array.as_ref().unwrap().levels()[7]
+            .value
+            .unwrap();
         assert!(
             (val - 42.5).abs() < 0.001,
             "add2 should output 42.5, got {}",
@@ -1653,10 +1674,7 @@ write_level = 8
 
     #[test]
     fn test_component_thermostat_execution() {
-        let mut engine = make_engine(&[
-            (4, ChannelDirection::In),
-            (90, ChannelDirection::Out),
-        ]);
+        let mut engine = make_engine(&[(4, ChannelDirection::In), (90, ChannelDirection::Out)]);
 
         seed_hal_value(&engine, 4, 68.0); // below setpoint - deadband/2
 
@@ -1680,7 +1698,9 @@ write_level = 8
 
         // 68.0 < 71.0 (setpoint - deadband/2), so heating should be on (1.0).
         let ch90 = engine.channels.get(90).unwrap();
-        let val = ch90.priority_array.as_ref().unwrap().levels()[7].value.unwrap();
+        let val = ch90.priority_array.as_ref().unwrap().levels()[7]
+            .value
+            .unwrap();
         assert!(
             (val - 1.0).abs() < f64::EPSILON,
             "thermostat should output 1.0 (heating on), got {}",

@@ -22,15 +22,15 @@ use tracing::{debug, info};
 
 use crate::sox::dyn_slots::DynValue;
 use crate::sox::sox_handlers::{
-    ComponentTree, ManifestDb, SlotValue, VirtualComponent, VirtualSlot,
-    DEFAULT_KITS, SLOT_FLAG_ACTION, SLOT_FLAG_CONFIG,
+    ComponentTree, ManifestDb, SlotValue, VirtualComponent, VirtualSlot, DEFAULT_KITS,
+    SLOT_FLAG_ACTION, SLOT_FLAG_CONFIG,
 };
 use crate::sox::sox_protocol::SoxValueType;
 use crate::sox::{DynSlotStoreHandle, SharedComponentTree};
 
 use super::sox_api::{
-    category_for_type, decode_position, encode_position, is_system_comp,
-    json_to_slot_value, slot_direction, slot_value_to_json, sox_type_name,
+    category_for_type, decode_position, encode_position, is_system_comp, json_to_slot_value,
+    slot_direction, slot_value_to_json, sox_type_name,
 };
 
 // ── Constants ──────────────────────────────────────
@@ -49,19 +49,12 @@ pub struct RowsState {
 
 // ── Upgrade handler ────────────────────────────────
 
-pub async fn rows_ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<RowsState>,
-) -> Response {
+pub async fn rows_ws_handler(ws: WebSocketUpgrade, State(state): State<RowsState>) -> Response {
     let current = crate::metrics::metrics()
         .rows_active
         .load(Ordering::Relaxed);
     if current >= MAX_ROWS_CONNECTIONS {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "too many RoWS connections",
-        )
-            .into_response();
+        return (StatusCode::SERVICE_UNAVAILABLE, "too many RoWS connections").into_response();
     }
     ws.on_upgrade(|socket| handle_rows_session(socket, state))
 }
@@ -171,7 +164,15 @@ fn build_cov_messages(
     tree_cache: &mut HashMap<u16, Vec<u16>>,
     compact_cov: bool,
 ) -> Vec<String> {
-    build_cov_messages_with_tags(tree_handle, subscribed, cov_cache, tree_cache, compact_cov, None, None)
+    build_cov_messages_with_tags(
+        tree_handle,
+        subscribed,
+        cov_cache,
+        tree_cache,
+        compact_cov,
+        None,
+        None,
+    )
 }
 
 fn build_cov_messages_with_tags(
@@ -221,7 +222,9 @@ fn build_cov_messages_with_tags(
         }
 
         // Check for slot value changes
-        let current_slots: Vec<JsonValue> = comp.slots.iter()
+        let current_slots: Vec<JsonValue> = comp
+            .slots
+            .iter()
             .map(|s| slot_value_to_json(&s.value))
             .collect();
 
@@ -241,9 +244,7 @@ fn build_cov_messages_with_tags(
             let mut changed_slots = Vec::new();
             for (idx, (slot, val)) in comp.slots.iter().zip(current_slots.iter()).enumerate() {
                 #[allow(clippy::option_map_or_none)]
-                let is_new = !cached
-                    .and_then(|c| c.get(idx))
-                    .is_some_and(|cv| cv == val);
+                let is_new = !cached.and_then(|c| c.get(idx)).is_some_and(|cv| cv == val);
                 if is_new {
                     if compact_cov {
                         // Compact mode: slot index + value only (no name).
@@ -287,7 +288,12 @@ fn build_cov_messages_with_tags(
                 let changed = tc
                     .get(&comp_id)
                     .map(|cached| cached != &current_tags)
-                    .unwrap_or(!current_tags.as_object().map(|o| o.is_empty()).unwrap_or(true));
+                    .unwrap_or(
+                        !current_tags
+                            .as_object()
+                            .map(|o| o.is_empty())
+                            .unwrap_or(true),
+                    );
                 if changed {
                     if let Ok(json) = serde_json::to_string(&serde_json::json!({
                         "op": "tagsChanged",
@@ -342,15 +348,27 @@ fn handle_client_msg(
         }
         "writeSlot" => {
             let comp_id = msg.get("compId").and_then(|v| v.as_u64()).map(|v| v as u16);
-            let slot_idx = msg.get("slotIdx").and_then(|v| v.as_u64()).map(|v| v as usize);
+            let slot_idx = msg
+                .get("slotIdx")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
             let value = msg.get("value");
             match (comp_id, slot_idx, value) {
-                (Some(cid), Some(idx), Some(val)) => handle_write_slot(state, cid, idx, val, id.as_deref()),
-                _ => make_error(id.as_deref(), "BAD_REQUEST", "missing compId, slotIdx, or value"),
+                (Some(cid), Some(idx), Some(val)) => {
+                    handle_write_slot(state, cid, idx, val, id.as_deref())
+                }
+                _ => make_error(
+                    id.as_deref(),
+                    "BAD_REQUEST",
+                    "missing compId, slotIdx, or value",
+                ),
             }
         }
         "addComp" => {
-            let parent_id = msg.get("parentId").and_then(|v| v.as_u64()).map(|v| v as u16);
+            let parent_id = msg
+                .get("parentId")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u16);
             let kit_id = msg.get("kitId").and_then(|v| v.as_u64()).map(|v| v as u8);
             let type_id = msg.get("typeId").and_then(|v| v.as_u64()).map(|v| v as u8);
             let name = msg.get("name").and_then(|v| v.as_str());
@@ -358,7 +376,11 @@ fn handle_client_msg(
                 (Some(pid), Some(kid), Some(tid), Some(n)) => {
                     handle_add_comp(state, pid, kid, tid, n, id.as_deref())
                 }
-                _ => make_error(id.as_deref(), "BAD_REQUEST", "missing parentId, kitId, typeId, or name"),
+                _ => make_error(
+                    id.as_deref(),
+                    "BAD_REQUEST",
+                    "missing parentId, kitId, typeId, or name",
+                ),
             }
         }
         "deleteComp" => {
@@ -377,27 +399,47 @@ fn handle_client_msg(
             }
         }
         "addLink" => {
-            let fc = msg.get("fromComp").and_then(|v| v.as_u64()).map(|v| v as u16);
-            let fs = msg.get("fromSlot").and_then(|v| v.as_u64()).map(|v| v as u8);
+            let fc = msg
+                .get("fromComp")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u16);
+            let fs = msg
+                .get("fromSlot")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u8);
             let tc = msg.get("toComp").and_then(|v| v.as_u64()).map(|v| v as u16);
             let ts = msg.get("toSlot").and_then(|v| v.as_u64()).map(|v| v as u8);
             match (fc, fs, tc, ts) {
                 (Some(fc), Some(fs), Some(tc), Some(ts)) => {
                     handle_add_link(state, fc, fs, tc, ts, id.as_deref())
                 }
-                _ => make_error(id.as_deref(), "BAD_REQUEST", "missing fromComp/fromSlot/toComp/toSlot"),
+                _ => make_error(
+                    id.as_deref(),
+                    "BAD_REQUEST",
+                    "missing fromComp/fromSlot/toComp/toSlot",
+                ),
             }
         }
         "deleteLink" => {
-            let fc = msg.get("fromComp").and_then(|v| v.as_u64()).map(|v| v as u16);
-            let fs = msg.get("fromSlot").and_then(|v| v.as_u64()).map(|v| v as u8);
+            let fc = msg
+                .get("fromComp")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u16);
+            let fs = msg
+                .get("fromSlot")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u8);
             let tc = msg.get("toComp").and_then(|v| v.as_u64()).map(|v| v as u16);
             let ts = msg.get("toSlot").and_then(|v| v.as_u64()).map(|v| v as u8);
             match (fc, fs, tc, ts) {
                 (Some(fc), Some(fs), Some(tc), Some(ts)) => {
                     handle_delete_link(state, fc, fs, tc, ts, id.as_deref())
                 }
-                _ => make_error(id.as_deref(), "BAD_REQUEST", "missing fromComp/fromSlot/toComp/toSlot"),
+                _ => make_error(
+                    id.as_deref(),
+                    "BAD_REQUEST",
+                    "missing fromComp/fromSlot/toComp/toSlot",
+                ),
             }
         }
         "updatePos" => {
@@ -411,7 +453,10 @@ fn handle_client_msg(
         }
         "invoke" => {
             let comp_id = msg.get("compId").and_then(|v| v.as_u64()).map(|v| v as u16);
-            let slot_idx = msg.get("slotIdx").and_then(|v| v.as_u64()).map(|v| v as usize);
+            let slot_idx = msg
+                .get("slotIdx")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
             match (comp_id, slot_idx) {
                 (Some(cid), Some(idx)) => handle_invoke(state, cid, idx, id.as_deref()),
                 _ => make_error(id.as_deref(), "BAD_REQUEST", "missing compId or slotIdx"),
@@ -420,7 +465,8 @@ fn handle_client_msg(
         "nameTable" => handle_name_table(state, id.as_deref(), compact_cov),
         "palette" => handle_palette(state, id.as_deref()),
         "subscribe" => {
-            let comp_ids = msg.get("compIds")
+            let comp_ids = msg
+                .get("compIds")
                 .and_then(|v| v.as_array())
                 .map(|arr| {
                     arr.iter()
@@ -436,7 +482,9 @@ fn handle_client_msg(
                 let tree = state.tree.read().unwrap();
                 for &cid in &comp_ids {
                     if let Some(comp) = tree.get(cid) {
-                        let vals: Vec<JsonValue> = comp.slots.iter()
+                        let vals: Vec<JsonValue> = comp
+                            .slots
+                            .iter()
                             .map(|s| slot_value_to_json(&s.value))
                             .collect();
                         cov_cache.insert(cid, vals);
@@ -444,13 +492,17 @@ fn handle_client_msg(
                     }
                 }
             }
-            make_result(id.as_deref(), serde_json::json!({
-                "subscribed": comp_ids,
-                "count": subscribed.len(),
-            }))
+            make_result(
+                id.as_deref(),
+                serde_json::json!({
+                    "subscribed": comp_ids,
+                    "count": subscribed.len(),
+                }),
+            )
         }
         "unsubscribe" => {
-            let comp_ids = msg.get("compIds")
+            let comp_ids = msg
+                .get("compIds")
                 .and_then(|v| v.as_array())
                 .map(|arr| {
                     arr.iter()
@@ -463,10 +515,13 @@ fn handle_client_msg(
                 cov_cache.remove(cid);
                 tree_cache.remove(cid);
             }
-            make_result(id.as_deref(), serde_json::json!({
-                "unsubscribed": comp_ids,
-                "count": subscribed.len(),
-            }))
+            make_result(
+                id.as_deref(),
+                serde_json::json!({
+                    "unsubscribed": comp_ids,
+                    "count": subscribed.len(),
+                }),
+            )
         }
         "readTags" => {
             let comp_id = msg.get("compId").and_then(|v| v.as_u64()).map(|v| v as u16);
@@ -496,13 +551,18 @@ fn handle_client_msg(
             // Currently accepted for forward-compatibility but JSON remains the default.
             let format = msg.get("format").and_then(|v| v.as_str()).unwrap_or("json");
             match format {
-                "json" | "trio" => {
-                    make_result(id.as_deref(), serde_json::json!({
+                "json" | "trio" => make_result(
+                    id.as_deref(),
+                    serde_json::json!({
                         "format": format,
                         "status": "ok",
-                    }))
-                }
-                _ => make_error(id.as_deref(), "BAD_REQUEST", &format!("unsupported format: {format}")),
+                    }),
+                ),
+                _ => make_error(
+                    id.as_deref(),
+                    "BAD_REQUEST",
+                    &format!("unsupported format: {format}"),
+                ),
             }
         }
         _ => make_error(id.as_deref(), "UNKNOWN_OP", &format!("unknown op: {op}")),
@@ -562,12 +622,24 @@ fn handle_write_slot(
         };
         match comp.slots.get(slot_idx) {
             Some(slot) => slot.type_id,
-            None => return make_error(id, "BAD_REQUEST", &format!("slot index {slot_idx} out of range")),
+            None => {
+                return make_error(
+                    id,
+                    "BAD_REQUEST",
+                    &format!("slot index {slot_idx} out of range"),
+                )
+            }
         }
     };
     let new_value = match json_to_slot_value(value, slot_type_id) {
         Some(v) => v,
-        None => return make_error(id, "BAD_REQUEST", &format!("cannot coerce value to type_id {slot_type_id}")),
+        None => {
+            return make_error(
+                id,
+                "BAD_REQUEST",
+                &format!("cannot coerce value to type_id {slot_type_id}"),
+            )
+        }
     };
     if let Some(comp) = tree.get_mut(comp_id) {
         if let Some(slot) = comp.slots.get_mut(slot_idx) {
@@ -691,7 +763,11 @@ fn handle_add_link(
         tree.mark_dirty();
         make_result(id, serde_json::json!({ "ok": true }))
     } else {
-        make_error(id, "CONFLICT", "link already exists or would create a cycle")
+        make_error(
+            id,
+            "CONFLICT",
+            "link already exists or would create a cycle",
+        )
     }
 }
 
@@ -745,7 +821,13 @@ fn handle_invoke(
     };
     let slot = match comp.slots.get(slot_idx) {
         Some(s) => s,
-        None => return make_error(id, "BAD_REQUEST", &format!("slot index {slot_idx} out of range")),
+        None => {
+            return make_error(
+                id,
+                "BAD_REQUEST",
+                &format!("slot index {slot_idx} out of range"),
+            )
+        }
     };
     if slot.flags & SLOT_FLAG_ACTION == 0 {
         return make_error(id, "BAD_REQUEST", "slot is not an action slot");
@@ -783,7 +865,8 @@ fn handle_name_table(
     compact_cov: &mut bool,
 ) -> Option<String> {
     let tree = state.tree.read().unwrap();
-    let names: Vec<JsonValue> = tree.name_table
+    let names: Vec<JsonValue> = tree
+        .name_table
         .all_names()
         .into_iter()
         .map(|(name_id, name)| {
@@ -1040,7 +1123,10 @@ mod tests {
 
     #[test]
     fn validate_name_starts_with_digit() {
-        assert_eq!(validate_name("1comp"), Some("name must start with a letter"));
+        assert_eq!(
+            validate_name("1comp"),
+            Some("name must start with a letter")
+        );
     }
 
     #[test]
@@ -1053,7 +1139,10 @@ mod tests {
 
     #[test]
     fn validate_name_starts_underscore() {
-        assert_eq!(validate_name("_comp"), Some("name must start with a letter"));
+        assert_eq!(
+            validate_name("_comp"),
+            Some("name must start with a letter")
+        );
     }
 
     #[test]
@@ -1329,7 +1418,9 @@ mod tests {
 
     #[test]
     fn cov_detects_slot_change() {
-        use crate::sox::sox_handlers::{ComponentTree, ManifestDb, VirtualComponent, VirtualSlot, SlotValue};
+        use crate::sox::sox_handlers::{
+            ComponentTree, ManifestDb, SlotValue, VirtualComponent, VirtualSlot,
+        };
         use crate::sox::sox_protocol::SoxValueType;
 
         let manifest_db = Arc::new(ManifestDb::load(""));
@@ -1358,14 +1449,26 @@ mod tests {
         let mut tree_cache_map = HashMap::new();
 
         // First call: should produce a COV (no cache)
-        let msgs = build_cov_messages(&tree_handle, &subscribed, &mut cov_cache, &mut tree_cache_map, false);
+        let msgs = build_cov_messages(
+            &tree_handle,
+            &subscribed,
+            &mut cov_cache,
+            &mut tree_cache_map,
+            false,
+        );
         assert_eq!(msgs.len(), 1);
         let v: JsonValue = serde_json::from_str(&msgs[0]).unwrap();
         assert_eq!(v["op"], "cov");
         assert_eq!(v["compId"], 100);
 
         // Second call: no change, no COV
-        let msgs = build_cov_messages(&tree_handle, &subscribed, &mut cov_cache, &mut tree_cache_map, false);
+        let msgs = build_cov_messages(
+            &tree_handle,
+            &subscribed,
+            &mut cov_cache,
+            &mut tree_cache_map,
+            false,
+        );
         assert!(msgs.is_empty());
 
         // Mutate value
@@ -1377,7 +1480,13 @@ mod tests {
         }
 
         // Third call: should detect change
-        let msgs = build_cov_messages(&tree_handle, &subscribed, &mut cov_cache, &mut tree_cache_map, false);
+        let msgs = build_cov_messages(
+            &tree_handle,
+            &subscribed,
+            &mut cov_cache,
+            &mut tree_cache_map,
+            false,
+        );
         assert_eq!(msgs.len(), 1);
         let v: JsonValue = serde_json::from_str(&msgs[0]).unwrap();
         assert_eq!(v["op"], "cov");
@@ -1386,7 +1495,9 @@ mod tests {
 
     #[test]
     fn cov_detects_tree_change() {
-        use crate::sox::sox_handlers::{ComponentTree, ManifestDb, VirtualComponent, VirtualSlot, SlotValue};
+        use crate::sox::sox_handlers::{
+            ComponentTree, ManifestDb, SlotValue, VirtualComponent, VirtualSlot,
+        };
         use crate::sox::sox_protocol::SoxValueType;
 
         let manifest_db = Arc::new(ManifestDb::load(""));
@@ -1415,7 +1526,13 @@ mod tests {
         let mut tree_cache_map = HashMap::new();
 
         // Prime cache
-        let _ = build_cov_messages(&tree_handle, &subscribed, &mut cov_cache, &mut tree_cache_map, false);
+        let _ = build_cov_messages(
+            &tree_handle,
+            &subscribed,
+            &mut cov_cache,
+            &mut tree_cache_map,
+            false,
+        );
 
         // Add a child
         {
@@ -1425,7 +1542,13 @@ mod tests {
             }
         }
 
-        let msgs = build_cov_messages(&tree_handle, &subscribed, &mut cov_cache, &mut tree_cache_map, false);
+        let msgs = build_cov_messages(
+            &tree_handle,
+            &subscribed,
+            &mut cov_cache,
+            &mut tree_cache_map,
+            false,
+        );
         // Should have a treeChanged message
         let tree_msgs: Vec<&String> = msgs.iter().filter(|m| m.contains("treeChanged")).collect();
         assert_eq!(tree_msgs.len(), 1);
@@ -1461,8 +1584,7 @@ mod tests {
             links: vec![],
         });
 
-        let tree_handle: SharedComponentTree =
-            Arc::new(std::sync::RwLock::new(tree_inner));
+        let tree_handle: SharedComponentTree = Arc::new(std::sync::RwLock::new(tree_inner));
         let state = RowsState {
             tree: tree_handle,
             manifest_db,
@@ -1493,7 +1615,10 @@ mod tests {
         assert!(has_my_comp, "name table should contain 'myComp'");
 
         // compact_cov should now be enabled
-        assert!(compact_cov, "compact_cov should be true after nameTable request");
+        assert!(
+            compact_cov,
+            "compact_cov should be true after nameTable request"
+        );
     }
 
     #[test]
@@ -1522,8 +1647,7 @@ mod tests {
             links: vec![],
         });
 
-        let tree_handle: SharedComponentTree =
-            Arc::new(std::sync::RwLock::new(tree_inner));
+        let tree_handle: SharedComponentTree = Arc::new(std::sync::RwLock::new(tree_inner));
         let mut subscribed = HashSet::new();
         subscribed.insert(200);
         let mut cov_cache = HashMap::new();
@@ -1561,8 +1685,14 @@ mod tests {
         // Compact format uses "i" and "v" instead of "index", "name", "value"
         assert!(slot.get("i").is_some(), "compact COV should have 'i' key");
         assert!(slot.get("v").is_some(), "compact COV should have 'v' key");
-        assert!(slot.get("name").is_none(), "compact COV should not have 'name'");
-        assert!(slot.get("index").is_none(), "compact COV should not have 'index'");
+        assert!(
+            slot.get("name").is_none(),
+            "compact COV should not have 'name'"
+        );
+        assert!(
+            slot.get("index").is_none(),
+            "compact COV should not have 'index'"
+        );
     }
 
     // ── Dynamic tag tests ──────────────────────
@@ -1570,11 +1700,12 @@ mod tests {
     fn make_test_state_with_dyn_store() -> (RowsState, DynSlotStoreHandle) {
         use crate::sox::sox_handlers::{ComponentTree, ManifestDb};
         let manifest_db = Arc::new(ManifestDb::load(""));
-        let tree = Arc::new(std::sync::RwLock::new(
-            ComponentTree::new_with_manifest(manifest_db.clone()),
+        let tree = Arc::new(std::sync::RwLock::new(ComponentTree::new_with_manifest(
+            manifest_db.clone(),
+        )));
+        let dyn_store: DynSlotStoreHandle = Arc::new(std::sync::RwLock::new(
+            crate::sox::dyn_slots::DynSlotStore::with_defaults(),
         ));
-        let dyn_store: DynSlotStoreHandle =
-            Arc::new(std::sync::RwLock::new(crate::sox::dyn_slots::DynSlotStore::with_defaults()));
         let state = RowsState {
             tree,
             manifest_db,
@@ -1585,11 +1716,11 @@ mod tests {
 
     #[test]
     fn rows_read_comp_includes_tags_when_present() {
+        use crate::sox::dyn_slots::DynValue;
         use crate::sox::sox_handlers::{
             ComponentTree, ManifestDb, SlotValue, VirtualComponent, VirtualSlot,
         };
         use crate::sox::sox_protocol::SoxValueType;
-        use crate::sox::dyn_slots::DynValue;
 
         let manifest_db = Arc::new(ManifestDb::load(""));
         let mut tree_inner = ComponentTree::new_with_manifest(manifest_db.clone());
@@ -1611,13 +1742,16 @@ mod tests {
         });
 
         let tree = Arc::new(std::sync::RwLock::new(tree_inner));
-        let dyn_store: DynSlotStoreHandle =
-            Arc::new(std::sync::RwLock::new(crate::sox::dyn_slots::DynSlotStore::with_defaults()));
+        let dyn_store: DynSlotStoreHandle = Arc::new(std::sync::RwLock::new(
+            crate::sox::dyn_slots::DynSlotStore::with_defaults(),
+        ));
 
         // Set a dynamic tag
         {
             let mut store = dyn_store.write().unwrap();
-            store.set(100, "modbusAddr".into(), DynValue::Int(40001)).unwrap();
+            store
+                .set(100, "modbusAddr".into(), DynValue::Int(40001))
+                .unwrap();
         }
 
         let state = RowsState {
@@ -1642,7 +1776,10 @@ mod tests {
         assert_eq!(v["op"], "result");
         assert_eq!(v["ok"], true);
         // Tags should be present in the response
-        assert!(v["data"]["tags"].is_object(), "readComp should include tags");
+        assert!(
+            v["data"]["tags"].is_object(),
+            "readComp should include tags"
+        );
         assert_eq!(v["data"]["tags"]["modbusAddr"]["val"], 40001);
     }
 
@@ -1672,8 +1809,9 @@ mod tests {
             links: vec![],
         });
         let tree = Arc::new(std::sync::RwLock::new(tree_inner));
-        let dyn_store: DynSlotStoreHandle =
-            Arc::new(std::sync::RwLock::new(crate::sox::dyn_slots::DynSlotStore::with_defaults()));
+        let dyn_store: DynSlotStoreHandle = Arc::new(std::sync::RwLock::new(
+            crate::sox::dyn_slots::DynSlotStore::with_defaults(),
+        ));
         let state = RowsState {
             tree,
             manifest_db,
@@ -1695,7 +1833,10 @@ mod tests {
         let v: JsonValue = serde_json::from_str(reply.as_deref().unwrap()).unwrap();
         assert_eq!(v["op"], "result");
         // Tags field should NOT be present when there are no dynamic tags
-        assert!(v["data"]["tags"].is_null(), "readComp should not include tags when empty");
+        assert!(
+            v["data"]["tags"].is_null(),
+            "readComp should not include tags when empty"
+        );
     }
 
     #[test]
@@ -1703,7 +1844,13 @@ mod tests {
         let (state, dyn_store) = make_test_state_with_dyn_store();
         {
             let mut store = dyn_store.write().unwrap();
-            store.set(0, "testTag".into(), crate::sox::dyn_slots::DynValue::Str("hello".into())).unwrap();
+            store
+                .set(
+                    0,
+                    "testTag".into(),
+                    crate::sox::dyn_slots::DynValue::Str("hello".into()),
+                )
+                .unwrap();
         }
         let mut subscribed = HashSet::new();
         let mut cov_cache = HashMap::new();
@@ -1773,7 +1920,9 @@ mod tests {
         let (state, dyn_store) = make_test_state_with_dyn_store();
         {
             let mut store = dyn_store.write().unwrap();
-            store.set(50, "foo".into(), crate::sox::dyn_slots::DynValue::Marker).unwrap();
+            store
+                .set(50, "foo".into(), crate::sox::dyn_slots::DynValue::Marker)
+                .unwrap();
         }
         let mut subscribed = HashSet::new();
         let mut cov_cache = HashMap::new();
@@ -1817,11 +1966,11 @@ mod tests {
 
     #[test]
     fn rows_tags_changed_cov_push() {
+        use crate::sox::dyn_slots::DynValue;
         use crate::sox::sox_handlers::{
             ComponentTree, ManifestDb, SlotValue, VirtualComponent, VirtualSlot,
         };
         use crate::sox::sox_protocol::SoxValueType;
-        use crate::sox::dyn_slots::DynValue;
 
         let manifest_db = Arc::new(ManifestDb::load(""));
         let mut tree_inner = ComponentTree::new_with_manifest(manifest_db.clone());
@@ -1843,8 +1992,9 @@ mod tests {
         });
 
         let tree: SharedComponentTree = Arc::new(std::sync::RwLock::new(tree_inner));
-        let dyn_store: DynSlotStoreHandle =
-            Arc::new(std::sync::RwLock::new(crate::sox::dyn_slots::DynSlotStore::with_defaults()));
+        let dyn_store: DynSlotStoreHandle = Arc::new(std::sync::RwLock::new(
+            crate::sox::dyn_slots::DynSlotStore::with_defaults(),
+        ));
 
         let mut subscribed = HashSet::new();
         subscribed.insert(200);
@@ -1873,7 +2023,9 @@ mod tests {
         // Now add a dynamic tag
         {
             let mut store = dyn_store.write().unwrap();
-            store.set(200, "devEUI".into(), DynValue::Str("A81758".into())).unwrap();
+            store
+                .set(200, "devEUI".into(), DynValue::Str("A81758".into()))
+                .unwrap();
         }
 
         // Second tick: should detect the tag change
@@ -1933,9 +2085,13 @@ mod tests {
     fn make_test_state() -> RowsState {
         use crate::sox::sox_handlers::{ComponentTree, ManifestDb};
         let manifest_db = Arc::new(ManifestDb::load(""));
-        let tree = Arc::new(std::sync::RwLock::new(
-            ComponentTree::new_with_manifest(manifest_db.clone()),
-        ));
-        RowsState { tree, manifest_db, dyn_store: None }
+        let tree = Arc::new(std::sync::RwLock::new(ComponentTree::new_with_manifest(
+            manifest_db.clone(),
+        )));
+        RowsState {
+            tree,
+            manifest_db,
+            dyn_store: None,
+        }
     }
 }

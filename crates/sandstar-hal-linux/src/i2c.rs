@@ -177,13 +177,7 @@ impl LinuxI2c {
         label: &str,
     ) -> Result<f64, HalError> {
         let protocol = detect_protocol_with_address(label, address);
-        debug!(
-            device,
-            address,
-            ?protocol,
-            label,
-            "i2c: read_measurement"
-        );
+        debug!(device, address, ?protocol, label, "i2c: read_measurement");
 
         let mut last_err = HalError::BusError(device, "no attempts made".into());
 
@@ -191,10 +185,7 @@ impl LinuxI2c {
             match self.try_read(device, address, protocol) {
                 Ok(val) => {
                     if attempt > 0 {
-                        info!(
-                            device,
-                            address, attempt, "i2c: read succeeded after retry"
-                        );
+                        info!(device, address, attempt, "i2c: read succeeded after retry");
                     }
                     return Ok(val);
                 }
@@ -260,9 +251,7 @@ impl Default for LinuxI2c {
 // Helper: lock the buses mutex, returning a HalError on poison.
 #[cfg(target_os = "linux")]
 impl LinuxI2c {
-    fn lock_buses(
-        &self,
-    ) -> Result<std::sync::MutexGuard<'_, HashMap<u32, BusState>>, HalError> {
+    fn lock_buses(&self) -> Result<std::sync::MutexGuard<'_, HashMap<u32, BusState>>, HalError> {
         self.buses
             .lock()
             .map_err(|e| HalError::BusError(0, format!("buses mutex poisoned: {e}")))
@@ -279,10 +268,7 @@ impl LinuxI2c {
     ///
     /// The caller must already hold `buses` via `lock_buses()` and pass in
     /// the guard so we can mutate the map without UB.
-    fn ensure_bus_fd(
-        buses: &mut HashMap<u32, BusState>,
-        device: u32,
-    ) -> Result<RawFd, HalError> {
+    fn ensure_bus_fd(buses: &mut HashMap<u32, BusState>, device: u32) -> Result<RawFd, HalError> {
         let bus = buses
             .get_mut(&device)
             .ok_or_else(|| HalError::BusError(device, "bus not registered".into()))?;
@@ -358,11 +344,7 @@ impl LinuxI2c {
     }
 
     /// SDP510 read: write 0xF1, read 3 bytes, verify CRC (init=0x00).
-    fn read_sdp510(
-        fd: RawFd,
-        device: u32,
-        address: u32,
-    ) -> Result<f64, HalError> {
+    fn read_sdp510(fd: RawFd, device: u32, address: u32) -> Result<f64, HalError> {
         let cmd: [u8; 1] = [0xF1];
         let written = unsafe { libc::write(fd, cmd.as_ptr() as *const libc::c_void, 1) };
         if written != 1 {
@@ -407,22 +389,16 @@ impl LinuxI2c {
     /// wait 45 ms, read 9 bytes, verify three CRCs (init=0xFF).
     ///
     /// Returns `(differential_pressure_raw, temperature_raw)` both as f64.
-    fn read_sdp810(
-        fd: RawFd,
-        device: u32,
-        address: u32,
-    ) -> Result<(f64, f64), HalError> {
+    fn read_sdp810(fd: RawFd, device: u32, address: u32) -> Result<(f64, f64), HalError> {
         // Trigger measurement.
         let cmd: [u8; 2] = [0x36, 0x2F];
-        let written =
-            unsafe { libc::write(fd, cmd.as_ptr() as *const libc::c_void, 2) };
+        let written = unsafe { libc::write(fd, cmd.as_ptr() as *const libc::c_void, 2) };
         if written != 2 {
             // Retry after stop command (mirrors the C code).
             let stop: [u8; 2] = [0x3F, 0xF9];
             unsafe { libc::write(fd, stop.as_ptr() as *const libc::c_void, 2) };
             thread::sleep(Duration::from_millis(2));
-            let retry =
-                unsafe { libc::write(fd, cmd.as_ptr() as *const libc::c_void, 2) };
+            let retry = unsafe { libc::write(fd, cmd.as_ptr() as *const libc::c_void, 2) };
             if retry != 2 {
                 return Err(HalError::DeviceError {
                     device,
@@ -500,10 +476,7 @@ impl LinuxI2c {
         let raw_dp = ((buf[0] as i16) << 8) | buf[1] as i16;
         let raw_temp = ((buf[3] as i16) << 8) | buf[4] as i16;
 
-        debug!(
-            device,
-            address, raw_dp, raw_temp, "i2c: SDP810 read OK"
-        );
+        debug!(device, address, raw_dp, raw_temp, "i2c: SDP810 read OK");
 
         Ok((raw_dp as f64, raw_temp as f64))
     }
@@ -601,9 +574,7 @@ impl LinuxI2c {
 
                 // Step 5: Restart continuous mode [0x36, 0x15].
                 let start: [u8; 2] = [0x36, 0x15];
-                let written = unsafe {
-                    libc::write(fd, start.as_ptr() as *const libc::c_void, 2)
-                };
+                let written = unsafe { libc::write(fd, start.as_ptr() as *const libc::c_void, 2) };
                 if written != 2 {
                     warn!(device, address, "reinit: failed to start continuous mode");
                     return Err(HalError::DeviceError {
@@ -616,9 +587,7 @@ impl LinuxI2c {
 
                 // Step 6: Verify with test read.
                 let mut buf = [0u8; 9];
-                let n = unsafe {
-                    libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, 9)
-                };
+                let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, 9) };
                 if n != 9 {
                     warn!(device, address, n, "reinit: test read got wrong length");
                     return Err(HalError::DeviceError {
@@ -654,7 +623,6 @@ impl LinuxI2c {
         }
         Ok(())
     }
-
 }
 
 /// Helper to get the current errno value.
@@ -731,7 +699,10 @@ mod tests {
         assert_eq!(detect_protocol("sdp810"), SensorProtocol::Sdp810Dp);
         assert_eq!(detect_protocol("SDP810"), SensorProtocol::Sdp810Dp);
         assert_eq!(detect_protocol("SDP810_dp"), SensorProtocol::Sdp810Dp);
-        assert_eq!(detect_protocol("my_SDP810_sensor"), SensorProtocol::Sdp810Dp);
+        assert_eq!(
+            detect_protocol("my_SDP810_sensor"),
+            SensorProtocol::Sdp810Dp
+        );
     }
 
     #[test]
@@ -890,8 +861,8 @@ mod tests {
     fn parse_sdp810_scale_crc_failure() {
         let mut buf = build_sdp810_response(100, 5000, 60);
         buf[8] = 0x00; // corrupt Scale CRC (likely wrong)
-        // May or may not fail depending on whether 0x00 happens to be correct.
-        // Force it by flipping a bit.
+                       // May or may not fail depending on whether 0x00 happens to be correct.
+                       // Force it by flipping a bit.
         buf[8] ^= 0xFF;
         assert!(parse_sdp810_response(&buf).is_err());
     }

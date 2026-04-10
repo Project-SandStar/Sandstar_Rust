@@ -348,10 +348,7 @@ impl VmStack {
     /// The frame pointer (base index) of the current call frame,
     /// or 0 if there are no frames.
     pub fn frame_base(&self) -> usize {
-        self.frames
-            .last()
-            .map(|f| f.frame_pointer)
-            .unwrap_or(0)
+        self.frames.last().map(|f| f.frame_pointer).unwrap_or(0)
     }
 
     // ------------------------------------------------------------------

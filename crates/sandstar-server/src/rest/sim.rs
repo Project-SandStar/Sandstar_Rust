@@ -66,7 +66,13 @@ impl InjectPoint {
     fn value_f64(&self) -> f64 {
         match self {
             InjectPoint::Analog { value, .. } => *value,
-            InjectPoint::Digital { value, .. } => if *value { 1.0 } else { 0.0 },
+            InjectPoint::Digital { value, .. } => {
+                if *value {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
             InjectPoint::I2c { value, .. } => *value,
             InjectPoint::Pwm { value, .. } => *value,
             InjectPoint::Uart { value, .. } => *value,
@@ -171,9 +177,7 @@ async fn inject_handler(
 ///
 /// Each call drains the write buffer, so outputs are only returned once.
 /// This prevents stale data accumulation during long test runs.
-async fn outputs_handler(
-    State(state): State<SharedSimState>,
-) -> Json<OutputsResponse> {
+async fn outputs_handler(State(state): State<SharedSimState>) -> Json<OutputsResponse> {
     let mut s = state.write().expect("sim state lock poisoned");
     let outputs: Vec<OutputEntry> = s
         .writes
@@ -193,9 +197,7 @@ async fn outputs_handler(
 }
 
 /// GET /api/sim/state — snapshot of current sim state sizes (read-only).
-async fn state_handler(
-    State(state): State<SharedSimState>,
-) -> Json<StateResponse> {
+async fn state_handler(State(state): State<SharedSimState>) -> Json<StateResponse> {
     let s = state.read().expect("sim state lock poisoned");
     Json(StateResponse {
         read_count: s.reads.len(),
@@ -226,7 +228,12 @@ async fn scenario_handler(
             for point in step.points {
                 apply_inject_point(&mut s, point);
             }
-            tracing::debug!(step = i, offset_ms, points = point_count, "sim scenario step");
+            tracing::debug!(
+                step = i,
+                offset_ms,
+                points = point_count,
+                "sim scenario step"
+            );
         }
         tracing::info!("sim scenario complete");
     });
@@ -239,27 +246,45 @@ async fn scenario_handler(
 // ── Helpers ─────────────────────────────────────────────────
 
 /// Apply a single inject point to the sim state.
-fn apply_inject_point(
-    s: &mut sandstar_hal::simulator::SimState,
-    point: InjectPoint,
-) {
+fn apply_inject_point(s: &mut sandstar_hal::simulator::SimState, point: InjectPoint) {
     match point {
-        InjectPoint::Analog { device, address, value } => {
+        InjectPoint::Analog {
+            device,
+            address,
+            value,
+        } => {
             s.reads.insert(ReadKey::Analog { device, address }, value);
         }
         InjectPoint::Digital { address, value } => {
             s.digital_reads.insert(address, value);
         }
-        InjectPoint::I2c { device, address, label, value } => {
+        InjectPoint::I2c {
+            device,
+            address,
+            label,
+            value,
+        } => {
             s.reads.insert(
-                ReadKey::I2c { device, address, label },
+                ReadKey::I2c {
+                    device,
+                    address,
+                    label,
+                },
                 value,
             );
         }
-        InjectPoint::Pwm { chip, channel, value } => {
+        InjectPoint::Pwm {
+            chip,
+            channel,
+            value,
+        } => {
             s.reads.insert(ReadKey::Pwm { chip, channel }, value);
         }
-        InjectPoint::Uart { device, label, value } => {
+        InjectPoint::Uart {
+            device,
+            label,
+            value,
+        } => {
             s.reads.insert(ReadKey::Uart { device, label }, value);
         }
     }
@@ -329,7 +354,12 @@ mod tests {
         let s = state.read().unwrap();
         assert_eq!(s.reads.len(), 2);
         assert_eq!(
-            *s.reads.get(&ReadKey::Analog { device: 0, address: 0 }).unwrap(),
+            *s.reads
+                .get(&ReadKey::Analog {
+                    device: 0,
+                    address: 0
+                })
+                .unwrap(),
             2048.0
         );
     }
@@ -437,8 +467,20 @@ mod tests {
         // Pre-populate some state
         {
             let mut s = state.write().unwrap();
-            s.reads.insert(ReadKey::Analog { device: 0, address: 0 }, 1.0);
-            s.reads.insert(ReadKey::Analog { device: 0, address: 1 }, 2.0);
+            s.reads.insert(
+                ReadKey::Analog {
+                    device: 0,
+                    address: 0,
+                },
+                1.0,
+            );
+            s.reads.insert(
+                ReadKey::Analog {
+                    device: 0,
+                    address: 1,
+                },
+                2.0,
+            );
             s.digital_reads.insert(45, true);
         }
 
@@ -468,7 +510,13 @@ mod tests {
         {
             let mut s = state.write().unwrap();
             s.writes.insert(WriteKey::Digital { address: 45 }, 1.0);
-            s.writes.insert(WriteKey::Pwm { chip: 4, channel: 0 }, 0.75);
+            s.writes.insert(
+                WriteKey::Pwm {
+                    chip: 4,
+                    channel: 0,
+                },
+                0.75,
+            );
         }
 
         let app = router(state.clone());
@@ -498,7 +546,13 @@ mod tests {
         // Set initial value
         {
             let mut s = state.write().unwrap();
-            s.reads.insert(ReadKey::Analog { device: 0, address: 0 }, 1000.0);
+            s.reads.insert(
+                ReadKey::Analog {
+                    device: 0,
+                    address: 0,
+                },
+                1000.0,
+            );
         }
 
         let app = router(state.clone());
@@ -523,7 +577,12 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let s = state.read().unwrap();
         assert_eq!(
-            *s.reads.get(&ReadKey::Analog { device: 0, address: 0 }).unwrap(),
+            *s.reads
+                .get(&ReadKey::Analog {
+                    device: 0,
+                    address: 0
+                })
+                .unwrap(),
             2000.0
         );
     }
@@ -625,7 +684,12 @@ mod tests {
         // Last step should have set value to 2200
         let s = state.read().unwrap();
         assert_eq!(
-            *s.reads.get(&ReadKey::Analog { device: 0, address: 0 }).unwrap(),
+            *s.reads
+                .get(&ReadKey::Analog {
+                    device: 0,
+                    address: 0
+                })
+                .unwrap(),
             2200.0
         );
     }

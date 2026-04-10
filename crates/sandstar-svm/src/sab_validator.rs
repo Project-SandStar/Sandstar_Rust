@@ -319,7 +319,7 @@ fn opcode_instruction_size(op: u8) -> Option<usize> {
         Opcode::CallNative | Opcode::CallNativeWide | Opcode::CallNativeVoid => 4,
 
         // Variable-length instructions
-        Opcode::InitArray => 4,  // opcode + u8 + u16
+        Opcode::InitArray => 4, // opcode + u8 + u16
 
         // 5-byte instructions
         Opcode::Load8BitFieldU4
@@ -643,8 +643,7 @@ pub fn validate_sab_bytes(path: &str, data: &[u8]) -> Result<SabValidationReport
         }
     }
 
-    report.scode_version =
-        ((header.major_ver as u32) << 8) | (header.minor_ver as u32);
+    report.scode_version = ((header.major_ver as u32) << 8) | (header.minor_ver as u32);
 
     // 2. Scan for native method references and opcode usage
     let natives = NativeTable::with_defaults();
@@ -671,9 +670,7 @@ pub fn validate_sab_bytes(path: &str, data: &[u8]) -> Result<SabValidationReport
         }
 
         // Check if opcode is supported
-        if !supported[op_byte as usize]
-            && !report.unsupported_opcodes.contains(&op_byte)
-        {
+        if !supported[op_byte as usize] && !report.unsupported_opcodes.contains(&op_byte) {
             report.unsupported_opcodes.push(op_byte);
         }
 
@@ -685,10 +682,7 @@ pub fn validate_sab_bytes(path: &str, data: &[u8]) -> Result<SabValidationReport
         {
             let kit_id = data[pc + 1];
             let method_id = data[pc + 2];
-            let kit_name = natives
-                .kit_name(kit_id)
-                .unwrap_or("unknown")
-                .to_string();
+            let kit_name = natives.kit_name(kit_id).unwrap_or("unknown").to_string();
 
             let native_ref = NativeMethodRef {
                 kit_id,
@@ -713,8 +707,7 @@ pub fn validate_sab_bytes(path: &str, data: &[u8]) -> Result<SabValidationReport
 
         // Special handling for Switch (variable length)
         if op_byte == Opcode::Switch as u8 && pc + 3 <= code_end {
-            let num_entries =
-                u16::from_le_bytes([data[pc + 1], data[pc + 2]]) as usize;
+            let num_entries = u16::from_le_bytes([data[pc + 1], data[pc + 2]]) as usize;
             pc += 3 + num_entries * 2;
         } else {
             pc += size;
@@ -794,7 +787,9 @@ pub fn validate_sax_str(path: &str, content: &str) -> Result<SabValidationReport
     report.component_count = comp_count;
 
     if comp_count == 0 && !content.is_empty() {
-        report.warnings.push("no <comp> elements found in .sax file".into());
+        report
+            .warnings
+            .push("no <comp> elements found in .sax file".into());
     }
 
     if !type_names.is_empty() {
@@ -819,9 +814,7 @@ pub fn validate_sax_str(path: &str, content: &str) -> Result<SabValidationReport
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::image_loader::{
-        SCODE_BLOCK_SIZE, SCODE_MAGIC, SCODE_MAJOR_VER, SCODE_MINOR_VER,
-    };
+    use crate::image_loader::{SCODE_BLOCK_SIZE, SCODE_MAGIC, SCODE_MAJOR_VER, SCODE_MINOR_VER};
     use crate::opcodes::Opcode;
 
     /// Build a minimal valid .sab-like scode image.
@@ -850,10 +843,7 @@ mod tests {
 
     #[test]
     fn validate_empty_sab_header() {
-        let data = make_valid_sab(&[
-            Opcode::LoadI0 as u8,
-            Opcode::ReturnPop as u8,
-        ]);
+        let data = make_valid_sab(&[Opcode::LoadI0 as u8, Opcode::ReturnPop as u8]);
         let report = validate_sab_bytes("test.sab", &data).unwrap();
         assert!(report.header_valid, "header should be valid");
         assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
@@ -891,14 +881,8 @@ mod tests {
         let data = make_valid_sab(&code);
         let report = validate_sab_bytes("test.sab", &data).unwrap();
 
-        assert_eq!(
-            report.opcode_usage.get(&(Opcode::LoadI0 as u8)),
-            Some(&1)
-        );
-        assert_eq!(
-            report.opcode_usage.get(&(Opcode::IntAdd as u8)),
-            Some(&1)
-        );
+        assert_eq!(report.opcode_usage.get(&(Opcode::LoadI0 as u8)), Some(&1));
+        assert_eq!(report.opcode_usage.get(&(Opcode::IntAdd as u8)), Some(&1));
         assert!(report.unsupported_opcodes.is_empty());
         assert!(report.compatible);
     }
@@ -979,11 +963,31 @@ mod tests {
         assert_eq!(table.kit_name(100), Some("shaystack"));
 
         // Verify method counts match expected
-        assert_eq!(table.method_count(0), 60, "kit 0 (sys) should have 60 methods");
-        assert_eq!(table.method_count(2), 17, "kit 2 (inet) should have 17 methods");
-        assert_eq!(table.method_count(4), 23, "kit 4 (EacIo) should have 23 methods");
-        assert_eq!(table.method_count(9), 3, "kit 9 (datetimeStd) should have 3 methods");
-        assert_eq!(table.method_count(100), 28, "kit 100 (shaystack) should have 28 methods");
+        assert_eq!(
+            table.method_count(0),
+            60,
+            "kit 0 (sys) should have 60 methods"
+        );
+        assert_eq!(
+            table.method_count(2),
+            17,
+            "kit 2 (inet) should have 17 methods"
+        );
+        assert_eq!(
+            table.method_count(4),
+            23,
+            "kit 4 (EacIo) should have 23 methods"
+        );
+        assert_eq!(
+            table.method_count(9),
+            3,
+            "kit 9 (datetimeStd) should have 3 methods"
+        );
+        assert_eq!(
+            table.method_count(100),
+            28,
+            "kit 100 (shaystack) should have 28 methods"
+        );
 
         // Verify that core kits have real implementations (not all stubs)
         assert!(
@@ -1078,9 +1082,18 @@ mod tests {
     #[test]
     fn native_refs_deduplicated() {
         let code = vec![
-            Opcode::CallNative as u8, 0, 5, 0, // first call to sys:5
-            Opcode::CallNative as u8, 0, 5, 0, // duplicate call
-            Opcode::CallNative as u8, 0, 10, 1, // different method
+            Opcode::CallNative as u8,
+            0,
+            5,
+            0, // first call to sys:5
+            Opcode::CallNative as u8,
+            0,
+            5,
+            0, // duplicate call
+            Opcode::CallNative as u8,
+            0,
+            10,
+            1, // different method
             Opcode::ReturnPop as u8,
         ];
         let data = make_valid_sab(&code);

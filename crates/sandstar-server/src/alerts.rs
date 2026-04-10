@@ -75,8 +75,7 @@ impl AlertConfig {
     pub fn load(path: &Path) -> Result<Self, String> {
         let data = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read alert config {}: {}", path.display(), e))?;
-        serde_json::from_str(&data)
-            .map_err(|e| format!("failed to parse alert config: {}", e))
+        serde_json::from_str(&data).map_err(|e| format!("failed to parse alert config: {}", e))
     }
 
     /// Save configuration to a JSON file.
@@ -348,8 +347,8 @@ impl AlertManager {
         for ch in channels {
             let is_fault = ch.status == "Fault";
             let is_down = ch.status == "Down";
-            let is_alert_status = (is_fault && self.config.alert_on_fault)
-                || (is_down && self.config.alert_on_down);
+            let is_alert_status =
+                (is_fault && self.config.alert_on_fault) || (is_down && self.config.alert_on_down);
 
             if is_alert_status {
                 still_alerting.push(ch.id);
@@ -554,9 +553,7 @@ pub fn alert_router(manager: SharedAlertManager) -> Router {
 }
 
 /// GET /api/alerts/config — view current alert config (password masked).
-async fn get_config(
-    State(mgr): State<SharedAlertManager>,
-) -> impl IntoResponse {
+async fn get_config(State(mgr): State<SharedAlertManager>) -> impl IntoResponse {
     let mgr = mgr.lock().unwrap();
     Json(mgr.config().masked())
 }
@@ -577,9 +574,7 @@ async fn put_config(
 }
 
 /// GET /api/alerts/recipients — list recipient email addresses.
-async fn get_recipients(
-    State(mgr): State<SharedAlertManager>,
-) -> impl IntoResponse {
+async fn get_recipients(State(mgr): State<SharedAlertManager>) -> impl IntoResponse {
     let mgr = mgr.lock().unwrap();
     Json(mgr.config().recipients.clone())
 }
@@ -602,7 +597,9 @@ async fn add_recipient(
         ),
         Ok(false) => (
             StatusCode::OK,
-            Json(serde_json::json!({"added": false, "email": req.email, "reason": "already exists"})),
+            Json(
+                serde_json::json!({"added": false, "email": req.email, "reason": "already exists"}),
+            ),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -634,25 +631,19 @@ async fn remove_recipient(
 }
 
 /// GET /api/alerts/active — list currently active (unresolved) alerts.
-async fn get_active(
-    State(mgr): State<SharedAlertManager>,
-) -> impl IntoResponse {
+async fn get_active(State(mgr): State<SharedAlertManager>) -> impl IntoResponse {
     let mgr = mgr.lock().unwrap();
     Json(mgr.active_alerts())
 }
 
 /// GET /api/alerts/history — recent alert history (newest first, max 100).
-async fn get_history(
-    State(mgr): State<SharedAlertManager>,
-) -> impl IntoResponse {
+async fn get_history(State(mgr): State<SharedAlertManager>) -> impl IntoResponse {
     let mgr = mgr.lock().unwrap();
     Json(mgr.history())
 }
 
 /// POST /api/alerts/test — send a test email.
-async fn send_test(
-    State(mgr): State<SharedAlertManager>,
-) -> impl IntoResponse {
+async fn send_test(State(mgr): State<SharedAlertManager>) -> impl IntoResponse {
     let mgr = mgr.lock().unwrap();
     let notified = mgr.send_test();
     Json(serde_json::json!({
@@ -779,9 +770,7 @@ mod tests {
     #[test]
     fn transition_ok_to_fault_sends_alert() {
         let sent = Arc::new(Mutex::new(Vec::new()));
-        let sender = MockSender {
-            sent: sent.clone(),
-        };
+        let sender = MockSender { sent: sent.clone() };
         let mut mgr = AlertManager::new(test_config());
         mgr.set_sender(Box::new(sender));
 
@@ -808,9 +797,7 @@ mod tests {
     #[test]
     fn no_realert_within_cooldown() {
         let sent = Arc::new(Mutex::new(Vec::new()));
-        let sender = MockSender {
-            sent: sent.clone(),
-        };
+        let sender = MockSender { sent: sent.clone() };
         let mut mgr = AlertManager::new(test_config());
         mgr.set_sender(Box::new(sender));
 
@@ -835,9 +822,7 @@ mod tests {
     #[test]
     fn recovery_sends_notification() {
         let sent = Arc::new(Mutex::new(Vec::new()));
-        let sender = MockSender {
-            sent: sent.clone(),
-        };
+        let sender = MockSender { sent: sent.clone() };
         let mut mgr = AlertManager::new(test_config());
         mgr.set_sender(Box::new(sender));
 
@@ -865,9 +850,7 @@ mod tests {
     #[test]
     fn disabled_config_skips_all() {
         let sent = Arc::new(Mutex::new(Vec::new()));
-        let sender = MockSender {
-            sent: sent.clone(),
-        };
+        let sender = MockSender { sent: sent.clone() };
         let mut config = test_config();
         config.enabled = false;
         let mut mgr = AlertManager::new(config);
@@ -883,9 +866,7 @@ mod tests {
     #[test]
     fn alert_on_down_only() {
         let sent = Arc::new(Mutex::new(Vec::new()));
-        let sender = MockSender {
-            sent: sent.clone(),
-        };
+        let sender = MockSender { sent: sent.clone() };
         let mut config = test_config();
         config.alert_on_fault = false;
         config.alert_on_down = true;
@@ -949,9 +930,7 @@ mod tests {
     #[test]
     fn multiple_channels_alert_independently() {
         let sent = Arc::new(Mutex::new(Vec::new()));
-        let sender = MockSender {
-            sent: sent.clone(),
-        };
+        let sender = MockSender { sent: sent.clone() };
         let mut mgr = AlertManager::new(test_config());
         mgr.set_sender(Box::new(sender));
 
@@ -1015,9 +994,7 @@ mod tests {
     #[test]
     fn persistent_fault_no_repeat_alert() {
         let sent = Arc::new(Mutex::new(Vec::new()));
-        let sender = MockSender {
-            sent: sent.clone(),
-        };
+        let sender = MockSender { sent: sent.clone() };
         let mut mgr = AlertManager::new(test_config());
         mgr.set_sender(Box::new(sender));
 

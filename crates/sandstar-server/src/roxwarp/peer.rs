@@ -157,12 +157,10 @@ async fn try_connect(
     // Phase 4: Active gossip loop
     set_peer_state(peer_states, &peer.node_id, PeerState::Active).await;
 
-    let mut heartbeat_timer =
-        tokio::time::interval(Duration::from_secs(heartbeat_secs));
+    let mut heartbeat_timer = tokio::time::interval(Duration::from_secs(heartbeat_secs));
     heartbeat_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-    let mut anti_entropy_timer =
-        tokio::time::interval(Duration::from_secs(anti_entropy_secs));
+    let mut anti_entropy_timer = tokio::time::interval(Duration::from_secs(anti_entropy_secs));
     anti_entropy_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let mut last_sent_version = current_version;
@@ -266,8 +264,9 @@ async fn wait_for_welcome<S>(
     ws_rx: &mut futures_util::stream::SplitStream<S>,
 ) -> Option<(String, HashMap<String, u64>)>
 where
-    S: futures_util::Stream<Item = Result<TungsteniteMessage, tokio_tungstenite::tungstenite::Error>>
-        + Unpin,
+    S: futures_util::Stream<
+            Item = Result<TungsteniteMessage, tokio_tungstenite::tungstenite::Error>,
+        > + Unpin,
 {
     match tokio::time::timeout(Duration::from_secs(10), ws_rx.next()).await {
         Ok(Some(Ok(TungsteniteMessage::Binary(data)))) => {
@@ -303,8 +302,8 @@ async fn handle_peer_binary<S>(
 where
     S: futures_util::Sink<TungsteniteMessage> + Unpin,
 {
-    let msg: WarpMessage = rmp_serde::from_slice(data)
-        .map_err(|e| format!("invalid msgpack message: {e}"))?;
+    let msg: WarpMessage =
+        rmp_serde::from_slice(data).map_err(|e| format!("invalid msgpack message: {e}"))?;
     process_peer_message(msg, delta_engine, peer_node_id, ws_tx, debug_mode).await
 }
 
@@ -319,8 +318,8 @@ async fn handle_peer_text<S>(
 where
     S: futures_util::Sink<TungsteniteMessage> + Unpin,
 {
-    let msg: WarpMessage = serde_json::from_str(text)
-        .map_err(|e| format!("invalid json message: {e}"))?;
+    let msg: WarpMessage =
+        serde_json::from_str(text).map_err(|e| format!("invalid json message: {e}"))?;
     process_peer_message(msg, delta_engine, peer_node_id, ws_tx, debug_mode).await
 }
 
@@ -368,10 +367,7 @@ where
             debug!(peer = %node_id, "roxWarp peer: received version vector");
             // Check if peer is behind on our data
             let our_version = delta_engine.current_version();
-            let peer_has = versions
-                .get(&delta_engine.node_id)
-                .copied()
-                .unwrap_or(0);
+            let peer_has = versions.get(&delta_engine.node_id).copied().unwrap_or(0);
             if peer_has < our_version {
                 let deltas = delta_engine.delta_since(peer_has).await;
                 if !deltas.is_empty() {
@@ -445,10 +441,7 @@ async fn set_peer_state(
     peer_id: &str,
     state: PeerState,
 ) {
-    peer_states
-        .write()
-        .await
-        .insert(peer_id.to_string(), state);
+    peer_states.write().await.insert(peer_id.to_string(), state);
 }
 
 #[cfg(test)]
@@ -479,8 +472,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_peer_state_works() {
-        let states: Arc<RwLock<HashMap<String, PeerState>>> =
-            Arc::new(RwLock::new(HashMap::new()));
+        let states: Arc<RwLock<HashMap<String, PeerState>>> = Arc::new(RwLock::new(HashMap::new()));
 
         set_peer_state(&states, "peer-1", PeerState::Connecting).await;
         assert_eq!(

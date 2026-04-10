@@ -137,7 +137,10 @@ mod tests {
         let data = [0xBE, 0xEF];
         let crc_ff = sensirion_crc8(&data, 0xFF);
         let crc_00 = sensirion_crc8(&data, 0x00);
-        assert_ne!(crc_ff, crc_00, "Different inits must produce different CRCs");
+        assert_ne!(
+            crc_ff, crc_00,
+            "Different inits must produce different CRCs"
+        );
     }
 
     #[test]

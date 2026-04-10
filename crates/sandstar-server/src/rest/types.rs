@@ -109,33 +109,99 @@ pub struct FormatEntry {
 /// Standard formats list.
 pub fn formats_list() -> Vec<FormatEntry> {
     vec![
-        FormatEntry { mime: "application/json", receive: true, send: true },
-        FormatEntry { mime: "text/zinc", receive: true, send: true },
-        FormatEntry { mime: "text/plain", receive: false, send: true },
+        FormatEntry {
+            mime: "application/json",
+            receive: true,
+            send: true,
+        },
+        FormatEntry {
+            mime: "text/zinc",
+            receive: true,
+            send: true,
+        },
+        FormatEntry {
+            mime: "text/plain",
+            receive: false,
+            send: true,
+        },
     ]
 }
 
 /// Standard ops list.
 pub fn ops_list() -> Vec<OpEntry> {
     vec![
-        OpEntry { name: "about", summary: "Server metadata" },
-        OpEntry { name: "ops", summary: "List available operations" },
-        OpEntry { name: "formats", summary: "List supported MIME types" },
-        OpEntry { name: "read", summary: "Read points by filter or ID" },
-        OpEntry { name: "hisRead", summary: "Read historical trend data" },
-        OpEntry { name: "nav", summary: "Navigate site/equip/point tree" },
-        OpEntry { name: "invokeAction", summary: "Invoke action on a record" },
-        OpEntry { name: "status", summary: "Engine status" },
-        OpEntry { name: "channels", summary: "List all channels" },
-        OpEntry { name: "polls", summary: "List polled channels" },
-        OpEntry { name: "tables", summary: "List lookup tables" },
-        OpEntry { name: "pointWrite", summary: "Write to output channel" },
-        OpEntry { name: "pollNow", summary: "Trigger immediate poll cycle" },
-        OpEntry { name: "reload", summary: "Reload configuration from disk" },
-        OpEntry { name: "watchSub", summary: "Subscribe to channel changes" },
-        OpEntry { name: "watchUnsub", summary: "Unsubscribe or close watch" },
-        OpEntry { name: "watchPoll", summary: "Poll for changed values" },
-        OpEntry { name: "history", summary: "Query channel value history" },
+        OpEntry {
+            name: "about",
+            summary: "Server metadata",
+        },
+        OpEntry {
+            name: "ops",
+            summary: "List available operations",
+        },
+        OpEntry {
+            name: "formats",
+            summary: "List supported MIME types",
+        },
+        OpEntry {
+            name: "read",
+            summary: "Read points by filter or ID",
+        },
+        OpEntry {
+            name: "hisRead",
+            summary: "Read historical trend data",
+        },
+        OpEntry {
+            name: "nav",
+            summary: "Navigate site/equip/point tree",
+        },
+        OpEntry {
+            name: "invokeAction",
+            summary: "Invoke action on a record",
+        },
+        OpEntry {
+            name: "status",
+            summary: "Engine status",
+        },
+        OpEntry {
+            name: "channels",
+            summary: "List all channels",
+        },
+        OpEntry {
+            name: "polls",
+            summary: "List polled channels",
+        },
+        OpEntry {
+            name: "tables",
+            summary: "List lookup tables",
+        },
+        OpEntry {
+            name: "pointWrite",
+            summary: "Write to output channel",
+        },
+        OpEntry {
+            name: "pollNow",
+            summary: "Trigger immediate poll cycle",
+        },
+        OpEntry {
+            name: "reload",
+            summary: "Reload configuration from disk",
+        },
+        OpEntry {
+            name: "watchSub",
+            summary: "Subscribe to channel changes",
+        },
+        OpEntry {
+            name: "watchUnsub",
+            summary: "Unsubscribe or close watch",
+        },
+        OpEntry {
+            name: "watchPoll",
+            summary: "Poll for changed values",
+        },
+        OpEntry {
+            name: "history",
+            summary: "Query channel value history",
+        },
     ]
 }
 

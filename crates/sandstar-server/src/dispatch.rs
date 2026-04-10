@@ -38,7 +38,9 @@ pub fn handle_connection<H: HalRead + HalWrite + HalDiagnostics>(
     };
 
     debug!(?cmd, "received command");
-    crate::metrics::metrics().ipc_requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    crate::metrics::metrics()
+        .ipc_requests
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     let result = match &cmd {
         EngineCommand::Shutdown => ConnectionResult::Shutdown,
@@ -103,31 +105,29 @@ fn execute<H: HalRead + HalWrite + HalDiagnostics>(
             }
         }
 
-        EngineCommand::GetWriteLevels { channel } => {
-            match engine.get_write_levels(channel) {
-                Ok(pa_opt) => {
-                    let levels: Vec<WriteLevelInfo> = (0..17)
-                        .map(|i| {
-                            let (val, who) = match &pa_opt {
-                                Some(pa) => {
-                                    let wl = &pa.levels()[i];
-                                    (wl.value, wl.who.clone())
-                                }
-                                None => (None, String::new()),
-                            };
-                            WriteLevelInfo {
-                                level: (i + 1) as u8,
-                                level_dis: format!("Level {}", i + 1),
-                                val,
-                                who,
+        EngineCommand::GetWriteLevels { channel } => match engine.get_write_levels(channel) {
+            Ok(pa_opt) => {
+                let levels: Vec<WriteLevelInfo> = (0..17)
+                    .map(|i| {
+                        let (val, who) = match &pa_opt {
+                            Some(pa) => {
+                                let wl = &pa.levels()[i];
+                                (wl.value, wl.who.clone())
                             }
-                        })
-                        .collect();
-                    EngineResponse::WriteLevels(levels)
-                }
-                Err(e) => EngineResponse::Error(e.to_string()),
+                            None => (None, String::new()),
+                        };
+                        WriteLevelInfo {
+                            level: (i + 1) as u8,
+                            level_dis: format!("Level {}", i + 1),
+                            val,
+                            who,
+                        }
+                    })
+                    .collect();
+                EngineResponse::WriteLevels(levels)
             }
-        }
+            Err(e) => EngineResponse::Error(e.to_string()),
+        },
 
         EngineCommand::ConvertValue { channel, raw } => {
             let mut ev = EngineValue::default();
@@ -202,12 +202,14 @@ fn execute<H: HalRead + HalWrite + HalDiagnostics>(
                 }
                 Err(e) => EngineResponse::Error(format!("reload failed: {}", e)),
             },
-            None => EngineResponse::Error(
-                "no config directory — running in demo mode".to_string(),
-            ),
+            None => EngineResponse::Error("no config directory — running in demo mode".to_string()),
         },
 
-        EngineCommand::GetHistory { channel, since_secs, limit } => {
+        EngineCommand::GetHistory {
+            channel,
+            since_secs,
+            limit,
+        } => {
             let points = history_store.query(channel, since_secs, limit);
             let entries = points
                 .into_iter()
@@ -237,15 +239,21 @@ fn execute<H: HalRead + HalWrite + HalDiagnostics>(
                 .count();
             let i2c_backoff_active = engine.i2c_backoff.len();
 
-            let last_us = m.poll_duration_us_last.load(std::sync::atomic::Ordering::Relaxed);
-            let max_us = m.poll_duration_us_max.load(std::sync::atomic::Ordering::Relaxed);
+            let last_us = m
+                .poll_duration_us_last
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let max_us = m
+                .poll_duration_us_max
+                .load(std::sync::atomic::Ordering::Relaxed);
 
             EngineResponse::Diagnostics(DiagnosticsInfo {
                 uptime_secs: uptime.as_secs(),
                 poll_count: m.poll_count.load(std::sync::atomic::Ordering::Relaxed),
                 last_poll_duration_ms: last_us / 1000,
                 max_poll_duration_ms: max_us / 1000,
-                poll_overrun_count: m.poll_overrun_count.load(std::sync::atomic::Ordering::Relaxed),
+                poll_overrun_count: m
+                    .poll_overrun_count
+                    .load(std::sync::atomic::Ordering::Relaxed),
                 poll_interval_ms: config.poll_interval_ms,
                 channels_total: engine.channels.count(),
                 channels_fault,

@@ -106,7 +106,10 @@ impl ChannelSnapshot {
     }
 
     pub fn is_enabled(&self, channel: u32) -> bool {
-        self.channels.get(&channel).map(|ch| ch.enabled).unwrap_or(false)
+        self.channels
+            .get(&channel)
+            .map(|ch| ch.enabled)
+            .unwrap_or(false)
     }
 
     pub fn is_ok(&self, channel: u32) -> bool {
@@ -211,7 +214,11 @@ pub fn drain_tag_writes() -> Vec<SvmTagWrite> {
 pub(crate) fn queue_tag_write(channel: u32, tag: String, value: String) {
     if let Some(q) = TAG_WRITE_QUEUE.get() {
         if let Ok(mut v) = q.lock() {
-            v.push(SvmTagWrite { channel, tag, value });
+            v.push(SvmTagWrite {
+                channel,
+                tag,
+                value,
+            });
         }
     }
 }
@@ -489,7 +496,7 @@ mod tests {
     fn test_snapshot_write_levels_populated() {
         let mut snap = ChannelSnapshot::new();
         let mut levels = [None; 17];
-        levels[7] = Some(72.0);  // Priority level 8
+        levels[7] = Some(72.0); // Priority level 8
         levels[15] = Some(55.0); // Priority level 16
         snap.update(vec![ChannelInfo {
             channel: 500,
@@ -600,9 +607,7 @@ mod tests {
 
     #[test]
     fn test_ffi_safe_passes_through_on_success() {
-        let result: Cell = ffi_safe!(Cell { ival: -1 }, {
-            Cell { ival: 42 }
-        });
+        let result: Cell = ffi_safe!(Cell { ival: -1 }, { Cell { ival: 42 } });
         assert_eq!(unsafe { result.ival }, 42);
     }
 

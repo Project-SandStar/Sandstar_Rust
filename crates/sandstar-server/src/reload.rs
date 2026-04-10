@@ -41,10 +41,14 @@ impl fmt::Display for ReloadSummary {
             f,
             "channels: {} added, {} removed, {} modified, {} unchanged | \
              tables={} | polls: {} added, {} removed, {} total | errors={}",
-            self.channels_added, self.channels_removed,
-            self.channels_updated, self.channels_unchanged,
+            self.channels_added,
+            self.channels_removed,
+            self.channels_updated,
+            self.channels_unchanged,
             self.tables_reloaded,
-            self.polls_added, self.polls_removed, self.polls_after,
+            self.polls_added,
+            self.polls_removed,
+            self.polls_after,
             self.errors.len()
         )
     }
@@ -119,11 +123,8 @@ pub fn reload_config<H: HalRead + HalWrite + HalDiagnostics>(
                 summary.errors.extend(result.warnings);
 
                 // 3. Diff the poll list: add missing, remove stale
-                let current_poll_ids: HashSet<u32> = engine
-                    .polls
-                    .iter()
-                    .map(|(&id, _)| id)
-                    .collect();
+                let current_poll_ids: HashSet<u32> =
+                    engine.polls.iter().map(|(&id, _)| id).collect();
 
                 // Add polls that should exist but don't
                 for &id in &result.expected_polls {
@@ -263,7 +264,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
 
         // Create a malformed database.zinc that will fail to parse
-        fs::write(dir.path().join("database.zinc"), "not valid zinc at all {{{\n").unwrap();
+        fs::write(
+            dir.path().join("database.zinc"),
+            "not valid zinc at all {{{\n",
+        )
+        .unwrap();
 
         let mut engine = make_engine_with_channel(1100);
 
@@ -313,10 +318,7 @@ mod tests {
 
     /// Write a minimal database.zinc file for the given channels.
     /// Each entry is (id, label, is_virtual, has_cur_marker).
-    fn write_database_zinc(
-        dir: &TempDir,
-        channels: &[(u32, &str, bool, bool)],
-    ) {
+    fn write_database_zinc(dir: &TempDir, channels: &[(u32, &str, bool, bool)]) {
         let mut cols: Vec<&str> = vec!["channel", "enabled", "navName"];
         let has_virtual = channels.iter().any(|(_, _, v, _)| *v);
         let has_cur = channels.iter().any(|(_, _, _, c)| *c);
@@ -343,14 +345,20 @@ mod tests {
             // virtualChannel (if column exists)
             if has_virtual {
                 content.push(',');
-                if *is_virtual { content.push('M'); }
+                if *is_virtual {
+                    content.push('M');
+                }
                 content.push(',');
-                if *is_virtual { content.push('M'); } // analog marker for virtual
+                if *is_virtual {
+                    content.push('M');
+                } // analog marker for virtual
             }
             // cur (if column exists)
             if has_cur {
                 content.push(',');
-                if *has_cur_marker { content.push('M'); }
+                if *has_cur_marker {
+                    content.push('M');
+                }
             }
             content.push('\n');
         }
@@ -365,24 +373,37 @@ mod tests {
         engine.channels.get_mut(1100).unwrap().enabled = true;
 
         // Initial load: just physical channel 1100
-        write_database_zinc(&dir, &[
-            (1100, "temp", false, true),
-        ]);
+        write_database_zinc(&dir, &[(1100, "temp", false, true)]);
         let _result = reload_config(&mut engine, dir.path()).unwrap();
         assert_eq!(engine.channels.count(), 1);
         assert!(engine.polls.contains(1100));
 
         // Reload with an extra virtual channel
-        write_database_zinc(&dir, &[
-            (1100, "temp", false, true),
-            (3000, "virtual_temp", true, false),
-        ]);
+        write_database_zinc(
+            &dir,
+            &[
+                (1100, "temp", false, true),
+                (3000, "virtual_temp", true, false),
+            ],
+        );
         let result = reload_config(&mut engine, dir.path()).unwrap();
 
-        assert_eq!(result.channels_added, 1, "should have added 1 virtual channel");
-        assert!(engine.channels.contains(3000), "virtual channel 3000 should exist");
-        assert!(engine.polls.contains(3000), "virtual channel should be polled");
-        assert!(engine.polls.contains(1100), "original poll should still exist");
+        assert_eq!(
+            result.channels_added, 1,
+            "should have added 1 virtual channel"
+        );
+        assert!(
+            engine.channels.contains(3000),
+            "virtual channel 3000 should exist"
+        );
+        assert!(
+            engine.polls.contains(3000),
+            "virtual channel should be polled"
+        );
+        assert!(
+            engine.polls.contains(1100),
+            "original poll should still exist"
+        );
 
         let ch = engine.channels.get(3000).unwrap();
         assert!(ch.channel_type.is_virtual());
@@ -396,23 +417,36 @@ mod tests {
         engine.channels.get_mut(1100).unwrap().enabled = true;
 
         // Initial load: physical 1100 + virtual 3000
-        write_database_zinc(&dir, &[
-            (1100, "temp", false, true),
-            (3000, "virtual_temp", true, false),
-        ]);
+        write_database_zinc(
+            &dir,
+            &[
+                (1100, "temp", false, true),
+                (3000, "virtual_temp", true, false),
+            ],
+        );
         reload_config(&mut engine, dir.path()).unwrap();
         assert!(engine.channels.contains(3000));
 
         // Reload without virtual channel
-        write_database_zinc(&dir, &[
-            (1100, "temp", false, true),
-        ]);
+        write_database_zinc(&dir, &[(1100, "temp", false, true)]);
         let result = reload_config(&mut engine, dir.path()).unwrap();
 
-        assert_eq!(result.channels_removed, 1, "should have removed 1 virtual channel");
-        assert!(!engine.channels.contains(3000), "virtual channel 3000 should be gone");
-        assert!(!engine.polls.contains(3000), "removed channel should not be polled");
-        assert!(engine.polls.contains(1100), "original poll should still exist");
+        assert_eq!(
+            result.channels_removed, 1,
+            "should have removed 1 virtual channel"
+        );
+        assert!(
+            !engine.channels.contains(3000),
+            "virtual channel 3000 should be gone"
+        );
+        assert!(
+            !engine.polls.contains(3000),
+            "removed channel should not be polled"
+        );
+        assert!(
+            engine.polls.contains(1100),
+            "original poll should still exist"
+        );
     }
 
     #[test]
@@ -422,16 +456,17 @@ mod tests {
         engine.channels.get_mut(1100).unwrap().enabled = true;
 
         // Initial load
-        write_database_zinc(&dir, &[
-            (1100, "temp", false, true),
-        ]);
+        write_database_zinc(&dir, &[(1100, "temp", false, true)]);
         reload_config(&mut engine, dir.path()).unwrap();
 
         // Simulate runtime state: set priority array + current value + poll state
         {
             let ch = engine.channels.get_mut(1100).unwrap();
             ch.priority_array = Some(sandstar_engine::priority::PriorityArray::default());
-            ch.priority_array.as_mut().unwrap().set_level(8, Some(72.0), "test", 0.0);
+            ch.priority_array
+                .as_mut()
+                .unwrap()
+                .set_level(8, Some(72.0), "test", 0.0);
             ch.value = EngineValue {
                 status: EngineStatus::Ok,
                 cur: 72.5,
@@ -455,21 +490,29 @@ mod tests {
         }
 
         // Reload with modified label (config change)
-        write_database_zinc(&dir, &[
-            (1100, "temperature_sensor", false, true),
-        ]);
+        write_database_zinc(&dir, &[(1100, "temperature_sensor", false, true)]);
         let result = reload_config(&mut engine, dir.path()).unwrap();
 
-        assert_eq!(result.channels_updated, 1, "label changed, should be modified");
+        assert_eq!(
+            result.channels_updated, 1,
+            "label changed, should be modified"
+        );
 
         // Label should be updated
         let ch = engine.channels.get(1100).unwrap();
         assert_eq!(ch.label, "temperature_sensor");
 
         // Priority array should be preserved (update_metadata doesn't touch it)
-        assert!(ch.priority_array.is_some(), "priority array must survive reload");
+        assert!(
+            ch.priority_array.is_some(),
+            "priority array must survive reload"
+        );
         let (eff, _level) = ch.priority_array.as_ref().unwrap().effective();
-        assert_eq!(eff, Some(72.0), "priority write at level 8 must survive reload");
+        assert_eq!(
+            eff,
+            Some(72.0),
+            "priority write at level 8 must survive reload"
+        );
 
         // Current value should be preserved
         assert_eq!(ch.value.cur, 72.5, "current value must survive reload");
@@ -489,9 +532,7 @@ mod tests {
         engine.channels.get_mut(1100).unwrap().enabled = true;
 
         // Initial load
-        write_database_zinc(&dir, &[
-            (1100, "temp", false, true),
-        ]);
+        write_database_zinc(&dir, &[(1100, "temp", false, true)]);
         reload_config(&mut engine, dir.path()).unwrap();
 
         // Set poll runtime state
@@ -509,13 +550,14 @@ mod tests {
         }
 
         // Reload with identical config — nothing should change
-        write_database_zinc(&dir, &[
-            (1100, "temp", false, true),
-        ]);
+        write_database_zinc(&dir, &[(1100, "temp", false, true)]);
         let result = reload_config(&mut engine, dir.path()).unwrap();
 
         assert_eq!(result.channels_updated, 0, "nothing modified");
-        assert_eq!(result.channels_unchanged, 1, "channel should be marked unchanged");
+        assert_eq!(
+            result.channels_unchanged, 1,
+            "channel should be marked unchanged"
+        );
         assert_eq!(result.polls_added, 0, "no new polls");
         assert_eq!(result.polls_removed, 0, "no removed polls");
 
@@ -533,17 +575,13 @@ mod tests {
         let mut engine = Engine::<MockHal>::new(MockHal::new());
 
         // Load a virtual channel
-        write_database_zinc(&dir, &[
-            (3000, "old_label", true, false),
-        ]);
+        write_database_zinc(&dir, &[(3000, "old_label", true, false)]);
         reload_config(&mut engine, dir.path()).unwrap();
         assert!(engine.channels.contains(3000));
         assert_eq!(engine.channels.get(3000).unwrap().label, "old_label");
 
         // Reload with updated label — should update in-place, not fail
-        write_database_zinc(&dir, &[
-            (3000, "new_label", true, false),
-        ]);
+        write_database_zinc(&dir, &[(3000, "new_label", true, false)]);
         let result = reload_config(&mut engine, dir.path()).unwrap();
 
         assert_eq!(result.channels_updated, 1, "virtual channel label changed");
@@ -572,10 +610,7 @@ mod tests {
         }
 
         // Load: both channels polled
-        write_database_zinc(&dir, &[
-            (1100, "a", false, true),
-            (1200, "b", false, true),
-        ]);
+        write_database_zinc(&dir, &[(1100, "a", false, true), (1200, "b", false, true)]);
         reload_config(&mut engine, dir.path()).unwrap();
         assert!(engine.polls.contains(1100));
         assert!(engine.polls.contains(1200));
@@ -592,7 +627,10 @@ mod tests {
         let result = reload_config(&mut engine, dir.path()).unwrap();
 
         assert!(engine.polls.contains(1100), "1100 should still be polled");
-        assert!(!engine.polls.contains(1200), "1200 should no longer be polled");
+        assert!(
+            !engine.polls.contains(1200),
+            "1200 should no longer be polled"
+        );
         assert_eq!(result.polls_removed, 1, "one poll should have been removed");
     }
 }

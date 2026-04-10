@@ -146,7 +146,12 @@ mod tests {
         #[test]
         fn test_read_adc_value() {
             let dir = TempDir::new().unwrap();
-            let root = dir.path().join("sys").join("bus").join("iio").join("devices");
+            let root = dir
+                .path()
+                .join("sys")
+                .join("bus")
+                .join("iio")
+                .join("devices");
             fs::create_dir_all(&root).unwrap();
             create_mock_iio_channel(&root, 0, 0, "2048\n");
 
@@ -158,7 +163,12 @@ mod tests {
         #[test]
         fn test_read_adc_different_channels() {
             let dir = TempDir::new().unwrap();
-            let root = dir.path().join("sys").join("bus").join("iio").join("devices");
+            let root = dir
+                .path()
+                .join("sys")
+                .join("bus")
+                .join("iio")
+                .join("devices");
             fs::create_dir_all(&root).unwrap();
 
             create_mock_iio_channel(&root, 0, 0, "1000\n");
@@ -174,7 +184,12 @@ mod tests {
         #[test]
         fn test_read_adc_different_devices() {
             let dir = TempDir::new().unwrap();
-            let root = dir.path().join("sys").join("bus").join("iio").join("devices");
+            let root = dir
+                .path()
+                .join("sys")
+                .join("bus")
+                .join("iio")
+                .join("devices");
             fs::create_dir_all(&root).unwrap();
 
             create_mock_iio_channel(&root, 0, 0, "100\n");
@@ -188,7 +203,12 @@ mod tests {
         #[test]
         fn test_read_adc_nonexistent_channel_returns_error() {
             let dir = TempDir::new().unwrap();
-            let root = dir.path().join("sys").join("bus").join("iio").join("devices");
+            let root = dir
+                .path()
+                .join("sys")
+                .join("bus")
+                .join("iio")
+                .join("devices");
             fs::create_dir_all(&root).unwrap();
 
             let device_dir = root.join("iio:device0");
@@ -201,7 +221,12 @@ mod tests {
         #[test]
         fn test_read_adc_zero_value() {
             let dir = TempDir::new().unwrap();
-            let root = dir.path().join("sys").join("bus").join("iio").join("devices");
+            let root = dir
+                .path()
+                .join("sys")
+                .join("bus")
+                .join("iio")
+                .join("devices");
             fs::create_dir_all(&root).unwrap();
             create_mock_iio_channel(&root, 0, 0, "0\n");
 
@@ -212,7 +237,12 @@ mod tests {
         #[test]
         fn test_read_adc_max_12bit_value() {
             let dir = TempDir::new().unwrap();
-            let root = dir.path().join("sys").join("bus").join("iio").join("devices");
+            let root = dir
+                .path()
+                .join("sys")
+                .join("bus")
+                .join("iio")
+                .join("devices");
             fs::create_dir_all(&root).unwrap();
             create_mock_iio_channel(&root, 0, 0, "4095\n");
 
@@ -223,7 +253,12 @@ mod tests {
         #[test]
         fn test_read_adc_invalid_content_returns_error() {
             let dir = TempDir::new().unwrap();
-            let root = dir.path().join("sys").join("bus").join("iio").join("devices");
+            let root = dir
+                .path()
+                .join("sys")
+                .join("bus")
+                .join("iio")
+                .join("devices");
             fs::create_dir_all(&root).unwrap();
             create_mock_iio_channel(&root, 0, 0, "not_a_number\n");
 

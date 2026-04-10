@@ -75,7 +75,9 @@ async fn read_single_channel_by_id() {
 #[tokio::test]
 async fn read_channel_by_filter() {
     let server = TestServer::start().await;
-    let resp = reqwest::get(server.url("/api/read?filter=channel==1113")).await.unwrap();
+    let resp = reqwest::get(server.url("/api/read?filter=channel==1113"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Vec<serde_json::Value> = resp.json().await.unwrap();
     assert_eq!(body.len(), 1);
@@ -140,7 +142,9 @@ async fn point_write_and_read_priority_grid() {
     assert!((l17["val"].as_f64().unwrap() - 1.0).abs() < f64::EPSILON);
 
     // Read back via GET
-    let resp = reqwest::get(server.url("/api/pointWrite?channel=2001")).await.unwrap();
+    let resp = reqwest::get(server.url("/api/pointWrite?channel=2001"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Vec<serde_json::Value> = resp.json().await.unwrap();
     assert_eq!(body.len(), 17);
@@ -213,7 +217,9 @@ async fn point_write_priority_ordering() {
     assert_eq!(resp.status(), 200);
 
     // Read the 17-level grid — both levels should be set
-    let resp = reqwest::get(server.url("/api/pointWrite?channel=2001")).await.unwrap();
+    let resp = reqwest::get(server.url("/api/pointWrite?channel=2001"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Vec<serde_json::Value> = resp.json().await.unwrap();
     assert_eq!(body.len(), 17);
@@ -328,7 +334,12 @@ async fn about_returns_zinc_when_requested() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(ct.contains("text/zinc"));
     let body = resp.text().await.unwrap();
     assert!(body.contains("ver:\"3.0\""));
@@ -346,7 +357,12 @@ async fn channels_returns_zinc_when_requested() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(ct.contains("text/zinc"));
     let body = resp.text().await.unwrap();
     assert!(body.contains("ver:\"3.0\""));
@@ -385,7 +401,9 @@ async fn history_returns_empty_for_new_channel() {
 #[tokio::test]
 async fn read_filter_by_type() {
     let server = TestServer::start().await;
-    let resp = reqwest::get(server.url("/api/read?filter=Analog")).await.unwrap();
+    let resp = reqwest::get(server.url("/api/read?filter=Analog"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Vec<serde_json::Value> = resp.json().await.unwrap();
     assert_eq!(body.len(), 2); // Two Analog channels: 1113, 1200
@@ -394,7 +412,9 @@ async fn read_filter_by_type() {
 #[tokio::test]
 async fn read_filter_by_direction() {
     let server = TestServer::start().await;
-    let resp = reqwest::get(server.url("/api/read?filter=Out")).await.unwrap();
+    let resp = reqwest::get(server.url("/api/read?filter=Out"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Vec<serde_json::Value> = resp.json().await.unwrap();
     assert_eq!(body.len(), 2); // Two output channels: 2001, 2002
@@ -460,7 +480,10 @@ async fn error_response_has_err_field() {
     let resp = reqwest::get(server.url("/api/read?id=9999")).await.unwrap();
     assert!(resp.status().as_u16() >= 400);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body["err"].is_string(), "error response must have 'err' string field");
+    assert!(
+        body["err"].is_string(),
+        "error response must have 'err' string field"
+    );
 }
 
 #[tokio::test]
@@ -473,7 +496,9 @@ async fn not_found_channel_returns_404() {
 #[tokio::test]
 async fn point_write_read_nonexistent_channel() {
     let server = TestServer::start().await;
-    let resp = reqwest::get(server.url("/api/pointWrite?channel=9999")).await.unwrap();
+    let resp = reqwest::get(server.url("/api/pointWrite?channel=9999"))
+        .await
+        .unwrap();
     assert!(resp.status().as_u16() >= 400);
 }
 
@@ -483,11 +508,7 @@ async fn point_write_read_nonexistent_channel() {
 async fn reload_fails_in_demo_mode() {
     let server = TestServer::start().await;
     let client = reqwest::Client::new();
-    let resp = client
-        .post(server.url("/api/reload"))
-        .send()
-        .await
-        .unwrap();
+    let resp = client.post(server.url("/api/reload")).send().await.unwrap();
     assert!(resp.status().as_u16() >= 400);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert!(body["err"].as_str().unwrap().contains("demo mode"));
@@ -498,7 +519,9 @@ async fn reload_fails_in_demo_mode() {
 #[tokio::test]
 async fn history_with_duration_param() {
     let server = TestServer::start().await;
-    let resp = reqwest::get(server.url("/api/history/1113?duration=1h")).await.unwrap();
+    let resp = reqwest::get(server.url("/api/history/1113?duration=1h"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Vec<serde_json::Value> = resp.json().await.unwrap();
     // No poll cycles yet, so empty is fine — just test the endpoint works
@@ -508,7 +531,9 @@ async fn history_with_duration_param() {
 #[tokio::test]
 async fn history_with_limit_param() {
     let server = TestServer::start().await;
-    let resp = reqwest::get(server.url("/api/history/1113?limit=5")).await.unwrap();
+    let resp = reqwest::get(server.url("/api/history/1113?limit=5"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
 }
 
@@ -518,12 +543,18 @@ async fn history_populates_after_poll() {
     let client = reqwest::Client::new();
 
     // Trigger a poll cycle
-    let resp = client.post(server.url("/api/pollNow")).send().await.unwrap();
+    let resp = client
+        .post(server.url("/api/pollNow"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
 
     // Give the history store a moment — the poll runs synchronously in test mode
     // History should now contain entries for polled channels
-    let resp = reqwest::get(server.url("/api/history/1113?duration=1h")).await.unwrap();
+    let resp = reqwest::get(server.url("/api/history/1113?duration=1h"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Vec<serde_json::Value> = resp.json().await.unwrap();
     // Note: history may still be empty if the test harness doesn't record to history_store
@@ -543,7 +574,10 @@ async fn status_contains_all_expected_fields() {
     assert!(body["channelCount"].is_u64(), "channelCount must be u64");
     assert!(body["pollCount"].is_u64(), "pollCount must be u64");
     assert!(body["tableCount"].is_u64(), "tableCount must be u64");
-    assert!(body["pollIntervalMs"].is_u64(), "pollIntervalMs must be u64");
+    assert!(
+        body["pollIntervalMs"].is_u64(),
+        "pollIntervalMs must be u64"
+    );
 }
 
 // ── Watch Subscriptions (Extended) ────────────────────────────
@@ -576,7 +610,11 @@ async fn watch_poll_without_refresh_returns_changes_only() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["rows"].as_array().unwrap().len(), 0, "no changes → 0 rows");
+    assert_eq!(
+        body["rows"].as_array().unwrap().len(),
+        0,
+        "no changes → 0 rows"
+    );
 }
 
 #[tokio::test]
@@ -765,26 +803,58 @@ async fn cors_preflight_returns_allowed_methods_and_headers() {
         .request(reqwest::Method::OPTIONS, server.url("/api/pointWrite"))
         .header("Origin", "http://192.168.1.100:8085")
         .header("Access-Control-Request-Method", "POST")
-        .header("Access-Control-Request-Headers", "content-type,authorization")
+        .header(
+            "Access-Control-Request-Headers",
+            "content-type,authorization",
+        )
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
 
     // Verify allowed methods include GET, POST
-    let methods = resp.headers().get("access-control-allow-methods").unwrap().to_str().unwrap();
-    assert!(methods.contains("GET"), "should allow GET, got: {}", methods);
-    assert!(methods.contains("POST"), "should allow POST, got: {}", methods);
+    let methods = resp
+        .headers()
+        .get("access-control-allow-methods")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(
+        methods.contains("GET"),
+        "should allow GET, got: {}",
+        methods
+    );
+    assert!(
+        methods.contains("POST"),
+        "should allow POST, got: {}",
+        methods
+    );
 
     // Verify allowed headers include content-type and authorization
-    let headers = resp.headers().get("access-control-allow-headers").unwrap().to_str().unwrap();
+    let headers = resp
+        .headers()
+        .get("access-control-allow-headers")
+        .unwrap()
+        .to_str()
+        .unwrap();
     let headers_lower = headers.to_lowercase();
-    assert!(headers_lower.contains("content-type"), "should allow content-type, got: {}", headers);
-    assert!(headers_lower.contains("authorization"), "should allow authorization, got: {}", headers);
+    assert!(
+        headers_lower.contains("content-type"),
+        "should allow content-type, got: {}",
+        headers
+    );
+    assert!(
+        headers_lower.contains("authorization"),
+        "should allow authorization, got: {}",
+        headers
+    );
 
     // Verify max-age is set (preflight caching)
     let max_age = resp.headers().get("access-control-max-age");
-    assert!(max_age.is_some(), "should have max-age for preflight caching");
+    assert!(
+        max_age.is_some(),
+        "should have max-age for preflight caching"
+    );
 }
 
 // ── Zinc Negotiation Extended ─────────────────────────────────
@@ -800,7 +870,12 @@ async fn polls_returns_zinc_when_requested() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(ct.contains("text/zinc"));
     let body = resp.text().await.unwrap();
     assert!(body.contains("ver:\"3.0\""));
@@ -817,7 +892,12 @@ async fn history_returns_zinc_when_requested() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(ct.contains("text/zinc"));
     let body = resp.text().await.unwrap();
     assert!(body.contains("ver:\"3.0\""));
@@ -846,11 +926,23 @@ async fn test_auth_required_on_protected_routes() {
     assert_eq!(resp.status(), 401, "POST without auth token should be 401");
 
     // Other protected routes should also require auth
-    let resp = client.post(server.url("/api/pollNow")).send().await.unwrap();
-    assert_eq!(resp.status(), 401, "pollNow without auth token should be 401");
+    let resp = client
+        .post(server.url("/api/pollNow"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        401,
+        "pollNow without auth token should be 401"
+    );
 
     let resp = client.post(server.url("/api/reload")).send().await.unwrap();
-    assert_eq!(resp.status(), 401, "reload without auth token should be 401");
+    assert_eq!(
+        resp.status(),
+        401,
+        "reload without auth token should be 401"
+    );
 }
 
 #[tokio::test]
@@ -870,7 +962,11 @@ async fn test_auth_succeeds_with_correct_token() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "POST with correct auth token should succeed");
+    assert_eq!(
+        resp.status(),
+        200,
+        "POST with correct auth token should succeed"
+    );
 }
 
 #[tokio::test]
@@ -890,7 +986,11 @@ async fn test_auth_rejects_wrong_token() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 401, "POST with wrong auth token should be 401");
+    assert_eq!(
+        resp.status(),
+        401,
+        "POST with wrong auth token should be 401"
+    );
 
     // Missing "Bearer " prefix -> 401
     let resp = client
@@ -904,7 +1004,11 @@ async fn test_auth_rejects_wrong_token() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 401, "Authorization without Bearer prefix should be 401");
+    assert_eq!(
+        resp.status(),
+        401,
+        "Authorization without Bearer prefix should be 401"
+    );
 }
 
 #[tokio::test]
@@ -927,7 +1031,9 @@ async fn test_public_routes_work_without_token() {
     let resp = reqwest::get(server.url("/api/polls")).await.unwrap();
     assert_eq!(resp.status(), 200, "/api/polls should be public");
 
-    let resp = reqwest::get(server.url("/api/pointWrite?channel=2001")).await.unwrap();
+    let resp = reqwest::get(server.url("/api/pointWrite?channel=2001"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200, "GET /api/pointWrite should be public");
 
     let resp = reqwest::get(server.url("/health")).await.unwrap();
@@ -960,7 +1066,11 @@ async fn test_scram_auth_full_flow() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 401, "scramFirst should return 401 with challenge");
+    assert_eq!(
+        resp.status(),
+        401,
+        "scramFirst should return 401 with challenge"
+    );
 
     let challenge: serde_json::Value = resp.json().await.unwrap();
     let hs_token = challenge["handshakeToken"].as_str().unwrap();
@@ -970,11 +1080,8 @@ async fn test_scram_auth_full_flow() {
 
     // Decode server-first
     let server_first = String::from_utf8(
-        base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            server_first_b64,
-        )
-        .unwrap(),
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, server_first_b64)
+            .unwrap(),
     )
     .unwrap();
 
@@ -1006,7 +1113,10 @@ async fn test_scram_auth_full_flow() {
     let result: serde_json::Value = resp.json().await.unwrap();
     let session_token = result["authToken"].as_str().unwrap();
     assert!(!session_token.is_empty(), "should receive session token");
-    assert!(result["data"].as_str().is_some(), "should receive server signature");
+    assert!(
+        result["data"].as_str().is_some(),
+        "should receive server signature"
+    );
 
     // Step 3: Use the session token for authorized requests
     let resp = client
@@ -1015,7 +1125,11 @@ async fn test_scram_auth_full_flow() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "session token should authorize requests");
+    assert_eq!(
+        resp.status(),
+        200,
+        "session token should authorize requests"
+    );
 }
 
 #[tokio::test]
@@ -1030,7 +1144,11 @@ async fn test_bearer_still_works_with_scram_configured() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "legacy bearer should still work with SCRAM configured");
+    assert_eq!(
+        resp.status(),
+        200,
+        "legacy bearer should still work with SCRAM configured"
+    );
 }
 
 #[tokio::test]
@@ -1093,7 +1211,10 @@ async fn test_scram_wrong_password_rejected() {
         .unwrap();
     assert_eq!(resp.status(), 401, "wrong password should be rejected");
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body["error"].as_str().unwrap().contains("invalid client proof"));
+    assert!(body["error"]
+        .as_str()
+        .unwrap()
+        .contains("invalid client proof"));
 }
 
 #[tokio::test]
@@ -1102,7 +1223,11 @@ async fn test_session_token_works_after_scram() {
     let client = reqwest::Client::new();
 
     // Without auth, protected routes should fail
-    let resp = client.post(server.url("/api/pollNow")).send().await.unwrap();
+    let resp = client
+        .post(server.url("/api/pollNow"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 401, "unauthenticated should be 401");
 
     // Complete SCRAM to get session token
@@ -1168,7 +1293,11 @@ async fn test_session_token_works_after_scram() {
             .send()
             .await
             .unwrap();
-        assert_eq!(resp.status(), 200, "session token should work for multiple requests");
+        assert_eq!(
+            resp.status(),
+            200,
+            "session token should work for multiple requests"
+        );
     }
 
     // Public routes should still work without auth
@@ -1277,7 +1406,11 @@ async fn his_read_with_range_today() {
     let client = reqwest::Client::new();
 
     // Poll to create history
-    client.post(server.url("/api/pollNow")).send().await.unwrap();
+    client
+        .post(server.url("/api/pollNow"))
+        .send()
+        .await
+        .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     let resp = client
@@ -1364,7 +1497,7 @@ async fn nav_equip_returns_points() {
     assert_eq!(resp.status(), 200);
     let body: Vec<serde_json::Value> = resp.json().await.unwrap();
     assert_eq!(body.len(), 5); // 5 demo channels
-    // Should have navId like "point:1113"
+                               // Should have navId like "point:1113"
     let nav_ids: Vec<&str> = body.iter().map(|r| r["navId"].as_str().unwrap()).collect();
     assert!(nav_ids.iter().any(|id| id.contains("1113")));
 }
@@ -1433,7 +1566,10 @@ async fn ops_includes_new_operations() {
     assert!(names.contains(&"formats"), "ops should list formats");
     assert!(names.contains(&"hisRead"), "ops should list hisRead");
     assert!(names.contains(&"nav"), "ops should list nav");
-    assert!(names.contains(&"invokeAction"), "ops should list invokeAction");
+    assert!(
+        names.contains(&"invokeAction"),
+        "ops should list invokeAction"
+    );
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1518,11 +1654,17 @@ async fn about_contains_version_product_vendor() {
     let resp = reqwest::get(server.url("/api/about")).await.unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body["productVersion"].is_string(), "must have productVersion");
+    assert!(
+        body["productVersion"].is_string(),
+        "must have productVersion"
+    );
     assert_eq!(body["productName"], "sandstar-engine-server");
     assert_eq!(body["vendorName"], "EacIo");
     assert!(body["buildInfo"].is_string(), "must have buildInfo");
-    assert!(body["serverBootTime"].is_string(), "must have serverBootTime");
+    assert!(
+        body["serverBootTime"].is_string(),
+        "must have serverBootTime"
+    );
 }
 
 // ── Health endpoint format ───────────────────────────────────
@@ -1617,7 +1759,10 @@ async fn rate_limiting_returns_429() {
             break;
         }
     }
-    assert!(got_429, "should have received 429 after exceeding rate limit");
+    assert!(
+        got_429,
+        "should have received 429 after exceeding rate limit"
+    );
 }
 
 // ── Write then read consistency ──────────────────────────────
@@ -1642,7 +1787,9 @@ async fn write_then_read_consistency() {
     assert_eq!(resp.status(), 200);
 
     // Immediately read the priority grid back
-    let resp = reqwest::get(server.url("/api/pointWrite?channel=2001")).await.unwrap();
+    let resp = reqwest::get(server.url("/api/pointWrite?channel=2001"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Vec<serde_json::Value> = resp.json().await.unwrap();
     assert_eq!(body.len(), 17);
@@ -1660,7 +1807,9 @@ async fn write_then_read_consistency() {
 async fn read_filter_and_combination() {
     let server = TestServer::start().await;
     // "analog and input" should match channels 1113 and 1200 (both Analog+In)
-    let resp = reqwest::get(server.url("/api/read?filter=analog%20and%20input")).await.unwrap();
+    let resp = reqwest::get(server.url("/api/read?filter=analog%20and%20input"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Vec<serde_json::Value> = resp.json().await.unwrap();
     assert_eq!(body.len(), 2, "should match 2 analog input channels");
@@ -1670,7 +1819,9 @@ async fn read_filter_and_combination() {
 async fn read_filter_or_combination() {
     let server = TestServer::start().await;
     // "i2c or pwm" should match channel 612 (I2c) and 2002 (Pwm)
-    let resp = reqwest::get(server.url("/api/read?filter=i2c%20or%20pwm")).await.unwrap();
+    let resp = reqwest::get(server.url("/api/read?filter=i2c%20or%20pwm"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Vec<serde_json::Value> = resp.json().await.unwrap();
     assert_eq!(body.len(), 2, "should match I2C + PWM channels");
@@ -1680,7 +1831,9 @@ async fn read_filter_or_combination() {
 async fn read_filter_channel_range() {
     let server = TestServer::start().await;
     // "channel > 2000" should match 2001 (Digital Out) and 2002 (PWM)
-    let resp = reqwest::get(server.url("/api/read?filter=channel%20%3E%202000")).await.unwrap();
+    let resp = reqwest::get(server.url("/api/read?filter=channel%20%3E%202000"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Vec<serde_json::Value> = resp.json().await.unwrap();
     assert_eq!(body.len(), 2, "should match channels > 2000");

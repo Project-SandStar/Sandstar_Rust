@@ -37,8 +37,7 @@ pub struct LogGuard {
 /// This ensures all files created by the process (including rotated logs)
 /// have owner-only access (0600 for files, 0700 for directories).
 pub fn init(log_level: &str, log_file: Option<&Path>) -> LogGuard {
-    let filter = EnvFilter::try_new(log_level)
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_new(log_level).unwrap_or_else(|_| EnvFilter::new("info"));
 
     match log_file {
         Some(path) => {
@@ -54,15 +53,9 @@ pub fn init(log_level: &str, log_file: Option<&Path>) -> LogGuard {
 
             tracing_subscriber::registry()
                 .with(filter)
+                .with(fmt::layer().with_writer(std::io::stderr).with_ansi(true))
                 .with(
-                    fmt::layer()
-                        .with_writer(std::io::stderr)
-                        .with_ansi(true),
-                )
-                .with(
-                    fmt::layer()
-                        .with_writer(non_blocking)
-                        .with_ansi(false), // no ANSI escapes in file output
+                    fmt::layer().with_writer(non_blocking).with_ansi(false), // no ANSI escapes in file output
                 )
                 .init();
 
@@ -72,9 +65,7 @@ pub fn init(log_level: &str, log_file: Option<&Path>) -> LogGuard {
         }
         None => {
             // stderr only (suitable for systemd journal capture)
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .init();
+            tracing_subscriber::fmt().with_env_filter(filter).init();
 
             LogGuard { _guard: None }
         }

@@ -28,31 +28,30 @@ pub mod bridge;
 pub mod types;
 
 // Pure Rust VM modules
-pub mod opcodes;
-pub mod vm_error;
-pub mod image_loader;
-pub mod vm_memory;
-pub mod vm_config;
 pub mod component_store;
-pub mod native_table;
-pub mod native_sys;
-pub mod native_file;
-pub mod test_utils;
-pub mod native_datetime;
+pub mod image_loader;
 pub mod native_component;
+pub mod native_datetime;
+pub mod native_eacio;
+pub mod native_file;
 pub mod native_inet;
 pub mod native_mod;
 pub mod native_serial;
-pub mod native_eacio;
-pub mod sab_validator;
-pub mod vm_stack;
-pub mod vm_interpreter;
+pub mod native_sys;
+pub mod native_table;
+pub mod opcodes;
 pub mod rust_runner;
+pub mod sab_validator;
+pub mod test_utils;
+pub mod vm_config;
+pub mod vm_error;
+pub mod vm_interpreter;
+pub mod vm_memory;
+pub mod vm_stack;
 
 pub use bridge::{
-    set_engine_bridge, set_write_queue, set_tag_write_queue,
-    drain_writes, drain_tag_writes,
-    ChannelInfo, ChannelSnapshot, SvmWrite, SvmTagWrite, TagValue,
+    drain_tag_writes, drain_writes, set_engine_bridge, set_tag_write_queue, set_write_queue,
+    ChannelInfo, ChannelSnapshot, SvmTagWrite, SvmWrite, TagValue,
 };
 pub use rust_runner::RustSvmRunner;
 pub use types::{Cell, SedonaVM};

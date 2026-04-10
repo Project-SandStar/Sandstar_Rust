@@ -15,8 +15,8 @@ use axum::{Extension, Json};
 use super::error::AppError;
 use super::types::*;
 use super::EngineHandle;
-use crate::sox::DynSlotStoreHandle;
 use crate::sox::sox_handlers::CHANNEL_COMP_BASE;
+use crate::sox::DynSlotStoreHandle;
 
 /// Check if the client wants Zinc wire format.
 fn wants_zinc(headers: &HeaderMap) -> bool {
@@ -51,7 +51,9 @@ pub async fn about(
         build_info: concat!(env!("CARGO_PKG_VERSION"), "+", env!("BUILD_GIT_HASH")),
     };
     if wants_zinc(&headers) {
-        Ok(zinc_response(super::zinc_format::about_to_zinc(&resp).to_zinc()))
+        Ok(zinc_response(
+            super::zinc_format::about_to_zinc(&resp).to_zinc(),
+        ))
     } else {
         Ok(Json(resp).into_response())
     }
@@ -83,7 +85,9 @@ pub async fn read(
     if let Some(id) = params.id {
         let val = handle.read_channel(id).await.map_err(AppError::from)?;
         if zinc {
-            return Ok(zinc_response(super::zinc_format::values_to_zinc(&[val]).to_zinc()));
+            return Ok(zinc_response(
+                super::zinc_format::values_to_zinc(&[val]).to_zinc(),
+            ));
         }
         return Ok(Json(vec![channel_value_json(&val)]).into_response());
     }
@@ -94,7 +98,9 @@ pub async fn read(
         if let Some(id) = parse_channel_eq(filter) {
             let val = handle.read_channel(id).await.map_err(AppError::from)?;
             if zinc {
-                return Ok(zinc_response(super::zinc_format::values_to_zinc(&[val]).to_zinc()));
+                return Ok(zinc_response(
+                    super::zinc_format::values_to_zinc(&[val]).to_zinc(),
+                ));
             }
             return Ok(Json(vec![channel_value_json(&val)]).into_response());
         }
@@ -108,7 +114,9 @@ pub async fn read(
 
         // Build a channel-index → dyn_tags lookup if the DynSlotStore is available.
         // Channel components have comp_id = CHANNEL_COMP_BASE + index.
-        let dyn_store_lock = dyn_store_ext.as_ref().map(|Extension(ds)| ds.read().unwrap());
+        let dyn_store_lock = dyn_store_ext
+            .as_ref()
+            .map(|Extension(ds)| ds.read().unwrap());
 
         let matched: Vec<_> = all
             .iter()
@@ -116,9 +124,7 @@ pub async fn read(
             .filter(|(i, ch)| match &expr {
                 Ok(f) => {
                     let comp_id = CHANNEL_COMP_BASE + *i as u16;
-                    let tags = dyn_store_lock
-                        .as_ref()
-                        .and_then(|ds| ds.get_all(comp_id));
+                    let tags = dyn_store_lock.as_ref().and_then(|ds| ds.get_all(comp_id));
                     super::filter::matches_with_tags(f, ch, tags)
                 }
                 Err(_) => matches_simple(ch, filter),
@@ -130,7 +136,9 @@ pub async fn read(
         drop(dyn_store_lock);
 
         if zinc {
-            return Ok(zinc_response(super::zinc_format::channels_to_zinc(&matched).to_zinc()));
+            return Ok(zinc_response(
+                super::zinc_format::channels_to_zinc(&matched).to_zinc(),
+            ));
         }
         let rows: Vec<serde_json::Value> = matched.iter().map(channel_info_json).collect();
         return Ok(Json(rows).into_response());
@@ -141,7 +149,9 @@ pub async fn read(
     let limit = params.limit.unwrap_or(100);
     let matched: Vec<_> = all.into_iter().take(limit).collect();
     if zinc {
-        return Ok(zinc_response(super::zinc_format::channels_to_zinc(&matched).to_zinc()));
+        return Ok(zinc_response(
+            super::zinc_format::channels_to_zinc(&matched).to_zinc(),
+        ));
     }
     let rows: Vec<serde_json::Value> = matched.iter().map(channel_info_json).collect();
     Ok(Json(rows).into_response())
@@ -187,7 +197,9 @@ pub async fn his_read(
     }
 
     if wants_zinc(&headers) {
-        return Ok(zinc_response(super::zinc_format::history_to_zinc(&points).to_zinc()));
+        return Ok(zinc_response(
+            super::zinc_format::history_to_zinc(&points).to_zinc(),
+        ));
     }
     Ok(Json(points).into_response())
 }
@@ -211,7 +223,9 @@ pub async fn nav(
                 "nav": "M",
             })];
             if zinc {
-                return Ok(zinc_response(super::zinc_format::nav_to_zinc(&rows).to_zinc()));
+                return Ok(zinc_response(
+                    super::zinc_format::nav_to_zinc(&rows).to_zinc(),
+                ));
             }
             Ok(Json(rows).into_response())
         }
@@ -223,7 +237,9 @@ pub async fn nav(
                 "nav": "M",
             })];
             if zinc {
-                return Ok(zinc_response(super::zinc_format::nav_to_zinc(&rows).to_zinc()));
+                return Ok(zinc_response(
+                    super::zinc_format::nav_to_zinc(&rows).to_zinc(),
+                ));
             }
             Ok(Json(rows).into_response())
         }
@@ -241,15 +257,14 @@ pub async fn nav(
                 })
                 .collect();
             if zinc {
-                return Ok(zinc_response(super::zinc_format::nav_to_zinc(&rows).to_zinc()));
+                return Ok(zinc_response(
+                    super::zinc_format::nav_to_zinc(&rows).to_zinc(),
+                ));
             }
             Ok(Json(rows).into_response())
         }
         // Unknown navId
-        Some(other) => Err(AppError::NotFound(format!(
-            "navId not found: {}",
-            other
-        ))),
+        Some(other) => Err(AppError::NotFound(format!("navId not found: {}", other))),
     }
 }
 
@@ -265,10 +280,7 @@ pub async fn invoke_action(
             let summary = handle.reload_config().await.map_err(AppError::from)?;
             Ok(Json(serde_json::json!({ "ok": true, "summary": summary })).into_response())
         }
-        other => Err(AppError::BadRequest(format!(
-            "unknown action: {}",
-            other
-        ))),
+        other => Err(AppError::BadRequest(format!("unknown action: {}", other))),
     }
 }
 
@@ -290,9 +302,7 @@ fn parse_his_range(range: Option<&str>) -> (u64, u64) {
             let midnight_yesterday = midnight_today - 86400;
             (midnight_yesterday, midnight_today)
         }
-        Some("last24h") => {
-            (now.saturating_sub(86400), u64::MAX)
-        }
+        Some("last24h") => (now.saturating_sub(86400), u64::MAX),
         Some(range_str) => {
             // Try "YYYY-MM-DD,YYYY-MM-DD" format
             if let Some((start, end)) = range_str.split_once(',') {
@@ -341,7 +351,9 @@ pub async fn status(
 ) -> Result<Response, AppError> {
     let info = handle.status().await.map_err(AppError::from)?;
     if wants_zinc(&headers) {
-        return Ok(zinc_response(super::zinc_format::status_to_zinc(&info).to_zinc()));
+        return Ok(zinc_response(
+            super::zinc_format::status_to_zinc(&info).to_zinc(),
+        ));
     }
     Ok(Json(serde_json::json!({
         "uptimeSecs": info.uptime_secs,
@@ -354,9 +366,7 @@ pub async fn status(
 }
 
 /// GET /health — lightweight health check for load balancers / systemd.
-pub async fn health(
-    State(handle): State<EngineHandle>,
-) -> Json<serde_json::Value> {
+pub async fn health(State(handle): State<EngineHandle>) -> Json<serde_json::Value> {
     match handle.status().await {
         Ok(info) => Json(serde_json::json!({
             "healthy": true,
@@ -389,7 +399,9 @@ pub async fn channels(
 ) -> Result<Response, AppError> {
     let list = handle.list_channels().await.map_err(AppError::from)?;
     if wants_zinc(&headers) {
-        return Ok(zinc_response(super::zinc_format::channels_to_zinc(&list).to_zinc()));
+        return Ok(zinc_response(
+            super::zinc_format::channels_to_zinc(&list).to_zinc(),
+        ));
     }
     let rows: Vec<serde_json::Value> = list.iter().map(channel_info_json).collect();
     Ok(Json(rows).into_response())
@@ -402,7 +414,9 @@ pub async fn polls(
 ) -> Result<Response, AppError> {
     let list = handle.list_polls().await.map_err(AppError::from)?;
     if wants_zinc(&headers) {
-        return Ok(zinc_response(super::zinc_format::polls_to_zinc(&list).to_zinc()));
+        return Ok(zinc_response(
+            super::zinc_format::polls_to_zinc(&list).to_zinc(),
+        ));
     }
     let rows: Vec<serde_json::Value> = list
         .into_iter()
@@ -418,9 +432,7 @@ pub async fn polls(
 }
 
 /// GET /api/tables — list lookup tables.
-pub async fn tables(
-    State(handle): State<EngineHandle>,
-) -> Result<Json<Vec<String>>, AppError> {
+pub async fn tables(State(handle): State<EngineHandle>) -> Result<Json<Vec<String>>, AppError> {
     let list = handle.list_tables().await.map_err(AppError::from)?;
     Ok(Json(list))
 }
@@ -457,7 +469,9 @@ pub async fn history(
         .map_err(AppError::from)?;
 
     if wants_zinc(&headers) {
-        return Ok(zinc_response(super::zinc_format::history_to_zinc(&points).to_zinc()));
+        return Ok(zinc_response(
+            super::zinc_format::history_to_zinc(&points).to_zinc(),
+        ));
     }
     Ok(Json(points).into_response())
 }
@@ -555,7 +569,9 @@ pub async fn watch_sub(
         .await
         .map_err(AppError::from)?;
     if wants_zinc(&headers) {
-        return Ok(zinc_response(super::zinc_format::watch_to_zinc(&resp).to_zinc()));
+        return Ok(zinc_response(
+            super::zinc_format::watch_to_zinc(&resp).to_zinc(),
+        ));
     }
     Ok(Json(resp).into_response())
 }
@@ -583,7 +599,9 @@ pub async fn watch_poll(
         .await
         .map_err(AppError::from)?;
     if wants_zinc(&headers) {
-        return Ok(zinc_response(super::zinc_format::watch_to_zinc(&resp).to_zinc()));
+        return Ok(zinc_response(
+            super::zinc_format::watch_to_zinc(&resp).to_zinc(),
+        ));
     }
     Ok(Json(resp).into_response())
 }
@@ -703,7 +721,7 @@ mod tests {
     fn his_range_date_range() {
         let (since, until) = parse_his_range(Some("2024-01-01,2024-01-31"));
         assert_eq!(since, 1704067200); // 2024-01-01
-        // until should be end of 2024-01-31
+                                       // until should be end of 2024-01-31
         let expected_end = parse_date_to_epoch("2024-01-31").unwrap() + 86400 - 1;
         assert_eq!(until, expected_end);
     }

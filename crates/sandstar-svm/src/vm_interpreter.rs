@@ -119,7 +119,9 @@ impl VmInterpreter {
         if num_params != args.len() {
             return Err(VmError::BadImage(format!(
                 "method at {} expects {} params, got {}",
-                entry_point, num_params, args.len()
+                entry_point,
+                num_params,
+                args.len()
             )));
         }
 
@@ -1017,7 +1019,7 @@ impl VmInterpreter {
                 let b = self.stack.get(sp - 3)?;
                 let c = self.stack.get(sp - 2)?;
                 let d = self.stack.get(sp - 1)?; // top
-                // Result: [c, d, a, b, c, d]
+                                                 // Result: [c, d, a, b, c, d]
                 self.stack.push_i32(0)?;
                 self.stack.push_i32(0)?;
                 let sp2 = self.stack.sp();
@@ -1834,7 +1836,9 @@ impl VmInterpreter {
                 let mut data_vec = Vec::new();
                 let mut ctx = NativeContext::new(&mut data_vec);
 
-                let result = self.natives.call_wide(kit_id, method_id, &mut ctx, &params)?;
+                let result = self
+                    .natives
+                    .call_wide(kit_id, method_id, &mut ctx, &params)?;
 
                 for _ in 0..num_params {
                     self.stack.pop_i32()?;
@@ -2103,7 +2107,9 @@ enum UnwindResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::image_loader::{ScodeImage, SCODE_BLOCK_SIZE, SCODE_MAGIC, SCODE_MAJOR_VER, SCODE_MINOR_VER};
+    use crate::image_loader::{
+        ScodeImage, SCODE_BLOCK_SIZE, SCODE_MAGIC, SCODE_MAJOR_VER, SCODE_MINOR_VER,
+    };
 
     /// Build a minimal VmMemory from raw code and data bytes.
     fn make_memory(code: &[u8], data_size: u32) -> VmMemory {
@@ -2146,7 +2152,8 @@ mod tests {
         // Method: 0 params, 0 locals
         // LoadI0, ReturnPop
         let code = &[
-            0, 0, // num_params=0, num_locals=0
+            0,
+            0, // num_params=0, num_locals=0
             Opcode::LoadI0 as u8,
             Opcode::ReturnPop as u8,
         ];
@@ -2157,11 +2164,7 @@ mod tests {
 
     #[test]
     fn load_i5_return() {
-        let code = &[
-            0, 0,
-            Opcode::LoadI5 as u8,
-            Opcode::ReturnPop as u8,
-        ];
+        let code = &[0, 0, Opcode::LoadI5 as u8, Opcode::ReturnPop as u8];
         let mut interp = make_interp(code);
         let result = interp.execute_method(32, &[]).unwrap();
         assert_eq!(result, 5);
@@ -2169,11 +2172,7 @@ mod tests {
 
     #[test]
     fn load_im1_return() {
-        let code = &[
-            0, 0,
-            Opcode::LoadIM1 as u8,
-            Opcode::ReturnPop as u8,
-        ];
+        let code = &[0, 0, Opcode::LoadIM1 as u8, Opcode::ReturnPop as u8];
         let mut interp = make_interp(code);
         let result = interp.execute_method(32, &[]).unwrap();
         assert_eq!(result, -1);
@@ -2187,7 +2186,8 @@ mod tests {
     fn int_add() {
         // Push 3, push 4, add -> 7
         let code = &[
-            0, 0,
+            0,
+            0,
             Opcode::LoadI3 as u8,
             Opcode::LoadI4 as u8,
             Opcode::IntAdd as u8,
@@ -2200,7 +2200,8 @@ mod tests {
     #[test]
     fn int_sub() {
         let code = &[
-            0, 0,
+            0,
+            0,
             Opcode::LoadI5 as u8,
             Opcode::LoadI3 as u8,
             Opcode::IntSub as u8,
@@ -2213,7 +2214,8 @@ mod tests {
     #[test]
     fn int_mul() {
         let code = &[
-            0, 0,
+            0,
+            0,
             Opcode::LoadI3 as u8,
             Opcode::LoadI4 as u8,
             Opcode::IntMul as u8,
@@ -2227,7 +2229,8 @@ mod tests {
     fn int_div() {
         // 5 / 3 = 1 (integer division)
         let code = &[
-            0, 0,
+            0,
+            0,
             Opcode::LoadI5 as u8,
             Opcode::LoadI3 as u8,
             Opcode::IntDiv as u8,
@@ -2240,7 +2243,8 @@ mod tests {
     #[test]
     fn int_neg() {
         let code = &[
-            0, 0,
+            0,
+            0,
             Opcode::LoadI5 as u8,
             Opcode::IntNeg as u8,
             Opcode::ReturnPop as u8,
@@ -2256,7 +2260,8 @@ mod tests {
     #[test]
     fn int_eq_true() {
         let code = &[
-            0, 0,
+            0,
+            0,
             Opcode::LoadI3 as u8,
             Opcode::LoadI3 as u8,
             Opcode::IntEq as u8,
@@ -2269,7 +2274,8 @@ mod tests {
     #[test]
     fn int_eq_false() {
         let code = &[
-            0, 0,
+            0,
+            0,
             Opcode::LoadI3 as u8,
             Opcode::LoadI4 as u8,
             Opcode::IntEq as u8,
@@ -2282,7 +2288,8 @@ mod tests {
     #[test]
     fn int_lt() {
         let code = &[
-            0, 0,
+            0,
+            0,
             Opcode::LoadI3 as u8,
             Opcode::LoadI5 as u8,
             Opcode::IntLt as u8,
@@ -2300,7 +2307,8 @@ mod tests {
     fn load_param0_return() {
         // Method takes 1 param, returns it
         let code = &[
-            1, 0, // 1 param, 0 locals
+            1,
+            0, // 1 param, 0 locals
             Opcode::LoadParam0 as u8,
             Opcode::ReturnPop as u8,
         ];
@@ -2312,7 +2320,8 @@ mod tests {
     fn store_load_local() {
         // Store 7 into local0, load it back
         let code = &[
-            0, 1, // 0 params, 1 local
+            0,
+            1, // 0 params, 1 local
             Opcode::LoadI5 as u8,
             Opcode::StoreLocal0 as u8,
             Opcode::LoadLocal0 as u8,
@@ -2329,7 +2338,8 @@ mod tests {
     #[test]
     fn float_add() {
         let code = &[
-            0, 0,
+            0,
+            0,
             Opcode::LoadF0 as u8,
             Opcode::LoadF1 as u8,
             Opcode::FloatAdd as u8,
@@ -2345,7 +2355,8 @@ mod tests {
     fn float_nan_eq() {
         // NullFloat == NullFloat should be true in Sedona
         let code = &[
-            0, 0,
+            0,
+            0,
             Opcode::LoadNullFloat as u8,
             Opcode::LoadNullFloat as u8,
             Opcode::FloatEq as u8,
@@ -2362,7 +2373,8 @@ mod tests {
     #[test]
     fn int_to_float_cast() {
         let code = &[
-            0, 0,
+            0,
+            0,
             Opcode::LoadI3 as u8,
             Opcode::IntToFloat as u8,
             Opcode::ReturnPop as u8,
@@ -2383,13 +2395,15 @@ mod tests {
         // Jump instruction at offset +3 from method start, size=2 bytes
         // Offset=1 means: end_of_instruction + 1 = (offset+5) + 1 = skip LoadI3, land on LoadI5
         let code = &[
-            0, 0,
-            Opcode::LoadI1 as u8,       // +2: push 1
-            Opcode::Jump as u8, 1u8,    // +3: jump offset=1 from end(+5), land at +6
-            Opcode::LoadI3 as u8,       // +5: skipped
-            Opcode::LoadI5 as u8,       // +6: push 5
-            Opcode::IntAdd as u8,       // +7: 1+5=6
-            Opcode::ReturnPop as u8,    // +8
+            0,
+            0,
+            Opcode::LoadI1 as u8, // +2: push 1
+            Opcode::Jump as u8,
+            1u8,                     // +3: jump offset=1 from end(+5), land at +6
+            Opcode::LoadI3 as u8,    // +5: skipped
+            Opcode::LoadI5 as u8,    // +6: push 5
+            Opcode::IntAdd as u8,    // +7: 1+5=6
+            Opcode::ReturnPop as u8, // +8
         ];
         let mut interp = make_interp(code);
         assert_eq!(interp.execute_method(32, &[]).unwrap(), 6);
@@ -2402,7 +2416,8 @@ mod tests {
     #[test]
     fn eq_zero() {
         let code = &[
-            0, 0,
+            0,
+            0,
             Opcode::LoadI0 as u8,
             Opcode::EqZero as u8,
             Opcode::ReturnPop as u8,
@@ -2414,7 +2429,8 @@ mod tests {
     #[test]
     fn not_eq_zero() {
         let code = &[
-            0, 0,
+            0,
+            0,
             Opcode::LoadI5 as u8,
             Opcode::NotEqZero as u8,
             Opcode::ReturnPop as u8,
@@ -2431,7 +2447,8 @@ mod tests {
     fn dup_add() {
         // Push 3, dup -> 3,3, add -> 6
         let code = &[
-            0, 0,
+            0,
+            0,
             Opcode::LoadI3 as u8,
             Opcode::Dup as u8,
             Opcode::IntAdd as u8,
@@ -2447,10 +2464,7 @@ mod tests {
 
     #[test]
     fn return_void() {
-        let code = &[
-            0, 0,
-            Opcode::ReturnVoid as u8,
-        ];
+        let code = &[0, 0, Opcode::ReturnVoid as u8];
         let mut interp = make_interp(code);
         assert_eq!(interp.execute_method(32, &[]).unwrap(), 0);
     }
@@ -2461,11 +2475,7 @@ mod tests {
 
     #[test]
     fn load_int_u1() {
-        let code = &[
-            0, 0,
-            Opcode::LoadIntU1 as u8, 42,
-            Opcode::ReturnPop as u8,
-        ];
+        let code = &[0, 0, Opcode::LoadIntU1 as u8, 42, Opcode::ReturnPop as u8];
         let mut interp = make_interp(code);
         assert_eq!(interp.execute_method(32, &[]).unwrap(), 42);
     }
@@ -2477,7 +2487,8 @@ mod tests {
     #[test]
     fn nop_passthrough() {
         let code = &[
-            0, 0,
+            0,
+            0,
             Opcode::Nop as u8,
             Opcode::LoadI1 as u8,
             Opcode::ReturnPop as u8,
@@ -2493,13 +2504,18 @@ mod tests {
     #[test]
     fn assert_success_and_failure() {
         let code = &[
-            0, 0,
+            0,
+            0,
             // Assert true (line 1)
             Opcode::LoadI1 as u8,
-            Opcode::Assert as u8, 1, 0,
+            Opcode::Assert as u8,
+            1,
+            0,
             // Assert false (line 2)
             Opcode::LoadI0 as u8,
-            Opcode::Assert as u8, 2, 0,
+            Opcode::Assert as u8,
+            2,
+            0,
             Opcode::LoadI0 as u8,
             Opcode::ReturnPop as u8,
         ];
@@ -2518,8 +2534,11 @@ mod tests {
         let val: u16 = 1000;
         let bytes = val.to_le_bytes();
         let code = &[
-            0, 0,
-            Opcode::LoadIntU2 as u8, bytes[0], bytes[1],
+            0,
+            0,
+            Opcode::LoadIntU2 as u8,
+            bytes[0],
+            bytes[1],
             Opcode::ReturnPop as u8,
         ];
         let mut interp = make_interp(code);
@@ -2533,7 +2552,8 @@ mod tests {
     #[test]
     fn add_two_params() {
         let code = &[
-            2, 0, // 2 params, 0 locals
+            2,
+            0, // 2 params, 0 locals
             Opcode::LoadParam0 as u8,
             Opcode::LoadParam1 as u8,
             Opcode::IntAdd as u8,

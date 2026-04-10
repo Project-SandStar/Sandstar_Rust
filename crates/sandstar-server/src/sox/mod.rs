@@ -21,8 +21,8 @@ use crate::rest::EngineHandle;
 use crate::sox::dasp::DaspTransport;
 use crate::sox::dyn_slots::DynSlotStore;
 use crate::sox::sox_handlers::{
-    handle_sox_request_with_dyn, handle_put_chunk, is_put_transfer_active,
-    parse_write_request, ComponentTree, ManifestDb, SubscriptionManager,
+    handle_put_chunk, handle_sox_request_with_dyn, is_put_transfer_active, parse_write_request,
+    ComponentTree, ManifestDb, SubscriptionManager,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -72,15 +72,24 @@ pub fn spawn_sox_server(
 
     // Build the initial tree synchronously so we can share it with REST.
     // The async task will populate it from channels on its first tick.
-    let tree = Arc::new(std::sync::RwLock::new(
-        ComponentTree::new_with_manifest(manifest_db.clone()),
-    ));
+    let tree = Arc::new(std::sync::RwLock::new(ComponentTree::new_with_manifest(
+        manifest_db.clone(),
+    )));
 
     let tree_clone = tree.clone();
     let manifest_db_clone = manifest_db.clone();
 
     let join_handle = tokio::spawn(async move {
-        run_sox_server(port, username, password, engine_handle, manifest_db_clone, dyn_store, tree_clone).await;
+        run_sox_server(
+            port,
+            username,
+            password,
+            engine_handle,
+            manifest_db_clone,
+            dyn_store,
+            tree_clone,
+        )
+        .await;
     });
 
     SoxServerHandles {
@@ -125,7 +134,11 @@ async fn run_sox_server(
         let initial_tree = match engine_handle.list_channels().await {
             Ok(channels) => {
                 let t = ComponentTree::from_channels_with_manifest(&channels, manifest_db.clone());
-                info!(components = t.len(), manifest_types = manifest_db.type_count(), "SOX component tree built");
+                info!(
+                    components = t.len(),
+                    manifest_types = manifest_db.type_count(),
+                    "SOX component tree built"
+                );
                 t
             }
             Err(e) => {
@@ -149,9 +162,8 @@ async fn run_sox_server(
 
     // Dynamic slot store (side-car tag dictionaries for components).
     // If a shared handle was provided, use it; otherwise create a local one.
-    let dyn_store_handle = dyn_store_handle.unwrap_or_else(|| {
-        Arc::new(std::sync::RwLock::new(DynSlotStore::with_defaults()))
-    });
+    let dyn_store_handle = dyn_store_handle
+        .unwrap_or_else(|| Arc::new(std::sync::RwLock::new(DynSlotStore::with_defaults())));
     let dyn_persist_path = {
         let config_dir = std::env::var("SANDSTAR_CONFIG_DIR")
             .unwrap_or_else(|_| "/home/eacio/sandstar/etc/config".to_string());
@@ -203,7 +215,10 @@ async fn run_sox_server(
                         // In Sedona, 'k' is used for both invoke and file chunk transfer.
                         // During a put, chunks are received silently (no response).
                         if payload.len() >= 2 && payload[0] == b'k' && is_put_transfer_active() {
-                            debug!(session = session_id, "SOX: routing 'k' to put chunk handler");
+                            debug!(
+                                session = session_id,
+                                "SOX: routing 'k' to put chunk handler"
+                            );
                             let chunk_payload = &payload[2..]; // skip cmd + replyNum
                             handle_put_chunk(chunk_payload);
                             continue; // no response for put chunks
@@ -212,14 +227,28 @@ async fn run_sox_server(
                         if let Some(request) = SoxRequest::parse(&payload) {
                             // Log write/invoke at info level, everything else at debug
                             if request.cmd as u8 == b'w' || request.cmd as u8 == b'k' {
-                                info!(session = session_id, cmd = request.cmd as u8, req_id = request.req_id, "SOX write/invoke received");
+                                info!(
+                                    session = session_id,
+                                    cmd = request.cmd as u8,
+                                    req_id = request.req_id,
+                                    "SOX write/invoke received"
+                                );
                             } else {
-                                debug!(session = session_id, cmd = request.cmd as u8, req_id = request.req_id, "SOX request");
+                                debug!(
+                                    session = session_id,
+                                    cmd = request.cmd as u8,
+                                    req_id = request.req_id,
+                                    "SOX request"
+                                );
                             }
                             // Handle write commands: forward to engine via EngineHandle.
                             if request.cmd == sox_protocol::SoxCmd::Write {
                                 if let Some(write_req) = parse_write_request(&request, &tree) {
-                                    info!(comp_id = write_req.comp_id, slot_id = write_req.slot_id, "SOX: write parsed");
+                                    info!(
+                                        comp_id = write_req.comp_id,
+                                        slot_id = write_req.slot_id,
+                                        "SOX: write parsed"
+                                    );
                                     if let Some((channel_id, value)) =
                                         write_req.to_channel_write(&tree)
                                     {
@@ -248,30 +277,39 @@ async fn run_sox_server(
                             }
 
                             // Save comp_id + parent_id before delete (component removed by handle_sox_request)
-                            let delete_comp_id = if request.cmd as u8 == b'd' && request.payload.len() >= 2 {
+                            let delete_comp_id = if request.cmd as u8 == b'd'
+                                && request.payload.len() >= 2
+                            {
                                 Some(u16::from_be_bytes([request.payload[0], request.payload[1]]))
-                            } else { None };
+                            } else {
+                                None
+                            };
                             let delete_parent_id = if let Some(cid) = delete_comp_id {
                                 tree.get(cid).map(|c| c.parent_id).unwrap_or(0)
-                            } else { 0 };
+                            } else {
+                                0
+                            };
 
-                            let response =
-                                handle_sox_request_with_dyn(&request, &mut tree, &mut subscriptions, session_id, Some(&dyn_store_handle));
+                            let response = handle_sox_request_with_dyn(
+                                &request,
+                                &mut tree,
+                                &mut subscriptions,
+                                session_id,
+                                Some(&dyn_store_handle),
+                            );
                             let response_bytes = response.to_bytes();
-                            if let Err(e) =
-                                transport.send_to_session(session_id, &response_bytes)
-                            {
-                                debug!(
-                                    session = session_id,
-                                    "SOX: failed to send response: {e}"
-                                );
+                            if let Err(e) = transport.send_to_session(session_id, &response_bytes) {
+                                debug!(session = session_id, "SOX: failed to send response: {e}");
                             }
 
                             // After Delete: clean up dynamic tags for the deleted component.
                             if let Some(cid) = delete_comp_id {
                                 if let Ok(mut ds) = dyn_store_handle.write() {
                                     if ds.tag_count(cid) > 0 {
-                                        info!(comp_id = cid, "dyn_slots: cleaning up tags for deleted component");
+                                        info!(
+                                            comp_id = cid,
+                                            "dyn_slots: cleaning up tags for deleted component"
+                                        );
                                         ds.remove_all(cid);
                                     }
                                 }
@@ -279,7 +317,8 @@ async fn run_sox_server(
 
                             // After Write to a channel component: push COV event.
                             if request.cmd as u8 == b'w' && request.payload.len() >= 2 {
-                                let written_comp = u16::from_be_bytes([request.payload[0], request.payload[1]]);
+                                let written_comp =
+                                    u16::from_be_bytes([request.payload[0], request.payload[1]]);
                                 if tree.is_channel_comp(written_comp) {
                                     let events = subscriptions.build_events(&[written_comp], &tree);
                                     for (sid, evt) in events {
@@ -295,9 +334,11 @@ async fn run_sox_server(
                             if (request.cmd as u8 == b'k' || request.cmd as u8 == b'w')
                                 && request.payload.len() >= 2
                             {
-                                let target_comp = u16::from_be_bytes([request.payload[0], request.payload[1]]);
+                                let target_comp =
+                                    u16::from_be_bytes([request.payload[0], request.payload[1]]);
                                 if !tree.is_channel_comp(target_comp) {
-                                    let events = subscriptions.build_config_events(target_comp, &tree);
+                                    let events =
+                                        subscriptions.build_config_events(target_comp, &tree);
                                     for (sid, evt) in events {
                                         let _ = transport.send_to_session(sid, &evt);
                                     }
@@ -308,11 +349,12 @@ async fn run_sox_server(
                             if request.cmd as u8 == b'a' || request.cmd as u8 == b'd' {
                                 // For Add: payload[0..2] = parentId
                                 // For Delete: payload[0..2] = compId (deleted), look up parent from saved value
-                                let parent_id = if request.cmd as u8 == b'a' && request.payload.len() >= 2 {
-                                    u16::from_be_bytes([request.payload[0], request.payload[1]])
-                                } else {
-                                    delete_parent_id // saved before handle_sox_request
-                                };
+                                let parent_id =
+                                    if request.cmd as u8 == b'a' && request.payload.len() >= 2 {
+                                        u16::from_be_bytes([request.payload[0], request.payload[1]])
+                                    } else {
+                                        delete_parent_id // saved before handle_sox_request
+                                    };
                                 // Send tree event for parent component
                                 if let Some(parent) = tree.get(parent_id) {
                                     let mut evt = Vec::with_capacity(64);
@@ -336,9 +378,8 @@ async fn run_sox_server(
                                 }
                                 // If it was an Add, also send tree event for the new component
                                 if request.cmd as u8 == b'a' {
-                                    let new_id = u16::from_be_bytes([
-                                        response_bytes[2], response_bytes[3]
-                                    ]);
+                                    let new_id =
+                                        u16::from_be_bytes([response_bytes[2], response_bytes[3]]);
                                     if let Some(comp) = tree.get(new_id) {
                                         let mut evt = Vec::with_capacity(64);
                                         evt.push(b'e');
@@ -358,11 +399,16 @@ async fn run_sox_server(
                             }
 
                             // After Link add/delete: push LINKS COV events for affected components.
-                            if request.cmd as u8 == b'l' && response_bytes[0] == b'L' && request.payload.len() >= 7 {
+                            if request.cmd as u8 == b'l'
+                                && response_bytes[0] == b'L'
+                                && request.payload.len() >= 7
+                            {
                                 // Parse the affected comp IDs from the link request payload
                                 // payload: u1 subcmd, u2 fromComp, u1 fromSlot, u2 toComp, u1 toSlot
-                                let from_comp = u16::from_be_bytes([request.payload[1], request.payload[2]]);
-                                let to_comp = u16::from_be_bytes([request.payload[4], request.payload[5]]);
+                                let from_comp =
+                                    u16::from_be_bytes([request.payload[1], request.payload[2]]);
+                                let to_comp =
+                                    u16::from_be_bytes([request.payload[4], request.payload[5]]);
                                 // Send links COV event for both affected components
                                 for &affected_id in &[from_comp, to_comp] {
                                     if let Some(comp) = tree.get(affected_id) {
@@ -371,7 +417,7 @@ async fn run_sox_server(
                                         evt.push(0xFF);
                                         evt.extend_from_slice(&affected_id.to_be_bytes());
                                         evt.push(b'l'); // what = links
-                                        // Write links for this component + 0xFFFF terminator
+                                                        // Write links for this component + 0xFFFF terminator
                                         for link in &comp.links {
                                             evt.extend_from_slice(&link.from_comp.to_be_bytes());
                                             evt.push(link.from_slot);
@@ -397,7 +443,9 @@ async fn run_sox_server(
                                             evt.extend_from_slice(&comp_id.to_be_bytes());
                                             evt.push(b'l');
                                             for link in &comp.links {
-                                                evt.extend_from_slice(&link.from_comp.to_be_bytes());
+                                                evt.extend_from_slice(
+                                                    &link.from_comp.to_be_bytes(),
+                                                );
                                                 evt.push(link.from_slot);
                                                 evt.extend_from_slice(&link.to_comp.to_be_bytes());
                                                 evt.push(link.to_slot);

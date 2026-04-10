@@ -94,7 +94,11 @@ impl Watchdog {
         // GPIO60 hardware watchdog: toggle state
         if let Some(ref mut fd) = self.gpio60_value {
             self.gpio60_state = !self.gpio60_state;
-            let val = if self.gpio60_state { b"1" as &[u8] } else { b"0" };
+            let val = if self.gpio60_state {
+                b"1" as &[u8]
+            } else {
+                b"0"
+            };
             if let Err(e) = fd.write_all(val) {
                 warn!(err = %e, "watchdog: failed to toggle GPIO60");
                 self.gpio60_value = None;

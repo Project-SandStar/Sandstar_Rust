@@ -113,7 +113,9 @@ impl HandleTable {
         if let Some(ptr) = self.handle_to_ptr.remove(&handle) {
             self.ptr_to_handle.remove(&(ptr as usize));
             if let Some(layout) = self.layouts.remove(&handle) {
-                unsafe { alloc::dealloc(ptr, layout); }
+                unsafe {
+                    alloc::dealloc(ptr, layout);
+                }
             }
             true
         } else {
@@ -303,13 +305,12 @@ pub fn sys_malloc(_ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult<i32>
 
     if std::mem::size_of::<usize>() <= 4 {
         // 32-bit: return raw pointer
-        let layout = Layout::from_size_align(size as usize, 8).map_err(|e| {
-            VmError::NativeError {
+        let layout =
+            Layout::from_size_align(size as usize, 8).map_err(|e| VmError::NativeError {
                 kit: 0,
                 method: 2,
                 message: format!("invalid layout: {e}"),
-            }
-        })?;
+            })?;
         let ptr = unsafe { alloc::alloc_zeroed(layout) };
         if ptr.is_null() {
             return Ok(0);
@@ -336,7 +337,9 @@ pub fn sys_free(_ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult<i32> {
         // TODO: track 32-bit allocations too
         Ok(0)
     } else {
-        with_handle_table(|t| { t.free(handle); });
+        with_handle_table(|t| {
+            t.free(handle);
+        });
         Ok(0)
     }
 }
@@ -1009,7 +1012,10 @@ mod tests {
         let ptr = resolve_ptr(handle).expect("should resolve");
         unsafe {
             let slice = std::slice::from_raw_parts(ptr, 16);
-            assert!(slice.iter().all(|&b| b == 0), "malloc memory should be zeroed");
+            assert!(
+                slice.iter().all(|&b| b == 0),
+                "malloc memory should be zeroed"
+            );
         }
         sys_free(&mut ctx, &[handle]).unwrap();
     }
@@ -1138,7 +1144,9 @@ mod tests {
         let handle = sys_malloc(&mut ctx, &[4]).unwrap();
         // Fill with 1s first
         let ptr = resolve_ptr(handle).unwrap();
-        unsafe { std::ptr::write_bytes(ptr, 1, 4); }
+        unsafe {
+            std::ptr::write_bytes(ptr, 1, 4);
+        }
         sys_set_bytes(&mut ctx, &[0, handle, 0, 0]).unwrap();
         unsafe {
             let slice = std::slice::from_raw_parts(ptr, 4);
@@ -1155,7 +1163,9 @@ mod tests {
         let mut ctx = test_ctx(&mut mem);
         let handle = sys_malloc(&mut ctx, &[4]).unwrap();
         let ptr = resolve_ptr(handle).unwrap();
-        unsafe { std::ptr::write_bytes(ptr, 0xFF, 4); }
+        unsafe {
+            std::ptr::write_bytes(ptr, 0xFF, 4);
+        }
         sys_and_bytes(&mut ctx, &[0x0F_i32, handle, 0, 4]).unwrap();
         unsafe {
             let slice = std::slice::from_raw_parts(ptr, 4);
@@ -1187,7 +1197,9 @@ mod tests {
         let mut ctx = test_ctx(&mut mem);
         let handle = sys_malloc(&mut ctx, &[4]).unwrap();
         let ptr = resolve_ptr(handle).unwrap();
-        unsafe { std::ptr::write_bytes(ptr, 0xFF, 4); }
+        unsafe {
+            std::ptr::write_bytes(ptr, 0xFF, 4);
+        }
         sys_and_bytes(&mut ctx, &[0x0F_i32, handle, 1, 2]).unwrap();
         unsafe {
             let slice = std::slice::from_raw_parts(ptr, 4);
@@ -1362,8 +1374,8 @@ mod tests {
         register_kit0_sys(&mut table);
 
         let implemented_ids: Vec<u16> = vec![
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
-            16, 17, 18, 19, 20, 21, 41, 42, 43, 56, 57, 58, 59,
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 41, 42,
+            43, 56, 57, 58, 59,
         ];
         for id in &implemented_ids {
             assert!(

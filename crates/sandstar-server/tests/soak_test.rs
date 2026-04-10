@@ -119,7 +119,11 @@ async fn test_soak_1000_polls_stable_memory() {
             .send()
             .await
             .unwrap();
-        assert_eq!(resp.status(), 200, "channel {ch_id} should be readable after 1000 polls");
+        assert_eq!(
+            resp.status(),
+            200,
+            "channel {ch_id} should be readable after 1000 polls"
+        );
     }
 }
 
@@ -295,7 +299,10 @@ async fn test_soak_concurrent_rest_during_poll() {
         .json()
         .await
         .unwrap();
-    assert_eq!(status["channelCount"], 5, "server should still report 5 channels");
+    assert_eq!(
+        status["channelCount"], 5,
+        "server should still report 5 channels"
+    );
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -333,8 +340,26 @@ async fn test_soak_hal_error_recovery() {
     hal.set_analog(0, 1, Ok(3276.0));
 
     let mut engine = Engine::new(hal);
-    let ch1 = Channel::new(1113, ChannelType::Analog, ChannelDirection::In, 0, 0, false, ValueConv::default(), "AI1 Error-Prone");
-    let ch2 = Channel::new(1200, ChannelType::Analog, ChannelDirection::In, 0, 1, false, ValueConv::default(), "AI2 Stable");
+    let ch1 = Channel::new(
+        1113,
+        ChannelType::Analog,
+        ChannelDirection::In,
+        0,
+        0,
+        false,
+        ValueConv::default(),
+        "AI1 Error-Prone",
+    );
+    let ch2 = Channel::new(
+        1200,
+        ChannelType::Analog,
+        ChannelDirection::In,
+        0,
+        1,
+        false,
+        ValueConv::default(),
+        "AI2 Stable",
+    );
     let _ = engine.channels.add(ch1);
     let _ = engine.channels.add(ch2);
     let _ = engine.polls.add(1113);
@@ -350,7 +375,11 @@ async fn test_soak_hal_error_recovery() {
             .send()
             .await
             .unwrap();
-        assert_eq!(resp.status(), 200, "PollNow should succeed even when channels error");
+        assert_eq!(
+            resp.status(),
+            200,
+            "PollNow should succeed even when channels error"
+        );
     }
 
     // Verify channel 1200 is unaffected — should be Ok with stable value
@@ -388,7 +417,11 @@ async fn test_soak_hal_error_recovery() {
         .json()
         .await
         .unwrap();
-    assert_eq!(channels.len(), 2, "both channels should survive error injection");
+    assert_eq!(
+        channels.len(),
+        2,
+        "both channels should survive error injection"
+    );
 
     // History should contain entries for both channels (some may be error status)
     let h1: Vec<serde_json::Value> = client
@@ -407,7 +440,10 @@ async fn test_soak_hal_error_recovery() {
         .json()
         .await
         .unwrap();
-    assert!(!h1.is_empty(), "error-prone channel should still have history");
+    assert!(
+        !h1.is_empty(),
+        "error-prone channel should still have history"
+    );
     assert!(!h2.is_empty(), "stable channel should have history");
 }
 
@@ -433,11 +469,7 @@ async fn test_soak_rapid_config_reload() {
     // Fire 20 rapid reload requests. In demo mode, these will fail (no config dir)
     // but should NOT crash the server.
     for _ in 0..20 {
-        let resp = client
-            .post(server.url("/api/reload"))
-            .send()
-            .await
-            .unwrap();
+        let resp = client.post(server.url("/api/reload")).send().await.unwrap();
         // Demo mode returns an error — that's fine, we just verify no crash
         assert!(
             resp.status().as_u16() >= 400,
@@ -462,7 +494,11 @@ async fn test_soak_rapid_config_reload() {
         .json()
         .await
         .unwrap();
-    assert_eq!(channels.len(), 5, "all 5 channels should survive rapid reloads");
+    assert_eq!(
+        channels.len(),
+        5,
+        "all 5 channels should survive rapid reloads"
+    );
 
     // Status endpoint still works
     let status: serde_json::Value = client

@@ -414,17 +414,17 @@ pub fn filestore_rename(ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult
 /// Register all Kit 0 FileStore native methods (slots 44–54) in the dispatch
 /// table, replacing the stubs that were registered by `NativeTable::with_defaults()`.
 pub fn register_kit0_file(table: &mut NativeTable) {
-    table.register(0, 44, filestore_do_size);        // FileStore.doSize
-    table.register(0, 45, filestore_do_open);        // FileStore.doOpen
-    table.register(0, 46, filestore_do_read);        // FileStore.doRead
-    table.register(0, 47, filestore_do_read_bytes);  // FileStore.doReadBytes
-    table.register(0, 48, filestore_do_write);       // FileStore.doWrite
+    table.register(0, 44, filestore_do_size); // FileStore.doSize
+    table.register(0, 45, filestore_do_open); // FileStore.doOpen
+    table.register(0, 46, filestore_do_read); // FileStore.doRead
+    table.register(0, 47, filestore_do_read_bytes); // FileStore.doReadBytes
+    table.register(0, 48, filestore_do_write); // FileStore.doWrite
     table.register(0, 49, filestore_do_write_bytes); // FileStore.doWriteBytes
-    table.register(0, 50, filestore_do_tell);        // FileStore.doTell
-    table.register(0, 51, filestore_do_seek);        // FileStore.doSeek
-    table.register(0, 52, filestore_do_flush);       // FileStore.doFlush
-    table.register(0, 53, filestore_do_close);       // FileStore.doClose
-    table.register(0, 54, filestore_rename);         // FileStore.rename
+    table.register(0, 50, filestore_do_tell); // FileStore.doTell
+    table.register(0, 51, filestore_do_seek); // FileStore.doSeek
+    table.register(0, 52, filestore_do_flush); // FileStore.doFlush
+    table.register(0, 53, filestore_do_close); // FileStore.doClose
+    table.register(0, 54, filestore_rename); // FileStore.rename
 }
 
 /// Reset the global file store, closing all open handles.
@@ -444,7 +444,6 @@ fn reset_file_store() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     /// Build a NativeContext with a memory buffer that has a null-terminated
     /// string written at position 0.
@@ -480,7 +479,6 @@ mod tests {
 
     #[test]
     fn do_size_existing_file() {
-
         let path = temp_path("size_exist");
         fs::write(&path, b"hello").unwrap();
 
@@ -494,7 +492,6 @@ mod tests {
 
     #[test]
     fn do_size_nonexistent() {
-
         let path = temp_path("size_noexist_xyz");
         cleanup(&path); // ensure it doesn't exist
 
@@ -508,7 +505,6 @@ mod tests {
 
     #[test]
     fn do_open_write_creates_file() {
-
         let path = temp_path("open_write");
         cleanup(&path);
 
@@ -529,7 +525,6 @@ mod tests {
 
     #[test]
     fn do_open_read_existing() {
-
         let path = temp_path("open_read");
         fs::write(&path, b"data").unwrap();
 
@@ -546,7 +541,6 @@ mod tests {
 
     #[test]
     fn do_open_read_nonexistent_returns_zero() {
-
         let path = temp_path("open_read_nope");
         cleanup(&path);
 
@@ -561,7 +555,6 @@ mod tests {
 
     #[test]
     fn write_read_single_byte_roundtrip() {
-
         let path = temp_path("wr_byte");
         cleanup(&path);
 
@@ -607,7 +600,6 @@ mod tests {
 
     #[test]
     fn write_read_bytes_roundtrip() {
-
         let path = temp_path("wr_bytes");
         cleanup(&path);
 
@@ -626,11 +618,8 @@ mod tests {
 
         // Write 5 bytes from buffer.
         let mut ctx = NativeContext::new(&mut mem);
-        let ok = filestore_do_write_bytes(
-            &mut ctx,
-            &[wh, buf_start as i32, 0, data.len() as i32],
-        )
-        .unwrap();
+        let ok = filestore_do_write_bytes(&mut ctx, &[wh, buf_start as i32, 0, data.len() as i32])
+            .unwrap();
         assert_eq!(ok, 1);
 
         // Close.
@@ -648,11 +637,7 @@ mod tests {
         assert!(rh > 0);
 
         let mut ctx = NativeContext::new(&mut mem);
-        let n = filestore_do_read_bytes(
-            &mut ctx,
-            &[rh, buf_start as i32, 0, 5],
-        )
-        .unwrap();
+        let n = filestore_do_read_bytes(&mut ctx, &[rh, buf_start as i32, 0, 5]).unwrap();
         assert_eq!(n, 5);
         assert_eq!(&mem[buf_start..buf_start + 5], b"HELLO");
 
@@ -665,7 +650,6 @@ mod tests {
 
     #[test]
     fn seek_tell_roundtrip() {
-
         let path = temp_path("seek_tell");
         fs::write(&path, b"abcdefghij").unwrap();
 
@@ -700,7 +684,6 @@ mod tests {
 
     #[test]
     fn flush_does_not_error() {
-
         let path = temp_path("flush");
         cleanup(&path);
 
@@ -723,7 +706,6 @@ mod tests {
 
     #[test]
     fn close_invalid_handle_returns_zero() {
-
         let mut mem = vec![0u8; 16];
         let mut ctx = NativeContext::new(&mut mem);
         let result = filestore_do_close(&mut ctx, &[9999]).unwrap();
@@ -732,7 +714,6 @@ mod tests {
 
     #[test]
     fn close_zero_handle_returns_neg_one() {
-
         let mut mem = vec![0u8; 16];
         let mut ctx = NativeContext::new(&mut mem);
         let result = filestore_do_close(&mut ctx, &[0]).unwrap();
@@ -743,7 +724,6 @@ mod tests {
 
     #[test]
     fn rename_success() {
-
         let from = temp_path("rename_from");
         let to = temp_path("rename_to");
         cleanup(&from);
@@ -766,7 +746,6 @@ mod tests {
 
     #[test]
     fn rename_nonexistent_source_returns_zero() {
-
         let from = temp_path("rename_nosrc");
         let to = temp_path("rename_nodst");
         cleanup(&from);
@@ -783,7 +762,6 @@ mod tests {
 
     #[test]
     fn mode_m_creates_file_if_missing() {
-
         let path = temp_path("mode_m_create");
         cleanup(&path);
 
@@ -801,7 +779,6 @@ mod tests {
 
     #[test]
     fn mode_m_opens_existing_for_rw() {
-
         let path = temp_path("mode_m_rw");
         fs::write(&path, b"ABCD").unwrap();
 
@@ -833,7 +810,6 @@ mod tests {
 
     #[test]
     fn multiple_files_open() {
-
         let p1 = temp_path("multi1");
         let p2 = temp_path("multi2");
         cleanup(&p1);
@@ -925,7 +901,6 @@ mod tests {
 
     #[test]
     fn read_invalid_handle_returns_neg_one() {
-
         let mut mem = vec![0u8; 16];
         let mut ctx = NativeContext::new(&mut mem);
         assert_eq!(filestore_do_read(&mut ctx, &[9999]).unwrap(), -1);
@@ -935,7 +910,6 @@ mod tests {
 
     #[test]
     fn open_write_creates_parent_dirs() {
-
         let dir = temp_path("subdir_test");
         let _ = fs::remove_dir_all(&dir);
         let file_path = format!("{dir}/nested/file.txt");

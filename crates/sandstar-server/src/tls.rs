@@ -44,10 +44,7 @@ pub fn validate_tls_files(cert_path: &Path, key_path: &Path) -> Result<(), Strin
         ));
     }
     if !key_path.exists() {
-        return Err(format!(
-            "TLS key file not found: {}",
-            key_path.display()
-        ));
+        return Err(format!("TLS key file not found: {}", key_path.display()));
     }
     Ok(())
 }
@@ -90,7 +87,9 @@ mod tests {
         let key: Option<PathBuf> = None;
         let result = validate_tls_args(&cert, &key);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("--tls-cert requires --tls-key"));
+        assert!(result
+            .unwrap_err()
+            .contains("--tls-cert requires --tls-key"));
     }
 
     #[test]
@@ -99,7 +98,9 @@ mod tests {
         let key = Some(PathBuf::from("key.pem"));
         let result = validate_tls_args(&cert, &key);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("--tls-key requires --tls-cert"));
+        assert!(result
+            .unwrap_err()
+            .contains("--tls-key requires --tls-cert"));
     }
 
     #[test]

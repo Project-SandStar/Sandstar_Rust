@@ -386,9 +386,7 @@ mod tests {
             unit: "F".to_string(),
             ..Default::default()
         };
-        store
-            .update_metadata(1100, false, conv, "updated")
-            .unwrap();
+        store.update_metadata(1100, false, conv, "updated").unwrap();
 
         let ch = store.get(1100).unwrap();
         assert!(!ch.enabled);

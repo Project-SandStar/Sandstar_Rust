@@ -79,12 +79,7 @@ impl PollScheduler {
     ///
     /// The offset is automatically calculated to stagger polls across
     /// the interval window when `auto_stagger` is enabled.
-    pub fn add_bucket(
-        &mut self,
-        driver_id: &str,
-        interval: Duration,
-        points: Vec<DriverPointRef>,
-    ) {
+    pub fn add_bucket(&mut self, driver_id: &str, interval: Duration, points: Vec<DriverPointRef>) {
         let offset = if self.auto_stagger {
             self.calculate_stagger(interval)
         } else {

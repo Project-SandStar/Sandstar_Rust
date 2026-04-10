@@ -199,7 +199,10 @@ mod tests {
     #[test]
     fn grid_with_meta() {
         let g = ZincGrid {
-            meta: vec![("hisStart", ZincValue::DateTime("2024-01-01T00:00:00Z".into()))],
+            meta: vec![(
+                "hisStart",
+                ZincValue::DateTime("2024-01-01T00:00:00Z".into()),
+            )],
             columns: vec![ZincColumn::new("ts"), ZincColumn::new("val")],
             rows: vec![],
         };

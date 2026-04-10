@@ -35,7 +35,9 @@ impl HalValidation {
 
     /// Check if a specific subsystem is available.
     pub fn is_available(&self, name: &str) -> bool {
-        self.subsystems.iter().any(|s| s.name == name && s.available)
+        self.subsystems
+            .iter()
+            .any(|s| s.name == name && s.available)
     }
 }
 
@@ -80,17 +82,41 @@ pub trait HalWrite {
 /// All methods have default no-op implementations so MockHal works unchanged.
 #[allow(unused_variables)]
 pub trait HalControl {
-    fn init(&mut self) -> Result<(), HalError> { Ok(()) }
-    fn shutdown(&mut self) -> Result<(), HalError> { Ok(()) }
+    fn init(&mut self) -> Result<(), HalError> {
+        Ok(())
+    }
+    fn shutdown(&mut self) -> Result<(), HalError> {
+        Ok(())
+    }
     /// Probe hardware subsystems and return structured validation results.
     /// Default implementation returns empty (all-OK) validation.
-    fn validate(&self) -> HalValidation { HalValidation::default() }
-    fn gpio_export(&mut self, address: u32, output: bool) -> Result<(), HalError> { Ok(()) }
-    fn gpio_unexport(&mut self, address: u32) -> Result<(), HalError> { Ok(()) }
-    fn pwm_export(&mut self, chip: u32, channel: u32) -> Result<(), HalError> { Ok(()) }
-    fn pwm_configure(&mut self, chip: u32, channel: u32, period_ns: u32, polarity_normal: bool) -> Result<(), HalError> { Ok(()) }
-    fn pwm_enable(&mut self, chip: u32, channel: u32, enabled: bool) -> Result<(), HalError> { Ok(()) }
-    fn pwm_unexport(&mut self, chip: u32, channel: u32) -> Result<(), HalError> { Ok(()) }
+    fn validate(&self) -> HalValidation {
+        HalValidation::default()
+    }
+    fn gpio_export(&mut self, address: u32, output: bool) -> Result<(), HalError> {
+        Ok(())
+    }
+    fn gpio_unexport(&mut self, address: u32) -> Result<(), HalError> {
+        Ok(())
+    }
+    fn pwm_export(&mut self, chip: u32, channel: u32) -> Result<(), HalError> {
+        Ok(())
+    }
+    fn pwm_configure(
+        &mut self,
+        chip: u32,
+        channel: u32,
+        period_ns: u32,
+        polarity_normal: bool,
+    ) -> Result<(), HalError> {
+        Ok(())
+    }
+    fn pwm_enable(&mut self, chip: u32, channel: u32, enabled: bool) -> Result<(), HalError> {
+        Ok(())
+    }
+    fn pwm_unexport(&mut self, chip: u32, channel: u32) -> Result<(), HalError> {
+        Ok(())
+    }
 }
 
 /// Diagnostics and recovery for HAL implementations.
@@ -99,9 +125,15 @@ pub trait HalControl {
 /// All methods have default no-op implementations.
 #[allow(unused_variables)]
 pub trait HalDiagnostics {
-    fn reset_i2c_bus(&self, device: u32) -> Result<(), HalError> { Ok(()) }
-    fn reinit_i2c_sensor(&self, device: u32, address: u32, label: &str) -> Result<(), HalError> { Ok(()) }
-    fn probe_i2c(&self, device: u32, address: u32) -> Result<bool, HalError> { Ok(true) }
+    fn reset_i2c_bus(&self, device: u32) -> Result<(), HalError> {
+        Ok(())
+    }
+    fn reinit_i2c_sensor(&self, device: u32, address: u32, label: &str) -> Result<(), HalError> {
+        Ok(())
+    }
+    fn probe_i2c(&self, device: u32, address: u32) -> Result<bool, HalError> {
+        Ok(true)
+    }
 }
 
 #[cfg(feature = "simulator")]
@@ -117,11 +149,26 @@ pub mod simulator {
     /// Key for dispatching simulator read results.
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub enum ReadKey {
-        Analog { device: u32, address: u32 },
-        Digital { address: u32 },
-        I2c { device: u32, address: u32, label: String },
-        Pwm { chip: u32, channel: u32 },
-        Uart { device: u32, label: String },
+        Analog {
+            device: u32,
+            address: u32,
+        },
+        Digital {
+            address: u32,
+        },
+        I2c {
+            device: u32,
+            address: u32,
+            label: String,
+        },
+        Pwm {
+            chip: u32,
+            channel: u32,
+        },
+        Uart {
+            device: u32,
+            label: String,
+        },
     }
 
     /// Key for capturing simulator write outputs.
@@ -185,7 +232,10 @@ pub mod simulator {
     impl HalRead for SimulatorHal {
         fn read_analog(&self, device: u32, address: u32) -> Result<f64, HalError> {
             let s = self.state.read().expect("SimulatorState RwLock poisoned");
-            Ok(*s.reads.get(&ReadKey::Analog { device, address }).unwrap_or(&0.0))
+            Ok(*s
+                .reads
+                .get(&ReadKey::Analog { device, address })
+                .unwrap_or(&0.0))
         }
 
         fn read_digital(&self, address: u32) -> Result<bool, HalError> {
@@ -195,7 +245,14 @@ pub mod simulator {
 
         fn read_i2c(&self, device: u32, address: u32, label: &str) -> Result<f64, HalError> {
             let s = self.state.read().expect("SimulatorState RwLock poisoned");
-            Ok(*s.reads.get(&ReadKey::I2c { device, address, label: label.to_string() }).unwrap_or(&0.0))
+            Ok(*s
+                .reads
+                .get(&ReadKey::I2c {
+                    device,
+                    address,
+                    label: label.to_string(),
+                })
+                .unwrap_or(&0.0))
         }
 
         fn read_pwm(&self, chip: u32, channel: u32) -> Result<f64, HalError> {
@@ -205,14 +262,21 @@ pub mod simulator {
 
         fn read_uart(&self, device: u32, label: &str) -> Result<f64, HalError> {
             let s = self.state.read().expect("SimulatorState RwLock poisoned");
-            Ok(*s.reads.get(&ReadKey::Uart { device, label: label.to_string() }).unwrap_or(&0.0))
+            Ok(*s
+                .reads
+                .get(&ReadKey::Uart {
+                    device,
+                    label: label.to_string(),
+                })
+                .unwrap_or(&0.0))
         }
     }
 
     impl HalWrite for SimulatorHal {
         fn write_digital(&self, address: u32, value: bool) -> Result<(), HalError> {
             let mut s = self.state.write().expect("SimulatorState RwLock poisoned");
-            s.writes.insert(WriteKey::Digital { address }, if value { 1.0 } else { 0.0 });
+            s.writes
+                .insert(WriteKey::Digital { address }, if value { 1.0 } else { 0.0 });
             // Mirror write to digital_reads so read_digital reflects the output state
             // (matches real GPIO behavior where reading an output pin returns its driven value)
             s.digital_reads.insert(address, value);
@@ -246,7 +310,10 @@ pub mod simulator {
         fn test_read_analog_injected() {
             let state = new_shared_state();
             state.write().unwrap().reads.insert(
-                ReadKey::Analog { device: 0, address: 3 },
+                ReadKey::Analog {
+                    device: 0,
+                    address: 3,
+                },
                 2048.0,
             );
             let hal = SimulatorHal::new(state);
@@ -274,7 +341,11 @@ pub mod simulator {
         fn test_read_i2c_injected() {
             let state = new_shared_state();
             state.write().unwrap().reads.insert(
-                ReadKey::I2c { device: 2, address: 0x40, label: "sdp810".to_string() },
+                ReadKey::I2c {
+                    device: 2,
+                    address: 0x40,
+                    label: "sdp810".to_string(),
+                },
                 120.5,
             );
             let hal = SimulatorHal::new(state);
@@ -291,8 +362,14 @@ pub mod simulator {
             hal.write_digital(6, false).unwrap();
 
             let s = state.read().unwrap();
-            assert_eq!(*s.writes.get(&WriteKey::Digital { address: 5 }).unwrap(), 1.0);
-            assert_eq!(*s.writes.get(&WriteKey::Digital { address: 6 }).unwrap(), 0.0);
+            assert_eq!(
+                *s.writes.get(&WriteKey::Digital { address: 5 }).unwrap(),
+                1.0
+            );
+            assert_eq!(
+                *s.writes.get(&WriteKey::Digital { address: 6 }).unwrap(),
+                0.0
+            );
         }
 
         #[test]
@@ -302,7 +379,15 @@ pub mod simulator {
             hal.write_pwm(0, 1, 0.75).unwrap();
 
             let s = state.read().unwrap();
-            assert_eq!(*s.writes.get(&WriteKey::Pwm { chip: 0, channel: 1 }).unwrap(), 0.75);
+            assert_eq!(
+                *s.writes
+                    .get(&WriteKey::Pwm {
+                        chip: 0,
+                        channel: 1
+                    })
+                    .unwrap(),
+                0.75
+            );
         }
 
         #[test]
@@ -310,7 +395,10 @@ pub mod simulator {
             let state = new_shared_state();
             // Pre-inject a value
             state.write().unwrap().reads.insert(
-                ReadKey::Analog { device: 0, address: 0 },
+                ReadKey::Analog {
+                    device: 0,
+                    address: 0,
+                },
                 42.0,
             );
 
@@ -348,10 +436,23 @@ pub mod mock {
     /// Key for dispatching mock read results.
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     enum ReadKey {
-        Analog { device: u32, address: u32 },
-        I2c { device: u32, address: u32, label: String },
-        Pwm { chip: u32, channel: u32 },
-        Uart { device: u32, label: String },
+        Analog {
+            device: u32,
+            address: u32,
+        },
+        I2c {
+            device: u32,
+            address: u32,
+            label: String,
+        },
+        Pwm {
+            chip: u32,
+            channel: u32,
+        },
+        Uart {
+            device: u32,
+            label: String,
+        },
     }
 
     /// Recorded digital write.
@@ -422,7 +523,13 @@ pub mod mock {
         }
 
         /// Queue an I2C read result for (device, address, label).
-        pub fn set_i2c(&self, device: u32, address: u32, label: &str, result: Result<f64, HalError>) {
+        pub fn set_i2c(
+            &self,
+            device: u32,
+            address: u32,
+            label: &str,
+            result: Result<f64, HalError>,
+        ) {
             self.reads
                 .borrow_mut()
                 .entry(ReadKey::I2c {
@@ -560,16 +667,23 @@ pub mod mock {
         }
 
         fn write_pwm(&self, chip: u32, channel: u32, duty: f64) -> Result<(), HalError> {
-            self.pwm_writes
-                .borrow_mut()
-                .push(PwmWrite { chip, channel, duty });
+            self.pwm_writes.borrow_mut().push(PwmWrite {
+                chip,
+                channel,
+                duty,
+            });
             Ok(())
         }
     }
 
     impl HalControl for MockHal {}
     impl HalDiagnostics for MockHal {
-        fn reinit_i2c_sensor(&self, _device: u32, _address: u32, _label: &str) -> Result<(), HalError> {
+        fn reinit_i2c_sensor(
+            &self,
+            _device: u32,
+            _address: u32,
+            _label: &str,
+        ) -> Result<(), HalError> {
             let mut queue = self.reinit_results.borrow_mut();
             if queue.is_empty() {
                 Ok(())
@@ -623,8 +737,20 @@ pub mod mock {
 
             let writes = hal.digital_writes();
             assert_eq!(writes.len(), 2);
-            assert_eq!(writes[0], DigitalWrite { address: 5, value: true });
-            assert_eq!(writes[1], DigitalWrite { address: 6, value: false });
+            assert_eq!(
+                writes[0],
+                DigitalWrite {
+                    address: 5,
+                    value: true
+                }
+            );
+            assert_eq!(
+                writes[1],
+                DigitalWrite {
+                    address: 6,
+                    value: false
+                }
+            );
         }
 
         #[test]
@@ -634,7 +760,14 @@ pub mod mock {
 
             let writes = hal.pwm_writes();
             assert_eq!(writes.len(), 1);
-            assert_eq!(writes[0], PwmWrite { chip: 0, channel: 1, duty: 0.75 });
+            assert_eq!(
+                writes[0],
+                PwmWrite {
+                    chip: 0,
+                    channel: 1,
+                    duty: 0.75
+                }
+            );
         }
 
         #[test]
@@ -654,7 +787,14 @@ pub mod mock {
         #[test]
         fn test_mock_error_result() {
             let hal = MockHal::new();
-            hal.set_analog(0, 0, Err(HalError::Timeout { device: 0, address: 0 }));
+            hal.set_analog(
+                0,
+                0,
+                Err(HalError::Timeout {
+                    device: 0,
+                    address: 0,
+                }),
+            );
             assert!(hal.read_analog(0, 0).is_err());
         }
     }

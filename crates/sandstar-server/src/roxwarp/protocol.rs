@@ -302,8 +302,8 @@ pub mod capabilities {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::string_table::StringTable;
+    use super::*;
 
     fn sample_point() -> VersionedPoint {
         VersionedPoint {
@@ -411,10 +411,7 @@ mod tests {
     fn versions_json_roundtrip() {
         let msg = WarpMessage::Versions {
             node_id: "node-a".into(),
-            versions: HashMap::from([
-                ("node-a".into(), 1542),
-                ("node-b".into(), 1200),
-            ]),
+            versions: HashMap::from([("node-a".into(), 1542), ("node-b".into(), 1200)]),
         };
         let json = msg.to_json().unwrap();
         let decoded = WarpMessage::from_json(&json).unwrap();
@@ -616,15 +613,13 @@ mod tests {
         let msg = WarpMessage::QueryResult {
             node_id: "node-b".into(),
             query_id: "q-001".into(),
-            results: vec![
-                QueryPoint {
-                    channel: 1113,
-                    value: 73.2,
-                    unit: "degF".into(),
-                    status: "ok".into(),
-                    node_id: "node-b".into(),
-                },
-            ],
+            results: vec![QueryPoint {
+                channel: 1113,
+                value: 73.2,
+                unit: "degF".into(),
+                status: "ok".into(),
+                node_id: "node-b".into(),
+            }],
         };
         let json = msg.to_json().unwrap();
         assert!(json.contains("\"type\":\"warp:queryResult\""));
@@ -651,15 +646,13 @@ mod tests {
         let msg = WarpMessage::QueryResult {
             node_id: "node-a".into(),
             query_id: "q-001".into(),
-            results: vec![
-                QueryPoint {
-                    channel: 2200,
-                    value: 55.0,
-                    unit: "%RH".into(),
-                    status: "ok".into(),
-                    node_id: "node-a".into(),
-                },
-            ],
+            results: vec![QueryPoint {
+                channel: 2200,
+                value: 55.0,
+                unit: "%RH".into(),
+                status: "ok".into(),
+                node_id: "node-a".into(),
+            }],
         };
         let bytes = msg.to_msgpack().unwrap();
         let decoded = WarpMessage::from_msgpack(&bytes).unwrap();
@@ -759,10 +752,7 @@ mod tests {
     fn versions_msgpack_roundtrip() {
         let msg = WarpMessage::Versions {
             node_id: "node-a".into(),
-            versions: HashMap::from([
-                ("node-a".into(), 1542),
-                ("node-b".into(), 1200),
-            ]),
+            versions: HashMap::from([("node-a".into(), 1542), ("node-b".into(), 1200)]),
         };
         let bytes = msg.to_msgpack().unwrap();
         let decoded = WarpMessage::from_msgpack(&bytes).unwrap();

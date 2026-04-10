@@ -189,9 +189,7 @@ fn main() {
             channel: *channel,
             level: *level,
         },
-        Commands::WriteLevels { channel } => EngineCommand::GetWriteLevels {
-            channel: *channel,
-        },
+        Commands::WriteLevels { channel } => EngineCommand::GetWriteLevels { channel: *channel },
         Commands::Convert { channel, raw } => EngineCommand::ConvertValue {
             channel: *channel,
             raw: *raw,
@@ -203,7 +201,11 @@ fn main() {
         Commands::Poll => EngineCommand::PollNow,
         Commands::Shutdown => EngineCommand::Shutdown,
         Commands::Reload => EngineCommand::ReloadConfig,
-        Commands::History { channel, since, limit } => {
+        Commands::History {
+            channel,
+            since,
+            limit,
+        } => {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -246,7 +248,12 @@ fn print_response(response: EngineResponse, as_json: bool) {
 fn print_json(response: EngineResponse) {
     let output = match response {
         EngineResponse::Ok => json!({"ok": true}),
-        EngineResponse::Value { channel, status, raw, cur } => {
+        EngineResponse::Value {
+            channel,
+            status,
+            raw,
+            cur,
+        } => {
             json!({"channel": channel, "status": status, "raw": raw, "cur": cur})
         }
         EngineResponse::Channels(ch) => serde_json::to_value(&ch).unwrap(),
@@ -325,7 +332,10 @@ fn print_text(response: EngineResponse) {
             println!("{:<8} {:<10} {:<12}", "CH", "STATUS", "LAST CUR");
             println!("{}", "-".repeat(32));
             for p in polls {
-                println!("{:<8} {:<10} {:<12.4}", p.channel, p.last_status, p.last_cur);
+                println!(
+                    "{:<8} {:<10} {:<12.4}",
+                    p.channel, p.last_status, p.last_cur
+                );
             }
         }
 
@@ -339,17 +349,17 @@ fn print_text(response: EngineResponse) {
         }
 
         EngineResponse::WriteLevels(levels) => {
-            println!(
-                "{:<6} {:<12} {:<12} WHO",
-                "LVL", "LEVEL DIS", "VALUE"
-            );
+            println!("{:<6} {:<12} {:<12} WHO", "LVL", "LEVEL DIS", "VALUE");
             println!("{}", "-".repeat(44));
             for l in levels {
                 let val_str = match l.val {
                     Some(v) => format!("{:.4}", v),
                     None => "null".to_string(),
                 };
-                println!("{:<6} {:<12} {:<12} {}", l.level, l.level_dis, val_str, l.who);
+                println!(
+                    "{:<6} {:<12} {:<12} {}",
+                    l.level, l.level_dis, val_str, l.who
+                );
             }
         }
 
@@ -552,7 +562,10 @@ fn print_health_text(
         if in_cat.is_empty() {
             continue;
         }
-        let cat_ok = in_cat.iter().filter(|c| c.status == "Ok" || c.status == "Unknown").count();
+        let cat_ok = in_cat
+            .iter()
+            .filter(|c| c.status == "Ok" || c.status == "Unknown")
+            .count();
         let cat_down = in_cat.iter().filter(|c| c.status == "Down").count();
         let cat_fault = in_cat.iter().filter(|c| c.status == "Fault").count();
         let cat_dis = in_cat.iter().filter(|c| !c.enabled).count();
@@ -685,7 +698,11 @@ mod tests {
     fn test_write_subcommand_default_level() {
         let cli = try_parse(&["sandstar-cli", "write", "2001", "72.5"]).unwrap();
         match cli.command {
-            Commands::Write { channel, value, level } => {
+            Commands::Write {
+                channel,
+                value,
+                level,
+            } => {
                 assert_eq!(channel, 2001);
                 assert!((value - 72.5).abs() < f64::EPSILON);
                 assert_eq!(level, 17); // default
@@ -698,7 +715,11 @@ mod tests {
     fn test_write_subcommand_custom_level() {
         let cli = try_parse(&["sandstar-cli", "write", "2001", "72.5", "--level", "8"]).unwrap();
         match cli.command {
-            Commands::Write { channel, value, level } => {
+            Commands::Write {
+                channel,
+                value,
+                level,
+            } => {
                 assert_eq!(channel, 2001);
                 assert!((value - 72.5).abs() < f64::EPSILON);
                 assert_eq!(level, 8);
@@ -718,10 +739,14 @@ mod tests {
     fn test_history_subcommand_defaults() {
         let cli = try_parse(&["sandstar-cli", "history", "1113"]).unwrap();
         match cli.command {
-            Commands::History { channel, since, limit } => {
+            Commands::History {
+                channel,
+                since,
+                limit,
+            } => {
                 assert_eq!(channel, 1113);
                 assert_eq!(since, 3600); // default
-                assert_eq!(limit, 100);  // default
+                assert_eq!(limit, 100); // default
             }
             _ => panic!("expected History command"),
         }
@@ -730,10 +755,21 @@ mod tests {
     #[test]
     fn test_history_subcommand_custom_flags() {
         let cli = try_parse(&[
-            "sandstar-cli", "history", "1113", "--since", "7200", "--limit", "50",
-        ]).unwrap();
+            "sandstar-cli",
+            "history",
+            "1113",
+            "--since",
+            "7200",
+            "--limit",
+            "50",
+        ])
+        .unwrap();
         match cli.command {
-            Commands::History { channel, since, limit } => {
+            Commands::History {
+                channel,
+                since,
+                limit,
+            } => {
                 assert_eq!(channel, 1113);
                 assert_eq!(since, 7200);
                 assert_eq!(limit, 50);
@@ -757,8 +793,13 @@ mod tests {
     #[test]
     fn test_convert_sax_with_output() {
         let cli = try_parse(&[
-            "sandstar-cli", "convert-sax", "app.sax", "-o", "control.toml",
-        ]).unwrap();
+            "sandstar-cli",
+            "convert-sax",
+            "app.sax",
+            "-o",
+            "control.toml",
+        ])
+        .unwrap();
         match cli.command {
             Commands::ConvertSax { sax_file, output } => {
                 assert_eq!(sax_file, "app.sax");

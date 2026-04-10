@@ -24,8 +24,8 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
 use crate::sox::sox_handlers::{
-    ComponentTree, ManifestDb, SlotValue, VirtualComponent, VirtualSlot,
-    DEFAULT_KITS, SLOT_FLAG_ACTION, SLOT_FLAG_CONFIG,
+    ComponentTree, ManifestDb, SlotValue, VirtualComponent, VirtualSlot, DEFAULT_KITS,
+    SLOT_FLAG_ACTION, SLOT_FLAG_CONFIG,
 };
 use crate::sox::sox_protocol::SoxValueType;
 use crate::sox::{DynSlotStoreHandle, SharedComponentTree};
@@ -263,24 +263,12 @@ pub(crate) fn slot_value_to_json(value: &SlotValue) -> serde_json::Value {
 /// Coerce a JSON value to a typed SlotValue based on the slot's type_id.
 pub(crate) fn json_to_slot_value(json: &serde_json::Value, type_id: u8) -> Option<SlotValue> {
     match type_id {
-        t if t == SoxValueType::Bool as u8 => {
-            json.as_bool().map(SlotValue::Bool)
-        }
-        t if t == SoxValueType::Int as u8 => {
-            json.as_i64().map(|v| SlotValue::Int(v as i32))
-        }
-        t if t == SoxValueType::Long as u8 => {
-            json.as_i64().map(SlotValue::Long)
-        }
-        t if t == SoxValueType::Float as u8 => {
-            json.as_f64().map(|v| SlotValue::Float(v as f32))
-        }
-        t if t == SoxValueType::Double as u8 => {
-            json.as_f64().map(SlotValue::Double)
-        }
-        t if t == SoxValueType::Buf as u8 => {
-            json.as_str().map(|s| SlotValue::Str(s.to_string()))
-        }
+        t if t == SoxValueType::Bool as u8 => json.as_bool().map(SlotValue::Bool),
+        t if t == SoxValueType::Int as u8 => json.as_i64().map(|v| SlotValue::Int(v as i32)),
+        t if t == SoxValueType::Long as u8 => json.as_i64().map(SlotValue::Long),
+        t if t == SoxValueType::Float as u8 => json.as_f64().map(|v| SlotValue::Float(v as f32)),
+        t if t == SoxValueType::Double as u8 => json.as_f64().map(SlotValue::Double),
+        t if t == SoxValueType::Buf as u8 => json.as_str().map(|s| SlotValue::Str(s.to_string())),
         // Byte / Short treated as Int
         t if t == SoxValueType::Byte as u8 || t == SoxValueType::Short as u8 => {
             json.as_i64().map(|v| SlotValue::Int(v as i32))
@@ -454,7 +442,10 @@ pub async fn get_comp(
                 let trio_text = super::trio::encode_trio(&tags);
                 (
                     StatusCode::OK,
-                    [(axum::http::header::CONTENT_TYPE, super::trio::TRIO_CONTENT_TYPE)],
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        super::trio::TRIO_CONTENT_TYPE,
+                    )],
                     trio_text,
                 )
                     .into_response()
@@ -480,7 +471,10 @@ pub async fn add_comp(
 
     // Validate parent exists.
     if tree.get(req.parent_id).is_none() {
-        return (StatusCode::BAD_REQUEST, format!("parent {} not found", req.parent_id))
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("parent {} not found", req.parent_id),
+        )
             .into_response();
     }
 
@@ -525,12 +519,12 @@ pub async fn add_comp(
 }
 
 /// DELETE /api/sox/comp/{id} — delete a component.
-pub async fn delete_comp(
-    State(state): State<SoxApiState>,
-    Path(id): Path<u16>,
-) -> Response {
+pub async fn delete_comp(State(state): State<SoxApiState>, Path(id): Path<u16>) -> Response {
     if id < 7 {
-        return (StatusCode::FORBIDDEN, "cannot delete system components (id < 7)")
+        return (
+            StatusCode::FORBIDDEN,
+            "cannot delete system components (id < 7)",
+        )
             .into_response();
     }
 
@@ -589,14 +583,16 @@ pub async fn write_slot(
         let comp = match tree.get(id) {
             Some(c) => c,
             None => {
-                return (StatusCode::NOT_FOUND, format!("component {id} not found"))
-                    .into_response()
+                return (StatusCode::NOT_FOUND, format!("component {id} not found")).into_response()
             }
         };
         match comp.slots.get(idx) {
             Some(slot) => slot.type_id,
             None => {
-                return (StatusCode::BAD_REQUEST, format!("slot index {idx} out of range"))
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("slot index {idx} out of range"),
+                )
                     .into_response()
             }
         }
@@ -643,10 +639,7 @@ pub async fn invoke_action(
     };
 
     // Find the slot by name.
-    let slot_idx = comp
-        .slots
-        .iter()
-        .position(|s| s.name == slot_name);
+    let slot_idx = comp.slots.iter().position(|s| s.name == slot_name);
     let slot_idx = match slot_idx {
         Some(i) => i,
         None => {
@@ -663,9 +656,7 @@ pub async fn invoke_action(
         "setTrue" => {
             // Find the target bool slot (usually the first runtime bool).
             for slot in &mut comp.slots {
-                if slot.type_id == SoxValueType::Bool as u8
-                    && slot.flags & SLOT_FLAG_ACTION == 0
-                {
+                if slot.type_id == SoxValueType::Bool as u8 && slot.flags & SLOT_FLAG_ACTION == 0 {
                     slot.value = SlotValue::Bool(true);
                     break;
                 }
@@ -673,9 +664,7 @@ pub async fn invoke_action(
         }
         "setFalse" => {
             for slot in &mut comp.slots {
-                if slot.type_id == SoxValueType::Bool as u8
-                    && slot.flags & SLOT_FLAG_ACTION == 0
-                {
+                if slot.type_id == SoxValueType::Bool as u8 && slot.flags & SLOT_FLAG_ACTION == 0 {
                     slot.value = SlotValue::Bool(false);
                     break;
                 }
@@ -697,10 +686,7 @@ pub async fn invoke_action(
 }
 
 /// POST /api/sox/link — add a link.
-pub async fn add_link(
-    State(state): State<SoxApiState>,
-    Json(req): Json<LinkRequest>,
-) -> Response {
+pub async fn add_link(State(state): State<SoxApiState>, Json(req): Json<LinkRequest>) -> Response {
     let mut tree = state.tree.write().unwrap();
     if tree.add_link(req.from_comp, req.from_slot, req.to_comp, req.to_slot) {
         tree.mark_dirty();
@@ -795,7 +781,8 @@ pub async fn get_palette(State(state): State<SoxApiState>) -> Response {
 pub async fn get_names(State(state): State<SoxApiState>) -> Response {
     let tree = state.tree.read().unwrap();
     let (count, total_bytes, avg_length) = tree.name_table.stats();
-    let names: Vec<serde_json::Value> = tree.name_table
+    let names: Vec<serde_json::Value> = tree
+        .name_table
         .all_names()
         .into_iter()
         .map(|(id, name)| {

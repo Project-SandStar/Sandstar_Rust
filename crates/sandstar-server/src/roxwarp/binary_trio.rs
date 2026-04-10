@@ -78,20 +78,11 @@ pub enum TrioValue {
 
     /// Haystack Date.
     #[serde(rename = "date")]
-    Date {
-        year: i16,
-        month: u8,
-        day: u8,
-    },
+    Date { year: i16, month: u8, day: u8 },
 
     /// Haystack Time.
     #[serde(rename = "time")]
-    Time {
-        hour: u8,
-        min: u8,
-        sec: u8,
-        ms: u16,
-    },
+    Time { hour: u8, min: u8, sec: u8, ms: u16 },
 
     /// Haystack DateTime.
     #[serde(rename = "dateTime")]
@@ -164,10 +155,7 @@ impl TrioValue {
 
     /// Create a DateTime value from Unix milliseconds and timezone.
     pub fn date_time(ms: i64, tz: impl Into<String>) -> Self {
-        Self::DateTime {
-            ms,
-            tz: tz.into(),
-        }
+        Self::DateTime { ms, tz: tz.into() }
     }
 
     /// Create a Remove sentinel (for diff encoding).
@@ -330,7 +318,9 @@ fn parse_trio_scalar(s: &str) -> TrioValue {
         };
     }
     // Number (possibly with unit)
-    if let Some(num_end) = s.find(|c: char| !c.is_ascii_digit() && c != '.' && c != '-' && c != '+' && c != 'e' && c != 'E') {
+    if let Some(num_end) = s.find(|c: char| {
+        !c.is_ascii_digit() && c != '.' && c != '-' && c != '+' && c != 'e' && c != 'E'
+    }) {
         if let Ok(val) = s[..num_end].parse::<f64>() {
             let unit = s[num_end..].trim().to_string();
             if unit.is_empty() {
@@ -348,9 +338,7 @@ fn parse_trio_scalar(s: &str) -> TrioValue {
         return TrioValue::Number { val };
     }
     // Fallback: treat as string
-    TrioValue::Str {
-        val: s.to_string(),
-    }
+    TrioValue::Str { val: s.to_string() }
 }
 
 // ── Tests ────────────────────────────────────────────
@@ -443,9 +431,7 @@ mod tests {
             &TrioValue::Bool { val: true }
         );
 
-        if let TrioValue::NumberUnit { val, unit } =
-            decoded.get("num_unit_tag").unwrap()
-        {
+        if let TrioValue::NumberUnit { val, unit } = decoded.get("num_unit_tag").unwrap() {
             assert!((val - 73.2).abs() < f64::EPSILON);
             assert_eq!(unit, "degF");
         } else {
@@ -607,7 +593,10 @@ mod tests {
         assert_eq!(format!("{}", TrioValue::Marker), "M");
         assert_eq!(format!("{}", TrioValue::bool(true)), "true");
         assert_eq!(format!("{}", TrioValue::number(42.0)), "42");
-        assert_eq!(format!("{}", TrioValue::number_unit(73.2, "degF")), "73.2degF");
+        assert_eq!(
+            format!("{}", TrioValue::number_unit(73.2, "degF")),
+            "73.2degF"
+        );
         assert_eq!(format!("{}", TrioValue::str("hello")), "\"hello\"");
         assert_eq!(format!("{}", TrioValue::ref_id("abc")), "@abc");
         assert_eq!(

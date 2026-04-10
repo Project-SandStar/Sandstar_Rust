@@ -9,9 +9,7 @@ use std::fs;
 use std::path::Path;
 
 use sandstar_engine::channel::{Channel, ChannelDirection, ChannelType};
-use sandstar_engine::conversion::{
-    RateLimitConfig, SmoothMethod, SmoothingConfig, SpikeConfig,
-};
+use sandstar_engine::conversion::{RateLimitConfig, SmoothMethod, SmoothingConfig, SpikeConfig};
 use sandstar_engine::error::EngineError;
 use sandstar_engine::table::{TableRanges, TableStore};
 use sandstar_engine::value::{ConversionFn, FilterConfig, FlowConfig, ValueConv};
@@ -47,7 +45,11 @@ pub fn load_points<H: HalRead + HalWrite + HalDiagnostics>(
         let id: u32 = match fields[0].trim().parse() {
             Ok(v) => v,
             Err(_) => {
-                warn!(line = line_num + 1, field = fields[0], "invalid channel number");
+                warn!(
+                    line = line_num + 1,
+                    field = fields[0],
+                    "invalid channel number"
+                );
                 continue;
             }
         };
@@ -65,7 +67,16 @@ pub fn load_points<H: HalRead + HalWrite + HalDiagnostics>(
             conv.conv_func = ConversionFn::from_channel_id(id);
         }
 
-        let ch = Channel::new(id, channel_type, direction, device, address, trigger, conv, label);
+        let ch = Channel::new(
+            id,
+            channel_type,
+            direction,
+            device,
+            address,
+            trigger,
+            conv,
+            label,
+        );
 
         match engine.channels.add(ch) {
             Ok(()) => count += 1,
@@ -299,13 +310,15 @@ pub fn load_database<H: HalRead + HalWrite + HalDiagnostics>(
             if !engine.channels.contains(channel_id) {
                 warn!(
                     channel = channel_id,
-                    row,
-                    "channel in database.zinc not found in points.csv — skipping"
+                    row, "channel in database.zinc not found in points.csv — skipping"
                 );
                 continue;
             }
 
-            match engine.channels.update_metadata(channel_id, enabled, conv, &label) {
+            match engine
+                .channels
+                .update_metadata(channel_id, enabled, conv, &label)
+            {
                 Ok(()) => {
                     if let Some(ch) = engine.channels.get_mut(channel_id) {
                         ch.tags = tags.clone();
@@ -479,7 +492,8 @@ pub fn load_database_granular<H: HalRead + HalWrite + HalDiagnostics>(
                     }
                     Err(e) => {
                         result.warnings.push(format!(
-                            "failed to add virtual channel {}: {}", channel_id, e
+                            "failed to add virtual channel {}: {}",
+                            channel_id, e
                         ));
                     }
                 }
@@ -501,7 +515,10 @@ pub fn load_database_granular<H: HalRead + HalWrite + HalDiagnostics>(
                 false
             };
 
-            match engine.channels.update_metadata(channel_id, enabled, conv, &label) {
+            match engine
+                .channels
+                .update_metadata(channel_id, enabled, conv, &label)
+            {
                 Ok(()) => {
                     if let Some(ch) = engine.channels.get_mut(channel_id) {
                         ch.tags = tags;
@@ -514,7 +531,8 @@ pub fn load_database_granular<H: HalRead + HalWrite + HalDiagnostics>(
                 }
                 Err(e) => {
                     result.warnings.push(format!(
-                        "failed to update channel {} metadata: {}", channel_id, e
+                        "failed to update channel {} metadata: {}",
+                        channel_id, e
                     ));
                     continue;
                 }
@@ -795,10 +813,18 @@ pub fn validate_channels_vs_hardware<H: HalRead + HalWrite + HalDiagnostics>(
             continue;
         }
         let sample: Vec<String> = ids.iter().take(5).map(|id: &u32| id.to_string()).collect();
-        let extra = if ids.len() > 5 { format!(" +{} more", ids.len() - 5) } else { String::new() };
+        let extra = if ids.len() > 5 {
+            format!(" +{} more", ids.len() - 5)
+        } else {
+            String::new()
+        };
         warnings.push(format!(
             "{} {:?} channels loaded but {} hardware not detected (channels: [{}]{})",
-            ids.len(), ct, subsystem, sample.join(", "), extra
+            ids.len(),
+            ct,
+            subsystem,
+            sample.join(", "),
+            extra
         ));
     }
 
@@ -953,7 +979,14 @@ mod tests {
         assert_eq!(flow.scale_factor, 60.0);
 
         // Spike filter
-        let spike = ch.conv.filter_config.as_ref().unwrap().spike_filter.as_ref().unwrap();
+        let spike = ch
+            .conv
+            .filter_config
+            .as_ref()
+            .unwrap()
+            .spike_filter
+            .as_ref()
+            .unwrap();
         assert_eq!(spike.threshold, 5.0);
         assert_eq!(spike.startup_discard, 5);
     }
@@ -964,11 +997,7 @@ mod tests {
         // No channels loaded from points.csv
 
         let mut f = NamedTempFile::new().unwrap();
-        writeln!(
-            f,
-            "ver:\"3.0\"\nchannel,enabled,analog\n1113,M,M"
-        )
-        .unwrap();
+        writeln!(f, "ver:\"3.0\"\nchannel,enabled,analog\n1113,M,M").unwrap();
 
         let count = load_database(&mut engine, f.path()).unwrap();
         assert_eq!(count, 0); // skipped: 1113 not in ChannelStore
@@ -979,11 +1008,7 @@ mod tests {
         let mut engine = make_engine_with_channel(612, ChannelType::I2c);
 
         let mut f = NamedTempFile::new().unwrap();
-        writeln!(
-            f,
-            "ver:\"3.0\"\nchannel,enabled,device,cur\n,,M,\n612,M,,M"
-        )
-        .unwrap();
+        writeln!(f, "ver:\"3.0\"\nchannel,enabled,device,cur\n,,M,\n612,M,,M").unwrap();
 
         let count = load_database(&mut engine, f.path()).unwrap();
         assert_eq!(count, 1); // only row with channel=612

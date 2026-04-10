@@ -98,8 +98,7 @@ impl Default for ClusterConfig {
 impl ClusterConfig {
     /// Load cluster configuration from a JSON file.
     pub fn load(path: &str) -> Result<Self, String> {
-        let data =
-            std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
+        let data = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
         serde_json::from_str(&data).map_err(|e| format!("parse {path}: {e}"))
     }
 }
@@ -195,13 +194,7 @@ impl DeltaEngine {
     }
 
     /// Record a local point change; returns the new version.
-    pub async fn record_change(
-        &self,
-        channel: u32,
-        value: f64,
-        unit: &str,
-        status: &str,
-    ) -> u64 {
+    pub async fn record_change(&self, channel: u32, value: f64, unit: &str, status: &str) -> u64 {
         let version = self.version.fetch_add(1, Ordering::SeqCst) + 1;
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -279,18 +272,14 @@ impl DeltaEngine {
     /// Get full state (for initial sync with a new peer).
     pub async fn full_state(&self) -> (u64, Vec<VersionedPoint>) {
         let current = self.version.load(Ordering::SeqCst);
-        let points: Vec<VersionedPoint> =
-            self.points.read().await.values().cloned().collect();
+        let points: Vec<VersionedPoint> = self.points.read().await.values().cloned().collect();
         (current, points)
     }
 
     /// Get the version vector: node_id -> last known version.
     pub async fn get_version_vector(&self) -> HashMap<String, u64> {
         let mut vv = self.peer_versions.read().await.clone();
-        vv.insert(
-            self.node_id.clone(),
-            self.version.load(Ordering::SeqCst),
-        );
+        vv.insert(self.node_id.clone(), self.version.load(Ordering::SeqCst));
         vv
     }
 }
@@ -353,23 +342,24 @@ impl ClusterManager {
         }
 
         // Build mTLS client config for outbound connections (if configured)
-        let mtls_client: super::peer::MtlsClientConfig =
-            if let (Some(cert), Some(key), Some(ca)) =
-                (&self.config.cert_path, &self.config.key_path, &self.config.ca_path)
-            {
-                match super::mtls::build_mtls_client_config(cert, key, ca) {
-                    Ok(cfg) => {
-                        info!("roxWarp: mTLS client config loaded for outbound connections");
-                        Some(cfg)
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "roxWarp: failed to load mTLS client config, using plain WS");
-                        None
-                    }
+        let mtls_client: super::peer::MtlsClientConfig = if let (Some(cert), Some(key), Some(ca)) = (
+            &self.config.cert_path,
+            &self.config.key_path,
+            &self.config.ca_path,
+        ) {
+            match super::mtls::build_mtls_client_config(cert, key, ca) {
+                Ok(cfg) => {
+                    info!("roxWarp: mTLS client config loaded for outbound connections");
+                    Some(cfg)
                 }
-            } else {
-                None
-            };
+                Err(e) => {
+                    warn!(error = %e, "roxWarp: failed to load mTLS client config, using plain WS");
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         // Spawn the channel feed loop
         let feed_engine = self.delta_engine.clone();
@@ -465,8 +455,7 @@ async fn channel_feed_loop(
     engine_handle: EngineHandle,
     interval_secs: u64,
 ) {
-    let mut timer =
-        tokio::time::interval(Duration::from_secs(interval_secs));
+    let mut timer = tokio::time::interval(Duration::from_secs(interval_secs));
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // Track previous values to only record actual changes
@@ -491,8 +480,7 @@ async fn channel_feed_loop(
             let changed = prev_values
                 .get(&ch.id)
                 .map(|(prev_val, prev_status)| {
-                    (*prev_val - ch.cur).abs() > f64::EPSILON
-                        || *prev_status != ch.status
+                    (*prev_val - ch.cur).abs() > f64::EPSILON || *prev_status != ch.status
                 })
                 .unwrap_or(true);
 
@@ -502,8 +490,7 @@ async fn channel_feed_loop(
                 delta_engine
                     .record_change(ch.id, ch.cur, &unit, &ch.status)
                     .await;
-                prev_values
-                    .insert(ch.id, (ch.cur, ch.status.clone()));
+                prev_values.insert(ch.id, (ch.cur, ch.status.clone()));
                 debug!(
                     channel = ch.id,
                     value = ch.cur,
@@ -601,8 +588,14 @@ mod tests {
         }"#;
         let config: ClusterConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.port, 9443);
-        assert_eq!(config.cert_path.as_deref(), Some("/etc/sandstar/device.pem"));
-        assert_eq!(config.key_path.as_deref(), Some("/etc/sandstar/device-key.pem"));
+        assert_eq!(
+            config.cert_path.as_deref(),
+            Some("/etc/sandstar/device.pem")
+        );
+        assert_eq!(
+            config.key_path.as_deref(),
+            Some("/etc/sandstar/device-key.pem")
+        );
         assert_eq!(config.ca_path.as_deref(), Some("/etc/sandstar/ca.pem"));
     }
 

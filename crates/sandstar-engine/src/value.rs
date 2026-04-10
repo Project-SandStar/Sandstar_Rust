@@ -1,7 +1,7 @@
-use crate::conversion::filters::{SmoothingConfig, SpikeConfig, RateLimitConfig};
+use crate::conversion::filters::{RateLimitConfig, SmoothingConfig, SpikeConfig};
 use crate::conversion::sdp610;
 use crate::table::TableStore;
-use crate::{ChannelId, EngineStatus, EngineValue, ValueFlags, Result};
+use crate::{ChannelId, EngineStatus, EngineValue, Result, ValueFlags};
 
 /// Conversion function tag (replaces C function pointer dispatch).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,31 +142,21 @@ impl ValueConv {
             }
 
             let cur = match conv_func {
-                ConversionFn::Sdp610ToPa => {
-                    sdp610::raw_to_pa(raw, flow_cfg.scale_factor)
-                }
-                ConversionFn::Sdp610ToInH2O => {
-                    sdp610::raw_to_inh2o(raw, flow_cfg.scale_factor)
-                }
-                ConversionFn::Sdp610ToPsi => {
-                    sdp610::raw_to_psi(raw, flow_cfg.scale_factor)
-                }
-                ConversionFn::Sdp610ToCfm => {
-                    sdp610::raw_to_cfm(
-                        raw,
-                        flow_cfg.k_factor,
-                        flow_cfg.dead_band,
-                        flow_cfg.scale_factor,
-                    )
-                }
-                ConversionFn::Sdp610ToLps => {
-                    sdp610::raw_to_lps(
-                        raw,
-                        flow_cfg.k_factor,
-                        flow_cfg.dead_band,
-                        flow_cfg.scale_factor,
-                    )
-                }
+                ConversionFn::Sdp610ToPa => sdp610::raw_to_pa(raw, flow_cfg.scale_factor),
+                ConversionFn::Sdp610ToInH2O => sdp610::raw_to_inh2o(raw, flow_cfg.scale_factor),
+                ConversionFn::Sdp610ToPsi => sdp610::raw_to_psi(raw, flow_cfg.scale_factor),
+                ConversionFn::Sdp610ToCfm => sdp610::raw_to_cfm(
+                    raw,
+                    flow_cfg.k_factor,
+                    flow_cfg.dead_band,
+                    flow_cfg.scale_factor,
+                ),
+                ConversionFn::Sdp610ToLps => sdp610::raw_to_lps(
+                    raw,
+                    flow_cfg.k_factor,
+                    flow_cfg.dead_band,
+                    flow_cfg.scale_factor,
+                ),
             };
 
             // Apply combined formula if all parameters set
@@ -193,11 +183,7 @@ impl ValueConv {
     ///
     /// After reversion, sets status=Ok and trigger=false (matches C behavior).
     /// Writes back both raw and (clamped) cur values.
-    pub fn revert(
-        &self,
-        value: &mut EngineValue,
-        tables: &TableStore,
-    ) -> Result<()> {
+    pub fn revert(&self, value: &mut EngineValue, tables: &TableStore) -> Result<()> {
         let mut cur = value.cur;
 
         // Clamp to [min, max]
@@ -224,7 +210,11 @@ impl ValueConv {
             // ADC: binary threshold
             let low = self.low.unwrap_or(0.0);
             let high = self.high.unwrap_or(4096.0);
-            if cur <= 0.0 { low } else { high }
+            if cur <= 0.0 {
+                low
+            } else {
+                high
+            }
         } else if let Some(table_idx) = self.table_index {
             // Table reverse lookup
             let min = self.min.unwrap_or(0.0);
@@ -280,7 +270,11 @@ impl ValueConv {
         let cur = if self.adc_mode {
             // ADC mode: threshold at midpoint -> binary
             let mid = low + (high - low) * 0.5;
-            if raw <= mid { 0.0 } else { 1.0 }
+            if raw <= mid {
+                0.0
+            } else {
+                1.0
+            }
         } else if let Some(table_idx) = self.table_index {
             // Table lookup with binary search interpolation
             let min = self.min.unwrap_or(0.0);
@@ -310,17 +304,23 @@ impl ValueConv {
             }
 
             // Normal table lookup (raw is within valid range)
-            tables
-                .lookup(table_idx, raw, min, max)
-                .unwrap_or_else(|| {
-                    // Fallback: range scaling
-                    let range = high - low;
-                    if range != 0.0 { raw / range } else { 0.0 }
-                })
+            tables.lookup(table_idx, raw, min, max).unwrap_or_else(|| {
+                // Fallback: range scaling
+                let range = high - low;
+                if range != 0.0 {
+                    raw / range
+                } else {
+                    0.0
+                }
+            })
         } else if self.low.is_some() && self.high.is_some() {
             // Range scaling (no table)
             let range = high - low;
-            if range != 0.0 { raw / range } else { 0.0 }
+            if range != 0.0 {
+                raw / range
+            } else {
+                0.0
+            }
         } else {
             raw
         };
@@ -355,9 +355,14 @@ impl ValueConv {
     ///
     /// Formula: fmax(fmin(((cur / (high - low)) * scale) + offset, max), min)
     fn apply_combined_transform(&self, cur: f64) -> f64 {
-        if let (Some(low), Some(high), Some(offset), Some(scale), Some(min), Some(max)) =
-            (self.low, self.high, self.offset, self.scale, self.min, self.max)
-        {
+        if let (Some(low), Some(high), Some(offset), Some(scale), Some(min), Some(max)) = (
+            self.low,
+            self.high,
+            self.offset,
+            self.scale,
+            self.min,
+            self.max,
+        ) {
             let range = high - low;
             if range != 0.0 {
                 let result = ((cur / range) * scale) + offset;
@@ -605,15 +610,27 @@ mod tests {
 
     #[test]
     fn test_conversion_fn_from_tag() {
-        assert_eq!(ConversionFn::from_tag("SDP610ToPa"), Some(ConversionFn::Sdp610ToPa));
-        assert_eq!(ConversionFn::from_tag("SDP610ToCFM"), Some(ConversionFn::Sdp610ToCfm));
+        assert_eq!(
+            ConversionFn::from_tag("SDP610ToPa"),
+            Some(ConversionFn::Sdp610ToPa)
+        );
+        assert_eq!(
+            ConversionFn::from_tag("SDP610ToCFM"),
+            Some(ConversionFn::Sdp610ToCfm)
+        );
         assert_eq!(ConversionFn::from_tag("unknown"), None);
     }
 
     #[test]
     fn test_conversion_fn_from_channel() {
-        assert_eq!(ConversionFn::from_channel_id(610), Some(ConversionFn::Sdp610ToInH2O));
-        assert_eq!(ConversionFn::from_channel_id(612), Some(ConversionFn::Sdp610ToCfm));
+        assert_eq!(
+            ConversionFn::from_channel_id(610),
+            Some(ConversionFn::Sdp610ToInH2O)
+        );
+        assert_eq!(
+            ConversionFn::from_channel_id(612),
+            Some(ConversionFn::Sdp610ToCfm)
+        );
         assert_eq!(ConversionFn::from_channel_id(999), None);
     }
 

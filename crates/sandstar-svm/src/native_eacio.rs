@@ -104,15 +104,13 @@ fn bridge_get_level(channel: u32) -> Option<u8> {
 fn bridge_get_level_value(channel: u32, level: usize) -> Option<f64> {
     let snapshot = crate::bridge::ENGINE_BRIDGE.get()?;
     let guard = snapshot.read().ok()?;
-    guard
-        .get(channel)
-        .and_then(|ch| {
-            if (1..=17).contains(&level) {
-                ch.write_levels[level - 1]
-            } else {
-                None
-            }
-        })
+    guard.get(channel).and_then(|ch| {
+        if (1..=17).contains(&level) {
+            ch.write_levels[level - 1]
+        } else {
+            None
+        }
+    })
 }
 
 /// Get a tag value for a channel from the bridge snapshot.
@@ -156,7 +154,11 @@ fn bridge_queue_write(channel: u32, value: f64) {
 fn bridge_queue_tag_write(channel: u32, tag: String, value: String) {
     if let Some(q) = crate::bridge::TAG_WRITE_QUEUE.get() {
         if let Ok(mut v) = q.lock() {
-            v.push(crate::bridge::SvmTagWrite { channel, tag, value });
+            v.push(crate::bridge::SvmTagWrite {
+                channel,
+                tag,
+                value,
+            });
         }
     }
 }
@@ -188,10 +190,7 @@ pub fn eacio_bool_out_point_set(_ctx: &mut NativeContext<'_>, params: &[i32]) ->
 /// `binaryValuePoint.set(channel, value) -> bool` (4::3)
 ///
 /// Writes a binary value point (same semantics as bool output).
-pub fn eacio_binary_value_point_set(
-    _ctx: &mut NativeContext<'_>,
-    params: &[i32],
-) -> VmResult<i32> {
+pub fn eacio_binary_value_point_set(_ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult<i32> {
     let channel = params.first().copied().unwrap_or(0) as u32;
     let value = params.get(1).copied().unwrap_or(0);
     bridge_queue_write(channel, if value != 0 { 1.0 } else { 0.0 });
@@ -222,10 +221,7 @@ pub fn eacio_analog_out_point_set(_ctx: &mut NativeContext<'_>, params: &[i32]) 
 /// `analogValuePoint.set(channel, value) -> bool` (4::6)
 ///
 /// Writes an analog value point (same as analog output).
-pub fn eacio_analog_value_point_set(
-    _ctx: &mut NativeContext<'_>,
-    params: &[i32],
-) -> VmResult<i32> {
+pub fn eacio_analog_value_point_set(_ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult<i32> {
     let channel = params.first().copied().unwrap_or(0) as u32;
     let value_bits = params.get(1).copied().unwrap_or(0) as u32;
     let value = f32::from_bits(value_bits) as f64;
@@ -328,10 +324,7 @@ pub fn eacio_get_bool_tag_value(_ctx: &mut NativeContext<'_>, params: &[i32]) ->
 /// `eacio.getNumberTagValue(channel, tagName) -> float` (4::16)
 ///
 /// Returns the numeric value of a tag on the channel (as float bits).
-pub fn eacio_get_number_tag_value(
-    _ctx: &mut NativeContext<'_>,
-    params: &[i32],
-) -> VmResult<i32> {
+pub fn eacio_get_number_tag_value(_ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult<i32> {
     let _channel = params.first().copied().unwrap_or(0) as u32;
     // TODO: Phase B — read tag name Str, return Number tag value
     Ok(0_f32.to_bits() as i32)
@@ -340,10 +333,7 @@ pub fn eacio_get_number_tag_value(
 /// `eacio.getStringTagValue(channel, tagName, buf) -> void` (4::17)
 ///
 /// Writes the string value of a tag into `buf`.
-pub fn eacio_get_string_tag_value(
-    _ctx: &mut NativeContext<'_>,
-    _params: &[i32],
-) -> VmResult<i32> {
+pub fn eacio_get_string_tag_value(_ctx: &mut NativeContext<'_>, _params: &[i32]) -> VmResult<i32> {
     // TODO: Phase B — read tag name, write value into Sedona Str buffer
     Ok(0)
 }
@@ -388,10 +378,7 @@ pub fn eacio_get_channel_in(_ctx: &mut NativeContext<'_>, params: &[i32]) -> VmR
 /// `analogValuePoint.get(channel) -> float` (4::22)
 ///
 /// Reads an analog value point (same as analogInPoint.get for reads).
-pub fn eacio_analog_value_point_get(
-    _ctx: &mut NativeContext<'_>,
-    params: &[i32],
-) -> VmResult<i32> {
+pub fn eacio_analog_value_point_get(_ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult<i32> {
     let channel = params.first().copied().unwrap_or(0) as u32;
     let val = bridge_read_float(channel).unwrap_or(0.0) as f32;
     Ok(val.to_bits() as i32)
@@ -501,21 +488,30 @@ mod tests {
         let (mut mem, _) = test_ctx();
         let mut ctx = NativeContext::new(&mut mem);
         let val_bits = 72.5_f32.to_bits() as i32;
-        assert_eq!(eacio_analog_out_point_set(&mut ctx, &[1100, val_bits]).unwrap(), 1);
+        assert_eq!(
+            eacio_analog_out_point_set(&mut ctx, &[1100, val_bits]).unwrap(),
+            1
+        );
     }
 
     #[test]
     fn analog_value_point_set_returns_success() {
         let (mut mem, _) = test_ctx();
         let mut ctx = NativeContext::new(&mut mem);
-        assert_eq!(eacio_analog_value_point_set(&mut ctx, &[1100, 0]).unwrap(), 1);
+        assert_eq!(
+            eacio_analog_value_point_set(&mut ctx, &[1100, 0]).unwrap(),
+            1
+        );
     }
 
     #[test]
     fn binary_value_point_set_returns_success() {
         let (mut mem, _) = test_ctx();
         let mut ctx = NativeContext::new(&mut mem);
-        assert_eq!(eacio_binary_value_point_set(&mut ctx, &[1100, 1]).unwrap(), 1);
+        assert_eq!(
+            eacio_binary_value_point_set(&mut ctx, &[1100, 1]).unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -641,7 +637,10 @@ mod tests {
         register_kit4_eacio(&mut table);
 
         assert_eq!(table.kit_name(EACIO_KIT_ID), Some("EacIo"));
-        assert_eq!(table.method_count(EACIO_KIT_ID), EACIO_METHOD_COUNT as usize);
+        assert_eq!(
+            table.method_count(EACIO_KIT_ID),
+            EACIO_METHOD_COUNT as usize
+        );
 
         // Slot 0 is stub
         assert!(!table.is_implemented(EACIO_KIT_ID, 0));

@@ -33,9 +33,13 @@ pub fn json_to_dynvalue(val: &serde_json::Value) -> DynValue {
         serde_json::Value::Null => DynValue::Null,
         serde_json::Value::Bool(b) => DynValue::Bool(*b),
         serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() { DynValue::Int(i) }
-            else if let Some(f) = n.as_f64() { DynValue::Float(f) }
-            else { DynValue::Null }
+            if let Some(i) = n.as_i64() {
+                DynValue::Int(i)
+            } else if let Some(f) = n.as_f64() {
+                DynValue::Float(f)
+            } else {
+                DynValue::Null
+            }
         }
         serde_json::Value::String(s) => DynValue::Str(s.clone()),
         _ => DynValue::Str(val.to_string()), // arrays/objects → JSON string
@@ -59,9 +63,7 @@ pub fn router(store: DynSlotStoreHandle) -> Router {
 /// GET /api/tags — list all components that have dynamic tags.
 ///
 /// Response: `{ "components": [{ "compId": 10, "tagCount": 3 }, ...] }`
-async fn list_tags(
-    State(store): State<DynSlotStoreHandle>,
-) -> Response {
+async fn list_tags(State(store): State<DynSlotStoreHandle>) -> Response {
     let store = store.read().expect("dyn_slots lock poisoned");
     let mut comps: Vec<serde_json::Value> = store
         .comp_ids()
@@ -126,9 +128,7 @@ async fn get_tags(
 /// GET /api/tags/stats — interner and store statistics.
 ///
 /// Response: `{ "totalTags": 42, "components": 5, "interner": { ... } }`
-async fn get_stats(
-    State(store): State<DynSlotStoreHandle>,
-) -> Response {
+async fn get_stats(State(store): State<DynSlotStoreHandle>) -> Response {
     let store = store.read().expect("dyn_slots lock poisoned");
     let stats = store.interner_stats();
     let body = serde_json::json!({
@@ -191,20 +191,13 @@ async fn set_tags(
     if replace {
         // Full replacement.
         if let Err(e) = store.set_all(comp_id, new_tags) {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"err": e})),
-            )
-                .into_response();
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"err": e}))).into_response();
         }
     } else {
         // Merge: set each tag individually.
         for (key, val) in new_tags {
             if let Err(e) = store.set(comp_id, key, val) {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"err": e})),
-                )
+                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"err": e})))
                     .into_response();
             }
         }
@@ -242,11 +235,13 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use tower::ServiceExt;
     use std::sync::{Arc, RwLock};
+    use tower::ServiceExt;
 
     fn test_store() -> DynSlotStoreHandle {
-        Arc::new(RwLock::new(crate::sox::dyn_slots::DynSlotStore::with_defaults()))
+        Arc::new(RwLock::new(
+            crate::sox::dyn_slots::DynSlotStore::with_defaults(),
+        ))
     }
 
     #[tokio::test]
@@ -258,7 +253,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap(),
+            &axum::body::to_bytes(resp.into_body(), 1_000_000)
+                .await
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(body["totalTags"], 0);
@@ -287,7 +284,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let result: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap(),
+            &axum::body::to_bytes(resp.into_body(), 1_000_000)
+                .await
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(result["ok"], true);
@@ -301,7 +300,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let result: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap(),
+            &axum::body::to_bytes(resp.into_body(), 1_000_000)
+                .await
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(result["compId"], 10);
@@ -330,7 +331,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let result: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap(),
+            &axum::body::to_bytes(resp.into_body(), 1_000_000)
+                .await
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(result["removed"], true);
@@ -355,7 +358,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let result: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap(),
+            &axum::body::to_bytes(resp.into_body(), 1_000_000)
+                .await
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(result["removed"], false);
@@ -435,7 +440,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let result: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap(),
+            &axum::body::to_bytes(resp.into_body(), 1_000_000)
+                .await
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(result["totalTags"], 3);
@@ -452,7 +459,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let result: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap(),
+            &axum::body::to_bytes(resp.into_body(), 1_000_000)
+                .await
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(result["compId"], 999);
@@ -464,11 +473,15 @@ mod tests {
         let store = test_store();
         {
             let mut s = store.write().unwrap();
-            s.set(10, "dis".into(), DynValue::Str("Room Temp".into())).unwrap();
-            s.add_computed(10, crate::sox::dyn_slots::ComputedSlot {
-                name: "label".into(),
-                formula: crate::sox::dyn_slots::ComputedFormula::CopyTag("dis".into()),
-            });
+            s.set(10, "dis".into(), DynValue::Str("Room Temp".into()))
+                .unwrap();
+            s.add_computed(
+                10,
+                crate::sox::dyn_slots::ComputedSlot {
+                    name: "label".into(),
+                    formula: crate::sox::dyn_slots::ComputedFormula::CopyTag("dis".into()),
+                },
+            );
         }
         let app = router(store);
         let resp = app
@@ -477,7 +490,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let result: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap(),
+            &axum::body::to_bytes(resp.into_body(), 1_000_000)
+                .await
+                .unwrap(),
         )
         .unwrap();
         let tags = result["tags"].as_object().unwrap();
@@ -492,11 +507,15 @@ mod tests {
         let store = test_store();
         {
             let mut s = store.write().unwrap();
-            s.set(10, "dis".into(), DynValue::Str("Room Temp".into())).unwrap();
-            s.add_computed(10, crate::sox::dyn_slots::ComputedSlot {
-                name: "label".into(),
-                formula: crate::sox::dyn_slots::ComputedFormula::CopyTag("dis".into()),
-            });
+            s.set(10, "dis".into(), DynValue::Str("Room Temp".into()))
+                .unwrap();
+            s.add_computed(
+                10,
+                crate::sox::dyn_slots::ComputedSlot {
+                    name: "label".into(),
+                    formula: crate::sox::dyn_slots::ComputedFormula::CopyTag("dis".into()),
+                },
+            );
         }
         let app = router(store);
         let resp = app
@@ -509,7 +528,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let result: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap(),
+            &axum::body::to_bytes(resp.into_body(), 1_000_000)
+                .await
+                .unwrap(),
         )
         .unwrap();
         let tags = result["tags"].as_object().unwrap();
@@ -523,8 +544,10 @@ mod tests {
         let store = test_store();
         {
             let mut s = store.write().unwrap();
-            s.set(10, "dis".into(), DynValue::Str("Test".into())).unwrap();
-            s.set(20, "unit".into(), DynValue::Str("degF".into())).unwrap();
+            s.set(10, "dis".into(), DynValue::Str("Test".into()))
+                .unwrap();
+            s.set(20, "unit".into(), DynValue::Str("degF".into()))
+                .unwrap();
         }
         let app = router(store);
         let resp = app
@@ -533,7 +556,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let result: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap(),
+            &axum::body::to_bytes(resp.into_body(), 1_000_000)
+                .await
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(result["totalTags"], 2);

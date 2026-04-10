@@ -213,22 +213,14 @@ impl NativeTable {
         let kit_methods = self.kits.get(kid).ok_or_else(|| VmError::NativeError {
             kit: kit_id,
             method: method_id,
-            message: format!(
-                "kit {} not registered{}",
-                kit_id,
-                self.kit_label(kit_id),
-            ),
+            message: format!("kit {} not registered{}", kit_id, self.kit_label(kit_id),),
         })?;
 
         if kit_methods.is_empty() {
             return Err(VmError::NativeError {
                 kit: kit_id,
                 method: method_id,
-                message: format!(
-                    "kit {} has no methods{}",
-                    kit_id,
-                    self.kit_label(kit_id),
-                ),
+                message: format!("kit {} has no methods{}", kit_id, self.kit_label(kit_id),),
             });
         }
 
@@ -292,10 +284,7 @@ impl NativeTable {
 
     /// Number of methods registered in a kit (0 if kit doesn't exist).
     pub fn method_count(&self, kit_id: u8) -> usize {
-        self.kits
-            .get(kit_id as usize)
-            .map(|v| v.len())
-            .unwrap_or(0)
+        self.kits.get(kit_id as usize).map(|v| v.len()).unwrap_or(0)
     }
 
     /// Human-readable kit name, if set.
@@ -318,11 +307,7 @@ impl NativeTable {
     pub fn implemented_count(&self, kit_id: u8) -> usize {
         self.kits
             .get(kit_id as usize)
-            .map(|v| {
-                v.iter()
-                    .filter(|e| !matches!(e, NativeEntry::Stub))
-                    .count()
-            })
+            .map(|v| v.iter().filter(|e| !matches!(e, NativeEntry::Stub)).count())
             .unwrap_or(0)
     }
 
@@ -498,9 +483,7 @@ impl NativeTable {
                 .filter(|e| !matches!(e, NativeEntry::Stub))
                 .count();
             let stub_count = methods.len() - impl_count;
-            let name = self
-                .kit_name(kid as u8)
-                .unwrap_or("?");
+            let name = self.kit_name(kid as u8).unwrap_or("?");
             lines.push(format!(
                 "  kit {:>3} ({:<12}): {} methods ({} impl, {} stubs)",
                 kid,
@@ -545,10 +528,7 @@ pub enum NativeTableMismatch {
         actual: String,
     },
     /// Kit has methods registered but no kit name set.
-    MissingKitName {
-        kit_id: u8,
-        expected: String,
-    },
+    MissingKitName { kit_id: u8, expected: String },
 }
 
 impl std::fmt::Display for NativeTableMismatch {
@@ -1056,9 +1036,21 @@ mod tests {
         assert!(t.kit_count() >= 101, "should include kit 100");
         assert_eq!(t.method_count(0), 60, "kit 0 (sys) should have 60 methods");
         assert_eq!(t.method_count(2), 17, "kit 2 (inet) should have 17 methods");
-        assert_eq!(t.method_count(4), 23, "kit 4 (EacIo) should have 23 methods");
-        assert_eq!(t.method_count(9), 3, "kit 9 (datetimeStd) should have 3 methods");
-        assert_eq!(t.method_count(100), 28, "kit 100 (shaystack) should have 28 methods");
+        assert_eq!(
+            t.method_count(4),
+            23,
+            "kit 4 (EacIo) should have 23 methods"
+        );
+        assert_eq!(
+            t.method_count(9),
+            3,
+            "kit 9 (datetimeStd) should have 3 methods"
+        );
+        assert_eq!(
+            t.method_count(100),
+            28,
+            "kit 100 (shaystack) should have 28 methods"
+        );
     }
 
     #[test]

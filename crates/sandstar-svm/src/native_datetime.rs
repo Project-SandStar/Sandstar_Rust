@@ -225,11 +225,15 @@ mod tests {
         let mut ctx = NativeContext::new(&mut mem);
 
         // Call doSetClock via dispatch
-        let result = table.call(9, 1, &mut ctx, &params).expect("dispatch doSetClock");
+        let result = table
+            .call(9, 1, &mut ctx, &params)
+            .expect("dispatch doSetClock");
         assert_eq!(result, 0);
 
         // Call doGetUtcOffset via dispatch
-        let offset = table.call(9, 2, &mut ctx, &params).expect("dispatch doGetUtcOffset");
+        let offset = table
+            .call(9, 2, &mut ctx, &params)
+            .expect("dispatch doGetUtcOffset");
         assert!(offset >= -12 * 3600 && offset <= 14 * 3600);
     }
 

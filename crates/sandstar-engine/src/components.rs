@@ -1288,7 +1288,7 @@ mod tests {
         t.heating = true;
 
         t.execute(70.0); // on
-        // Temperature rises above high threshold (73.0): heat turns off.
+                         // Temperature rises above high threshold (73.0): heat turns off.
         assert!(!t.execute(74.0));
     }
 
@@ -1300,7 +1300,7 @@ mod tests {
         t.heating = true;
 
         t.execute(70.0); // on
-        // Temperature within deadband (71.5): holds current state (on).
+                         // Temperature within deadband (71.5): holds current state (on).
         assert!(t.execute(71.5));
     }
 
@@ -1368,9 +1368,21 @@ mod tests {
         let mut sched = DailyScheduleFloat::new();
         sched.default_value = 72.0;
         sched.entries = vec![
-            ScheduleEntry { hour: 6, minute: 0, value: 70.0 },
-            ScheduleEntry { hour: 18, minute: 0, value: 76.0 },
-            ScheduleEntry { hour: 22, minute: 0, value: 72.0 },
+            ScheduleEntry {
+                hour: 6,
+                minute: 0,
+                value: 70.0,
+            },
+            ScheduleEntry {
+                hour: 18,
+                minute: 0,
+                value: 76.0,
+            },
+            ScheduleEntry {
+                hour: 22,
+                minute: 0,
+                value: 72.0,
+            },
         ];
 
         // Before first entry: default.
@@ -1407,9 +1419,11 @@ mod tests {
         let mut sched = DailyScheduleFloat::new();
         sched.default_value = 72.0;
         sched.enabled = false;
-        sched.entries = vec![
-            ScheduleEntry { hour: 6, minute: 0, value: 70.0 },
-        ];
+        sched.entries = vec![ScheduleEntry {
+            hour: 6,
+            minute: 0,
+            value: 70.0,
+        }];
         assert!((sched.evaluate(12, 0) - 72.0).abs() < f64::EPSILON);
     }
 
@@ -1419,9 +1433,21 @@ mod tests {
         let mut sched = DailyScheduleFloat::new();
         sched.default_value = 60.0;
         sched.entries = vec![
-            ScheduleEntry { hour: 18, minute: 0, value: 76.0 },
-            ScheduleEntry { hour: 6, minute: 0, value: 70.0 },
-            ScheduleEntry { hour: 22, minute: 0, value: 72.0 },
+            ScheduleEntry {
+                hour: 18,
+                minute: 0,
+                value: 76.0,
+            },
+            ScheduleEntry {
+                hour: 6,
+                minute: 0,
+                value: 70.0,
+            },
+            ScheduleEntry {
+                hour: 22,
+                minute: 0,
+                value: 72.0,
+            },
         ];
 
         assert!((sched.evaluate(12, 0) - 70.0).abs() < f64::EPSILON);
@@ -1435,8 +1461,16 @@ mod tests {
         let mut sched = DailyScheduleBool::new();
         sched.default_value = false;
         sched.entries = vec![
-            BoolScheduleEntry { hour: 8, minute: 0, value: true },
-            BoolScheduleEntry { hour: 17, minute: 0, value: false },
+            BoolScheduleEntry {
+                hour: 8,
+                minute: 0,
+                value: true,
+            },
+            BoolScheduleEntry {
+                hour: 17,
+                minute: 0,
+                value: false,
+            },
         ];
 
         assert!(!sched.evaluate(7, 0)); // before schedule: default (false)
@@ -1461,9 +1495,11 @@ mod tests {
         let mut sched = DailyScheduleBool::new();
         sched.enabled = false;
         sched.default_value = true;
-        sched.entries = vec![
-            BoolScheduleEntry { hour: 8, minute: 0, value: false },
-        ];
+        sched.entries = vec![BoolScheduleEntry {
+            hour: 8,
+            minute: 0,
+            value: false,
+        }];
         assert!(sched.evaluate(12, 0)); // disabled -> default (true)
     }
 }

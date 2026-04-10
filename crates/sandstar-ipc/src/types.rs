@@ -45,7 +45,11 @@ pub enum EngineCommand {
     ReloadConfig,
 
     /// Query channel value history from the ring buffer.
-    GetHistory { channel: u32, since_secs: u64, limit: usize },
+    GetHistory {
+        channel: u32,
+        since_secs: u64,
+        limit: usize,
+    },
 
     /// Get engine diagnostics (poll timing, channel health, I2C backoff state).
     Diagnostics,

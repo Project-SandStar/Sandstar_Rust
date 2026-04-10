@@ -1144,11 +1144,7 @@ mod tests {
     #[test]
     fn test_all_values_0_to_239_are_valid() {
         for i in 0u8..240 {
-            assert!(
-                Opcode::try_from(i).is_ok(),
-                "Opcode {} should be valid",
-                i
-            );
+            assert!(Opcode::try_from(i).is_ok(), "Opcode {} should be valid", i);
         }
     }
 

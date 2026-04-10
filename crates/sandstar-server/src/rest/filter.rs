@@ -67,12 +67,12 @@ enum Token {
     And,
     Or,
     Not,
-    Eq,   // ==
-    Ne,   // !=
-    Lt,   // <
-    Le,   // <=
-    Gt,   // >
-    Ge,   // >=
+    Eq, // ==
+    Ne, // !=
+    Lt, // <
+    Le, // <=
+    Gt, // >
+    Ge, // >=
     LParen,
     RParen,
     True,
@@ -98,7 +98,10 @@ pub fn parse(input: &str) -> Result<Expr, String> {
 
 fn parse_or(tokens: &[Token], pos: &mut usize, depth: usize) -> Result<Expr, String> {
     if depth > MAX_PARSE_DEPTH {
-        return Err(format!("filter too deeply nested (max {} levels)", MAX_PARSE_DEPTH));
+        return Err(format!(
+            "filter too deeply nested (max {} levels)",
+            MAX_PARSE_DEPTH
+        ));
     }
     let mut left = parse_and(tokens, pos, depth)?;
     while *pos < tokens.len() && tokens[*pos] == Token::Or {
@@ -264,7 +267,9 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
         }
 
         // Number (with optional negative sign)
-        if chars[i].is_ascii_digit() || (chars[i] == '-' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit()) {
+        if chars[i].is_ascii_digit()
+            || (chars[i] == '-' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit())
+        {
             let start = i;
             if chars[i] == '-' {
                 i += 1;
@@ -273,7 +278,9 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 i += 1;
             }
             let num_str: String = chars[start..i].iter().collect();
-            let n: f64 = num_str.parse().map_err(|_| format!("invalid number: {}", num_str))?;
+            let n: f64 = num_str
+                .parse()
+                .map_err(|_| format!("invalid number: {}", num_str))?;
             tokens.push(Token::Num(n));
             continue;
         }
@@ -320,14 +327,22 @@ pub fn matches(expr: &Expr, ch: &ChannelInfo) -> bool {
 /// First checks static ChannelInfo fields, then falls back to the dynamic tag
 /// dictionary. This allows filters like `modbusAddr==40001` to match components
 /// that have `modbusAddr` set as a dynamic tag.
-pub fn matches_with_tags(expr: &Expr, ch: &ChannelInfo, tags: Option<&HashMap<String, DynValue>>) -> bool {
+pub fn matches_with_tags(
+    expr: &Expr,
+    ch: &ChannelInfo,
+    tags: Option<&HashMap<String, DynValue>>,
+) -> bool {
     match tags {
         None => matches(expr, ch),
         Some(tags) => matches_with_tags_inner(expr, ch, tags),
     }
 }
 
-fn matches_with_tags_inner(expr: &Expr, ch: &ChannelInfo, tags: &HashMap<String, DynValue>) -> bool {
+fn matches_with_tags_inner(
+    expr: &Expr,
+    ch: &ChannelInfo,
+    tags: &HashMap<String, DynValue>,
+) -> bool {
     match expr {
         Expr::Has(tag) => has_tag(ch, tag) || has_dyn_tag(tags, tag),
         Expr::Missing(tag) => !has_tag(ch, tag) && !has_dyn_tag(tags, tag),
@@ -337,8 +352,12 @@ fn matches_with_tags_inner(expr: &Expr, ch: &ChannelInfo, tags: &HashMap<String,
             }
             cmp_dyn_tag(tags, tag, *op, val)
         }
-        Expr::And(l, r) => matches_with_tags_inner(l, ch, tags) && matches_with_tags_inner(r, ch, tags),
-        Expr::Or(l, r) => matches_with_tags_inner(l, ch, tags) || matches_with_tags_inner(r, ch, tags),
+        Expr::And(l, r) => {
+            matches_with_tags_inner(l, ch, tags) && matches_with_tags_inner(r, ch, tags)
+        }
+        Expr::Or(l, r) => {
+            matches_with_tags_inner(l, ch, tags) || matches_with_tags_inner(r, ch, tags)
+        }
     }
 }
 
@@ -353,7 +372,9 @@ fn has_dyn_tag(tags: &HashMap<String, DynValue>, tag: &str) -> bool {
 
 /// Compare a dynamic tag value against a filter value.
 fn cmp_dyn_tag(tags: &HashMap<String, DynValue>, tag: &str, op: CmpOp, val: &Value) -> bool {
-    let Some(dyn_val) = tags.get(tag) else { return false };
+    let Some(dyn_val) = tags.get(tag) else {
+        return false;
+    };
     match (dyn_val, val) {
         // Numeric comparisons: DynValue::Int or Float vs filter Num
         (DynValue::Int(i), Value::Num(n)) => cmp_f64(*i as f64, op, *n),
@@ -368,9 +389,10 @@ fn cmp_dyn_tag(tags: &HashMap<String, DynValue>, tag: &str, op: CmpOp, val: &Val
             _ => false,
         },
         // Numeric string matching: try to compare DynValue::Str as number
-        (DynValue::Str(s), Value::Num(n)) => {
-            s.parse::<f64>().map(|f| cmp_f64(f, op, *n)).unwrap_or(false)
-        }
+        (DynValue::Str(s), Value::Num(n)) => s
+            .parse::<f64>()
+            .map(|f| cmp_f64(f, op, *n))
+            .unwrap_or(false),
         _ => false,
     }
 }
@@ -515,13 +537,17 @@ mod tests {
     #[test]
     fn test_parse_equality() {
         let expr = parse("channel==1113").unwrap();
-        assert!(matches!(&expr, Expr::Cmp(n, CmpOp::Eq, Value::Num(v)) if n == "channel" && *v == 1113.0));
+        assert!(
+            matches!(&expr, Expr::Cmp(n, CmpOp::Eq, Value::Num(v)) if n == "channel" && *v == 1113.0)
+        );
     }
 
     #[test]
     fn test_parse_string_equality() {
         let expr = parse("unit==\"°F\"").unwrap();
-        assert!(matches!(&expr, Expr::Cmp(n, CmpOp::Eq, Value::Str(s)) if n == "unit" && s == "°F"));
+        assert!(
+            matches!(&expr, Expr::Cmp(n, CmpOp::Eq, Value::Str(s)) if n == "unit" && s == "°F")
+        );
     }
 
     #[test]
@@ -545,7 +571,9 @@ mod tests {
     #[test]
     fn test_parse_comparison_gt() {
         let expr = parse("channel > 1000").unwrap();
-        assert!(matches!(&expr, Expr::Cmp(n, CmpOp::Gt, Value::Num(v)) if n == "channel" && *v == 1000.0));
+        assert!(
+            matches!(&expr, Expr::Cmp(n, CmpOp::Gt, Value::Num(v)) if n == "channel" && *v == 1000.0)
+        );
     }
 
     #[test]
@@ -638,7 +666,11 @@ mod tests {
         // 33 levels of nesting exceeds MAX_PARSE_DEPTH (32)
         let deep = "(".repeat(33) + "point" + &")".repeat(33);
         let err = parse(&deep).unwrap_err();
-        assert!(err.contains("deeply nested"), "expected depth error, got: {}", err);
+        assert!(
+            err.contains("deeply nested"),
+            "expected depth error, got: {}",
+            err
+        );
     }
 
     #[test]
@@ -660,7 +692,11 @@ mod tests {
         // Exactly 32 levels of parenthesized nesting — should parse OK
         let deep = "(".repeat(32) + "point" + &")".repeat(32);
         let result = parse(&deep);
-        assert!(result.is_ok(), "32-deep should parse OK, got: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "32-deep should parse OK, got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -731,7 +767,11 @@ mod tests {
         // Should parse OK: 20 levels of not-recursion is within stack limits.
         // Even number of nots = Has("disabled"), odd = Missing("disabled").
         let result = parse(&filter);
-        assert!(result.is_ok(), "20-deep not chain should parse, got: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "20-deep not chain should parse, got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -790,7 +830,11 @@ mod tests {
     fn test_filter_unicode_values() {
         // Unicode in quoted string values should parse fine
         let result = parse("dis==\"\u{6e29}\u{5ea6}\""); // 温度
-        assert!(result.is_ok(), "unicode string value should parse: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "unicode string value should parse: {:?}",
+            result.err()
+        );
 
         if let Ok(Expr::Cmp(tag, CmpOp::Eq, Value::Str(s))) = &result {
             assert_eq!(tag, "dis");
@@ -814,7 +858,11 @@ mod tests {
         // 31 levels of nesting — well within limit
         let deep = "(".repeat(31) + "point" + &")".repeat(31);
         let result = parse(&deep);
-        assert!(result.is_ok(), "31-deep should parse OK, got: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "31-deep should parse OK, got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -848,7 +896,11 @@ mod tests {
     fn test_unicode_chinese_in_filter_value() {
         // Full Chinese string: 温度传感器
         let result = parse("dis==\"\u{6e29}\u{5ea6}\u{4f20}\u{611f}\u{5668}\"");
-        assert!(result.is_ok(), "Chinese string should parse: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Chinese string should parse: {:?}",
+            result.err()
+        );
         if let Ok(Expr::Cmp(tag, CmpOp::Eq, Value::Str(s))) = &result {
             assert_eq!(tag, "dis");
             assert_eq!(s, "\u{6e29}\u{5ea6}\u{4f20}\u{611f}\u{5668}");
@@ -861,7 +913,11 @@ mod tests {
     fn test_backslash_escape_in_string() {
         // Escaped quote inside string: dis=="say \"hello\""
         let result = parse("dis==\"say \\\"hello\\\"\"");
-        assert!(result.is_ok(), "escaped quotes should parse: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "escaped quotes should parse: {:?}",
+            result.err()
+        );
         if let Ok(Expr::Cmp(_, CmpOp::Eq, Value::Str(s))) = &result {
             assert_eq!(s, "say \"hello\"");
         } else {
@@ -873,7 +929,11 @@ mod tests {
     fn test_backslash_in_string_value() {
         // Backslash followed by non-special char: dis=="C:\\path"
         let result = parse("dis==\"C:\\\\path\"");
-        assert!(result.is_ok(), "backslash in string should parse: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "backslash in string should parse: {:?}",
+            result.err()
+        );
         if let Ok(Expr::Cmp(_, CmpOp::Eq, Value::Str(s))) = &result {
             assert_eq!(s, "C:\\path");
         } else {
@@ -892,7 +952,11 @@ mod tests {
 
         // Negative number
         let result = parse("cur > -100");
-        assert!(result.is_ok(), "negative number should parse: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "negative number should parse: {:?}",
+            result.err()
+        );
         if let Ok(Expr::Cmp(_, CmpOp::Gt, Value::Num(n))) = &result {
             assert!((*n - (-100.0)).abs() < f64::EPSILON);
         }
@@ -1004,7 +1068,10 @@ mod tests {
     // ═══════════════════════════════════════════════════════════
 
     fn make_tags(entries: &[(&str, DynValue)]) -> HashMap<String, DynValue> {
-        entries.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+        entries
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
     }
 
     #[test]

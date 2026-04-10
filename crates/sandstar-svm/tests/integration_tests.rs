@@ -39,8 +39,7 @@ fn test_load_win32_svm_scode_header() {
     let path = scode_path("win32_svm/kits.scode");
     skip_if_missing!(path);
 
-    let image = ScodeImage::load_from_file(&path)
-        .expect("failed to load win32_svm/kits.scode");
+    let image = ScodeImage::load_from_file(&path).expect("failed to load win32_svm/kits.scode");
 
     eprintln!("=== win32_svm/kits.scode header ===");
     eprintln!("  magic:         0x{:08X}", image.header.magic);
@@ -50,10 +49,16 @@ fn test_load_win32_svm_scode_header() {
     eprintln!("  ref_size:      {}", image.header.ref_size);
     eprintln!("  image_size:    {}", image.header.image_size);
     eprintln!("  data_size:     {}", image.header.data_size);
-    eprintln!("  main_method:   {} (offset={})", image.header.main_method,
-              image.block_to_offset(image.header.main_method));
-    eprintln!("  resume_method: {} (offset={})", image.header.resume_method,
-              image.block_to_offset(image.header.resume_method));
+    eprintln!(
+        "  main_method:   {} (offset={})",
+        image.header.main_method,
+        image.block_to_offset(image.header.main_method)
+    );
+    eprintln!(
+        "  resume_method: {} (offset={})",
+        image.header.resume_method,
+        image.block_to_offset(image.header.resume_method)
+    );
     eprintln!("  tests_bix:     {}", image.header.tests_bix);
 
     assert_eq!(image.header.magic, 0x5ED0BA07, "magic mismatch");
@@ -61,8 +66,14 @@ fn test_load_win32_svm_scode_header() {
     assert_eq!(image.header.minor_ver, 5, "minor version");
     assert_eq!(image.header.block_size, 4, "block size");
     assert_eq!(image.header.image_size, 168936, "image size");
-    assert!(image.header.main_method > 0, "main_method should be nonzero");
-    assert!(image.header.resume_method > 0, "resume_method should be nonzero");
+    assert!(
+        image.header.main_method > 0,
+        "main_method should be nonzero"
+    );
+    assert!(
+        image.header.resume_method > 0,
+        "resume_method should be nonzero"
+    );
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -74,8 +85,7 @@ fn test_load_linux_scode_header() {
     let path = scode_path("2026-03-11_21-56-18/app/kits.scode");
     skip_if_missing!(path);
 
-    let image = ScodeImage::load_from_file(&path)
-        .expect("failed to load linux kits.scode");
+    let image = ScodeImage::load_from_file(&path).expect("failed to load linux kits.scode");
 
     eprintln!("=== linux app kits.scode header ===");
     eprintln!("  magic:         0x{:08X}", image.header.magic);
@@ -85,10 +95,16 @@ fn test_load_linux_scode_header() {
     eprintln!("  ref_size:      {}", image.header.ref_size);
     eprintln!("  image_size:    {}", image.header.image_size);
     eprintln!("  data_size:     {}", image.header.data_size);
-    eprintln!("  main_method:   {} (offset={})", image.header.main_method,
-              image.block_to_offset(image.header.main_method));
-    eprintln!("  resume_method: {} (offset={})", image.header.resume_method,
-              image.block_to_offset(image.header.resume_method));
+    eprintln!(
+        "  main_method:   {} (offset={})",
+        image.header.main_method,
+        image.block_to_offset(image.header.main_method)
+    );
+    eprintln!(
+        "  resume_method: {} (offset={})",
+        image.header.resume_method,
+        image.block_to_offset(image.header.resume_method)
+    );
     eprintln!("  tests_bix:     {}", image.header.tests_bix);
 
     assert_eq!(image.header.magic, 0x5ED0BA07, "magic mismatch");
@@ -96,8 +112,14 @@ fn test_load_linux_scode_header() {
     assert_eq!(image.header.minor_ver, 5, "minor version");
     assert_eq!(image.header.block_size, 4, "block size");
     assert_eq!(image.header.image_size, 164056, "image size");
-    assert!(image.header.main_method > 0, "main_method should be nonzero");
-    assert!(image.header.resume_method > 0, "resume_method should be nonzero");
+    assert!(
+        image.header.main_method > 0,
+        "main_method should be nonzero"
+    );
+    assert!(
+        image.header.resume_method > 0,
+        "resume_method should be nonzero"
+    );
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -109,20 +131,24 @@ fn test_create_vm_memory_from_real_scode() {
     let path = scode_path("win32_svm/kits.scode");
     skip_if_missing!(path);
 
-    let image = ScodeImage::load_from_file(&path)
-        .expect("failed to load scode");
+    let image = ScodeImage::load_from_file(&path).expect("failed to load scode");
 
-    let memory = VmMemory::from_image(&image)
-        .expect("VmMemory::from_image failed on real scode");
+    let memory = VmMemory::from_image(&image).expect("VmMemory::from_image failed on real scode");
 
     eprintln!("=== VmMemory from win32_svm scode ===");
     eprintln!("  code segment length: {}", memory.code_len());
     eprintln!("  data segment length: {}", memory.data_len());
 
-    assert_eq!(memory.code_len(), image.header.image_size as usize,
-               "code segment should match image_size");
-    assert_eq!(memory.data_len(), image.header.data_size as usize,
-               "data segment should match data_size");
+    assert_eq!(
+        memory.code_len(),
+        image.header.image_size as usize,
+        "code segment should match image_size"
+    );
+    assert_eq!(
+        memory.data_len(),
+        image.header.data_size as usize,
+        "data segment should match data_size"
+    );
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -134,10 +160,8 @@ fn test_create_interpreter_from_real_scode() {
     let path = scode_path("win32_svm/kits.scode");
     skip_if_missing!(path);
 
-    let image = ScodeImage::load_from_file(&path)
-        .expect("failed to load scode");
-    let memory = VmMemory::from_image(&image)
-        .expect("VmMemory::from_image failed");
+    let image = ScodeImage::load_from_file(&path).expect("failed to load scode");
+    let memory = VmMemory::from_image(&image).expect("VmMemory::from_image failed");
     let natives = NativeTable::with_defaults();
 
     let interpreter = VmInterpreter::new(memory, natives);
@@ -207,8 +231,8 @@ fn test_rust_runner_start_real_scode() {
 #[test]
 fn test_rust_runner_with_bridge_setup() {
     use sandstar_svm::{
-        set_engine_bridge, set_write_queue, set_tag_write_queue,
-        ChannelSnapshot, SvmWrite, SvmTagWrite,
+        set_engine_bridge, set_tag_write_queue, set_write_queue, ChannelSnapshot, SvmTagWrite,
+        SvmWrite,
     };
     use std::sync::{Arc, Mutex, RwLock};
 
@@ -258,8 +282,7 @@ fn test_sab_validator_on_win32_sab() {
     skip_if_missing!(path);
 
     let path_str = path.to_string_lossy().to_string();
-    let report = validate_sab(&path_str)
-        .expect("validate_sab failed to produce a report");
+    let report = validate_sab(&path_str).expect("validate_sab failed to produce a report");
 
     eprintln!("=== SAB validation: win32_svm/app.sab ===");
     eprintln!("  file_size:          {}", report.file_size);
@@ -275,8 +298,10 @@ fn test_sab_validator_on_win32_sab() {
     eprintln!("  compatible:         {}", report.compatible);
 
     for kit in &report.kits {
-        eprintln!("    kit {}: {} (natives={}, checksum=0x{:08X})",
-                  kit.id, kit.name, kit.native_count, kit.checksum);
+        eprintln!(
+            "    kit {}: {} (natives={}, checksum=0x{:08X})",
+            kit.id, kit.name, kit.native_count, kit.checksum
+        );
     }
     for w in &report.warnings {
         eprintln!("    WARN: {}", w);
@@ -290,8 +315,10 @@ fn test_sab_validator_on_win32_sab() {
     // A "false" header_valid means the magic is not 0x5ED0BA07 — expected.
     if !report.header_valid {
         eprintln!("  (header_valid=false is expected — .sab uses a different magic)");
-        assert!(!report.errors.is_empty(),
-                "should have error explaining why header is invalid");
+        assert!(
+            !report.errors.is_empty(),
+            "should have error explaining why header is invalid"
+        );
     }
 }
 
@@ -301,8 +328,7 @@ fn test_sab_validator_on_linux_sab() {
     skip_if_missing!(path);
 
     let path_str = path.to_string_lossy().to_string();
-    let report = validate_sab(&path_str)
-        .expect("validate_sab failed to produce a report");
+    let report = validate_sab(&path_str).expect("validate_sab failed to produce a report");
 
     eprintln!("=== SAB validation: linux app.sab ===");
     eprintln!("  file_size:          {}", report.file_size);
@@ -314,8 +340,10 @@ fn test_sab_validator_on_linux_sab() {
     eprintln!("  compatible:         {}", report.compatible);
 
     for kit in &report.kits {
-        eprintln!("    kit {}: {} (natives={}, checksum=0x{:08X})",
-                  kit.id, kit.name, kit.native_count, kit.checksum);
+        eprintln!(
+            "    kit {}: {} (natives={}, checksum=0x{:08X})",
+            kit.id, kit.name, kit.native_count, kit.checksum
+        );
     }
     for e in &report.errors {
         eprintln!("    ERR:  {}", e);
@@ -323,8 +351,10 @@ fn test_sab_validator_on_linux_sab() {
 
     if !report.header_valid {
         eprintln!("  (header_valid=false is expected — .sab uses a different magic)");
-        assert!(!report.errors.is_empty(),
-                "should have error explaining why header is invalid");
+        assert!(
+            !report.errors.is_empty(),
+            "should have error explaining why header is invalid"
+        );
     }
 }
 
@@ -346,18 +376,35 @@ fn test_both_scode_files_have_compatible_headers() {
     let linux = ScodeImage::load_from_file(&linux_path).expect("load linux scode");
 
     eprintln!("=== Header comparison ===");
-    eprintln!("  win32: image_size={}, data_size={}, main={}, resume={}",
-              win32.header.image_size, win32.header.data_size,
-              win32.header.main_method, win32.header.resume_method);
-    eprintln!("  linux: image_size={}, data_size={}, main={}, resume={}",
-              linux.header.image_size, linux.header.data_size,
-              linux.header.main_method, linux.header.resume_method);
+    eprintln!(
+        "  win32: image_size={}, data_size={}, main={}, resume={}",
+        win32.header.image_size,
+        win32.header.data_size,
+        win32.header.main_method,
+        win32.header.resume_method
+    );
+    eprintln!(
+        "  linux: image_size={}, data_size={}, main={}, resume={}",
+        linux.header.image_size,
+        linux.header.data_size,
+        linux.header.main_method,
+        linux.header.resume_method
+    );
 
     // Both should share the same scode format version
     assert_eq!(win32.header.magic, linux.header.magic, "magic should match");
-    assert_eq!(win32.header.major_ver, linux.header.major_ver, "major version");
-    assert_eq!(win32.header.minor_ver, linux.header.minor_ver, "minor version");
-    assert_eq!(win32.header.block_size, linux.header.block_size, "block size");
+    assert_eq!(
+        win32.header.major_ver, linux.header.major_ver,
+        "major version"
+    );
+    assert_eq!(
+        win32.header.minor_ver, linux.header.minor_ver,
+        "minor version"
+    );
+    assert_eq!(
+        win32.header.block_size, linux.header.block_size,
+        "block size"
+    );
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -374,14 +421,23 @@ fn test_scode_block_access_patterns() {
     // Verify we can read bytes at the main method entry point
     let main_offset = image.block_to_offset(image.header.main_method);
     let first_opcode = image.get_u8(main_offset);
-    assert!(first_opcode.is_some(), "should be able to read opcode at main entry");
+    assert!(
+        first_opcode.is_some(),
+        "should be able to read opcode at main entry"
+    );
     eprintln!("  main entry opcode byte: 0x{:02X}", first_opcode.unwrap());
 
     // Verify we can read bytes at the resume method entry point
     let resume_offset = image.block_to_offset(image.header.resume_method);
     let resume_opcode = image.get_u8(resume_offset);
-    assert!(resume_opcode.is_some(), "should be able to read opcode at resume entry");
-    eprintln!("  resume entry opcode byte: 0x{:02X}", resume_opcode.unwrap());
+    assert!(
+        resume_opcode.is_some(),
+        "should be able to read opcode at resume entry"
+    );
+    eprintln!(
+        "  resume entry opcode byte: 0x{:02X}",
+        resume_opcode.unwrap()
+    );
 
     // Verify boundary reads work
     let last_byte = image.get_u8(image.len() - 1);
@@ -400,8 +456,7 @@ fn test_sab_validator_bytes_api() {
     skip_if_missing!(path);
 
     let data = std::fs::read(&path).expect("read .sab file");
-    let report = validate_sab_bytes("win32_svm/app.sab", &data)
-        .expect("validate_sab_bytes failed");
+    let report = validate_sab_bytes("win32_svm/app.sab", &data).expect("validate_sab_bytes failed");
 
     eprintln!("=== SAB bytes validation ===");
     eprintln!("  file_size:    {}", report.file_size);

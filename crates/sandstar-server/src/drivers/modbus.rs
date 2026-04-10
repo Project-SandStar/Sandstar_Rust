@@ -9,7 +9,9 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 
 use super::async_driver::AsyncDriver;
-use super::{DriverError, DriverMeta, DriverPointRef, DriverStatus, LearnGrid, LearnPoint, PollMode};
+use super::{
+    DriverError, DriverMeta, DriverPointRef, DriverStatus, LearnGrid, LearnPoint, PollMode,
+};
 
 // ── Modbus TCP Frame ───────────────────────────────────────
 
@@ -99,7 +101,12 @@ impl ModbusFrame {
         let mut data = Vec::with_capacity(4);
         data.extend_from_slice(&start.to_be_bytes());
         data.extend_from_slice(&count.to_be_bytes());
-        Self { transaction_id: txn, unit_id: unit, function_code: fc::READ_COILS, data }
+        Self {
+            transaction_id: txn,
+            unit_id: unit,
+            function_code: fc::READ_COILS,
+            data,
+        }
     }
 
     /// Build a Read Discrete Inputs request (FC 02).
@@ -107,7 +114,12 @@ impl ModbusFrame {
         let mut data = Vec::with_capacity(4);
         data.extend_from_slice(&start.to_be_bytes());
         data.extend_from_slice(&count.to_be_bytes());
-        Self { transaction_id: txn, unit_id: unit, function_code: fc::READ_DISCRETE_INPUTS, data }
+        Self {
+            transaction_id: txn,
+            unit_id: unit,
+            function_code: fc::READ_DISCRETE_INPUTS,
+            data,
+        }
     }
 
     /// Build a Read Holding Registers request (FC 03).
@@ -115,7 +127,12 @@ impl ModbusFrame {
         let mut data = Vec::with_capacity(4);
         data.extend_from_slice(&start.to_be_bytes());
         data.extend_from_slice(&count.to_be_bytes());
-        Self { transaction_id: txn, unit_id: unit, function_code: fc::READ_HOLDING_REGISTERS, data }
+        Self {
+            transaction_id: txn,
+            unit_id: unit,
+            function_code: fc::READ_HOLDING_REGISTERS,
+            data,
+        }
     }
 
     /// Build a Read Input Registers request (FC 04).
@@ -123,7 +140,12 @@ impl ModbusFrame {
         let mut data = Vec::with_capacity(4);
         data.extend_from_slice(&start.to_be_bytes());
         data.extend_from_slice(&count.to_be_bytes());
-        Self { transaction_id: txn, unit_id: unit, function_code: fc::READ_INPUT_REGISTERS, data }
+        Self {
+            transaction_id: txn,
+            unit_id: unit,
+            function_code: fc::READ_INPUT_REGISTERS,
+            data,
+        }
     }
 
     /// Build a Write Single Coil request (FC 05).
@@ -134,7 +156,12 @@ impl ModbusFrame {
         data.extend_from_slice(&address.to_be_bytes());
         let coil_val: u16 = if value { 0xFF00 } else { 0x0000 };
         data.extend_from_slice(&coil_val.to_be_bytes());
-        Self { transaction_id: txn, unit_id: unit, function_code: fc::WRITE_SINGLE_COIL, data }
+        Self {
+            transaction_id: txn,
+            unit_id: unit,
+            function_code: fc::WRITE_SINGLE_COIL,
+            data,
+        }
     }
 
     /// Build a Write Single Register request (FC 06).
@@ -142,7 +169,12 @@ impl ModbusFrame {
         let mut data = Vec::with_capacity(4);
         data.extend_from_slice(&address.to_be_bytes());
         data.extend_from_slice(&value.to_be_bytes());
-        Self { transaction_id: txn, unit_id: unit, function_code: fc::WRITE_SINGLE_REGISTER, data }
+        Self {
+            transaction_id: txn,
+            unit_id: unit,
+            function_code: fc::WRITE_SINGLE_REGISTER,
+            data,
+        }
     }
 
     /// Build a Write Multiple Registers request (FC 16).
@@ -156,7 +188,12 @@ impl ModbusFrame {
         for v in values {
             data.extend_from_slice(&v.to_be_bytes());
         }
-        Self { transaction_id: txn, unit_id: unit, function_code: fc::WRITE_MULTIPLE_REGISTERS, data }
+        Self {
+            transaction_id: txn,
+            unit_id: unit,
+            function_code: fc::WRITE_MULTIPLE_REGISTERS,
+            data,
+        }
     }
 
     /// Parse register values from a read response (FC 03/04).
@@ -282,8 +319,18 @@ impl ModbusRegister {
     }
 
     /// Create with explicit scale and offset.
-    pub fn with_scaling(address: u16, register_type: RegisterType, scale: f64, offset: f64) -> Self {
-        Self { address, register_type, scale, offset }
+    pub fn with_scaling(
+        address: u16,
+        register_type: RegisterType,
+        scale: f64,
+        offset: f64,
+    ) -> Self {
+        Self {
+            address,
+            register_type,
+            scale,
+            offset,
+        }
     }
 
     /// Convert raw register value to engineering value.
@@ -405,23 +452,41 @@ impl ModbusDriver {
         let txn = self.next_txn();
         match reg.register_type {
             RegisterType::Coil => ModbusFrame::read_coils(txn, self.slave_id, reg.address, 1),
-            RegisterType::DiscreteInput => ModbusFrame::read_discrete_inputs(txn, self.slave_id, reg.address, 1),
-            RegisterType::HoldingRegister => ModbusFrame::read_holding_registers(txn, self.slave_id, reg.address, 1),
-            RegisterType::InputRegister => ModbusFrame::read_input_registers(txn, self.slave_id, reg.address, 1),
+            RegisterType::DiscreteInput => {
+                ModbusFrame::read_discrete_inputs(txn, self.slave_id, reg.address, 1)
+            }
+            RegisterType::HoldingRegister => {
+                ModbusFrame::read_holding_registers(txn, self.slave_id, reg.address, 1)
+            }
+            RegisterType::InputRegister => {
+                ModbusFrame::read_input_registers(txn, self.slave_id, reg.address, 1)
+            }
         }
     }
 
     /// Build a write request frame for the given register and engineering value.
-    fn build_write_frame(&mut self, reg: &ModbusRegister, value: f64) -> Result<ModbusFrame, DriverError> {
+    fn build_write_frame(
+        &mut self,
+        reg: &ModbusRegister,
+        value: f64,
+    ) -> Result<ModbusFrame, DriverError> {
         let txn = self.next_txn();
         match reg.register_type {
-            RegisterType::Coil => {
-                Ok(ModbusFrame::write_single_coil(txn, self.slave_id, reg.address, value != 0.0))
-            }
+            RegisterType::Coil => Ok(ModbusFrame::write_single_coil(
+                txn,
+                self.slave_id,
+                reg.address,
+                value != 0.0,
+            )),
             RegisterType::HoldingRegister => {
                 let raw = reg.eng_to_raw(value);
                 let raw_u16 = raw.round().clamp(0.0, u16::MAX as f64) as u16;
-                Ok(ModbusFrame::write_single_register(txn, self.slave_id, reg.address, raw_u16))
+                Ok(ModbusFrame::write_single_register(
+                    txn,
+                    self.slave_id,
+                    reg.address,
+                    raw_u16,
+                ))
             }
             RegisterType::InputRegister | RegisterType::DiscreteInput => {
                 Err(DriverError::ConfigFault(format!(
@@ -480,8 +545,8 @@ impl ModbusDriver {
             .next()
             .ok_or_else(|| DriverError::ConfigFault(format!("no addresses for '{addr_str}'")))?;
 
-        let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
-            .map_err(|e| {
+        let mut stream =
+            TcpStream::connect_timeout(&addr, Duration::from_secs(5)).map_err(|e| {
                 self.connected = false;
                 self.status = DriverStatus::Fault(format!("connect failed: {e}"));
                 DriverError::CommFault(format!("connect to {addr_str}: {e}"))
@@ -536,7 +601,10 @@ impl AsyncDriver for ModbusDriver {
                 Ok(DriverMeta {
                     model: Some(format!(
                         "Modbus TCP {}:{} unit {} ({} registers)",
-                        self.host, self.port, self.slave_id, self.register_map.len()
+                        self.host,
+                        self.port,
+                        self.slave_id,
+                        self.register_map.len()
                     )),
                     ..Default::default()
                 })
@@ -564,7 +632,10 @@ impl AsyncDriver for ModbusDriver {
         // Try to connect (or reconnect) as a health check.
         self.try_connect()?;
         Ok(DriverMeta {
-            model: Some(format!("Modbus TCP {}:{} unit {}", self.host, self.port, self.slave_id)),
+            model: Some(format!(
+                "Modbus TCP {}:{} unit {}",
+                self.host, self.port, self.slave_id
+            )),
             ..Default::default()
         })
     }
@@ -576,7 +647,9 @@ impl AsyncDriver for ModbusDriver {
             .map(|(&id, reg)| {
                 let kind = match reg.register_type {
                     RegisterType::Coil | RegisterType::DiscreteInput => "Bool".to_string(),
-                    RegisterType::HoldingRegister | RegisterType::InputRegister => "Number".to_string(),
+                    RegisterType::HoldingRegister | RegisterType::InputRegister => {
+                        "Number".to_string()
+                    }
                 };
                 let mut tags = HashMap::new();
                 tags.insert("pointId".to_string(), id.to_string());
@@ -590,7 +663,11 @@ impl AsyncDriver for ModbusDriver {
                     tags.insert("writable".to_string(), "true".to_string());
                 }
                 LearnPoint {
-                    name: format!("{}_{}", reg.register_type.label().to_lowercase(), reg.address),
+                    name: format!(
+                        "{}_{}",
+                        reg.register_type.label().to_lowercase(),
+                        reg.address
+                    ),
                     address: format!("{}:{}", reg.register_type.label(), reg.address),
                     kind,
                     unit: None,
@@ -603,7 +680,10 @@ impl AsyncDriver for ModbusDriver {
         Ok(points)
     }
 
-    async fn sync_cur(&mut self, points: &[DriverPointRef]) -> Vec<(u32, Result<f64, DriverError>)> {
+    async fn sync_cur(
+        &mut self,
+        points: &[DriverPointRef],
+    ) -> Vec<(u32, Result<f64, DriverError>)> {
         if !self.connected {
             // All reads fail when not connected.
             return points
@@ -622,9 +702,13 @@ impl AsyncDriver for ModbusDriver {
             let reg = match self.register_map.get(&pt.point_id) {
                 Some(r) => r.clone(),
                 None => {
-                    results.push((pt.point_id, Err(DriverError::ConfigFault(
-                        format!("no register mapping for point {}", pt.point_id),
-                    ))));
+                    results.push((
+                        pt.point_id,
+                        Err(DriverError::ConfigFault(format!(
+                            "no register mapping for point {}",
+                            pt.point_id
+                        ))),
+                    ));
                     continue;
                 }
             };
@@ -634,13 +718,17 @@ impl AsyncDriver for ModbusDriver {
                 Ok(resp) => {
                     let value = match reg.register_type {
                         RegisterType::Coil | RegisterType::DiscreteInput => {
-                            resp.parse_coil_response(1)
-                                .map(|bits| if bits.first().copied().unwrap_or(false) { 1.0 } else { 0.0 })
+                            resp.parse_coil_response(1).map(|bits| {
+                                if bits.first().copied().unwrap_or(false) {
+                                    1.0
+                                } else {
+                                    0.0
+                                }
+                            })
                         }
-                        RegisterType::HoldingRegister | RegisterType::InputRegister => {
-                            resp.parse_register_response()
-                                .map(|regs| reg.raw_to_eng(regs.first().copied().unwrap_or(0) as f64))
-                        }
+                        RegisterType::HoldingRegister | RegisterType::InputRegister => resp
+                            .parse_register_response()
+                            .map(|regs| reg.raw_to_eng(regs.first().copied().unwrap_or(0) as f64)),
                     };
                     results.push((pt.point_id, value));
                 }
@@ -665,20 +753,22 @@ impl AsyncDriver for ModbusDriver {
             let reg = match self.register_map.get(&point_id) {
                 Some(r) => r.clone(),
                 None => {
-                    results.push((point_id, Err(DriverError::ConfigFault(
-                        format!("no register mapping for point {}", point_id),
-                    ))));
+                    results.push((
+                        point_id,
+                        Err(DriverError::ConfigFault(format!(
+                            "no register mapping for point {}",
+                            point_id
+                        ))),
+                    ));
                     continue;
                 }
             };
 
             match self.build_write_frame(&reg, value) {
-                Ok(frame) => {
-                    match self.transact(&frame) {
-                        Ok(_resp) => results.push((point_id, Ok(()))),
-                        Err(e) => results.push((point_id, Err(e))),
-                    }
-                }
+                Ok(frame) => match self.transact(&frame) {
+                    Ok(_resp) => results.push((point_id, Ok(()))),
+                    Err(e) => results.push((point_id, Err(e))),
+                },
                 Err(e) => results.push((point_id, Err(e))),
             }
         }
@@ -711,9 +801,9 @@ mod tests {
 
         // Verify MBAP header
         assert_eq!(u16::from_be_bytes([bytes[0], bytes[1]]), 42); // txn ID
-        assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), 0);  // protocol ID
-        assert_eq!(u16::from_be_bytes([bytes[4], bytes[5]]), 6);  // length = 1+1+4
-        assert_eq!(bytes[6], 1);  // unit ID
+        assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), 0); // protocol ID
+        assert_eq!(u16::from_be_bytes([bytes[4], bytes[5]]), 6); // length = 1+1+4
+        assert_eq!(bytes[6], 1); // unit ID
         assert_eq!(bytes[7], fc::READ_HOLDING_REGISTERS); // FC
 
         let decoded = ModbusFrame::decode(&bytes).unwrap();
@@ -751,9 +841,9 @@ mod tests {
             0x00, 0x01, // txn
             0x00, 0x00, // protocol
             0x00, 0x03, // length = 3 (unit + fc + exception code)
-            0x01,       // unit
-            0x83,       // FC 03 + 0x80 = exception
-            0x02,       // exception code 2 = illegal data address
+            0x01, // unit
+            0x83, // FC 03 + 0x80 = exception
+            0x02, // exception code 2 = illegal data address
         ];
         let result = ModbusFrame::decode(&bytes);
         assert!(result.is_err());
@@ -768,9 +858,9 @@ mod tests {
             0x00, 0x01, // txn
             0x00, 0x00, // protocol
             0x00, 0x0A, // length = 10
-            0x01,       // unit
-            0x03,       // FC
-            0x00,       // only 1 data byte, need 8 more
+            0x01, // unit
+            0x03, // FC
+            0x00, // only 1 data byte, need 8 more
         ];
         let result = ModbusFrame::decode(&bytes);
         assert!(result.is_err());
@@ -839,7 +929,7 @@ mod tests {
             vec![
                 0x00, 0xC8, // start addr 200
                 0x00, 0x02, // count 2
-                0x04,       // byte count 4
+                0x04, // byte count 4
                 0x00, 0x64, // value 100
                 0x00, 0xC8, // value 200
             ]
@@ -882,11 +972,11 @@ mod tests {
         };
         let coils = resp.parse_coil_response(8).unwrap();
         assert_eq!(coils.len(), 8);
-        assert!(coils[0]);  // bit 0
-        assert!(coils[1]);  // bit 1
+        assert!(coils[0]); // bit 0
+        assert!(coils[1]); // bit 1
         assert!(!coils[2]); // bit 2
         assert!(!coils[3]); // bit 3
-        assert!(coils[4]);  // bit 4
+        assert!(coils[4]); // bit 4
         assert!(!coils[5]); // bit 5
         assert!(!coils[6]); // bit 6
         assert!(!coils[7]); // bit 7
@@ -908,9 +998,18 @@ mod tests {
     #[test]
     fn register_type_read_fc() {
         assert_eq!(RegisterType::Coil.read_fc(), fc::READ_COILS);
-        assert_eq!(RegisterType::DiscreteInput.read_fc(), fc::READ_DISCRETE_INPUTS);
-        assert_eq!(RegisterType::HoldingRegister.read_fc(), fc::READ_HOLDING_REGISTERS);
-        assert_eq!(RegisterType::InputRegister.read_fc(), fc::READ_INPUT_REGISTERS);
+        assert_eq!(
+            RegisterType::DiscreteInput.read_fc(),
+            fc::READ_DISCRETE_INPUTS
+        );
+        assert_eq!(
+            RegisterType::HoldingRegister.read_fc(),
+            fc::READ_HOLDING_REGISTERS
+        );
+        assert_eq!(
+            RegisterType::InputRegister.read_fc(),
+            fc::READ_INPUT_REGISTERS
+        );
     }
 
     #[test]
@@ -976,7 +1075,10 @@ mod tests {
     #[test]
     fn modbus_driver_register_map() {
         let mut d = ModbusDriver::new("mb-2", "x", 502, 1);
-        d.add_register(100, ModbusRegister::new(40001, RegisterType::HoldingRegister));
+        d.add_register(
+            100,
+            ModbusRegister::new(40001, RegisterType::HoldingRegister),
+        );
         d.add_register(200, ModbusRegister::new(0, RegisterType::Coil));
         assert_eq!(d.register_count(), 2);
 
@@ -1010,8 +1112,14 @@ mod tests {
     #[tokio::test]
     async fn modbus_learn_with_registers() {
         let mut d = ModbusDriver::new("mb-5", "x", 502, 1);
-        d.add_register(100, ModbusRegister::new(40001, RegisterType::HoldingRegister));
-        d.add_register(200, ModbusRegister::with_scaling(0, RegisterType::Coil, 1.0, 0.0));
+        d.add_register(
+            100,
+            ModbusRegister::new(40001, RegisterType::HoldingRegister),
+        );
+        d.add_register(
+            200,
+            ModbusRegister::with_scaling(0, RegisterType::Coil, 1.0, 0.0),
+        );
         d.add_register(300, ModbusRegister::new(30001, RegisterType::InputRegister));
 
         let grid = d.learn(None).await.unwrap();
@@ -1044,7 +1152,12 @@ mod tests {
         let results = d.sync_cur(&refs).await;
         assert_eq!(results.len(), 1);
         assert!(results[0].1.is_err());
-        assert!(results[0].1.as_ref().unwrap_err().to_string().contains("not connected"));
+        assert!(results[0]
+            .1
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("not connected"));
     }
 
     #[tokio::test]
@@ -1059,7 +1172,12 @@ mod tests {
         let results = d.sync_cur(&refs).await;
         assert_eq!(results.len(), 1);
         assert!(results[0].1.is_err());
-        assert!(results[0].1.as_ref().unwrap_err().to_string().contains("no register mapping"));
+        assert!(results[0]
+            .1
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("no register mapping"));
     }
 
     #[tokio::test]
@@ -1070,7 +1188,12 @@ mod tests {
         let results = d.write(&[(100, 42.0)]).await;
         assert_eq!(results.len(), 1);
         assert!(results[0].1.is_err());
-        assert!(results[0].1.as_ref().unwrap_err().to_string().contains("not connected"));
+        assert!(results[0]
+            .1
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("not connected"));
     }
 
     #[test]

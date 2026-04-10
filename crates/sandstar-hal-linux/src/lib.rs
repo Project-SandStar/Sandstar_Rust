@@ -7,12 +7,12 @@ use std::cell::RefCell;
 
 use sandstar_hal::{HalControl, HalDiagnostics, HalError, HalRead, HalValidation, HalWrite};
 
-pub mod sysfs;
-pub mod gpio;
 pub mod adc;
-pub mod pwm;
 pub mod crc;
+pub mod gpio;
 pub mod i2c;
+pub mod pwm;
+pub mod sysfs;
 pub mod uart;
 
 // Re-export sub-drivers for direct access
@@ -99,29 +99,79 @@ impl HalControl for LinuxHal {
 
         // I2C: check /dev/i2c-{0,1,2}
         let i2c_found = (0..=2).any(|n| std::path::Path::new(&format!("/dev/i2c-{n}")).exists());
-        v.add("i2c", i2c_found, if i2c_found { "I2C bus detected" } else { "no I2C buses found (/dev/i2c-*)" });
+        v.add(
+            "i2c",
+            i2c_found,
+            if i2c_found {
+                "I2C bus detected"
+            } else {
+                "no I2C buses found (/dev/i2c-*)"
+            },
+        );
 
         // ADC: check /sys/bus/iio/devices/iio:device*
         let iio_root = std::path::Path::new("/sys/bus/iio/devices");
-        let adc_found = iio_root.exists() && std::fs::read_dir(iio_root)
-            .map(|entries| entries.filter_map(|e| e.ok()).any(|e| e.file_name().to_string_lossy().starts_with("iio:device")))
-            .unwrap_or(false);
-        v.add("adc", adc_found, if adc_found { "IIO ADC device detected" } else { "no IIO ADC devices found" });
+        let adc_found = iio_root.exists()
+            && std::fs::read_dir(iio_root)
+                .map(|entries| {
+                    entries
+                        .filter_map(|e| e.ok())
+                        .any(|e| e.file_name().to_string_lossy().starts_with("iio:device"))
+                })
+                .unwrap_or(false);
+        v.add(
+            "adc",
+            adc_found,
+            if adc_found {
+                "IIO ADC device detected"
+            } else {
+                "no IIO ADC devices found"
+            },
+        );
 
         // GPIO: check /sys/class/gpio/export
         let gpio_found = std::path::Path::new("/sys/class/gpio/export").exists();
-        v.add("gpio", gpio_found, if gpio_found { "GPIO sysfs available" } else { "/sys/class/gpio not found" });
+        v.add(
+            "gpio",
+            gpio_found,
+            if gpio_found {
+                "GPIO sysfs available"
+            } else {
+                "/sys/class/gpio not found"
+            },
+        );
 
         // PWM: check /sys/class/pwm/pwmchip*
         let pwm_root = std::path::Path::new("/sys/class/pwm");
-        let pwm_found = pwm_root.exists() && std::fs::read_dir(pwm_root)
-            .map(|entries| entries.filter_map(|e| e.ok()).any(|e| e.file_name().to_string_lossy().starts_with("pwmchip")))
-            .unwrap_or(false);
-        v.add("pwm", pwm_found, if pwm_found { "PWM chips available" } else { "no PWM chips found" });
+        let pwm_found = pwm_root.exists()
+            && std::fs::read_dir(pwm_root)
+                .map(|entries| {
+                    entries
+                        .filter_map(|e| e.ok())
+                        .any(|e| e.file_name().to_string_lossy().starts_with("pwmchip"))
+                })
+                .unwrap_or(false);
+        v.add(
+            "pwm",
+            pwm_found,
+            if pwm_found {
+                "PWM chips available"
+            } else {
+                "no PWM chips found"
+            },
+        );
 
         // UART: check /dev/ttyO*
         let uart_found = (0..8).any(|n| std::path::Path::new(&format!("/dev/ttyO{n}")).exists());
-        v.add("uart", uart_found, if uart_found { "UART devices detected" } else { "no UART devices found (/dev/ttyO*)" });
+        v.add(
+            "uart",
+            uart_found,
+            if uart_found {
+                "UART devices detected"
+            } else {
+                "no UART devices found (/dev/ttyO*)"
+            },
+        );
 
         v
     }
@@ -138,10 +188,20 @@ impl HalControl for LinuxHal {
         self.pwm.get_mut().export(chip, channel)
     }
 
-    fn pwm_configure(&mut self, chip: u32, channel: u32, period_ns: u32, polarity_normal: bool) -> Result<(), HalError> {
+    fn pwm_configure(
+        &mut self,
+        chip: u32,
+        channel: u32,
+        period_ns: u32,
+        polarity_normal: bool,
+    ) -> Result<(), HalError> {
         let pwm = self.pwm.get_mut();
         pwm.set_period(chip, channel, period_ns)?;
-        let pol = if polarity_normal { pwm::PwmPolarity::Normal } else { pwm::PwmPolarity::Inversed };
+        let pol = if polarity_normal {
+            pwm::PwmPolarity::Normal
+        } else {
+            pwm::PwmPolarity::Inversed
+        };
         pwm.set_polarity(chip, channel, pol)
     }
 

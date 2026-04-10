@@ -26,11 +26,9 @@ async fn read_ws_json(
         .expect("WS transport error");
 
     match msg {
-        Message::Text(text) => {
-            serde_json::from_str(&text).unwrap_or_else(|e| {
-                panic!("invalid JSON from WS: {e}\nraw: {text}");
-            })
-        }
+        Message::Text(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
+            panic!("invalid JSON from WS: {e}\nraw: {text}");
+        }),
         other => panic!("expected Text message, got {other:?}"),
     }
 }
@@ -229,7 +227,10 @@ async fn ws_refresh_returns_all() {
     )
     .await;
     let snap = read_ws_json(&mut ws_rx).await;
-    assert_eq!(snap["op"], "snapshot", "refresh should return snapshot: {snap}");
+    assert_eq!(
+        snap["op"], "snapshot",
+        "refresh should return snapshot: {snap}"
+    );
     assert_eq!(snap["watchId"], watch_id);
     assert!(snap["ts"].as_str().is_some(), "snapshot must have ts");
     assert_eq!(
@@ -343,7 +344,10 @@ async fn ws_auth_query_param() {
     )
     .await;
     let sub = read_ws_json(&mut ws_rx).await;
-    assert_eq!(sub["op"], "subscribed", "pre-authed subscribe should succeed: {sub}");
+    assert_eq!(
+        sub["op"], "subscribed",
+        "pre-authed subscribe should succeed: {sub}"
+    );
     assert_eq!(sub["rows"].as_array().unwrap().len(), 1);
 }
 
@@ -368,7 +372,10 @@ async fn ws_auth_required_without_token() {
     .await;
     let msg = read_ws_json(&mut ws_rx).await;
     assert_eq!(msg["op"], "error");
-    assert_eq!(msg["code"], "AUTH_REQUIRED", "unauthenticated subscribe should get AUTH_REQUIRED");
+    assert_eq!(
+        msg["code"], "AUTH_REQUIRED",
+        "unauthenticated subscribe should get AUTH_REQUIRED"
+    );
 }
 
 // ══════════════════════════════════════════════════════════════

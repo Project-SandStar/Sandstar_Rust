@@ -197,7 +197,13 @@ pub async fn ws_upgrade(
     };
 
     ws.on_upgrade(move |socket| {
-        ws_connection_task(socket, state.engine, state.auth_token, state.auth_state, pre_authed)
+        ws_connection_task(
+            socket,
+            state.engine,
+            state.auth_token,
+            state.auth_state,
+            pre_authed,
+        )
     })
 }
 
@@ -339,15 +345,25 @@ async fn handle_client_msg(
             match auth_token {
                 None => {
                     // No auth configured — also check auth_state
-                    let required = auth_state.as_ref().is_some_and(|a| a.store.is_auth_required());
+                    let required = auth_state
+                        .as_ref()
+                        .is_some_and(|a| a.store.is_auth_required());
                     if !required {
                         *authenticated = true;
-                        serde_json::to_string(&ServerMsg::AuthOk { id, auth_token: None }).ok()
+                        serde_json::to_string(&ServerMsg::AuthOk {
+                            id,
+                            auth_token: None,
+                        })
+                        .ok()
                     } else if let Some(ref state) = auth_state {
                         // Check as session token
                         if state.check_token(&token) {
                             *authenticated = true;
-                            serde_json::to_string(&ServerMsg::AuthOk { id, auth_token: None }).ok()
+                            serde_json::to_string(&ServerMsg::AuthOk {
+                                id,
+                                auth_token: None,
+                            })
+                            .ok()
                         } else {
                             serde_json::to_string(&ServerMsg::Error {
                                 id,
@@ -367,14 +383,22 @@ async fn handle_client_msg(
                 }
                 Some(required) if token == *required => {
                     *authenticated = true;
-                    serde_json::to_string(&ServerMsg::AuthOk { id, auth_token: None }).ok()
+                    serde_json::to_string(&ServerMsg::AuthOk {
+                        id,
+                        auth_token: None,
+                    })
+                    .ok()
                 }
                 _ => {
                     // Check session token via auth_state
                     if let Some(ref state) = auth_state {
                         if state.check_token(&token) {
                             *authenticated = true;
-                            return serde_json::to_string(&ServerMsg::AuthOk { id, auth_token: None }).ok();
+                            return serde_json::to_string(&ServerMsg::AuthOk {
+                                id,
+                                auth_token: None,
+                            })
+                            .ok();
                         }
                     }
                     serde_json::to_string(&ServerMsg::Error {
@@ -422,14 +446,12 @@ async fn handle_client_msg(
                     })
                     .ok()
                 }
-                Err(e) => {
-                    serde_json::to_string(&ServerMsg::Error {
-                        id,
-                        code: "AUTH_REQUIRED",
-                        message: &e,
-                    })
-                    .ok()
-                }
+                Err(e) => serde_json::to_string(&ServerMsg::Error {
+                    id,
+                    code: "AUTH_REQUIRED",
+                    message: &e,
+                })
+                .ok(),
             }
         }
         ClientMsg::Authenticate {
@@ -448,30 +470,28 @@ async fn handle_client_msg(
             };
 
             // The proof field is base64(client-final-message)
-            let client_final = match base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                &proof,
-            ) {
-                Ok(bytes) => match String::from_utf8(bytes) {
-                    Ok(s) => s,
+            let client_final =
+                match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &proof) {
+                    Ok(bytes) => match String::from_utf8(bytes) {
+                        Ok(s) => s,
+                        Err(_) => {
+                            return serde_json::to_string(&ServerMsg::Error {
+                                id,
+                                code: "AUTH_REQUIRED",
+                                message: "invalid UTF-8 in proof",
+                            })
+                            .ok();
+                        }
+                    },
                     Err(_) => {
                         return serde_json::to_string(&ServerMsg::Error {
                             id,
                             code: "AUTH_REQUIRED",
-                            message: "invalid UTF-8 in proof",
+                            message: "invalid base64 in proof",
                         })
                         .ok();
                     }
-                },
-                Err(_) => {
-                    return serde_json::to_string(&ServerMsg::Error {
-                        id,
-                        code: "AUTH_REQUIRED",
-                        message: "invalid base64 in proof",
-                    })
-                    .ok();
-                }
-            };
+                };
 
             match state.complete_scram(&handshake_token, &client_final) {
                 Ok((session_token, _server_sig)) => {
@@ -674,7 +694,10 @@ mod tests {
 
     #[test]
     fn server_msg_auth_ok_no_id() {
-        let msg = ServerMsg::AuthOk { id: None, auth_token: None };
+        let msg = ServerMsg::AuthOk {
+            id: None,
+            auth_token: None,
+        };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains(r#""op":"authOk""#));
         assert!(!json.contains("id"));

@@ -126,7 +126,13 @@ impl TableStore {
     /// Add a table by loading its values from a data file.
     ///
     /// Data file format: one floating-point number per line, no headers.
-    pub fn add(&mut self, tag: &str, unit_type: &str, path: &str, ranges: TableRanges) -> Result<()> {
+    pub fn add(
+        &mut self,
+        tag: &str,
+        unit_type: &str,
+        path: &str,
+        ranges: TableRanges,
+    ) -> Result<()> {
         // Check for duplicate tag + unit_type
         if self.find_by_tag_and_unit(tag, unit_type).is_some() {
             return Ok(()); // Already loaded, skip silently (matches C behavior)
@@ -174,9 +180,7 @@ impl TableStore {
         ranges: TableRanges,
     ) -> Result<()> {
         if values.is_empty() {
-            return Err(EngineError::InvalidTableFile(
-                "empty values".to_string(),
-            ));
+            return Err(EngineError::InvalidTableFile("empty values".to_string()));
         }
 
         let direction = if values.last().unwrap() > values.first().unwrap() {
@@ -390,9 +394,8 @@ impl TableStore {
 
     /// Load values from a data file (one float per line).
     fn load_values(path: &str) -> Result<Vec<f64>> {
-        let content = fs::read_to_string(path).map_err(|e| {
-            EngineError::InvalidTableFile(format!("cannot read {}: {}", path, e))
-        })?;
+        let content = fs::read_to_string(path)
+            .map_err(|e| EngineError::InvalidTableFile(format!("cannot read {}: {}", path, e)))?;
 
         let values: Vec<f64> = content
             .lines()
@@ -536,12 +539,7 @@ mod tests {
     fn test_duplicate_tag_skipped() {
         let mut store = TableStore::new();
         store
-            .add_with_values(
-                "dup",
-                "temp",
-                vec![1.0, 2.0, 3.0],
-                TableRanges::default(),
-            )
+            .add_with_values("dup", "temp", vec![1.0, 2.0, 3.0], TableRanges::default())
             .unwrap();
         assert_eq!(store.count(), 1);
 
@@ -562,16 +560,10 @@ mod tests {
         let idx = store.find_by_tag("test_inc").unwrap();
 
         // Boundary: cur = min -> first raw value
-        assert_eq!(
-            store.reverse_lookup(idx, -40.0, -40.0, 120.0),
-            Some(100.0)
-        );
+        assert_eq!(store.reverse_lookup(idx, -40.0, -40.0, 120.0), Some(100.0));
 
         // Boundary: cur = max -> last raw value
-        assert_eq!(
-            store.reverse_lookup(idx, 120.0, -40.0, 120.0),
-            Some(4000.0)
-        );
+        assert_eq!(store.reverse_lookup(idx, 120.0, -40.0, 120.0), Some(4000.0));
     }
 
     #[test]

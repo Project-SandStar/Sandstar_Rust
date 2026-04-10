@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone)]
 pub struct PidController {
     // -- Configuration (set by user) --
-
     /// Proportional gain.
     pub kp: f64,
     /// Integral gain (resets per minute). 0 = no integral.
@@ -37,7 +36,6 @@ pub struct PidController {
     pub enabled: bool,
 
     // -- Runtime state (managed internally) --
-
     /// Current output value.
     output: f64,
     /// Accumulated integral term.
@@ -440,7 +438,10 @@ mod tests {
 
         // First computation: error=0, last_error=0, d=0. Output = 50 (bias).
         let out = pid.execute(70.0, 70.0, advance(t0, 1000));
-        assert!((out - 50.0).abs() < 0.001, "no error change -> bias, got {out}");
+        assert!(
+            (out - 50.0).abs() < 0.001,
+            "no error change -> bias, got {out}"
+        );
 
         // Now introduce error: sp=80, pv=70, error=10. d = 10*(10-0)/1 = 100.
         // Output = 0 + 100 + 50 = 150 -> clamped to 100.
@@ -500,7 +501,10 @@ mod tests {
 
         // Run a few more cycles; integral should increase output further.
         let out2 = pid.execute(72.0, 75.0, advance(t0, 2000));
-        assert!(out2 > out, "integral should increase output: {out2} > {out}");
+        assert!(
+            out2 > out,
+            "integral should increase output: {out2} > {out}"
+        );
     }
 
     #[test]
@@ -550,7 +554,10 @@ mod tests {
         // NaN propagates through arithmetic: error = 72 - NaN = NaN.
         // The f64::clamp function returns NaN when the input is NaN.
         // This documents the current behavior: NaN input produces NaN output.
-        assert!(out.is_nan(), "NaN input propagates to NaN output, got {out}");
+        assert!(
+            out.is_nan(),
+            "NaN input propagates to NaN output, got {out}"
+        );
 
         // Verify the controller can recover after reset.
         pid.reset();
@@ -606,12 +613,18 @@ mod tests {
         // will return early without division by zero.
         let out = pid.execute(72.0, 70.0, t0);
         // Same instant => dt_secs=0 => early return with current output.
-        assert!(!out.is_nan(), "zero interval at same instant should not produce NaN");
+        assert!(
+            !out.is_nan(),
+            "zero interval at same instant should not produce NaN"
+        );
         assert!(out.is_finite(), "output should be finite, got {out}");
 
         // Advance by 1ms — dt_secs > 0 so computation proceeds.
         let out = pid.execute(72.0, 70.0, advance(t0, 1));
-        assert!(out.is_finite(), "output with 1ms dt should be finite, got {out}");
+        assert!(
+            out.is_finite(),
+            "output with 1ms dt should be finite, got {out}"
+        );
     }
 
     #[test]

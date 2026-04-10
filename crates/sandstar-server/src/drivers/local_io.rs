@@ -10,8 +10,8 @@
 
 use std::collections::HashMap;
 
-use super::{Driver, DriverError, DriverMeta, DriverPointRef, LearnGrid, LearnPoint, PollMode};
 use super::DriverStatus;
+use super::{Driver, DriverError, DriverMeta, DriverPointRef, LearnGrid, LearnPoint, PollMode};
 
 // ── LocalIoChannel ─────────────────────────────────────────
 
@@ -137,7 +137,11 @@ impl LocalIoDriver {
 
     /// Update the cached value for a channel (called by the engine poll loop).
     pub fn update_value(&mut self, channel_id: u32, value: f64, status: &str) {
-        if let Some(ch) = self.channels.iter_mut().find(|c| c.channel_id == channel_id) {
+        if let Some(ch) = self
+            .channels
+            .iter_mut()
+            .find(|c| c.channel_id == channel_id)
+        {
             ch.last_value = value;
             ch.last_status = status.to_string();
         }
@@ -203,8 +207,8 @@ impl Driver for LocalIoDriver {
     fn sync_cur(&mut self, points: &[DriverPointRef]) -> Vec<(u32, Result<f64, DriverError>)> {
         points
             .iter()
-            .map(|p| {
-                match self.channels.iter().find(|ch| ch.channel_id == p.point_id) {
+            .map(
+                |p| match self.channels.iter().find(|ch| ch.channel_id == p.point_id) {
                     Some(ch) if ch.enabled => (p.point_id, Ok(ch.last_value)),
                     Some(_) => (
                         p.point_id,
@@ -217,8 +221,8 @@ impl Driver for LocalIoDriver {
                             p.point_id
                         ))),
                     ),
-                }
-            })
+                },
+            )
             .collect()
     }
 
@@ -267,8 +271,7 @@ mod tests {
             LocalIoChannel::new(5000, "DO1 Relay", "DO", "digital", "GPIO60"),
             LocalIoChannel::new(6000, "PWM Fan", "PWM", "pwm", "PWM0:0"),
             {
-                let mut ch =
-                    LocalIoChannel::new(7000, "AI3 Disabled", "AI", "analog", "AIN2");
+                let mut ch = LocalIoChannel::new(7000, "AI3 Disabled", "AI", "analog", "AIN2");
                 ch.enabled = false;
                 ch
             },
@@ -345,7 +348,12 @@ mod tests {
         }];
         let results = d.sync_cur(&refs);
         assert!(results[0].1.is_err());
-        assert!(results[0].1.as_ref().unwrap_err().to_string().contains("disabled"));
+        assert!(results[0]
+            .1
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("disabled"));
     }
 
     #[test]
@@ -359,7 +367,12 @@ mod tests {
         }];
         let results = d.sync_cur(&refs);
         assert!(results[0].1.is_err());
-        assert!(results[0].1.as_ref().unwrap_err().to_string().contains("not found"));
+        assert!(results[0]
+            .1
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("not found"));
     }
 
     #[test]
@@ -384,7 +397,12 @@ mod tests {
 
         let results = d.write(&[(1100, 50.0)]);
         assert!(results[0].1.is_err());
-        assert!(results[0].1.as_ref().unwrap_err().to_string().contains("not an output"));
+        assert!(results[0]
+            .1
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("not an output"));
     }
 
     #[test]

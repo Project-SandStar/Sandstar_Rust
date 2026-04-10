@@ -10,9 +10,9 @@
 mod error;
 pub mod filter;
 pub mod handlers;
+pub mod rows;
 #[cfg(feature = "simulator-hal")]
 pub mod sim;
-pub mod rows;
 pub mod sox_api;
 pub mod tags;
 pub mod trio;
@@ -21,8 +21,8 @@ pub mod ws;
 pub mod zinc_format;
 pub mod zinc_grid;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{DefaultBodyLimit, Json, Request, State};
@@ -34,9 +34,9 @@ use axum::Router;
 use tokio::sync::{mpsc, oneshot};
 use tower_http::cors::CorsLayer;
 
-use sandstar_ipc::types::{ChannelInfo, PollInfo, StatusInfo};
 use crate::auth::AuthState;
 use crate::history::HistoryPoint;
+use sandstar_ipc::types::{ChannelInfo, PollInfo, StatusInfo};
 
 // ── Engine command channel ───────────────────────────────────
 
@@ -340,11 +340,10 @@ impl EngineHandle {
 // ── Router construction ──────────────────────────────────────
 
 /// Middleware that increments the REST request counter on every request.
-async fn count_requests(
-    request: Request,
-    next: middleware::Next,
-) -> Response {
-    crate::metrics::metrics().rest_requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+async fn count_requests(request: Request, next: middleware::Next) -> Response {
+    crate::metrics::metrics()
+        .rest_requests
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     next.run(request).await
 }
 
@@ -386,9 +385,7 @@ async fn check_auth(
 #[serde(tag = "action", rename_all = "camelCase")]
 enum AuthRequest {
     /// Step 1: Client sends hello with username.
-    Hello {
-        username: String,
-    },
+    Hello { username: String },
     /// Step 2: Client sends client-first-message (SCRAM).
     #[serde(rename_all = "camelCase")]
     ScramFirst {
@@ -407,9 +404,9 @@ enum AuthRequest {
 struct AuthChallengeResponse {
     handshake_token: String,
     hash: &'static str,
-    salt: String,     // base64
+    salt: String, // base64
     iterations: u32,
-    data: String,      // base64(server-first-message)
+    data: String, // base64(server-first-message)
 }
 
 #[derive(serde::Serialize)]
@@ -432,15 +429,12 @@ async fn auth_endpoint(
     Json(req): Json<AuthRequest>,
 ) -> Response {
     match req {
-        AuthRequest::Hello { username } => {
-            handle_auth_hello(&auth_state, &username)
-        }
-        AuthRequest::ScramFirst { data } => {
-            handle_scram_first(&auth_state, &data)
-        }
-        AuthRequest::ScramFinal { handshake_token, data } => {
-            handle_scram_final(&auth_state, &handshake_token, &data)
-        }
+        AuthRequest::Hello { username } => handle_auth_hello(&auth_state, &username),
+        AuthRequest::ScramFirst { data } => handle_scram_first(&auth_state, &data),
+        AuthRequest::ScramFinal {
+            handshake_token,
+            data,
+        } => handle_scram_final(&auth_state, &handshake_token, &data),
     }
 }
 
@@ -448,10 +442,8 @@ fn handle_auth_hello(auth_state: &AuthState, username: &str) -> Response {
     // Look up the user's salt and iterations (for the client to derive keys)
     match auth_state.store.get_credential(username) {
         Some(cred) => {
-            let salt_b64 = base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                &cred.salt,
-            );
+            let salt_b64 =
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &cred.salt);
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -473,32 +465,30 @@ fn handle_auth_hello(auth_state: &AuthState, username: &str) -> Response {
 }
 
 fn handle_scram_first(auth_state: &AuthState, data_b64: &str) -> Response {
-    let client_first = match base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        data_b64,
-    ) {
-        Ok(bytes) => match String::from_utf8(bytes) {
-            Ok(s) => s,
+    let client_first =
+        match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_b64) {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(s) => s,
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(AuthErrorResponse {
+                            error: "invalid UTF-8 in client-first".to_string(),
+                        }),
+                    )
+                        .into_response()
+                }
+            },
             Err(_) => {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(AuthErrorResponse {
-                        error: "invalid UTF-8 in client-first".to_string(),
+                        error: "invalid base64".to_string(),
                     }),
                 )
                     .into_response()
             }
-        },
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(AuthErrorResponse {
-                    error: "invalid base64".to_string(),
-                }),
-            )
-                .into_response()
-        }
-    };
+        };
 
     match auth_state.begin_scram(&client_first) {
         Ok((hs_token, server_first)) => {
@@ -536,37 +526,31 @@ fn handle_scram_first(auth_state: &AuthState, data_b64: &str) -> Response {
     }
 }
 
-fn handle_scram_final(
-    auth_state: &AuthState,
-    handshake_token: &str,
-    data_b64: &str,
-) -> Response {
-    let client_final = match base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        data_b64,
-    ) {
-        Ok(bytes) => match String::from_utf8(bytes) {
-            Ok(s) => s,
+fn handle_scram_final(auth_state: &AuthState, handshake_token: &str, data_b64: &str) -> Response {
+    let client_final =
+        match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_b64) {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(s) => s,
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(AuthErrorResponse {
+                            error: "invalid UTF-8 in client-final".to_string(),
+                        }),
+                    )
+                        .into_response()
+                }
+            },
             Err(_) => {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(AuthErrorResponse {
-                        error: "invalid UTF-8 in client-final".to_string(),
+                        error: "invalid base64".to_string(),
                     }),
                 )
                     .into_response()
             }
-        },
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(AuthErrorResponse {
-                    error: "invalid base64".to_string(),
-                }),
-            )
-                .into_response()
-        }
-    };
+        };
 
     match auth_state.complete_scram(handshake_token, &client_final) {
         Ok((session_token, server_sig)) => (
@@ -751,10 +735,7 @@ pub fn router_with_auth(
         .route("/api/hisRead", post(handlers::his_read))
         .route("/api/nav", post(handlers::nav))
         .route("/api/invokeAction", post(handlers::invoke_action))
-        .route_layer(middleware::from_fn_with_state(
-            auth_state,
-            check_auth,
-        ))
+        .route_layer(middleware::from_fn_with_state(auth_state, check_auth))
         .with_state(handle);
 
     // CORS policy: allow any origin (embedded device accessed by various IPs)
@@ -763,7 +744,13 @@ pub fn router_with_auth(
     // headers and methods.
     let cors = CorsLayer::new()
         .allow_origin(tower_http::cors::Any)
-        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
         .allow_headers([
             HeaderName::from_static("content-type"),
             HeaderName::from_static("authorization"),
@@ -810,11 +797,13 @@ pub fn router_with_auth(
     // Apply rate limiting only when configured (rate_limit > 0).
     if rate_limit > 0 {
         let limiter = Arc::new(RateLimiter::new(rate_limit));
-        app = app.layer(middleware::from_fn_with_state(limiter, rate_limit_middleware));
+        app = app.layer(middleware::from_fn_with_state(
+            limiter,
+            rate_limit_middleware,
+        ));
     }
 
-    app.layer(DefaultBodyLimit::max(1_048_576))
-        .layer(cors)
+    app.layer(DefaultBodyLimit::max(1_048_576)).layer(cors)
 }
 
 // ── roxWarp cluster routes ──────────────────────────────────
@@ -825,16 +814,19 @@ pub fn cluster_disabled_router() -> Router {
 }
 
 async fn cluster_disabled_handler() -> impl IntoResponse {
-    (StatusCode::OK, Json(serde_json::json!({
-        "enabled": false,
-        "message": "Clustering not enabled. Start with --cluster flag to enable roxWarp.",
-        "requirements": {
-            "flag": "--cluster",
-            "configFile": "--cluster-config <path> (optional)",
-            "nodeId": "--node-id <id> (optional, auto-generated from hostname)",
-            "peers": "Configure peer addresses in the cluster config JSON file"
-        }
-    })))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "enabled": false,
+            "message": "Clustering not enabled. Start with --cluster flag to enable roxWarp.",
+            "requirements": {
+                "flag": "--cluster",
+                "configFile": "--cluster-config <path> (optional)",
+                "nodeId": "--node-id <id> (optional, auto-generated from hostname)",
+                "peers": "Configure peer addresses in the cluster config JSON file"
+            }
+        })),
+    )
 }
 
 /// Build the Axum router for roxWarp cluster endpoints:
@@ -891,10 +883,7 @@ async fn cluster_query_handler(
             );
         }
     };
-    let limit = body
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as u32);
+    let limit = body.get("limit").and_then(|v| v.as_u64()).map(|n| n as u32);
 
     // Evaluate filter against local delta engine points
     let (_, all_points) = state.delta_engine.full_state().await;
@@ -946,7 +935,10 @@ mod tests {
         }
         // 6th request should be blocked
         assert!(!limiter.check(), "request over limit should be blocked");
-        assert!(!limiter.check(), "subsequent requests should also be blocked");
+        assert!(
+            !limiter.check(),
+            "subsequent requests should also be blocked"
+        );
     }
 
     #[test]

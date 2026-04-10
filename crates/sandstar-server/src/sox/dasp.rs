@@ -99,20 +99,20 @@ impl DaspMsgType {
 
 /// The low 2 bits encode the value type: 0=NIL, 1=U2, 2=STR, 3=BYTES.
 mod field_id {
-    pub const VERSION: u8 = 0x05;           // (1, U2)
-    pub const REMOTE_ID: u8 = 0x09;         // (2, U2)
-    pub const DIGEST_ALGORITHM: u8 = 0x0e;  // (3, STR)
-    pub const NONCE: u8 = 0x13;             // (4, BYTES)
-    pub const USERNAME: u8 = 0x16;          // (5, STR)
-    pub const DIGEST: u8 = 0x1b;            // (6, BYTES)
-    pub const IDEAL_MAX: u8 = 0x1d;         // (7, U2)
-    pub const ABS_MAX: u8 = 0x21;           // (8, U2)
-    pub const ACK: u8 = 0x25;               // (9, U2)
-    pub const ACK_MORE: u8 = 0x2b;          // (a, BYTES)
-    pub const RECEIVE_MAX: u8 = 0x2d;       // (b, U2)
-    pub const RECEIVE_TIMEOUT: u8 = 0x31;   // (c, U2)
-    pub const ERROR_CODE: u8 = 0x35;        // (d, U2)
-    pub const PLATFORM_ID: u8 = 0x3a;       // (e, STR)
+    pub const VERSION: u8 = 0x05; // (1, U2)
+    pub const REMOTE_ID: u8 = 0x09; // (2, U2)
+    pub const DIGEST_ALGORITHM: u8 = 0x0e; // (3, STR)
+    pub const NONCE: u8 = 0x13; // (4, BYTES)
+    pub const USERNAME: u8 = 0x16; // (5, STR)
+    pub const DIGEST: u8 = 0x1b; // (6, BYTES)
+    pub const IDEAL_MAX: u8 = 0x1d; // (7, U2)
+    pub const ABS_MAX: u8 = 0x21; // (8, U2)
+    pub const ACK: u8 = 0x25; // (9, U2)
+    pub const ACK_MORE: u8 = 0x2b; // (a, BYTES)
+    pub const RECEIVE_MAX: u8 = 0x2d; // (b, U2)
+    pub const RECEIVE_TIMEOUT: u8 = 0x31; // (c, U2)
+    pub const ERROR_CODE: u8 = 0x35; // (d, U2)
+    pub const PLATFORM_ID: u8 = 0x3a; // (e, STR)
 }
 
 /// Error codes per the DASP specification.
@@ -603,11 +603,17 @@ impl DaspTransport {
                 // Verify session exists and is authenticated
                 if let Some(session) = self.sessions.get_mut(&hdr.session_id) {
                     if !session.authenticated {
-                        debug!("DASP: datagram for unauthenticated session 0x{:04x}", hdr.session_id);
+                        debug!(
+                            "DASP: datagram for unauthenticated session 0x{:04x}",
+                            hdr.session_id
+                        );
                         return None;
                     }
                     if session.remote_addr != from {
-                        debug!("DASP: address mismatch for session 0x{:04x}", hdr.session_id);
+                        debug!(
+                            "DASP: address mismatch for session 0x{:04x}",
+                            hdr.session_id
+                        );
                         return None;
                     }
                     session.touch();
@@ -622,7 +628,10 @@ impl DaspTransport {
                     }
                     Some((hdr.session_id, payload))
                 } else {
-                    debug!("DASP: datagram for unknown session 0x{:04x}", hdr.session_id);
+                    debug!(
+                        "DASP: datagram for unknown session 0x{:04x}",
+                        hdr.session_id
+                    );
                     None
                 }
             }
@@ -637,12 +646,16 @@ impl DaspTransport {
     /// Send a SOX response payload to a session as a DATAGRAM.
     pub fn send_to_session(&mut self, session_id: u16, payload: &[u8]) -> std::io::Result<()> {
         let (remote_addr, remote_id, seq, recv_seq) = {
-            let session = self
-                .sessions
-                .get_mut(&session_id)
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "session not found"))?;
+            let session = self.sessions.get_mut(&session_id).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "session not found")
+            })?;
             let seq = session.next_seq();
-            (session.remote_addr, session.remote_id, seq, session.recv_seq)
+            (
+                session.remote_addr,
+                session.remote_id,
+                seq,
+                session.recv_seq,
+            )
         };
 
         let hdr = DaspHeader {
@@ -677,10 +690,9 @@ impl DaspTransport {
     /// not responses to client requests. This matches the Sedona DASP convention.
     pub fn send_event(&mut self, session_id: u16, payload: &[u8]) -> std::io::Result<()> {
         let (remote_addr, remote_id, recv_seq) = {
-            let session = self
-                .sessions
-                .get(&session_id)
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "session not found"))?;
+            let session = self.sessions.get(&session_id).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "session not found")
+            })?;
             (session.remote_addr, session.remote_id, session.recv_seq)
         };
 
@@ -724,7 +736,11 @@ impl DaspTransport {
             if let Some(session) = self.sessions.remove(&id) {
                 self.addr_to_session.remove(&session.remote_addr);
                 // Send CLOSE with TIMEOUT error code
-                let _ = self.send_close(session.remote_id, session.remote_addr, Some(DaspErrorCode::Timeout));
+                let _ = self.send_close(
+                    session.remote_id,
+                    session.remote_addr,
+                    Some(DaspErrorCode::Timeout),
+                );
             }
         }
     }
@@ -786,7 +802,11 @@ impl DaspTransport {
         if let Some(v) = hello.version {
             if v != DASP_VERSION {
                 warn!("DASP: incompatible version 0x{v:04x} from {from}");
-                self.send_close(hello.remote_id.unwrap_or(0xffff), from, Some(DaspErrorCode::IncompatibleVersion))?;
+                self.send_close(
+                    hello.remote_id.unwrap_or(0xffff),
+                    from,
+                    Some(DaspErrorCode::IncompatibleVersion),
+                )?;
                 return Ok(());
             }
         }
@@ -794,7 +814,11 @@ impl DaspTransport {
         // Check session limit
         if self.sessions.len() >= MAX_SESSIONS {
             warn!("DASP: too many sessions, rejecting HELLO from {from}");
-            self.send_close(hello.remote_id.unwrap_or(0xffff), from, Some(DaspErrorCode::Busy))?;
+            self.send_close(
+                hello.remote_id.unwrap_or(0xffff),
+                from,
+                Some(DaspErrorCode::Busy),
+            )?;
             return Ok(());
         }
 
@@ -885,7 +909,10 @@ impl DaspTransport {
         }
 
         // Authentication succeeded
-        let session = self.sessions.get_mut(&session_id).expect("session must exist");
+        let session = self
+            .sessions
+            .get_mut(&session_id)
+            .expect("session must exist");
         session.authenticated = true;
         session.touch();
 
@@ -1225,7 +1252,9 @@ mod tests {
         // Create client socket
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
         client.set_nonblocking(false).unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
 
         // --- Step 1: Client sends HELLO ---
         let mut hello = empty_header(DaspMsgType::Hello, 0xffff, 0);
@@ -1238,7 +1267,10 @@ mod tests {
         // Server processes HELLO
         // Set socket to blocking briefly to receive
         server.socket.set_nonblocking(false).unwrap();
-        server.socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        server
+            .socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         let result = server.poll();
         assert!(result.is_none(), "HELLO should not return data");
         assert_eq!(server.session_count(), 1, "session should be created");
@@ -1266,7 +1298,9 @@ mod tests {
         assert!(result.is_none(), "AUTHENTICATE should not return data");
 
         // Verify session is authenticated
-        let session = server.session(server_session_id).expect("session should exist");
+        let session = server
+            .session(server_session_id)
+            .expect("session should exist");
         assert!(session.authenticated, "session should be authenticated");
 
         // --- Step 4: Client receives WELCOME ---
@@ -1300,7 +1334,10 @@ mod tests {
         let mut server = test_transport("admin", "pass");
         let server_addr = server.local_addr().unwrap();
         server.socket.set_nonblocking(false).unwrap();
-        server.socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        server
+            .socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
 
         let _client = UdpSocket::bind("127.0.0.1:0").unwrap();
 
@@ -1325,7 +1362,9 @@ mod tests {
         let mut buf = Vec::new();
         encode_message(&hello, &[], &mut buf);
         let overflow_client = UdpSocket::bind("127.0.0.1:0").unwrap();
-        overflow_client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        overflow_client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         overflow_client.send_to(&buf, server_addr).unwrap();
         server.poll();
 
@@ -1334,7 +1373,9 @@ mod tests {
 
         // Client should receive CLOSE with BUSY error
         let mut recv_buf = [0u8; RECV_BUF_SIZE];
-        let (len, _) = overflow_client.recv_from(&mut recv_buf).expect("should receive close");
+        let (len, _) = overflow_client
+            .recv_from(&mut recv_buf)
+            .expect("should receive close");
         let close = parse_header(&recv_buf[..len]).expect("parse close");
         assert_eq!(close.msg_type, DaspMsgType::Close);
         assert_eq!(close.error_code, Some(DaspErrorCode::Busy as u16));
@@ -1348,11 +1389,16 @@ mod tests {
         let mut server = test_transport("admin", "pass");
         let server_addr = server.local_addr().unwrap();
         server.socket.set_nonblocking(false).unwrap();
-        server.socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        server
+            .socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
 
         // Create a session manually for testing keepalive
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         let client_addr = client.local_addr().unwrap();
 
         let session_id = server.alloc_session_id();
@@ -1371,7 +1417,9 @@ mod tests {
 
         // Client should receive keepalive back
         let mut recv_buf = [0u8; RECV_BUF_SIZE];
-        let (len, _) = client.recv_from(&mut recv_buf).expect("receive keepalive response");
+        let (len, _) = client
+            .recv_from(&mut recv_buf)
+            .expect("receive keepalive response");
         let resp = parse_header(&recv_buf[..len]).expect("parse keepalive");
         assert_eq!(resp.msg_type, DaspMsgType::Keepalive);
     }
@@ -1384,7 +1432,10 @@ mod tests {
         let mut server = test_transport("admin", "pass");
         let server_addr = server.local_addr().unwrap();
         server.socket.set_nonblocking(false).unwrap();
-        server.socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        server
+            .socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
 
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
         let client_addr = client.local_addr().unwrap();
@@ -1436,10 +1487,15 @@ mod tests {
         let mut server = test_transport("admin", "correct");
         let server_addr = server.local_addr().unwrap();
         server.socket.set_nonblocking(false).unwrap();
-        server.socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        server
+            .socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
 
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
 
         // Send HELLO
         let mut hello = empty_header(DaspMsgType::Hello, 0xffff, 0);
@@ -1475,7 +1531,10 @@ mod tests {
         let (len, _) = client.recv_from(&mut recv_buf).unwrap();
         let close = parse_header(&recv_buf[..len]).unwrap();
         assert_eq!(close.msg_type, DaspMsgType::Close);
-        assert_eq!(close.error_code, Some(DaspErrorCode::NotAuthenticated as u16));
+        assert_eq!(
+            close.error_code,
+            Some(DaspErrorCode::NotAuthenticated as u16)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1486,10 +1545,15 @@ mod tests {
         let mut server = test_transport("admin", "pass");
         let server_addr = server.local_addr().unwrap();
         server.socket.set_nonblocking(false).unwrap();
-        server.socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        server
+            .socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
 
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         let client_addr = client.local_addr().unwrap();
 
         // Create an already-authenticated session
@@ -1521,7 +1585,10 @@ mod tests {
         let mut server = test_transport("admin", "pass");
         let server_addr = server.local_addr().unwrap();
         server.socket.set_nonblocking(false).unwrap();
-        server.socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        server
+            .socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
 
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
         let client_addr = client.local_addr().unwrap();
@@ -1537,7 +1604,10 @@ mod tests {
         client.send_to(&buf, server_addr).unwrap();
 
         let result = server.poll();
-        assert!(result.is_none(), "unauthenticated datagram should be rejected");
+        assert!(
+            result.is_none(),
+            "unauthenticated datagram should be rejected"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1549,7 +1619,9 @@ mod tests {
         let server_addr = server.local_addr().unwrap();
 
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         let client_addr = client.local_addr().unwrap();
 
         let session_id = server.alloc_session_id();
@@ -1558,10 +1630,14 @@ mod tests {
         server.sessions.insert(session_id, session);
 
         let payload = b"response data";
-        server.send_to_session(session_id, payload).expect("send should succeed");
+        server
+            .send_to_session(session_id, payload)
+            .expect("send should succeed");
 
         let mut recv_buf = [0u8; RECV_BUF_SIZE];
-        let (len, from) = client.recv_from(&mut recv_buf).expect("client should receive");
+        let (len, from) = client
+            .recv_from(&mut recv_buf)
+            .expect("client should receive");
         assert_eq!(from, server_addr);
         let hdr = parse_header(&recv_buf[..len]).unwrap();
         assert_eq!(hdr.msg_type, DaspMsgType::Datagram);
@@ -1627,10 +1703,15 @@ mod tests {
         let mut server = test_transport("admin", "pass");
         let server_addr = server.local_addr().unwrap();
         server.socket.set_nonblocking(false).unwrap();
-        server.socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        server
+            .socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
 
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
 
         // First HELLO
         let mut hello = empty_header(DaspMsgType::Hello, 0xffff, 0);

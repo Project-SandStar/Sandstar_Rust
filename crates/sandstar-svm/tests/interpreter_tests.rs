@@ -7,8 +7,7 @@
 //! executes the bytecode, and asserts the expected result (stack state, return value, etc.).
 
 use sandstar_svm::image_loader::{
-    ScodeImage, SCODE_BLOCK_SIZE, SCODE_HEADER_SIZE, SCODE_MAGIC, SCODE_MAJOR_VER,
-    SCODE_MINOR_VER,
+    ScodeImage, SCODE_BLOCK_SIZE, SCODE_HEADER_SIZE, SCODE_MAGIC, SCODE_MAJOR_VER, SCODE_MINOR_VER,
 };
 use sandstar_svm::native_table::NativeTable;
 use sandstar_svm::opcodes::Opcode;
@@ -1273,11 +1272,7 @@ fn test_return_void() {
 #[test]
 fn test_return_pop() {
     // ReturnPop returns the top of stack as i32
-    let code = [
-        Opcode::LoadIntU1 as u8,
-        99,
-        Opcode::ReturnPop as u8,
-    ];
+    let code = [Opcode::LoadIntU1 as u8, 99, Opcode::ReturnPop as u8];
     assert_eq!(exec_result(&code), Ok(99));
 }
 
@@ -1595,12 +1590,12 @@ fn test_backward_jump() {
     // After reading offset at pos 4, PC = 5. Jump to 5 + (-3) = 2... hmm.
     // We need to go back to IntDec (pos 1). So offset = 1 - 5 = -4.
     let code = [
-        Opcode::LoadI3 as u8,       // 0
-        Opcode::IntDec as u8,       // 1: loop target
-        Opcode::Dup as u8,          // 2
-        Opcode::JumpNonZero as u8,  // 3
-        (-4i8) as u8,               // 4: offset => PC after = 5, 5 + (-4) = 1
-        Opcode::ReturnPop as u8,    // 5
+        Opcode::LoadI3 as u8,      // 0
+        Opcode::IntDec as u8,      // 1: loop target
+        Opcode::Dup as u8,         // 2
+        Opcode::JumpNonZero as u8, // 3
+        (-4i8) as u8,              // 4: offset => PC after = 5, 5 + (-4) = 1
+        Opcode::ReturnPop as u8,   // 5
     ];
     assert_eq!(exec_result(&code), Ok(0));
 }
@@ -1615,11 +1610,11 @@ fn test_nested_operations() {
     let code = [
         Opcode::LoadI1 as u8,
         Opcode::LoadI2 as u8,
-        Opcode::IntAdd as u8,  // 3
+        Opcode::IntAdd as u8, // 3
         Opcode::LoadI3 as u8,
-        Opcode::IntMul as u8,  // 9
+        Opcode::IntMul as u8, // 9
         Opcode::LoadI4 as u8,
-        Opcode::IntSub as u8,  // 5
+        Opcode::IntSub as u8, // 5
         Opcode::ReturnPop as u8,
     ];
     assert_eq!(exec_result(&code), Ok(5));
@@ -1632,10 +1627,10 @@ fn test_conditional_with_arithmetic() {
         Opcode::LoadI3 as u8,
         Opcode::LoadI2 as u8,
         Opcode::JumpIntGt as u8,
-        2i8 as u8,             // jump +2 if 3 > 2
-        Opcode::LoadI0 as u8,  // false branch
+        2i8 as u8,            // jump +2 if 3 > 2
+        Opcode::LoadI0 as u8, // false branch
         Opcode::ReturnPop as u8,
-        Opcode::LoadI1 as u8,  // true branch
+        Opcode::LoadI1 as u8, // true branch
         Opcode::ReturnPop as u8,
     ];
     assert_eq!(exec_result(&code), Ok(1));
@@ -1666,17 +1661,21 @@ fn test_switch_case_0() {
     // doesn't exist yet, we write a plausible encoding. The test will validate
     // the actual behavior once the interpreter is built.
     let code = [
-        Opcode::LoadI0 as u8,  // 0: push switch key = 0
-        Opcode::Switch as u8,  // 1: switch
-        3, 0,                   // 2-3: num_entries = 3
-        9, 0,                   // 4-5: offset[0] = 9 (relative to Switch at pos 1 => target = 1+9 = 10)
-        11, 0,                  // 6-7: offset[1] = 11 => target = 12
-        13, 0,                  // 8-9: offset[2] = 13 => target = 14
-        Opcode::LoadI1 as u8,  // 10: case 0
+        Opcode::LoadI0 as u8, // 0: push switch key = 0
+        Opcode::Switch as u8, // 1: switch
+        3,
+        0, // 2-3: num_entries = 3
+        9,
+        0, // 4-5: offset[0] = 9 (relative to Switch at pos 1 => target = 1+9 = 10)
+        11,
+        0, // 6-7: offset[1] = 11 => target = 12
+        13,
+        0,                       // 8-9: offset[2] = 13 => target = 14
+        Opcode::LoadI1 as u8,    // 10: case 0
         Opcode::ReturnPop as u8, // 11
-        Opcode::LoadI2 as u8,  // 12: case 1
+        Opcode::LoadI2 as u8,    // 12: case 1
         Opcode::ReturnPop as u8, // 13
-        Opcode::LoadI3 as u8,  // 14: case 2 / default
+        Opcode::LoadI3 as u8,    // 14: case 2 / default
         Opcode::ReturnPop as u8, // 15
     ];
     assert_eq!(exec_result(&code), Ok(1));
@@ -1686,15 +1685,19 @@ fn test_switch_case_0() {
 fn test_switch_case_1() {
     // Same switch table as above, but key = 1
     let code = [
-        Opcode::LoadI1 as u8,  // push switch key = 1
+        Opcode::LoadI1 as u8, // push switch key = 1
         Opcode::Switch as u8,
-        3, 0,
-        9, 0,                   // case 0 => offset 9
-        11, 0,                  // case 1 => offset 11
-        13, 0,                  // case 2 => offset 13
+        3,
+        0,
+        9,
+        0, // case 0 => offset 9
+        11,
+        0, // case 1 => offset 11
+        13,
+        0, // case 2 => offset 13
         Opcode::LoadI1 as u8,
         Opcode::ReturnPop as u8,
-        Opcode::LoadI2 as u8,  // case 1 target
+        Opcode::LoadI2 as u8, // case 1 target
         Opcode::ReturnPop as u8,
         Opcode::LoadI3 as u8,
         Opcode::ReturnPop as u8,
@@ -1837,7 +1840,8 @@ fn test_jump_far_int_eq_taken() {
         Opcode::LoadI3 as u8,
         Opcode::LoadI3 as u8,
         Opcode::JumpFarIntEq as u8,
-        ob[0], ob[1],
+        ob[0],
+        ob[1],
         Opcode::LoadI5 as u8,
         Opcode::ReturnPop as u8,
         Opcode::LoadI1 as u8,
@@ -1854,7 +1858,8 @@ fn test_jump_far_zero_taken() {
     let code = [
         Opcode::LoadI0 as u8,
         Opcode::JumpFarZero as u8,
-        ob[0], ob[1],
+        ob[0],
+        ob[1],
         Opcode::LoadI5 as u8,
         Opcode::ReturnPop as u8,
         Opcode::LoadI3 as u8,
@@ -1871,7 +1876,8 @@ fn test_jump_far_nonzero_taken() {
     let code = [
         Opcode::LoadI1 as u8,
         Opcode::JumpFarNonZero as u8,
-        ob[0], ob[1],
+        ob[0],
+        ob[1],
         Opcode::LoadI5 as u8,
         Opcode::ReturnPop as u8,
         Opcode::LoadI3 as u8,
@@ -1972,7 +1978,7 @@ fn test_long_shr() {
     let code = [
         Opcode::LoadL1 as u8,
         Opcode::LoadL1 as u8,
-        Opcode::LongAdd as u8,  // 2L
+        Opcode::LongAdd as u8, // 2L
         Opcode::LoadI1 as u8,
         Opcode::LongShiftR as u8,
         Opcode::LongToInt as u8,
@@ -1991,7 +1997,7 @@ fn test_long_div() {
     let code = [
         Opcode::LoadL1 as u8,
         Opcode::LoadL1 as u8,
-        Opcode::LongAdd as u8,  // 2L
+        Opcode::LongAdd as u8, // 2L
         Opcode::LoadL1 as u8,
         Opcode::LongDiv as u8,
         Opcode::LongToInt as u8,
@@ -2008,10 +2014,10 @@ fn test_long_mod() {
         Opcode::LoadL1 as u8,
         Opcode::LongAdd as u8,
         Opcode::LoadL1 as u8,
-        Opcode::LongAdd as u8,  // 3L
+        Opcode::LongAdd as u8, // 3L
         Opcode::LoadL1 as u8,
         Opcode::LoadL1 as u8,
-        Opcode::LongAdd as u8,  // 2L
+        Opcode::LongAdd as u8, // 2L
         Opcode::LongMod as u8,
         Opcode::LongToInt as u8,
         Opcode::ReturnPop as u8,

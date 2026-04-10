@@ -177,9 +177,7 @@ pub fn parse_ascii_value(buf: &[u8]) -> Option<f64> {
 #[cfg(target_os = "linux")]
 impl LinuxUart {
     /// Lock the ports mutex, returning a HalError on poison.
-    fn lock_ports(
-        &self,
-    ) -> Result<std::sync::MutexGuard<'_, HashMap<u32, PortState>>, HalError> {
+    fn lock_ports(&self) -> Result<std::sync::MutexGuard<'_, HashMap<u32, PortState>>, HalError> {
         self.ports
             .lock()
             .map_err(|e| HalError::BusError(0, format!("ports mutex poisoned: {e}")))
@@ -213,7 +211,10 @@ impl LinuxUart {
         let config = UartConfig::default();
         if let Err(e) = configure_termios(fd, &config) {
             unsafe { libc::close(fd) };
-            return Err(HalError::BusError(device, format!("termios config failed: {e}")));
+            return Err(HalError::BusError(
+                device,
+                format!("termios config failed: {e}"),
+            ));
         }
 
         // Flush pending data.
@@ -266,10 +267,7 @@ impl LinuxUart {
         }
 
         if total == 0 {
-            return Err(HalError::Timeout {
-                device,
-                address: 0,
-            });
+            return Err(HalError::Timeout { device, address: 0 });
         }
 
         debug!(device, total, "uart: received bytes");
@@ -277,10 +275,7 @@ impl LinuxUart {
         parse_ascii_value(&buf[..total]).ok_or_else(|| HalError::DeviceError {
             device,
             address: 0,
-            message: format!(
-                "failed to parse numeric value from {} bytes",
-                total
-            ),
+            message: format!("failed to parse numeric value from {} bytes", total),
         })
     }
 }

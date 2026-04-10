@@ -167,9 +167,8 @@ pub struct ScodeImage {
 impl ScodeImage {
     /// Load a `.scode` file from disk.
     pub fn load_from_file(path: &Path) -> Result<Self, VmError> {
-        let data = std::fs::read(path).map_err(|e| {
-            VmError::BadImage(format!("failed to read {}: {}", path.display(), e))
-        })?;
+        let data = std::fs::read(path)
+            .map_err(|e| VmError::BadImage(format!("failed to read {}: {}", path.display(), e)))?;
         Self::load_from_bytes(&data)
     }
 
@@ -215,8 +214,7 @@ impl ScodeImage {
     pub fn get_u64(&self, offset: usize) -> Option<u64> {
         let slice = self.code.get(offset..offset + 8)?;
         Some(u64::from_le_bytes([
-            slice[0], slice[1], slice[2], slice[3],
-            slice[4], slice[5], slice[6], slice[7],
+            slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7],
         ]))
     }
 

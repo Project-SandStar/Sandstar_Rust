@@ -79,13 +79,7 @@ impl DeltaEngine {
     }
 
     /// Record a local point change; returns the new version.
-    pub fn record_change(
-        &self,
-        channel: u32,
-        value: f64,
-        unit: &str,
-        status: &str,
-    ) -> u64 {
+    pub fn record_change(&self, channel: u32, value: f64, unit: &str, status: &str) -> u64 {
         let version = self.version.fetch_add(1, Ordering::SeqCst) + 1;
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)

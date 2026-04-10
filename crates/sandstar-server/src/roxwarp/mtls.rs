@@ -30,25 +30,20 @@ pub fn build_mtls_server_config(
     // Build a root cert store from the CA certificate(s)
     let mut root_store = rustls::RootCertStore::empty();
     for ca in &ca_certs {
-        root_store.add(ca.clone()).map_err(|e| {
-            RoxWarpError::Connection(format!("failed to add CA cert: {e}"))
-        })?;
+        root_store
+            .add(ca.clone())
+            .map_err(|e| RoxWarpError::Connection(format!("failed to add CA cert: {e}")))?;
     }
 
     // Require client authentication with certs signed by the CA
-    let client_verifier =
-        rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store))
-            .build()
-            .map_err(|e| {
-                RoxWarpError::Connection(format!("failed to build client verifier: {e}"))
-            })?;
+    let client_verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store))
+        .build()
+        .map_err(|e| RoxWarpError::Connection(format!("failed to build client verifier: {e}")))?;
 
     let config = rustls::ServerConfig::builder()
         .with_client_cert_verifier(client_verifier)
         .with_single_cert(certs, key)
-        .map_err(|e| {
-            RoxWarpError::Connection(format!("failed to build server TLS config: {e}"))
-        })?;
+        .map_err(|e| RoxWarpError::Connection(format!("failed to build server TLS config: {e}")))?;
 
     Ok(Arc::new(config))
 }
@@ -69,17 +64,15 @@ pub fn build_mtls_client_config(
     // Build a root cert store from the CA certificate(s)
     let mut root_store = rustls::RootCertStore::empty();
     for ca in &ca_certs {
-        root_store.add(ca.clone()).map_err(|e| {
-            RoxWarpError::Connection(format!("failed to add CA cert: {e}"))
-        })?;
+        root_store
+            .add(ca.clone())
+            .map_err(|e| RoxWarpError::Connection(format!("failed to add CA cert: {e}")))?;
     }
 
     let config = rustls::ClientConfig::builder()
         .with_root_certificates(root_store)
         .with_client_auth_cert(certs, key)
-        .map_err(|e| {
-            RoxWarpError::Connection(format!("failed to build client TLS config: {e}"))
-        })?;
+        .map_err(|e| RoxWarpError::Connection(format!("failed to build client TLS config: {e}")))?;
 
     Ok(Arc::new(config))
 }

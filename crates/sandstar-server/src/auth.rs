@@ -428,9 +428,7 @@ impl AuthState {
     pub fn new(store: AuthStore) -> Self {
         Self {
             store,
-            sessions: std::sync::Arc::new(std::sync::RwLock::new(SessionStore::new(
-                MAX_SESSIONS,
-            ))),
+            sessions: std::sync::Arc::new(std::sync::RwLock::new(SessionStore::new(MAX_SESSIONS))),
             handshakes: std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
     }
@@ -447,10 +445,7 @@ impl AuthState {
 
     /// Begin a SCRAM handshake for the given client-first-message.
     /// Returns (handshake_token, server-first-message) or an error.
-    pub fn begin_scram(
-        &self,
-        client_first_msg: &str,
-    ) -> Result<(String, String), String> {
+    pub fn begin_scram(&self, client_first_msg: &str) -> Result<(String, String), String> {
         let cf = parse_client_first(client_first_msg)?;
 
         let stored = self
@@ -542,8 +537,7 @@ fn hi(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
 
 /// HMAC-SHA-256(key, msg)
 fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
-    let mut mac =
-        HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(msg);
     let result = mac.finalize().into_bytes();
     let mut out = [0u8; 32];
@@ -600,8 +594,7 @@ pub fn scram_client_final(
         }
     }
 
-    let combined_nonce =
-        combined_nonce.ok_or_else(|| "missing r= in server-first".to_string())?;
+    let combined_nonce = combined_nonce.ok_or_else(|| "missing r= in server-first".to_string())?;
     let salt_b64 = salt_b64.ok_or_else(|| "missing s= in server-first".to_string())?;
     let iterations = iterations.ok_or_else(|| "missing i= in server-first".to_string())?;
 
@@ -684,21 +677,23 @@ mod tests {
             .expect("begin_scram should succeed");
 
         // Client step 2: build client-final
-        let client_final = scram_client_final(
-            "hunter2",
-            &client_nonce,
-            &client_first_bare,
-            &server_first,
-        )
-        .expect("client_final should succeed");
+        let client_final =
+            scram_client_final("hunter2", &client_nonce, &client_first_bare, &server_first)
+                .expect("client_final should succeed");
 
         // Server step 2: verify and issue session
         let (session_token, server_sig) = auth_state
             .complete_scram(&hs_token, &client_final)
             .expect("complete_scram should succeed");
 
-        assert!(!session_token.is_empty(), "session token should be non-empty");
-        assert!(!server_sig.is_empty(), "server signature should be non-empty");
+        assert!(
+            !session_token.is_empty(),
+            "session token should be non-empty"
+        );
+        assert!(
+            !server_sig.is_empty(),
+            "server signature should be non-empty"
+        );
 
         // Session token should work
         assert!(auth_state.check_token(&session_token));
@@ -881,13 +876,9 @@ mod tests {
         let (hs_token, server_first) = auth_state.begin_scram(&client_first).unwrap();
 
         // Build a valid client-final but with a tampered proof (flip every byte)
-        let real_final = scram_client_final(
-            "correct",
-            &client_nonce,
-            &client_first_bare,
-            &server_first,
-        )
-        .unwrap();
+        let real_final =
+            scram_client_final("correct", &client_nonce, &client_first_bare, &server_first)
+                .unwrap();
 
         // Extract the proof and corrupt it
         let p_idx = real_final.rfind(",p=").unwrap();
@@ -896,11 +887,7 @@ mod tests {
         for b in proof_bytes.iter_mut() {
             *b ^= 0xFF; // flip all bits
         }
-        let corrupted_final = format!(
-            "{},p={}",
-            &real_final[..p_idx],
-            BASE64.encode(&proof_bytes)
-        );
+        let corrupted_final = format!("{},p={}", &real_final[..p_idx], BASE64.encode(&proof_bytes));
 
         let result = auth_state.complete_scram(&hs_token, &corrupted_final);
         assert!(result.is_err());
@@ -957,7 +944,11 @@ mod tests {
             scram_client_final("", &client_nonce, &client_first_bare, &server_first).unwrap();
 
         let result = auth_state.complete_scram(&hs_token, &client_final);
-        assert!(result.is_ok(), "empty password credential should complete: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "empty password credential should complete: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -1068,7 +1059,13 @@ mod tests {
             let (client_first, client_nonce) = scram_client_first(&username);
             let client_first_bare = client_first.strip_prefix("n,,").unwrap().to_string();
             let (hs_token, server_first) = auth_state.begin_scram(&client_first).unwrap();
-            handshakes.push((hs_token, server_first, client_nonce, client_first_bare, password));
+            handshakes.push((
+                hs_token,
+                server_first,
+                client_nonce,
+                client_first_bare,
+                password,
+            ));
         }
 
         // Complete all handshakes — none should interfere with each other
@@ -1089,7 +1086,11 @@ mod tests {
             assert!(auth_state.check_token(token));
         }
         let unique: std::collections::HashSet<_> = session_tokens.iter().collect();
-        assert_eq!(unique.len(), session_tokens.len(), "all tokens must be unique");
+        assert_eq!(
+            unique.len(),
+            session_tokens.len(),
+            "all tokens must be unique"
+        );
     }
 
     #[test]
@@ -1155,7 +1156,9 @@ mod tests {
         // Second completion with same token fails (token consumed)
         let result2 = auth_state.complete_scram(&hs_token, &client_final);
         assert!(result2.is_err());
-        assert!(result2.unwrap_err().contains("invalid or expired handshake token"));
+        assert!(result2
+            .unwrap_err()
+            .contains("invalid or expired handshake token"));
     }
 
     #[test]
@@ -1194,6 +1197,9 @@ mod tests {
         auth_state.cleanup_expired();
 
         let hs = auth_state.handshakes.read().unwrap();
-        assert!(hs.is_empty(), "expired handshake should have been cleaned up");
+        assert!(
+            hs.is_empty(),
+            "expired handshake should have been cleaned up"
+        );
     }
 }

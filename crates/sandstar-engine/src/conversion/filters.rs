@@ -143,7 +143,12 @@ impl Default for RateLimitConfig {
 /// Apply smoothing filter to a value.
 ///
 /// Returns the smoothed value. Passes through raw input if fewer than 2 samples.
-pub fn apply_smoothing(state: &mut SmoothState, value: f64, window: usize, method: SmoothMethod) -> f64 {
+pub fn apply_smoothing(
+    state: &mut SmoothState,
+    value: f64,
+    window: usize,
+    method: SmoothMethod,
+) -> f64 {
     let window = window.clamp(2, SMOOTH_BUFFER_MAX);
 
     // Add value to circular buffer
@@ -195,7 +200,12 @@ pub fn apply_smoothing(state: &mut SmoothState, value: f64, window: usize, metho
 /// Apply rate limiting to a value.
 ///
 /// Limits how fast the output can change (asymmetric rise/fall rates).
-pub fn apply_rate_limit(state: &mut RateLimitState, value: f64, max_rise: f64, max_fall: f64) -> f64 {
+pub fn apply_rate_limit(
+    state: &mut RateLimitState,
+    value: f64,
+    max_rise: f64,
+    max_fall: f64,
+) -> f64 {
     if !state.initialized {
         state.initialized = true;
         state.last_output = value;
@@ -239,11 +249,7 @@ pub fn apply_rate_limit(state: &mut RateLimitState, value: f64, max_rise: f64, m
 ///
 /// Rejects values that change too rapidly (sensor glitch detection).
 /// During startup, discards the first N readings to let the sensor settle.
-pub fn apply_spike_filter(
-    state: &mut SpikeState,
-    value: f64,
-    config: &SpikeConfig,
-) -> f64 {
+pub fn apply_spike_filter(state: &mut SpikeState, value: f64, config: &SpikeConfig) -> f64 {
     state.reading_count += 1;
 
     // During startup discard period, accept everything to build baseline
@@ -282,7 +288,10 @@ mod tests {
         let mut state = SmoothState::default();
 
         // First sample passes through
-        assert_eq!(apply_smoothing(&mut state, 10.0, 3, SmoothMethod::Mean), 10.0);
+        assert_eq!(
+            apply_smoothing(&mut state, 10.0, 3, SmoothMethod::Mean),
+            10.0
+        );
 
         // Second sample: mean of [10, 20] = 15
         let result = apply_smoothing(&mut state, 20.0, 3, SmoothMethod::Mean);

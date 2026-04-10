@@ -188,6 +188,10 @@ mod tests {
         let _pid = PidFile::create(&pid_path).unwrap();
         let meta = fs::metadata(&pid_path).unwrap();
         let mode = meta.permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "PID file should have 0600 permissions, got {:o}", mode);
+        assert_eq!(
+            mode, 0o600,
+            "PID file should have 0600 permissions, got {:o}",
+            mode
+        );
     }
 }

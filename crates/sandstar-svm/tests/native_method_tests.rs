@@ -3,8 +3,8 @@
 //! Verifies that the newly-enabled native methods are properly registered
 //! and callable through the NativeTable dispatch system.
 
-use sandstar_svm::native_table::{NativeContext, NativeTable};
 use sandstar_svm::native_mod::register_all_natives;
+use sandstar_svm::native_table::{NativeContext, NativeTable};
 
 // ════════════════════════════════════════════════════════════════
 // Helper
@@ -174,7 +174,10 @@ fn test_sys_platform_type() {
     // Kit 0 method 0 = Sys.platformType()
     let result = table.call(0, 0, &mut ctx, &[]).unwrap();
     // Should return a non-zero handle to a static string
-    assert_ne!(result, 0, "Sys.platformType() should return a non-zero handle");
+    assert_ne!(
+        result, 0,
+        "Sys.platformType() should return a non-zero handle"
+    );
 }
 
 #[test]
@@ -185,7 +188,10 @@ fn test_sys_ticks() {
 
     // Kit 0 method 14 = Sys.ticks() — wide method returning i64 nanoseconds
     let result = table.call_wide(0, 14, &mut ctx, &[]).unwrap();
-    assert!(result > 0, "Sys.ticks() should return positive nanoseconds, got {result}");
+    assert!(
+        result > 0,
+        "Sys.ticks() should return positive nanoseconds, got {result}"
+    );
 
     // Call again — should be >= first result (monotonic)
     let result2 = table.call_wide(0, 14, &mut ctx, &[]).unwrap();
@@ -256,7 +262,10 @@ fn test_udp_close_on_invalid_handle() {
     // Kit 2 method 12 = UdpSocket.close()
     // Calling close on a non-existent socket should not panic
     let result = table.call(2, 12, &mut ctx, &[0]);
-    assert!(result.is_ok(), "UdpSocket.close() on invalid handle should not error");
+    assert!(
+        result.is_ok(),
+        "UdpSocket.close() on invalid handle should not error"
+    );
 }
 
 #[test]
@@ -268,7 +277,10 @@ fn test_tcp_close_on_invalid_handle() {
     // Kit 2 method 4 = TcpSocket.close()
     // Calling close on a non-existent socket should not panic
     let result = table.call(2, 4, &mut ctx, &[0]);
-    assert!(result.is_ok(), "TcpSocket.close() on invalid handle should not error");
+    assert!(
+        result.is_ok(),
+        "TcpSocket.close() on invalid handle should not error"
+    );
 }
 
 #[test]
@@ -279,7 +291,10 @@ fn test_tcp_server_close_on_invalid_handle() {
 
     // Kit 2 method 7 = TcpServerSocket.close()
     let result = table.call(2, 7, &mut ctx, &[0]);
-    assert!(result.is_ok(), "TcpServerSocket.close() on invalid handle should not error");
+    assert!(
+        result.is_ok(),
+        "TcpServerSocket.close() on invalid handle should not error"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -299,13 +314,15 @@ fn test_crypto_sha1() {
     // params: [input_ptr, input_off, len, output_ptr, output_off]
     // For empty input: len=0, input doesn't matter
     let result = table.call(2, 15, &mut ctx, &[0, 0, 0, 64, 0]);
-    assert!(result.is_ok(), "Crypto.sha1() should succeed on empty input");
+    assert!(
+        result.is_ok(),
+        "Crypto.sha1() should succeed on empty input"
+    );
 
     // Check SHA-1 of empty string at mem[64..84]
     let expected_sha1: [u8; 20] = [
-        0xda, 0x39, 0xa3, 0xee, 0x5e, 0x6b, 0x4b, 0x0d,
-        0x32, 0x55, 0xbf, 0xef, 0x95, 0x60, 0x18, 0x90,
-        0xaf, 0xd8, 0x07, 0x09,
+        0xda, 0x39, 0xa3, 0xee, 0x5e, 0x6b, 0x4b, 0x0d, 0x32, 0x55, 0xbf, 0xef, 0x95, 0x60, 0x18,
+        0x90, 0xaf, 0xd8, 0x07, 0x09,
     ];
     assert_eq!(
         &mem[64..84],

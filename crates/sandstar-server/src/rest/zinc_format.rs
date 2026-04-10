@@ -3,11 +3,11 @@
 //! Each function builds a typed Zinc 3.0 grid for a specific REST endpoint.
 //! Used when `Accept: text/zinc` is present.
 
-use super::zinc_grid::{ZincColumn, ZincGrid, ZincValue};
 use super::types::{AboutResponse, OpEntry};
+use super::zinc_grid::{ZincColumn, ZincGrid, ZincValue};
 use super::{ChannelValue, WatchResponse};
-use sandstar_ipc::types::{ChannelInfo, PollInfo, StatusInfo};
 use crate::history::HistoryPoint;
+use sandstar_ipc::types::{ChannelInfo, PollInfo, StatusInfo};
 
 // ── Helpers ─────────────────────────────────────────────────
 
@@ -225,13 +225,7 @@ pub fn history_to_zinc(points: &[HistoryPoint]) -> ZincGrid {
 pub fn formats_to_zinc(formats: &[super::types::FormatEntry]) -> ZincGrid {
     let rows = formats
         .iter()
-        .map(|f| {
-            vec![
-                str_val(f.mime),
-                bool_val(f.receive),
-                bool_val(f.send),
-            ]
-        })
+        .map(|f| vec![str_val(f.mime), bool_val(f.receive), bool_val(f.send)])
         .collect();
     ZincGrid {
         meta: vec![],

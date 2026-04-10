@@ -171,7 +171,10 @@ impl LinuxPwm {
     ///
     /// Matches C: `pwmio_export(chip, channel)`
     pub fn export(&mut self, chip: u32, channel: u32) -> Result<(), HalError> {
-        let export_path = self.sysfs_root.join(format!("pwmchip{}", chip)).join("export");
+        let export_path = self
+            .sysfs_root
+            .join(format!("pwmchip{}", chip))
+            .join("export");
         let ch_str = channel.to_string();
 
         // Export the channel (may fail if already exported)
@@ -222,7 +225,10 @@ impl LinuxPwm {
         let val = period_ns.to_string();
 
         let ch = self.channels.entry((chip, channel)).or_insert(PwmChannel {
-            duty_fd: None, period_fd: None, polarity_fd: None, enable_fd: None,
+            duty_fd: None,
+            period_fd: None,
+            polarity_fd: None,
+            enable_fd: None,
         });
         sysfs::write_cached(&mut ch.period_fd, &path, &val)
             .map_err(|e| Self::io_err(chip, channel, "set_period", e))
@@ -240,7 +246,10 @@ impl LinuxPwm {
         let path = self.polarity_path(chip, channel);
 
         let ch = self.channels.entry((chip, channel)).or_insert(PwmChannel {
-            duty_fd: None, period_fd: None, polarity_fd: None, enable_fd: None,
+            duty_fd: None,
+            period_fd: None,
+            polarity_fd: None,
+            enable_fd: None,
         });
         sysfs::write_cached(&mut ch.polarity_fd, &path, polarity.as_sysfs_str())
             .map_err(|e| Self::io_err(chip, channel, "set_polarity", e))
@@ -254,7 +263,10 @@ impl LinuxPwm {
         let val = if enabled { "1" } else { "0" };
 
         let ch = self.channels.entry((chip, channel)).or_insert(PwmChannel {
-            duty_fd: None, period_fd: None, polarity_fd: None, enable_fd: None,
+            duty_fd: None,
+            period_fd: None,
+            polarity_fd: None,
+            enable_fd: None,
         });
         sysfs::write_cached(&mut ch.enable_fd, &path, val)
             .map_err(|e| Self::io_err(chip, channel, "set_enable", e))
@@ -402,12 +414,9 @@ mod tests {
             let mut pwm = LinuxPwm::with_sysfs_root(root.clone());
             pwm.write_duty(4, 0, 750000.0).unwrap();
 
-            let duty_content = fs::read_to_string(
-                root.join("pwmchip4")
-                    .join("pwm-4:0")
-                    .join("duty_cycle"),
-            )
-            .unwrap();
+            let duty_content =
+                fs::read_to_string(root.join("pwmchip4").join("pwm-4:0").join("duty_cycle"))
+                    .unwrap();
             assert!(duty_content.starts_with("750000"));
         }
 
@@ -443,8 +452,7 @@ mod tests {
             pwm.export(4, 0).unwrap();
 
             // Verify export file was written
-            let export_content =
-                fs::read_to_string(root.join("pwmchip4").join("export")).unwrap();
+            let export_content = fs::read_to_string(root.join("pwmchip4").join("export")).unwrap();
             assert_eq!(export_content, "0");
 
             // Verify channel is tracked
@@ -483,10 +491,8 @@ mod tests {
             let mut pwm = LinuxPwm::with_sysfs_root(root.clone());
             pwm.set_period(4, 0, 20_000_000).unwrap();
 
-            let period_content = fs::read_to_string(
-                root.join("pwmchip4").join("pwm-4:0").join("period"),
-            )
-            .unwrap();
+            let period_content =
+                fs::read_to_string(root.join("pwmchip4").join("pwm-4:0").join("period")).unwrap();
             assert_eq!(period_content, "20000000");
         }
 
@@ -501,10 +507,8 @@ mod tests {
             let mut pwm = LinuxPwm::with_sysfs_root(root.clone());
             pwm.set_polarity(4, 0, PwmPolarity::Normal).unwrap();
 
-            let polarity_content = fs::read_to_string(
-                root.join("pwmchip4").join("pwm-4:0").join("polarity"),
-            )
-            .unwrap();
+            let polarity_content =
+                fs::read_to_string(root.join("pwmchip4").join("pwm-4:0").join("polarity")).unwrap();
             assert_eq!(polarity_content, "normal");
         }
 
@@ -519,10 +523,8 @@ mod tests {
             let mut pwm = LinuxPwm::with_sysfs_root(root.clone());
             pwm.set_polarity(4, 0, PwmPolarity::Inversed).unwrap();
 
-            let polarity_content = fs::read_to_string(
-                root.join("pwmchip4").join("pwm-4:0").join("polarity"),
-            )
-            .unwrap();
+            let polarity_content =
+                fs::read_to_string(root.join("pwmchip4").join("pwm-4:0").join("polarity")).unwrap();
             assert_eq!(polarity_content, "inversed");
         }
 
@@ -537,10 +539,8 @@ mod tests {
             let mut pwm = LinuxPwm::with_sysfs_root(root.clone());
             pwm.set_enable(4, 0, true).unwrap();
 
-            let enable_content = fs::read_to_string(
-                root.join("pwmchip4").join("pwm-4:0").join("enable"),
-            )
-            .unwrap();
+            let enable_content =
+                fs::read_to_string(root.join("pwmchip4").join("pwm-4:0").join("enable")).unwrap();
             assert_eq!(enable_content, "1");
         }
 
@@ -555,10 +555,8 @@ mod tests {
             let mut pwm = LinuxPwm::with_sysfs_root(root.clone());
             pwm.set_enable(4, 0, false).unwrap();
 
-            let enable_content = fs::read_to_string(
-                root.join("pwmchip4").join("pwm-4:0").join("enable"),
-            )
-            .unwrap();
+            let enable_content =
+                fs::read_to_string(root.join("pwmchip4").join("pwm-4:0").join("enable")).unwrap();
             assert_eq!(enable_content, "0");
         }
 

@@ -60,18 +60,13 @@ pub trait AsyncDriver: Send + Sync {
     /// Read current values for a batch of points.
     ///
     /// Returns `(point_id, result)` pairs. Failed reads return `DriverError`.
-    async fn sync_cur(
-        &mut self,
-        points: &[DriverPointRef],
-    ) -> Vec<(u32, Result<f64, DriverError>)>;
+    async fn sync_cur(&mut self, points: &[DriverPointRef])
+        -> Vec<(u32, Result<f64, DriverError>)>;
 
     /// Write values to points.
     ///
     /// Returns `(point_id, result)` pairs. Failed writes return `DriverError`.
-    async fn write(
-        &mut self,
-        writes: &[(u32, f64)],
-    ) -> Vec<(u32, Result<(), DriverError>)>;
+    async fn write(&mut self, writes: &[(u32, f64)]) -> Vec<(u32, Result<(), DriverError>)>;
 
     /// Subscribe to change-of-value notifications for these points.
     ///
@@ -180,10 +175,7 @@ impl AnyDriver {
     }
 
     /// Write values to points.
-    pub async fn write(
-        &mut self,
-        writes: &[(u32, f64)],
-    ) -> Vec<(u32, Result<(), DriverError>)> {
+    pub async fn write(&mut self, writes: &[(u32, f64)]) -> Vec<(u32, Result<(), DriverError>)> {
         match self {
             AnyDriver::Sync(d) => d.write(writes),
             AnyDriver::Async(d) => d.write(writes).await,
@@ -253,16 +245,10 @@ mod tests {
         fn ping(&mut self) -> Result<DriverMeta, DriverError> {
             Ok(DriverMeta::default())
         }
-        fn sync_cur(
-            &mut self,
-            points: &[DriverPointRef],
-        ) -> Vec<(u32, Result<f64, DriverError>)> {
+        fn sync_cur(&mut self, points: &[DriverPointRef]) -> Vec<(u32, Result<f64, DriverError>)> {
             points.iter().map(|p| (p.point_id, Ok(42.0))).collect()
         }
-        fn write(
-            &mut self,
-            writes: &[(u32, f64)],
-        ) -> Vec<(u32, Result<(), DriverError>)> {
+        fn write(&mut self, writes: &[(u32, f64)]) -> Vec<(u32, Result<(), DriverError>)> {
             writes.iter().map(|(id, _)| (*id, Ok(()))).collect()
         }
     }
@@ -313,10 +299,7 @@ mod tests {
         ) -> Vec<(u32, Result<f64, DriverError>)> {
             points.iter().map(|p| (p.point_id, Ok(99.0))).collect()
         }
-        async fn write(
-            &mut self,
-            writes: &[(u32, f64)],
-        ) -> Vec<(u32, Result<(), DriverError>)> {
+        async fn write(&mut self, writes: &[(u32, f64)]) -> Vec<(u32, Result<(), DriverError>)> {
             writes.iter().map(|(id, _)| (*id, Ok(()))).collect()
         }
     }

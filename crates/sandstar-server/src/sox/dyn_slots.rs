@@ -25,13 +25,34 @@ pub const DEFAULT_MAX_TOTAL: usize = 10_000;
 
 /// Common Haystack / protocol tag names pre-interned at startup.
 const COMMON_TAG_NAMES: &[&str] = &[
-    "dis", "navName", "unit", "kind", "point", "sensor", "cmd",
-    "equip", "site", "geoAddr", "geoCoord", "tz",
-    "modbusAddr", "modbusReg", "modbusType", "modbusScale",
-    "bacnetObj", "bacnetType", "bacnetProp",
-    "devEUI", "appEUI", "devAddr",
-    "mqttTopic", "mqttQos",
-    "channel", "direction", "enabled", "status",
+    "dis",
+    "navName",
+    "unit",
+    "kind",
+    "point",
+    "sensor",
+    "cmd",
+    "equip",
+    "site",
+    "geoAddr",
+    "geoCoord",
+    "tz",
+    "modbusAddr",
+    "modbusReg",
+    "modbusType",
+    "modbusScale",
+    "bacnetObj",
+    "bacnetType",
+    "bacnetProp",
+    "devEUI",
+    "appEUI",
+    "devAddr",
+    "mqttTopic",
+    "mqttQos",
+    "channel",
+    "direction",
+    "enabled",
+    "status",
 ];
 
 // ── String Interner ──────────────────────────────────────────
@@ -362,11 +383,7 @@ impl DynSlotStore {
     /// Bulk-set all tags for a component, replacing any existing tags.
     ///
     /// Returns `Err` if the new tag count would exceed limits.
-    pub fn set_all(
-        &mut self,
-        comp_id: u16,
-        tags: HashMap<String, DynValue>,
-    ) -> Result<(), String> {
+    pub fn set_all(&mut self, comp_id: u16, tags: HashMap<String, DynValue>) -> Result<(), String> {
         if tags.len() > self.max_per_comp {
             return Err(format!(
                 "tag count {} exceeds per-component limit {}",
@@ -451,11 +468,7 @@ impl DynSlotStore {
     /// Computed slots are evaluated against the component's current stored tags.
     /// If a computed slot has the same name as a stored tag, the stored tag wins.
     pub fn get_all_with_computed(&self, comp_id: u16) -> HashMap<String, DynValue> {
-        let mut result = self
-            .slots
-            .get(&comp_id)
-            .cloned()
-            .unwrap_or_default();
+        let mut result = self.slots.get(&comp_id).cloned().unwrap_or_default();
 
         if let Some(computed) = self.computed.get(&comp_id) {
             for slot in computed {
@@ -522,7 +535,11 @@ impl DynSlotStore {
                 false_val,
             } => {
                 let exists = tags.map(|t| t.contains_key(tag)).unwrap_or(false);
-                if exists { true_val.clone() } else { false_val.clone() }
+                if exists {
+                    true_val.clone()
+                } else {
+                    false_val.clone()
+                }
             }
         }
     }
@@ -577,17 +594,21 @@ impl DynSlotStore {
             version: 1,
             slots: self.slots.clone(),
         };
-        let json = serde_json::to_string_pretty(&data)
-            .map_err(|e| format!("serialize dyn_slots: {e}"))?;
+        let json =
+            serde_json::to_string_pretty(&data).map_err(|e| format!("serialize dyn_slots: {e}"))?;
 
         // Write atomically: write to temp file then rename.
         let tmp_path = format!("{path}.tmp");
-        std::fs::write(&tmp_path, json)
-            .map_err(|e| format!("write {tmp_path}: {e}"))?;
+        std::fs::write(&tmp_path, json).map_err(|e| format!("write {tmp_path}: {e}"))?;
         std::fs::rename(&tmp_path, path)
             .map_err(|e| format!("rename {tmp_path} -> {path}: {e}"))?;
 
-        info!(path, total = self.total, components = self.slots.len(), "dyn_slots saved");
+        info!(
+            path,
+            total = self.total,
+            components = self.slots.len(),
+            "dyn_slots saved"
+        );
         Ok(())
     }
 
@@ -601,8 +622,7 @@ impl DynSlotStore {
             return Ok(0);
         }
 
-        let json = std::fs::read_to_string(p)
-            .map_err(|e| format!("read {path}: {e}"))?;
+        let json = std::fs::read_to_string(p).map_err(|e| format!("read {path}: {e}"))?;
         let data: PersistData = match serde_json::from_str(&json) {
             Ok(d) => d,
             Err(e) => {
@@ -865,8 +885,12 @@ mod tests {
         store.set(1, "bool".into(), DynValue::Bool(true)).unwrap();
         store.set(1, "int".into(), DynValue::Int(42)).unwrap();
         store.set(1, "float".into(), DynValue::Float(3.14)).unwrap();
-        store.set(1, "str".into(), DynValue::Str("hello".into())).unwrap();
-        store.set(1, "ref".into(), DynValue::Ref("@p:demo".into())).unwrap();
+        store
+            .set(1, "str".into(), DynValue::Str("hello".into()))
+            .unwrap();
+        store
+            .set(1, "ref".into(), DynValue::Ref("@p:demo".into()))
+            .unwrap();
 
         assert_eq!(store.tag_count(1), 7);
         assert_eq!(store.get(1, "null"), Some(&DynValue::Null));
@@ -885,13 +909,21 @@ mod tests {
         let path_str = path.to_str().unwrap();
 
         let mut store = DynSlotStore::with_defaults();
-        store.set(10, "devEUI".into(), DynValue::Str("A81758".into())).unwrap();
+        store
+            .set(10, "devEUI".into(), DynValue::Str("A81758".into()))
+            .unwrap();
         store.set(10, "rssi".into(), DynValue::Int(-72)).unwrap();
-        store.set(20, "address".into(), DynValue::Int(40001)).unwrap();
-        store.set(20, "enabled".into(), DynValue::Bool(true)).unwrap();
+        store
+            .set(20, "address".into(), DynValue::Int(40001))
+            .unwrap();
+        store
+            .set(20, "enabled".into(), DynValue::Bool(true))
+            .unwrap();
         store.set(20, "point".into(), DynValue::Marker).unwrap();
         store.set(30, "scale".into(), DynValue::Float(0.1)).unwrap();
-        store.set(30, "ref".into(), DynValue::Ref("@p:demo:r:abc".into())).unwrap();
+        store
+            .set(30, "ref".into(), DynValue::Ref("@p:demo:r:abc".into()))
+            .unwrap();
         store.set(30, "empty".into(), DynValue::Null).unwrap();
 
         store.save(path_str).expect("save should succeed");
@@ -902,13 +934,19 @@ mod tests {
         let loaded = store2.load(path_str).expect("load should succeed");
         assert_eq!(loaded, 8);
         assert_eq!(store2.total_count(), 8);
-        assert_eq!(store2.get(10, "devEUI"), Some(&DynValue::Str("A81758".into())));
+        assert_eq!(
+            store2.get(10, "devEUI"),
+            Some(&DynValue::Str("A81758".into()))
+        );
         assert_eq!(store2.get(10, "rssi"), Some(&DynValue::Int(-72)));
         assert_eq!(store2.get(20, "address"), Some(&DynValue::Int(40001)));
         assert_eq!(store2.get(20, "enabled"), Some(&DynValue::Bool(true)));
         assert_eq!(store2.get(20, "point"), Some(&DynValue::Marker));
         assert_eq!(store2.get(30, "scale"), Some(&DynValue::Float(0.1)));
-        assert_eq!(store2.get(30, "ref"), Some(&DynValue::Ref("@p:demo:r:abc".into())));
+        assert_eq!(
+            store2.get(30, "ref"),
+            Some(&DynValue::Ref("@p:demo:r:abc".into()))
+        );
         assert_eq!(store2.get(30, "empty"), Some(&DynValue::Null));
 
         // Loaded store should not be dirty.
@@ -918,7 +956,9 @@ mod tests {
     #[test]
     fn load_nonexistent_file_is_noop() {
         let mut store = DynSlotStore::with_defaults();
-        let loaded = store.load("/nonexistent/path/dyn_slots.json").expect("should succeed");
+        let loaded = store
+            .load("/nonexistent/path/dyn_slots.json")
+            .expect("should succeed");
         assert_eq!(loaded, 0);
         assert_eq!(store.total_count(), 0);
     }
@@ -983,7 +1023,9 @@ mod tests {
         std::fs::write(&path, "{ this is not valid json !!!").expect("write corrupt");
 
         let mut store = DynSlotStore::with_defaults();
-        let loaded = store.load(path.to_str().unwrap()).expect("should not error on corrupt");
+        let loaded = store
+            .load(path.to_str().unwrap())
+            .expect("should not error on corrupt");
         assert_eq!(loaded, 0);
         assert_eq!(store.total_count(), 0);
     }
@@ -1013,7 +1055,10 @@ mod tests {
     #[test]
     fn interner_pre_interns_common_names() {
         let interner = TagNameInterner::new();
-        assert!(interner.len() >= 28, "should have pre-interned common names");
+        assert!(
+            interner.len() >= 28,
+            "should have pre-interned common names"
+        );
         // Verify a few known common names.
         assert!(interner.get_id("dis").is_some());
         assert!(interner.get_id("unit").is_some());
@@ -1067,7 +1112,9 @@ mod tests {
     fn store_interns_tag_names_on_set() {
         let mut store = DynSlotStore::with_defaults();
         let before = store.interner().len();
-        store.set(1, "customDriverTag".into(), DynValue::Marker).unwrap();
+        store
+            .set(1, "customDriverTag".into(), DynValue::Marker)
+            .unwrap();
         assert!(store.interner().get_id("customDriverTag").is_some());
         assert_eq!(store.interner().len(), before + 1);
     }
@@ -1097,10 +1144,13 @@ mod tests {
     #[test]
     fn computed_constant() {
         let mut store = DynSlotStore::with_defaults();
-        store.add_computed(10, ComputedSlot {
-            name: "version".into(),
-            formula: ComputedFormula::Constant(DynValue::Str("1.0".into())),
-        });
+        store.add_computed(
+            10,
+            ComputedSlot {
+                name: "version".into(),
+                formula: ComputedFormula::Constant(DynValue::Str("1.0".into())),
+            },
+        );
         let all = store.get_all_with_computed(10);
         assert_eq!(all.get("version"), Some(&DynValue::Str("1.0".into())));
     }
@@ -1108,11 +1158,16 @@ mod tests {
     #[test]
     fn computed_copy_tag() {
         let mut store = DynSlotStore::with_defaults();
-        store.set(10, "dis".into(), DynValue::Str("Room Temp".into())).unwrap();
-        store.add_computed(10, ComputedSlot {
-            name: "label".into(),
-            formula: ComputedFormula::CopyTag("dis".into()),
-        });
+        store
+            .set(10, "dis".into(), DynValue::Str("Room Temp".into()))
+            .unwrap();
+        store.add_computed(
+            10,
+            ComputedSlot {
+                name: "label".into(),
+                formula: ComputedFormula::CopyTag("dis".into()),
+            },
+        );
         let all = store.get_all_with_computed(10);
         assert_eq!(all.get("label"), Some(&DynValue::Str("Room Temp".into())));
     }
@@ -1120,10 +1175,13 @@ mod tests {
     #[test]
     fn computed_copy_tag_missing_source() {
         let mut store = DynSlotStore::with_defaults();
-        store.add_computed(10, ComputedSlot {
-            name: "label".into(),
-            formula: ComputedFormula::CopyTag("nonexistent".into()),
-        });
+        store.add_computed(
+            10,
+            ComputedSlot {
+                name: "label".into(),
+                formula: ComputedFormula::CopyTag("nonexistent".into()),
+            },
+        );
         let all = store.get_all_with_computed(10);
         assert_eq!(all.get("label"), Some(&DynValue::Null));
     }
@@ -1131,17 +1189,31 @@ mod tests {
     #[test]
     fn computed_concat() {
         let mut store = DynSlotStore::with_defaults();
-        store.set(10, "first".into(), DynValue::Str("Room".into())).unwrap();
-        store.set(10, "sep".into(), DynValue::Str(" - ".into())).unwrap();
-        store.set(10, "second".into(), DynValue::Str("Temp".into())).unwrap();
-        store.add_computed(10, ComputedSlot {
-            name: "fullName".into(),
-            formula: ComputedFormula::Concat(vec![
-                "first".into(), "sep".into(), "second".into(),
-            ]),
-        });
+        store
+            .set(10, "first".into(), DynValue::Str("Room".into()))
+            .unwrap();
+        store
+            .set(10, "sep".into(), DynValue::Str(" - ".into()))
+            .unwrap();
+        store
+            .set(10, "second".into(), DynValue::Str("Temp".into()))
+            .unwrap();
+        store.add_computed(
+            10,
+            ComputedSlot {
+                name: "fullName".into(),
+                formula: ComputedFormula::Concat(vec![
+                    "first".into(),
+                    "sep".into(),
+                    "second".into(),
+                ]),
+            },
+        );
         let all = store.get_all_with_computed(10);
-        assert_eq!(all.get("fullName"), Some(&DynValue::Str("Room - Temp".into())));
+        assert_eq!(
+            all.get("fullName"),
+            Some(&DynValue::Str("Room - Temp".into()))
+        );
     }
 
     #[test]
@@ -1149,14 +1221,17 @@ mod tests {
         let mut store = DynSlotStore::with_defaults();
         store.set(10, "a".into(), DynValue::Float(10.0)).unwrap();
         store.set(10, "b".into(), DynValue::Int(5)).unwrap();
-        store.add_computed(10, ComputedSlot {
-            name: "sum".into(),
-            formula: ComputedFormula::NumericOp {
-                left: "a".into(),
-                op: NumericOp::Add,
-                right: "b".into(),
+        store.add_computed(
+            10,
+            ComputedSlot {
+                name: "sum".into(),
+                formula: ComputedFormula::NumericOp {
+                    left: "a".into(),
+                    op: NumericOp::Add,
+                    right: "b".into(),
+                },
             },
-        });
+        );
         let all = store.get_all_with_computed(10);
         assert_eq!(all.get("sum"), Some(&DynValue::Float(15.0)));
     }
@@ -1166,14 +1241,17 @@ mod tests {
         let mut store = DynSlotStore::with_defaults();
         store.set(10, "a".into(), DynValue::Float(10.0)).unwrap();
         store.set(10, "b".into(), DynValue::Float(3.0)).unwrap();
-        store.add_computed(10, ComputedSlot {
-            name: "diff".into(),
-            formula: ComputedFormula::NumericOp {
-                left: "a".into(),
-                op: NumericOp::Sub,
-                right: "b".into(),
+        store.add_computed(
+            10,
+            ComputedSlot {
+                name: "diff".into(),
+                formula: ComputedFormula::NumericOp {
+                    left: "a".into(),
+                    op: NumericOp::Sub,
+                    right: "b".into(),
+                },
             },
-        });
+        );
         let all = store.get_all_with_computed(10);
         assert_eq!(all.get("diff"), Some(&DynValue::Float(7.0)));
     }
@@ -1183,14 +1261,17 @@ mod tests {
         let mut store = DynSlotStore::with_defaults();
         store.set(10, "a".into(), DynValue::Float(4.0)).unwrap();
         store.set(10, "b".into(), DynValue::Float(2.5)).unwrap();
-        store.add_computed(10, ComputedSlot {
-            name: "product".into(),
-            formula: ComputedFormula::NumericOp {
-                left: "a".into(),
-                op: NumericOp::Mul,
-                right: "b".into(),
+        store.add_computed(
+            10,
+            ComputedSlot {
+                name: "product".into(),
+                formula: ComputedFormula::NumericOp {
+                    left: "a".into(),
+                    op: NumericOp::Mul,
+                    right: "b".into(),
+                },
             },
-        });
+        );
         let all = store.get_all_with_computed(10);
         assert_eq!(all.get("product"), Some(&DynValue::Float(10.0)));
     }
@@ -1200,14 +1281,17 @@ mod tests {
         let mut store = DynSlotStore::with_defaults();
         store.set(10, "a".into(), DynValue::Float(10.0)).unwrap();
         store.set(10, "b".into(), DynValue::Float(4.0)).unwrap();
-        store.add_computed(10, ComputedSlot {
-            name: "ratio".into(),
-            formula: ComputedFormula::NumericOp {
-                left: "a".into(),
-                op: NumericOp::Div,
-                right: "b".into(),
+        store.add_computed(
+            10,
+            ComputedSlot {
+                name: "ratio".into(),
+                formula: ComputedFormula::NumericOp {
+                    left: "a".into(),
+                    op: NumericOp::Div,
+                    right: "b".into(),
+                },
             },
-        });
+        );
         let all = store.get_all_with_computed(10);
         assert_eq!(all.get("ratio"), Some(&DynValue::Float(2.5)));
     }
@@ -1217,14 +1301,17 @@ mod tests {
         let mut store = DynSlotStore::with_defaults();
         store.set(10, "a".into(), DynValue::Float(10.0)).unwrap();
         store.set(10, "b".into(), DynValue::Float(0.0)).unwrap();
-        store.add_computed(10, ComputedSlot {
-            name: "ratio".into(),
-            formula: ComputedFormula::NumericOp {
-                left: "a".into(),
-                op: NumericOp::Div,
-                right: "b".into(),
+        store.add_computed(
+            10,
+            ComputedSlot {
+                name: "ratio".into(),
+                formula: ComputedFormula::NumericOp {
+                    left: "a".into(),
+                    op: NumericOp::Div,
+                    right: "b".into(),
+                },
             },
-        });
+        );
         let all = store.get_all_with_computed(10);
         assert_eq!(all.get("ratio"), Some(&DynValue::Null));
     }
@@ -1234,14 +1321,17 @@ mod tests {
         let mut store = DynSlotStore::with_defaults();
         store.set(10, "a".into(), DynValue::Float(10.0)).unwrap();
         // "b" is missing
-        store.add_computed(10, ComputedSlot {
-            name: "sum".into(),
-            formula: ComputedFormula::NumericOp {
-                left: "a".into(),
-                op: NumericOp::Add,
-                right: "b".into(),
+        store.add_computed(
+            10,
+            ComputedSlot {
+                name: "sum".into(),
+                formula: ComputedFormula::NumericOp {
+                    left: "a".into(),
+                    op: NumericOp::Add,
+                    right: "b".into(),
+                },
             },
-        });
+        );
         let all = store.get_all_with_computed(10);
         assert_eq!(all.get("sum"), Some(&DynValue::Null));
     }
@@ -1250,14 +1340,17 @@ mod tests {
     fn computed_tag_exists_true() {
         let mut store = DynSlotStore::with_defaults();
         store.set(10, "point".into(), DynValue::Marker).unwrap();
-        store.add_computed(10, ComputedSlot {
-            name: "isPoint".into(),
-            formula: ComputedFormula::TagExists {
-                tag: "point".into(),
-                true_val: DynValue::Bool(true),
-                false_val: DynValue::Bool(false),
+        store.add_computed(
+            10,
+            ComputedSlot {
+                name: "isPoint".into(),
+                formula: ComputedFormula::TagExists {
+                    tag: "point".into(),
+                    true_val: DynValue::Bool(true),
+                    false_val: DynValue::Bool(false),
+                },
             },
-        });
+        );
         let all = store.get_all_with_computed(10);
         assert_eq!(all.get("isPoint"), Some(&DynValue::Bool(true)));
     }
@@ -1266,14 +1359,17 @@ mod tests {
     fn computed_tag_exists_false() {
         let mut store = DynSlotStore::with_defaults();
         // "point" not set
-        store.add_computed(10, ComputedSlot {
-            name: "isPoint".into(),
-            formula: ComputedFormula::TagExists {
-                tag: "point".into(),
-                true_val: DynValue::Bool(true),
-                false_val: DynValue::Bool(false),
+        store.add_computed(
+            10,
+            ComputedSlot {
+                name: "isPoint".into(),
+                formula: ComputedFormula::TagExists {
+                    tag: "point".into(),
+                    true_val: DynValue::Bool(true),
+                    false_val: DynValue::Bool(false),
+                },
             },
-        });
+        );
         let all = store.get_all_with_computed(10);
         assert_eq!(all.get("isPoint"), Some(&DynValue::Bool(false)));
     }
@@ -1281,11 +1377,16 @@ mod tests {
     #[test]
     fn computed_stored_tag_takes_precedence() {
         let mut store = DynSlotStore::with_defaults();
-        store.set(10, "label".into(), DynValue::Str("stored".into())).unwrap();
-        store.add_computed(10, ComputedSlot {
-            name: "label".into(),
-            formula: ComputedFormula::Constant(DynValue::Str("computed".into())),
-        });
+        store
+            .set(10, "label".into(), DynValue::Str("stored".into()))
+            .unwrap();
+        store.add_computed(
+            10,
+            ComputedSlot {
+                name: "label".into(),
+                formula: ComputedFormula::Constant(DynValue::Str("computed".into())),
+            },
+        );
         let all = store.get_all_with_computed(10);
         // Stored tag should win over computed slot with same name.
         assert_eq!(all.get("label"), Some(&DynValue::Str("stored".into())));
@@ -1299,10 +1400,13 @@ mod tests {
 
         let mut store = DynSlotStore::with_defaults();
         store.set(10, "a".into(), DynValue::Int(1)).unwrap();
-        store.add_computed(10, ComputedSlot {
-            name: "doubled".into(),
-            formula: ComputedFormula::Constant(DynValue::Int(2)),
-        });
+        store.add_computed(
+            10,
+            ComputedSlot {
+                name: "doubled".into(),
+                formula: ComputedFormula::Constant(DynValue::Int(2)),
+            },
+        );
         store.save(path_str).unwrap();
 
         // Load into a new store — computed slots should NOT be restored.
@@ -1317,10 +1421,13 @@ mod tests {
     fn computed_get_all_without_computed_excludes_them() {
         let mut store = DynSlotStore::with_defaults();
         store.set(10, "a".into(), DynValue::Int(1)).unwrap();
-        store.add_computed(10, ComputedSlot {
-            name: "computed_tag".into(),
-            formula: ComputedFormula::Constant(DynValue::Int(99)),
-        });
+        store.add_computed(
+            10,
+            ComputedSlot {
+                name: "computed_tag".into(),
+                formula: ComputedFormula::Constant(DynValue::Int(99)),
+            },
+        );
         // get_all (the original method) should NOT include computed slots.
         let stored = store.get_all(10).unwrap();
         assert!(!stored.contains_key("computed_tag"));
@@ -1330,14 +1437,20 @@ mod tests {
     #[test]
     fn computed_replace_existing_slot() {
         let mut store = DynSlotStore::with_defaults();
-        store.add_computed(10, ComputedSlot {
-            name: "ver".into(),
-            formula: ComputedFormula::Constant(DynValue::Str("1.0".into())),
-        });
-        store.add_computed(10, ComputedSlot {
-            name: "ver".into(),
-            formula: ComputedFormula::Constant(DynValue::Str("2.0".into())),
-        });
+        store.add_computed(
+            10,
+            ComputedSlot {
+                name: "ver".into(),
+                formula: ComputedFormula::Constant(DynValue::Str("1.0".into())),
+            },
+        );
+        store.add_computed(
+            10,
+            ComputedSlot {
+                name: "ver".into(),
+                formula: ComputedFormula::Constant(DynValue::Str("2.0".into())),
+            },
+        );
         let slots = store.get_computed(10).unwrap();
         assert_eq!(slots.len(), 1);
         let all = store.get_all_with_computed(10);
@@ -1347,10 +1460,13 @@ mod tests {
     #[test]
     fn computed_remove() {
         let mut store = DynSlotStore::with_defaults();
-        store.add_computed(10, ComputedSlot {
-            name: "temp".into(),
-            formula: ComputedFormula::Constant(DynValue::Int(0)),
-        });
+        store.add_computed(
+            10,
+            ComputedSlot {
+                name: "temp".into(),
+                formula: ComputedFormula::Constant(DynValue::Int(0)),
+            },
+        );
         assert!(store.remove_computed(10, "temp"));
         assert!(!store.remove_computed(10, "temp")); // already gone
         assert!(store.get_computed(10).is_none());
@@ -1360,10 +1476,13 @@ mod tests {
     fn computed_remove_all_cleans_computed() {
         let mut store = DynSlotStore::with_defaults();
         store.set(10, "a".into(), DynValue::Int(1)).unwrap();
-        store.add_computed(10, ComputedSlot {
-            name: "comp_tag".into(),
-            formula: ComputedFormula::Constant(DynValue::Int(2)),
-        });
+        store.add_computed(
+            10,
+            ComputedSlot {
+                name: "comp_tag".into(),
+                formula: ComputedFormula::Constant(DynValue::Int(2)),
+            },
+        );
         store.remove_all(10);
         assert!(store.get_computed(10).is_none());
         assert!(store.get_all(10).is_none());
@@ -1392,10 +1511,13 @@ mod tests {
     fn computed_on_empty_component() {
         let mut store = DynSlotStore::with_defaults();
         // Component 10 has NO stored tags, only computed slots.
-        store.add_computed(10, ComputedSlot {
-            name: "always".into(),
-            formula: ComputedFormula::Constant(DynValue::Marker),
-        });
+        store.add_computed(
+            10,
+            ComputedSlot {
+                name: "always".into(),
+                formula: ComputedFormula::Constant(DynValue::Marker),
+            },
+        );
         let all = store.get_all_with_computed(10);
         assert_eq!(all.len(), 1);
         assert_eq!(all.get("always"), Some(&DynValue::Marker));

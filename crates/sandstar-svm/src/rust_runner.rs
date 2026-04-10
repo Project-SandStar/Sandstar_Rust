@@ -102,9 +102,9 @@ impl RustSvmRunner {
             return Err(VmError::Stopped);
         }
 
-        let resume_offset = self.resume_offset.ok_or_else(|| {
-            VmError::BadImage("no resume method defined in scode header".into())
-        })?;
+        let resume_offset = self
+            .resume_offset
+            .ok_or_else(|| VmError::BadImage("no resume method defined in scode header".into()))?;
 
         let interpreter = self.interpreter.as_mut().ok_or(VmError::Stopped)?;
 
@@ -175,7 +175,7 @@ mod tests {
         buf[7] = 4; // ref_size
         buf[8..12].copy_from_slice(&(image_size as u32).to_le_bytes());
         buf[12..16].copy_from_slice(&256u32.to_le_bytes()); // data_size
-        // main_method block = header_size / block_size
+                                                            // main_method block = header_size / block_size
         let main_block = (SCODE_HEADER_SIZE / SCODE_BLOCK_SIZE as usize) as u16;
         buf[16..18].copy_from_slice(&main_block.to_le_bytes());
         buf[18..20].copy_from_slice(&0u16.to_le_bytes()); // tests_bix
@@ -238,8 +238,7 @@ mod tests {
         let resume_block = main_block + 1;
         buf[24..26].copy_from_slice(&resume_block.to_le_bytes());
 
-        buf[SCODE_HEADER_SIZE..SCODE_HEADER_SIZE + main_padded.len()]
-            .copy_from_slice(main_padded);
+        buf[SCODE_HEADER_SIZE..SCODE_HEADER_SIZE + main_padded.len()].copy_from_slice(main_padded);
         buf[SCODE_HEADER_SIZE + main_padded.len()..].copy_from_slice(resume_bytes);
 
         buf

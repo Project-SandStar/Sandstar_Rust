@@ -4,8 +4,7 @@
 //! useful for testing individual opcodes without a real `.scode` file.
 
 use crate::image_loader::{
-    ScodeImage, SCODE_BLOCK_SIZE, SCODE_HEADER_SIZE, SCODE_MAGIC, SCODE_MAJOR_VER,
-    SCODE_MINOR_VER,
+    ScodeImage, SCODE_BLOCK_SIZE, SCODE_HEADER_SIZE, SCODE_MAGIC, SCODE_MAJOR_VER, SCODE_MINOR_VER,
 };
 use crate::vm_memory::VmMemory;
 
@@ -187,9 +186,7 @@ mod tests {
 
     #[test]
     fn op_u8_emits_opcode_and_operand() {
-        let image = ScodeBuilder::new()
-            .op_u8(Opcode::LoadIntU1, 42)
-            .build();
+        let image = ScodeBuilder::new().op_u8(Opcode::LoadIntU1, 42).build();
         assert_eq!(
             image.get_u8(SCODE_HEADER_SIZE),
             Some(Opcode::LoadIntU1 as u8)
@@ -224,20 +221,13 @@ mod tests {
 
     #[test]
     fn op_u32_emits_four_bytes() {
-        let image = ScodeBuilder::new()
-            .op_u32(Opcode::Nop, 0xDEAD_BEEF)
-            .build();
-        assert_eq!(
-            image.get_u32(SCODE_HEADER_SIZE + 1),
-            Some(0xDEAD_BEEF)
-        );
+        let image = ScodeBuilder::new().op_u32(Opcode::Nop, 0xDEAD_BEEF).build();
+        assert_eq!(image.get_u32(SCODE_HEADER_SIZE + 1), Some(0xDEAD_BEEF));
     }
 
     #[test]
     fn raw_bytes_emitted_directly() {
-        let image = ScodeBuilder::new()
-            .raw(&[0xAA, 0xBB, 0xCC])
-            .build();
+        let image = ScodeBuilder::new().raw(&[0xAA, 0xBB, 0xCC]).build();
         assert_eq!(image.get_u8(SCODE_HEADER_SIZE), Some(0xAA));
         assert_eq!(image.get_u8(SCODE_HEADER_SIZE + 1), Some(0xBB));
         assert_eq!(image.get_u8(SCODE_HEADER_SIZE + 2), Some(0xCC));
@@ -298,9 +288,9 @@ mod tests {
     #[test]
     fn chained_operations_produce_correct_sequence() {
         let image = ScodeBuilder::new()
-            .op(Opcode::LoadI1)     // push 1
-            .op(Opcode::LoadI2)     // push 2
-            .op(Opcode::IntAdd)     // pop 2, push 3
+            .op(Opcode::LoadI1) // push 1
+            .op(Opcode::LoadI2) // push 2
+            .op(Opcode::IntAdd) // pop 2, push 3
             .build();
         let base = SCODE_HEADER_SIZE;
         assert_eq!(image.get_u8(base), Some(Opcode::LoadI1 as u8));

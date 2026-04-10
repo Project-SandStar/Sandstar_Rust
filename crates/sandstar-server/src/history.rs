@@ -201,9 +201,33 @@ mod tests {
     #[test]
     fn stats() {
         let mut store = HistoryStore::new(10);
-        store.record(1, HistoryPoint { ts: 0, cur: 0.0, raw: 0.0, status: EngineStatus::Ok });
-        store.record(1, HistoryPoint { ts: 1, cur: 0.0, raw: 0.0, status: EngineStatus::Ok });
-        store.record(2, HistoryPoint { ts: 0, cur: 0.0, raw: 0.0, status: EngineStatus::Ok });
+        store.record(
+            1,
+            HistoryPoint {
+                ts: 0,
+                cur: 0.0,
+                raw: 0.0,
+                status: EngineStatus::Ok,
+            },
+        );
+        store.record(
+            1,
+            HistoryPoint {
+                ts: 1,
+                cur: 0.0,
+                raw: 0.0,
+                status: EngineStatus::Ok,
+            },
+        );
+        store.record(
+            2,
+            HistoryPoint {
+                ts: 0,
+                cur: 0.0,
+                raw: 0.0,
+                status: EngineStatus::Ok,
+            },
+        );
 
         let (channels, total) = store.stats();
         assert_eq!(channels, 2);

@@ -65,7 +65,13 @@ impl TestServer {
         let engine = setup_demo_engine();
         let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCmd>(64);
         let handle = EngineHandle::new(cmd_tx);
-        let app = rest::router_with_auth(handle, auth_state, bearer_token.map(|s| s.to_string()), 0, None);
+        let app = rest::router_with_auth(
+            handle,
+            auth_state,
+            bearer_token.map(|s| s.to_string()),
+            0,
+            None,
+        );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
@@ -144,7 +150,11 @@ impl TestServer {
 }
 
 /// Engine command loop — processes REST commands against the engine.
-async fn cmd_loop(mut engine: Engine<MockHal>, mut cmd_rx: mpsc::Receiver<EngineCmd>, read_only: bool) {
+async fn cmd_loop(
+    mut engine: Engine<MockHal>,
+    mut cmd_rx: mpsc::Receiver<EngineCmd>,
+    read_only: bool,
+) {
     let config = ServerConfig {
         socket_path: String::new(),
         poll_interval_ms: 1000,
@@ -179,12 +189,15 @@ async fn cmd_loop(mut engine: Engine<MockHal>, mut cmd_rx: mpsc::Receiver<Engine
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
             for (&ch_id, item) in engine.polls.iter() {
-                history_store.record(ch_id, HistoryPoint {
-                    ts: now_unix,
-                    cur: item.last_value.cur,
-                    raw: item.last_value.raw,
-                    status: item.last_value.status,
-                });
+                history_store.record(
+                    ch_id,
+                    HistoryPoint {
+                        ts: now_unix,
+                        cur: item.last_value.cur,
+                        raw: item.last_value.raw,
+                        status: item.last_value.status,
+                    },
+                );
             }
         }
     }
@@ -196,11 +209,46 @@ pub fn setup_demo_engine() -> Engine<MockHal> {
     let mut engine = Engine::new(hal);
 
     let channels = [
-        (1113, ChannelType::Analog, ChannelDirection::In, 0, 0, "AI1 Thermistor 10K"),
-        (1200, ChannelType::Analog, ChannelDirection::In, 0, 1, "AI2 0-10V"),
-        (612, ChannelType::I2c, ChannelDirection::In, 2, 0x40, "I2C SDP610 CFM"),
-        (2001, ChannelType::Digital, ChannelDirection::Out, 0, 47, "DO1 Relay"),
-        (2002, ChannelType::Pwm, ChannelDirection::Out, 0, 0, "PWM1 Fan Speed"),
+        (
+            1113,
+            ChannelType::Analog,
+            ChannelDirection::In,
+            0,
+            0,
+            "AI1 Thermistor 10K",
+        ),
+        (
+            1200,
+            ChannelType::Analog,
+            ChannelDirection::In,
+            0,
+            1,
+            "AI2 0-10V",
+        ),
+        (
+            612,
+            ChannelType::I2c,
+            ChannelDirection::In,
+            2,
+            0x40,
+            "I2C SDP610 CFM",
+        ),
+        (
+            2001,
+            ChannelType::Digital,
+            ChannelDirection::Out,
+            0,
+            47,
+            "DO1 Relay",
+        ),
+        (
+            2002,
+            ChannelType::Pwm,
+            ChannelDirection::Out,
+            0,
+            0,
+            "PWM1 Fan Speed",
+        ),
     ];
 
     for (id, ct, dir, dev, addr, label) in channels {

@@ -136,12 +136,15 @@ pub async fn roxwarp_upgrade(
     Query(params): Query<HashMap<String, String>>,
     State(state): State<RoxWarpState>,
 ) -> Response {
-    let debug = params
-        .get("debug")
-        .map(|v| v == "trio")
-        .unwrap_or(false);
+    let debug = params.get("debug").map(|v| v == "trio").unwrap_or(false);
     ws.on_upgrade(move |socket| {
-        handle_roxwarp_connection(socket, state.delta_engine, state.config, state.sox_tree, debug)
+        handle_roxwarp_connection(
+            socket,
+            state.delta_engine,
+            state.config,
+            state.sox_tree,
+            debug,
+        )
     })
 }
 
@@ -182,7 +185,11 @@ async fn handle_roxwarp_connection(
         .as_ref()
         .map(|tree| {
             let t = tree.read().unwrap();
-            t.name_table.all_names().into_iter().map(|(_, n)| n).collect()
+            t.name_table
+                .all_names()
+                .into_iter()
+                .map(|(_, n)| n)
+                .collect()
         })
         .unwrap_or_default();
     let welcome = WarpMessage::Welcome {
@@ -190,7 +197,10 @@ async fn handle_roxwarp_connection(
         versions: our_versions,
         name_table: name_table_entries,
     };
-    if send_message(&mut ws_tx, &welcome, debug_mode).await.is_err() {
+    if send_message(&mut ws_tx, &welcome, debug_mode)
+        .await
+        .is_err()
+    {
         return;
     }
 
@@ -203,7 +213,10 @@ async fn handle_roxwarp_connection(
             to_version: current_version,
             points: deltas,
         };
-        if send_message(&mut ws_tx, &delta_msg, debug_mode).await.is_err() {
+        if send_message(&mut ws_tx, &delta_msg, debug_mode)
+            .await
+            .is_err()
+        {
             return;
         }
     }
@@ -367,8 +380,8 @@ async fn handle_incoming_binary(
     ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     debug_mode: bool,
 ) -> Result<(), String> {
-    let msg: WarpMessage = rmp_serde::from_slice(data)
-        .map_err(|e| format!("invalid msgpack message: {e}"))?;
+    let msg: WarpMessage =
+        rmp_serde::from_slice(data).map_err(|e| format!("invalid msgpack message: {e}"))?;
     process_warp_message(msg, delta_engine, config, peer_node_id, ws_tx, debug_mode).await
 }
 
@@ -381,8 +394,8 @@ async fn handle_incoming_text(
     ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     debug_mode: bool,
 ) -> Result<(), String> {
-    let msg: WarpMessage = serde_json::from_str(text)
-        .map_err(|e| format!("invalid json message: {e}"))?;
+    let msg: WarpMessage =
+        serde_json::from_str(text).map_err(|e| format!("invalid json message: {e}"))?;
     process_warp_message(msg, delta_engine, config, peer_node_id, ws_tx, debug_mode).await
 }
 
@@ -430,10 +443,7 @@ async fn process_warp_message(
             debug!(peer = %node_id, "roxWarp: received version vector");
             // Check if peer is behind on our data
             let our_version = delta_engine.current_version();
-            let peer_has = versions
-                .get(&config.node_id)
-                .copied()
-                .unwrap_or(0);
+            let peer_has = versions.get(&config.node_id).copied().unwrap_or(0);
             if peer_has < our_version {
                 // Send deltas for what the peer is missing
                 let deltas = delta_engine.delta_since(peer_has).await;
@@ -451,15 +461,9 @@ async fn process_warp_message(
             }
         }
 
-        WarpMessage::DeltaReq {
-            node_id,
-            want_from,
-        } => {
+        WarpMessage::DeltaReq { node_id, want_from } => {
             debug!(peer = %node_id, "roxWarp: received delta request");
-            let since = want_from
-                .get(&config.node_id)
-                .copied()
-                .unwrap_or(0);
+            let since = want_from.get(&config.node_id).copied().unwrap_or(0);
             let deltas = delta_engine.delta_since(since).await;
             let current = delta_engine.current_version();
             let delta_msg = WarpMessage::Delta {
@@ -503,13 +507,9 @@ async fn process_warp_message(
                 filter = %filter,
                 "roxWarp: received query"
             );
-            let results = evaluate_query_against_delta_engine(
-                delta_engine,
-                &config.node_id,
-                &filter,
-                limit,
-            )
-            .await;
+            let results =
+                evaluate_query_against_delta_engine(delta_engine, &config.node_id, &filter, limit)
+                    .await;
             let result_msg = WarpMessage::QueryResult {
                 node_id: config.node_id.clone(),
                 query_id,
@@ -520,7 +520,9 @@ async fn process_warp_message(
                 .map_err(|_| "send query result failed".to_string())?;
         }
 
-        WarpMessage::QueryResult { node_id, query_id, .. } => {
+        WarpMessage::QueryResult {
+            node_id, query_id, ..
+        } => {
             debug!(
                 peer = %node_id,
                 query_id = %query_id,
@@ -584,16 +586,14 @@ pub(crate) fn evaluate_point_filter(filter: &str, point: &VersionedPoint) -> boo
     if let Some(pos) = find_keyword(f, " and ") {
         let left = &f[..pos];
         let right = &f[pos + 5..];
-        return evaluate_point_filter(left, point)
-            && evaluate_point_filter(right, point);
+        return evaluate_point_filter(left, point) && evaluate_point_filter(right, point);
     }
 
     // Handle "or" disjunction
     if let Some(pos) = find_keyword(f, " or ") {
         let left = &f[..pos];
         let right = &f[pos + 4..];
-        return evaluate_point_filter(left, point)
-            || evaluate_point_filter(right, point);
+        return evaluate_point_filter(left, point) || evaluate_point_filter(right, point);
     }
 
     let f_lower = f.to_lowercase();
@@ -609,7 +609,10 @@ pub(crate) fn evaluate_point_filter(filter: &str, point: &VersionedPoint) -> boo
         let tag = parts[0].trim().to_lowercase();
         let val = parts[1].trim();
         return match tag.as_str() {
-            "channel" | "id" => val.parse::<u32>().map(|n| point.channel == n).unwrap_or(false),
+            "channel" | "id" => val
+                .parse::<u32>()
+                .map(|n| point.channel == n)
+                .unwrap_or(false),
             "unit" => point.unit.eq_ignore_ascii_case(val.trim_matches('"')),
             "status" => point.status.eq_ignore_ascii_case(val.trim_matches('"')),
             _ => false,
@@ -621,10 +624,16 @@ pub(crate) fn evaluate_point_filter(filter: &str, point: &VersionedPoint) -> boo
         let tag = parts[0].trim().to_lowercase();
         let val = parts[1].trim();
         if tag == "channel" || tag == "id" {
-            return val.parse::<u32>().map(|n| point.channel >= n).unwrap_or(false);
+            return val
+                .parse::<u32>()
+                .map(|n| point.channel >= n)
+                .unwrap_or(false);
         }
         if tag == "value" || tag == "cur" {
-            return val.parse::<f64>().map(|n| point.value >= n).unwrap_or(false);
+            return val
+                .parse::<f64>()
+                .map(|n| point.value >= n)
+                .unwrap_or(false);
         }
     }
 
@@ -633,10 +642,16 @@ pub(crate) fn evaluate_point_filter(filter: &str, point: &VersionedPoint) -> boo
         let tag = parts[0].trim().to_lowercase();
         let val = parts[1].trim();
         if tag == "channel" || tag == "id" {
-            return val.parse::<u32>().map(|n| point.channel <= n).unwrap_or(false);
+            return val
+                .parse::<u32>()
+                .map(|n| point.channel <= n)
+                .unwrap_or(false);
         }
         if tag == "value" || tag == "cur" {
-            return val.parse::<f64>().map(|n| point.value <= n).unwrap_or(false);
+            return val
+                .parse::<f64>()
+                .map(|n| point.value <= n)
+                .unwrap_or(false);
         }
     }
 
@@ -646,7 +661,10 @@ pub(crate) fn evaluate_point_filter(filter: &str, point: &VersionedPoint) -> boo
         let tag = parts[0].trim().to_lowercase();
         let val = parts[1].trim();
         if tag == "channel" || tag == "id" {
-            return val.parse::<u32>().map(|n| point.channel > n).unwrap_or(false);
+            return val
+                .parse::<u32>()
+                .map(|n| point.channel > n)
+                .unwrap_or(false);
         }
         if tag == "value" || tag == "cur" {
             return val.parse::<f64>().map(|n| point.value > n).unwrap_or(false);
@@ -658,7 +676,10 @@ pub(crate) fn evaluate_point_filter(filter: &str, point: &VersionedPoint) -> boo
         let tag = parts[0].trim().to_lowercase();
         let val = parts[1].trim();
         if tag == "channel" || tag == "id" {
-            return val.parse::<u32>().map(|n| point.channel < n).unwrap_or(false);
+            return val
+                .parse::<u32>()
+                .map(|n| point.channel < n)
+                .unwrap_or(false);
         }
         if tag == "value" || tag == "cur" {
             return val.parse::<f64>().map(|n| point.value < n).unwrap_or(false);
@@ -666,8 +687,7 @@ pub(crate) fn evaluate_point_filter(filter: &str, point: &VersionedPoint) -> boo
     }
 
     // Substring match on unit or status (fallback)
-    point.unit.to_lowercase().contains(&f_lower)
-        || point.status.to_lowercase().contains(&f_lower)
+    point.unit.to_lowercase().contains(&f_lower) || point.status.to_lowercase().contains(&f_lower)
 }
 
 /// Find the position of a keyword in a filter string, avoiding
@@ -710,7 +730,10 @@ async fn send_message(
         }
     } else {
         match rmp_serde::to_vec(msg) {
-            Ok(bytes) => ws_tx.send(Message::Binary(bytes.into())).await.map_err(|_| ()),
+            Ok(bytes) => ws_tx
+                .send(Message::Binary(bytes.into()))
+                .await
+                .map_err(|_| ()),
             Err(_) => Err(()),
         }
     }
@@ -828,10 +851,7 @@ mod tests {
     fn warp_versions_roundtrip() {
         let msg = WarpMessage::Versions {
             node_id: "node-a".to_string(),
-            versions: HashMap::from([
-                ("node-a".to_string(), 1542),
-                ("node-b".to_string(), 1200),
-            ]),
+            versions: HashMap::from([("node-a".to_string(), 1542), ("node-b".to_string(), 1200)]),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: WarpMessage = serde_json::from_str(&json).unwrap();
@@ -854,11 +874,7 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: WarpMessage = serde_json::from_str(&json).unwrap();
 
-        if let WarpMessage::DeltaReq {
-            node_id,
-            want_from,
-        } = decoded
-        {
+        if let WarpMessage::DeltaReq { node_id, want_from } = decoded {
             assert_eq!(node_id, "node-b");
             assert_eq!(*want_from.get("node-a").unwrap(), 1500);
         } else {
@@ -1023,8 +1039,14 @@ mod tests {
     #[test]
     fn filter_channel_range_and() {
         let p = test_point(1113, 72.5, "degF", "ok");
-        assert!(evaluate_point_filter("channel > 1000 and channel < 2000", &p));
-        assert!(!evaluate_point_filter("channel > 1000 and channel < 1100", &p));
+        assert!(evaluate_point_filter(
+            "channel > 1000 and channel < 2000",
+            &p
+        ));
+        assert!(!evaluate_point_filter(
+            "channel > 1000 and channel < 1100",
+            &p
+        ));
     }
 
     // ── Query message serialization ──────────────────────

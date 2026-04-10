@@ -26,19 +26,14 @@ impl Default for Cell {
 pub type NativeMethod = unsafe extern "C" fn(vm: *mut SedonaVM, params: *mut Cell) -> Cell;
 
 /// Wide native method: returns int64 (for long/double returns).
-pub type NativeMethodWide =
-    unsafe extern "C" fn(vm: *mut SedonaVM, params: *mut Cell) -> i64;
+pub type NativeMethodWide = unsafe extern "C" fn(vm: *mut SedonaVM, params: *mut Cell) -> i64;
 
 /// Assert failure callback signature.
 pub type OnAssertFailure = unsafe extern "C" fn(location: *const c_char, linenum: u16);
 
 /// VM call dispatcher signature.
-pub type VmCallFn = unsafe extern "C" fn(
-    vm: *mut SedonaVM,
-    method: u16,
-    args: *mut Cell,
-    argc: i32,
-) -> i32;
+pub type VmCallFn =
+    unsafe extern "C" fn(vm: *mut SedonaVM, method: u16, args: *mut Cell, argc: i32) -> i32;
 
 /// SedonaVM struct — matches the C `SedonaVM` from sedona.h (lines 337-366).
 ///

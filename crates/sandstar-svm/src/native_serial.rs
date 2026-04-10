@@ -250,7 +250,10 @@ mod tests {
         register_serial(&mut table);
 
         assert_eq!(table.kit_name(SERIAL_KIT_ID), Some("serial"));
-        assert_eq!(table.method_count(SERIAL_KIT_ID), SERIAL_METHOD_COUNT as usize);
+        assert_eq!(
+            table.method_count(SERIAL_KIT_ID),
+            SERIAL_METHOD_COUNT as usize
+        );
 
         for id in 0..SERIAL_METHOD_COUNT {
             assert!(
@@ -283,7 +286,9 @@ mod tests {
         let mut ctx = NativeContext::new(&mut mem);
 
         // doOpen
-        let r = table.call(SERIAL_KIT_ID, 0, &mut ctx, &[0, 9600, 8, 1, 0, 0]).unwrap();
+        let r = table
+            .call(SERIAL_KIT_ID, 0, &mut ctx, &[0, 9600, 8, 1, 0, 0])
+            .unwrap();
         assert_eq!(r, 1);
 
         // doClose

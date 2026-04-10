@@ -35,7 +35,9 @@ pub mod protocol;
 pub mod string_table;
 
 pub use binary_trio::{TrioDict, TrioValue};
-pub use cluster::{ClusterConfig, ClusterManager, ClusterStatus, PeerConfig, PeerState, PeerStatus};
+pub use cluster::{
+    ClusterConfig, ClusterManager, ClusterStatus, PeerConfig, PeerState, PeerStatus,
+};
 pub use handler::{roxwarp_upgrade, RoxWarpState};
 pub use protocol::{LoadMetrics, QueryPoint, WarpMessage};
 pub use string_table::StringTable;

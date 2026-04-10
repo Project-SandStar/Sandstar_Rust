@@ -20,7 +20,6 @@ pub struct LeadSequencer {
     pub hysteresis: f64,
 
     // -- Runtime state --
-
     /// Current stage outputs.
     stages: Vec<bool>,
 }
@@ -148,10 +147,7 @@ mod tests {
 
         // Drop to 42 (above threshold_off=37.5): stage 2 should HOLD (stay on).
         seq.execute(42.0);
-        assert!(
-            seq.stages()[2],
-            "hysteresis should keep stage 2 on at 42"
-        );
+        assert!(seq.stages()[2], "hysteresis should keep stage 2 on at 42");
 
         // Drop to 35 (below threshold_off=37.5): stage 2 should turn off.
         seq.execute(35.0);
@@ -265,7 +261,10 @@ mod tests {
 
         // Drop to 49.9: stage 2 (threshold_on=50) should turn off immediately.
         seq.execute(49.9);
-        assert!(!seq.stages()[2], "zero hysteresis: should turn off immediately");
+        assert!(
+            !seq.stages()[2],
+            "zero hysteresis: should turn off immediately"
+        );
     }
 
     #[test]
@@ -274,7 +273,10 @@ mod tests {
         // Stage 1 threshold_on = 25.0. Strictly greater-than comparison.
         // Exact threshold: 25.0 is NOT > 25.0, so stage 1 stays off (hysteresis hold).
         seq.execute(25.0);
-        assert!(!seq.stages()[1], "exact threshold should NOT turn on (strict >)");
+        assert!(
+            !seq.stages()[1],
+            "exact threshold should NOT turn on (strict >)"
+        );
 
         // Just above: 25.1 > 25.0 -> stage 1 on.
         seq.execute(25.1);

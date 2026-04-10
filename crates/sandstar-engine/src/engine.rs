@@ -12,9 +12,9 @@ use crate::channel::{ChannelStore, ChannelType};
 use crate::conversion::auto_detect::auto_detect_sensor;
 use crate::conversion::filters;
 use crate::error::{EngineError, Result};
-use crate::priority;
 use crate::notify::{NotifyId, NotifyStore};
 use crate::poll::PollStore;
+use crate::priority;
 use crate::table::TableStore;
 use crate::watch::{WatchId, WatchStore};
 use crate::{ChannelId, EngineStatus, EngineValue, ValueFlags};
@@ -128,7 +128,10 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
     /// - `Ok(Some(EngineValue))` if the channel is still in cooldown (return Down)
     /// - `Ok(None)` if the channel is not failed, or recovery succeeded (proceed to read)
     fn try_i2c_recovery(&mut self, id: ChannelId) -> Result<Option<EngineValue>> {
-        let ch = self.channels.get_mut(id).ok_or(EngineError::ChannelNotFound(id))?;
+        let ch = self
+            .channels
+            .get_mut(id)
+            .ok_or(EngineError::ChannelNotFound(id))?;
         if !ch.failed {
             return Ok(None);
         }
@@ -158,7 +161,10 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
 
             if let Err(_e) = self.hal.reinit_i2c_sensor(device, address, &label) {
                 // Reinit failed -- increase backoff
-                let backoff = self.i2c_backoff.entry(key).or_insert_with(I2cBackoffState::new);
+                let backoff = self
+                    .i2c_backoff
+                    .entry(key)
+                    .or_insert_with(I2cBackoffState::new);
                 let old_cooldown = backoff.cooldown;
                 let new_cooldown = backoff.record_failure();
 
@@ -190,7 +196,10 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
                     );
                 }
 
-                let ch = self.channels.get_mut(id).ok_or(EngineError::ChannelNotFound(id))?;
+                let ch = self
+                    .channels
+                    .get_mut(id)
+                    .ok_or(EngineError::ChannelNotFound(id))?;
                 ch.retry_counter = 0;
                 return Ok(Some(EngineValue::with_status(EngineStatus::Down)));
             }
@@ -206,7 +215,10 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
                 backoff.reset();
             }
 
-            let ch = self.channels.get_mut(id).ok_or(EngineError::ChannelNotFound(id))?;
+            let ch = self
+                .channels
+                .get_mut(id)
+                .ok_or(EngineError::ChannelNotFound(id))?;
             ch.failed = false;
             ch.retry_counter = 0;
         } else {
@@ -244,7 +256,10 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
 
         // 2. Disabled check
         {
-            let ch = self.channels.get(id).ok_or(EngineError::ChannelNotFound(id))?;
+            let ch = self
+                .channels
+                .get(id)
+                .ok_or(EngineError::ChannelNotFound(id))?;
             if !ch.enabled {
                 return Ok(EngineValue::with_status(EngineStatus::Disabled));
             }
@@ -259,7 +274,10 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
 
         // 4. Snapshot immutable fields
         let (channel_type, device, address, label, channel_in, pwm_disabled, trigger) = {
-            let ch = self.channels.get(id).ok_or(EngineError::ChannelNotFound(id))?;
+            let ch = self
+                .channels
+                .get(id)
+                .ok_or(EngineError::ChannelNotFound(id))?;
             (
                 ch.channel_type,
                 ch.device,
@@ -275,7 +293,10 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
         // Virtual channels: if written to (priority array has effective value), return that;
         // otherwise copy from source channel (channel_in linkage).
         if channel_type.is_virtual() {
-            let ch = self.channels.get_mut(id).ok_or(EngineError::ChannelNotFound(id))?;
+            let ch = self
+                .channels
+                .get_mut(id)
+                .ok_or(EngineError::ChannelNotFound(id))?;
 
             // Check if this virtual channel has been written to via channel_write_level
             let has_written_value = ch
@@ -297,7 +318,10 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
                 .map(|src| src.value.cur)
                 .unwrap_or(0.0);
 
-            let ch = self.channels.get_mut(id).ok_or(EngineError::ChannelNotFound(id))?;
+            let ch = self
+                .channels
+                .get_mut(id)
+                .ok_or(EngineError::ChannelNotFound(id))?;
             ch.value.cur = source_cur;
             ch.value.status = EngineStatus::Ok;
             ch.value.flags |= ValueFlags::CUR;
@@ -306,12 +330,10 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
 
         let hal_result: std::result::Result<f64, sandstar_hal::HalError> = match channel_type {
             ChannelType::Analog => self.hal.read_analog(device, address),
-            ChannelType::Digital | ChannelType::Triac => {
-                match self.hal.read_digital(address) {
-                    Ok(b) => Ok(if b { 1.0 } else { 0.0 }),
-                    Err(e) => Err(e),
-                }
-            }
+            ChannelType::Digital | ChannelType::Triac => match self.hal.read_digital(address) {
+                Ok(b) => Ok(if b { 1.0 } else { 0.0 }),
+                Err(e) => Err(e),
+            },
             ChannelType::Pwm => {
                 if pwm_disabled {
                     Ok(0.0)
@@ -329,7 +351,10 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
         let raw = match hal_result {
             Ok(v) => v,
             Err(_) => {
-                let ch = self.channels.get_mut(id).ok_or(EngineError::ChannelNotFound(id))?;
+                let ch = self
+                    .channels
+                    .get_mut(id)
+                    .ok_or(EngineError::ChannelNotFound(id))?;
                 ch.failed = true;
                 ch.value.status = EngineStatus::Down;
                 return Ok(EngineValue::with_status(EngineStatus::Down));
@@ -337,7 +362,10 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
         };
 
         // 7. Set raw value
-        let ch = self.channels.get_mut(id).ok_or(EngineError::ChannelNotFound(id))?;
+        let ch = self
+            .channels
+            .get_mut(id)
+            .ok_or(EngineError::ChannelNotFound(id))?;
         ch.value.set_raw(raw);
 
         // 8. SDP810 garbage detection
@@ -430,7 +458,10 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
 
         // 2. Direction must be output (or virtual) AND flags != 0
         {
-            let ch = self.channels.get(id).ok_or(EngineError::ChannelNotFound(id))?;
+            let ch = self
+                .channels
+                .get(id)
+                .ok_or(EngineError::ChannelNotFound(id))?;
             let writable = ch.direction.is_output() || ch.channel_type.is_virtual();
             if !writable || value.flags.is_empty() {
                 return Err(EngineError::WriteNotSupported(id));
@@ -439,7 +470,10 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
 
         // 3. Disabled check
         {
-            let ch = self.channels.get(id).ok_or(EngineError::ChannelNotFound(id))?;
+            let ch = self
+                .channels
+                .get(id)
+                .ok_or(EngineError::ChannelNotFound(id))?;
             if !ch.enabled {
                 value.status = EngineStatus::Disabled;
                 return Ok(());
@@ -448,12 +482,17 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
 
         // 4. Convert/revert based on flags
         {
-            let ch = self.channels.get(id).ok_or(EngineError::ChannelNotFound(id))?;
+            let ch = self
+                .channels
+                .get(id)
+                .ok_or(EngineError::ChannelNotFound(id))?;
             if value.flags.contains(ValueFlags::RAW) && !value.flags.contains(ValueFlags::CUR) {
                 // RAW only → convert to get cur
                 let mut flow = None;
                 ch.conv.convert(value, &self.tables, id, &mut flow)?;
-            } else if value.flags.contains(ValueFlags::CUR) && !value.flags.contains(ValueFlags::RAW) {
+            } else if value.flags.contains(ValueFlags::CUR)
+                && !value.flags.contains(ValueFlags::RAW)
+            {
                 // CUR only → revert to get raw
                 ch.conv.revert(value, &self.tables)?;
             }
@@ -461,7 +500,10 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
 
         // Snapshot fields for HAL dispatch
         let (channel_type, address, device) = {
-            let ch = self.channels.get(id).ok_or(EngineError::ChannelNotFound(id))?;
+            let ch = self
+                .channels
+                .get(id)
+                .ok_or(EngineError::ChannelNotFound(id))?;
             (ch.channel_type, ch.address, ch.device)
         };
 
@@ -470,12 +512,13 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
             ChannelType::Digital | ChannelType::Triac => {
                 self.hal.write_digital(address, value.raw > 0.5)
             }
-            ChannelType::Pwm => {
-                self.hal.write_pwm(device, address, value.raw)
-            }
+            ChannelType::Pwm => self.hal.write_pwm(device, address, value.raw),
             ChannelType::VirtualAnalog | ChannelType::VirtualDigital => {
                 // Virtual: just store cur on channel
-                let ch = self.channels.get_mut(id).ok_or(EngineError::ChannelNotFound(id))?;
+                let ch = self
+                    .channels
+                    .get_mut(id)
+                    .ok_or(EngineError::ChannelNotFound(id))?;
                 ch.value = *value;
                 return Ok(());
             }
@@ -491,7 +534,10 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
         }
 
         // 8. Update channel value
-        let ch = self.channels.get_mut(id).ok_or(EngineError::ChannelNotFound(id))?;
+        let ch = self
+            .channels
+            .get_mut(id)
+            .ok_or(EngineError::ChannelNotFound(id))?;
         ch.value = *value;
 
         // 9. Return
@@ -525,7 +571,10 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
 
         // Lazy-init priority array
         {
-            let ch = self.channels.get_mut(id).ok_or(EngineError::ChannelNotFound(id))?;
+            let ch = self
+                .channels
+                .get_mut(id)
+                .ok_or(EngineError::ChannelNotFound(id))?;
             if ch.priority_array.is_none() {
                 ch.priority_array = Some(priority::PriorityArray::default());
             }
@@ -533,7 +582,10 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
 
         // Set the level and get effective value
         let write_result = {
-            let ch = self.channels.get_mut(id).ok_or(EngineError::ChannelNotFound(id))?;
+            let ch = self
+                .channels
+                .get_mut(id)
+                .ok_or(EngineError::ChannelNotFound(id))?;
             // priority_array is guaranteed Some by the lazy-init above
             ch.priority_array
                 .as_mut()
@@ -556,10 +608,7 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
     /// Get the priority array for a channel (for API queries).
     ///
     /// Returns None if no priority writes have been made to this channel.
-    pub fn get_write_levels(
-        &self,
-        id: ChannelId,
-    ) -> Result<Option<&priority::PriorityArray>> {
+    pub fn get_write_levels(&self, id: ChannelId) -> Result<Option<&priority::PriorityArray>> {
         let ch = self
             .channels
             .get(id)
@@ -571,7 +620,10 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
     ///
     /// If flags==RAW → convert (raw→cur). If flags==CUR → revert (cur→raw).
     pub fn channel_convert(&self, id: ChannelId, value: &mut EngineValue) -> Result<()> {
-        let ch = self.channels.get(id).ok_or(EngineError::ChannelNotFound(id))?;
+        let ch = self
+            .channels
+            .get(id)
+            .ok_or(EngineError::ChannelNotFound(id))?;
 
         if value.flags.contains(ValueFlags::RAW) && !value.flags.contains(ValueFlags::CUR) {
             let mut flow = None;
@@ -651,9 +703,9 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
             if let Some(ch) = self.channels.get(id) {
                 if ch.channel_type == ChannelType::I2c && ch.enabled && !ch.failed {
                     let key = (ch.device, ch.address, ch.label.clone());
-                    cache.entry(key).or_insert_with_key(|k| {
-                        self.hal.read_i2c(k.0, k.1, &k.2)
-                    });
+                    cache
+                        .entry(key)
+                        .or_insert_with_key(|k| self.hal.read_i2c(k.0, k.1, &k.2));
                 }
             }
         }
@@ -679,7 +731,10 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
 
         // 2. Disabled check
         {
-            let ch = self.channels.get(id).ok_or(EngineError::ChannelNotFound(id))?;
+            let ch = self
+                .channels
+                .get(id)
+                .ok_or(EngineError::ChannelNotFound(id))?;
             if !ch.enabled {
                 return Ok(EngineValue::with_status(EngineStatus::Disabled));
             }
@@ -694,7 +749,10 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
 
         // 4. Snapshot immutable fields
         let (channel_type, device, address, label, channel_in, pwm_disabled, trigger) = {
-            let ch = self.channels.get(id).ok_or(EngineError::ChannelNotFound(id))?;
+            let ch = self
+                .channels
+                .get(id)
+                .ok_or(EngineError::ChannelNotFound(id))?;
             (
                 ch.channel_type,
                 ch.device,
@@ -708,7 +766,10 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
 
         // 5. HAL dispatch — I2C reads use cache, everything else goes direct
         if channel_type.is_virtual() {
-            let ch = self.channels.get_mut(id).ok_or(EngineError::ChannelNotFound(id))?;
+            let ch = self
+                .channels
+                .get_mut(id)
+                .ok_or(EngineError::ChannelNotFound(id))?;
 
             // Check if this virtual channel has been written to via channel_write_level
             let has_written_value = ch
@@ -730,7 +791,10 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
                 .map(|src| src.value.cur)
                 .unwrap_or(0.0);
 
-            let ch = self.channels.get_mut(id).ok_or(EngineError::ChannelNotFound(id))?;
+            let ch = self
+                .channels
+                .get_mut(id)
+                .ok_or(EngineError::ChannelNotFound(id))?;
             ch.value.cur = source_cur;
             ch.value.status = EngineStatus::Ok;
             ch.value.flags |= ValueFlags::CUR;
@@ -739,12 +803,10 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
 
         let hal_result: std::result::Result<f64, HalError> = match channel_type {
             ChannelType::Analog => self.hal.read_analog(device, address),
-            ChannelType::Digital | ChannelType::Triac => {
-                match self.hal.read_digital(address) {
-                    Ok(b) => Ok(if b { 1.0 } else { 0.0 }),
-                    Err(e) => Err(e),
-                }
-            }
+            ChannelType::Digital | ChannelType::Triac => match self.hal.read_digital(address) {
+                Ok(b) => Ok(if b { 1.0 } else { 0.0 }),
+                Err(e) => Err(e),
+            },
             ChannelType::Pwm => {
                 if pwm_disabled {
                     Ok(0.0)
@@ -757,10 +819,9 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
                 let key = (device, address, label.clone());
                 match i2c_cache.get(&key) {
                     Some(Ok(val)) => Ok(*val),
-                    Some(Err(_)) => Err(HalError::BusError(
-                        device,
-                        "cached I2C read failed".into(),
-                    )),
+                    Some(Err(_)) => {
+                        Err(HalError::BusError(device, "cached I2C read failed".into()))
+                    }
                     None => self.hal.read_i2c(device, address, &label),
                 }
             }
@@ -772,14 +833,20 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
         let raw = match hal_result {
             Ok(v) => v,
             Err(_) => {
-                let ch = self.channels.get_mut(id).ok_or(EngineError::ChannelNotFound(id))?;
+                let ch = self
+                    .channels
+                    .get_mut(id)
+                    .ok_or(EngineError::ChannelNotFound(id))?;
                 ch.failed = true;
                 ch.value.status = EngineStatus::Down;
                 return Ok(EngineValue::with_status(EngineStatus::Down));
             }
         };
 
-        let ch = self.channels.get_mut(id).ok_or(EngineError::ChannelNotFound(id))?;
+        let ch = self
+            .channels
+            .get_mut(id)
+            .ok_or(EngineError::ChannelNotFound(id))?;
         ch.value.set_raw(raw);
 
         let raw = ch.validate_i2c_raw(raw);
@@ -1129,7 +1196,10 @@ mod tests {
         engine.hal.set_analog(
             0,
             0,
-            Err(sandstar_hal::HalError::Timeout { device: 0, address: 0 }),
+            Err(sandstar_hal::HalError::Timeout {
+                device: 0,
+                address: 0,
+            }),
         );
 
         let value = engine.channel_read(1100).unwrap();
@@ -1540,7 +1610,11 @@ mod tests {
         assert_eq!(notifs.len(), 1);
         assert!(matches!(
             &notifs[0],
-            Notification::Watch { subscriber: 42, channel: 1100, .. }
+            Notification::Watch {
+                subscriber: 42,
+                channel: 1100,
+                ..
+            }
         ));
     }
 
@@ -1558,7 +1632,11 @@ mod tests {
         assert_eq!(notifs.len(), 1);
         assert!(matches!(
             &notifs[0],
-            Notification::Notify { subscriber: 99, channel: 1100, .. }
+            Notification::Notify {
+                subscriber: 99,
+                channel: 1100,
+                ..
+            }
         ));
     }
 
@@ -1570,7 +1648,10 @@ mod tests {
         engine.hal.set_analog(
             0,
             0,
-            Err(sandstar_hal::HalError::Timeout { device: 0, address: 0 }),
+            Err(sandstar_hal::HalError::Timeout {
+                device: 0,
+                address: 0,
+            }),
         );
 
         let notifs = engine.poll_update();
@@ -1763,7 +1844,12 @@ mod tests {
 
         for id in [610, 611, 612] {
             let ch = engine.channels.get(id).unwrap();
-            assert_eq!(ch.value.status, EngineStatus::Ok, "channel {} should be Ok", id);
+            assert_eq!(
+                ch.value.status,
+                EngineStatus::Ok,
+                "channel {} should be Ok",
+                id
+            );
             // raw should be 60.0 from the cache
             assert_eq!(ch.value.raw, 60.0, "channel {} raw should be 60.0", id);
         }
@@ -1831,7 +1917,10 @@ mod tests {
             2,
             0x40,
             "sdp810",
-            Err(sandstar_hal::HalError::Timeout { device: 2, address: 0x40 }),
+            Err(sandstar_hal::HalError::Timeout {
+                device: 2,
+                address: 0x40,
+            }),
         );
 
         let _notifs = engine.poll_update();
@@ -1906,7 +1995,7 @@ mod tests {
             .priority_array
             .as_mut()
             .unwrap()
-            .levels[0]  // level 1 = index 0 (private field, access via direct struct)
+            .levels[0] // level 1 = index 0 (private field, access via direct struct)
             .expires_at = Some(past);
 
         engine.expire_priority_timers();
@@ -2049,12 +2138,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            engine
-                .get_write_levels(5)
-                .unwrap()
-                .unwrap()
-                .effective()
-                .1,
+            engine.get_write_levels(5).unwrap().unwrap().effective().1,
             1
         );
 
@@ -2137,7 +2221,10 @@ mod tests {
         );
         let last_write = writes.last().unwrap();
         assert_eq!(last_write.address, 5);
-        assert!(!last_write.value, "effective value 0.0 should write false to digital HAL");
+        assert!(
+            !last_write.value,
+            "effective value 0.0 should write false to digital HAL"
+        );
     }
 
     // ========================================================================
@@ -2189,9 +2276,12 @@ mod tests {
         engine.channels.get_mut(612).unwrap().failed = true;
 
         // Queue reinit failures
-        engine.hal.queue_reinit_result(Err(
-            sandstar_hal::HalError::BusError(2, "sensor down".into()),
-        ));
+        engine
+            .hal
+            .queue_reinit_result(Err(sandstar_hal::HalError::BusError(
+                2,
+                "sensor down".into(),
+            )));
 
         // First cooldown: 30 cycles at base rate
         for i in 0..30 {
@@ -2209,9 +2299,12 @@ mod tests {
         );
 
         // Now need 60 cycles before next attempt
-        engine.hal.queue_reinit_result(Err(
-            sandstar_hal::HalError::BusError(2, "sensor down".into()),
-        ));
+        engine
+            .hal
+            .queue_reinit_result(Err(sandstar_hal::HalError::BusError(
+                2,
+                "sensor down".into(),
+            )));
         for _ in 0..60 {
             let value = engine.channel_read(612).unwrap();
             assert_eq!(value.status, EngineStatus::Down);
@@ -2243,9 +2336,12 @@ mod tests {
         engine.channels.get_mut(612).unwrap().failed = true;
 
         // Queue reinit failure
-        engine.hal.queue_reinit_result(Err(
-            sandstar_hal::HalError::BusError(2, "sensor down".into()),
-        ));
+        engine
+            .hal
+            .queue_reinit_result(Err(sandstar_hal::HalError::BusError(
+                2,
+                "sensor down".into(),
+            )));
 
         // Burn through 240 cycles
         for _ in 0..240 {
@@ -2261,9 +2357,12 @@ mod tests {
         );
 
         // Queue another failure
-        engine.hal.queue_reinit_result(Err(
-            sandstar_hal::HalError::BusError(2, "sensor down".into()),
-        ));
+        engine
+            .hal
+            .queue_reinit_result(Err(sandstar_hal::HalError::BusError(
+                2,
+                "sensor down".into(),
+            )));
 
         // Burn through 300 cycles
         for _ in 0..300 {
@@ -2347,12 +2446,18 @@ mod tests {
         engine.channels.add(i2c_channel(611)).unwrap();
 
         // Queue reinit failures for both
-        engine.hal.queue_reinit_result(Err(
-            sandstar_hal::HalError::BusError(2, "sensor down".into()),
-        ));
-        engine.hal.queue_reinit_result(Err(
-            sandstar_hal::HalError::BusError(2, "sensor down".into()),
-        ));
+        engine
+            .hal
+            .queue_reinit_result(Err(sandstar_hal::HalError::BusError(
+                2,
+                "sensor down".into(),
+            )));
+        engine
+            .hal
+            .queue_reinit_result(Err(sandstar_hal::HalError::BusError(
+                2,
+                "sensor down".into(),
+            )));
 
         // Mark both as failed
         engine.channels.get_mut(610).unwrap().failed = true;

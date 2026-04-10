@@ -694,7 +694,7 @@ mod tests {
         assert_eq!(bytes[4], b't');
         assert_eq!(&bytes[5..8], b"App");
         assert_eq!(bytes[8], 0x00); // NUL terminator
-        // 72.5f = 0x42910000
+                                    // 72.5f = 0x42910000
         assert_eq!(&bytes[9..13], &[0x42, 0x91, 0x00, 0x00]);
     }
 

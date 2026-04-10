@@ -140,13 +140,34 @@ mod tests {
     #[test]
     fn test_raw_to_cfm_dead_band() {
         // Below dead band -> 0
-        assert_eq!(raw_to_cfm(3.0, DEFAULT_K_FACTOR, DEFAULT_DEAD_BAND, DEFAULT_SCALE_FACTOR), 0.0);
+        assert_eq!(
+            raw_to_cfm(
+                3.0,
+                DEFAULT_K_FACTOR,
+                DEFAULT_DEAD_BAND,
+                DEFAULT_SCALE_FACTOR
+            ),
+            0.0
+        );
 
         // At dead band -> 0
-        assert_eq!(raw_to_cfm(4.9, DEFAULT_K_FACTOR, DEFAULT_DEAD_BAND, DEFAULT_SCALE_FACTOR), 0.0);
+        assert_eq!(
+            raw_to_cfm(
+                4.9,
+                DEFAULT_K_FACTOR,
+                DEFAULT_DEAD_BAND,
+                DEFAULT_SCALE_FACTOR
+            ),
+            0.0
+        );
 
         // Above dead band -> positive CFM
-        let cfm = raw_to_cfm(60.0, DEFAULT_K_FACTOR, DEFAULT_DEAD_BAND, DEFAULT_SCALE_FACTOR);
+        let cfm = raw_to_cfm(
+            60.0,
+            DEFAULT_K_FACTOR,
+            DEFAULT_DEAD_BAND,
+            DEFAULT_SCALE_FACTOR,
+        );
         assert!(cfm > 0.0);
     }
 
@@ -154,7 +175,12 @@ mod tests {
     fn test_raw_to_cfm_formula() {
         // raw=60, scale=60 -> Pa=1 -> inH2O = 0.00401865
         // CFM = 14000 * sqrt(0.00401865) = 14000 * 0.06339 ≈ 887.5
-        let cfm = raw_to_cfm(60.0, DEFAULT_K_FACTOR, DEFAULT_DEAD_BAND, DEFAULT_SCALE_FACTOR);
+        let cfm = raw_to_cfm(
+            60.0,
+            DEFAULT_K_FACTOR,
+            DEFAULT_DEAD_BAND,
+            DEFAULT_SCALE_FACTOR,
+        );
         let expected_inh2o = PA_TO_INCHES_WC; // 1 Pa
         let expected_cfm = DEFAULT_K_FACTOR * expected_inh2o.sqrt();
         assert!((cfm - expected_cfm).abs() < 0.01);
@@ -162,8 +188,18 @@ mod tests {
 
     #[test]
     fn test_raw_to_lps() {
-        let cfm = raw_to_cfm(60.0, DEFAULT_K_FACTOR, DEFAULT_DEAD_BAND, DEFAULT_SCALE_FACTOR);
-        let lps = raw_to_lps(60.0, DEFAULT_K_FACTOR, DEFAULT_DEAD_BAND, DEFAULT_SCALE_FACTOR);
+        let cfm = raw_to_cfm(
+            60.0,
+            DEFAULT_K_FACTOR,
+            DEFAULT_DEAD_BAND,
+            DEFAULT_SCALE_FACTOR,
+        );
+        let lps = raw_to_lps(
+            60.0,
+            DEFAULT_K_FACTOR,
+            DEFAULT_DEAD_BAND,
+            DEFAULT_SCALE_FACTOR,
+        );
         assert!((lps - cfm * CFM_TO_LPS).abs() < 1e-10);
     }
 
@@ -172,19 +208,31 @@ mod tests {
         let mut detected = false;
 
         // Below on threshold -> stays off
-        assert_eq!(apply_hysteresis(10.0, DEFAULT_HYST_ON, DEFAULT_HYST_OFF, &mut detected), 0.0);
+        assert_eq!(
+            apply_hysteresis(10.0, DEFAULT_HYST_ON, DEFAULT_HYST_OFF, &mut detected),
+            0.0
+        );
         assert!(!detected);
 
         // At on threshold -> turns on
-        assert_eq!(apply_hysteresis(16.0, DEFAULT_HYST_ON, DEFAULT_HYST_OFF, &mut detected), 16.0);
+        assert_eq!(
+            apply_hysteresis(16.0, DEFAULT_HYST_ON, DEFAULT_HYST_OFF, &mut detected),
+            16.0
+        );
         assert!(detected);
 
         // Above off threshold -> stays on
-        assert_eq!(apply_hysteresis(10.0, DEFAULT_HYST_ON, DEFAULT_HYST_OFF, &mut detected), 10.0);
+        assert_eq!(
+            apply_hysteresis(10.0, DEFAULT_HYST_ON, DEFAULT_HYST_OFF, &mut detected),
+            10.0
+        );
         assert!(detected);
 
         // Below off threshold -> turns off
-        assert_eq!(apply_hysteresis(5.0, DEFAULT_HYST_ON, DEFAULT_HYST_OFF, &mut detected), 0.0);
+        assert_eq!(
+            apply_hysteresis(5.0, DEFAULT_HYST_ON, DEFAULT_HYST_OFF, &mut detected),
+            0.0
+        );
         assert!(!detected);
     }
 
@@ -193,14 +241,20 @@ mod tests {
         let mut detected = true;
 
         // Negative value always turns off
-        assert_eq!(apply_hysteresis(-1.0, DEFAULT_HYST_ON, DEFAULT_HYST_OFF, &mut detected), 0.0);
+        assert_eq!(
+            apply_hysteresis(-1.0, DEFAULT_HYST_ON, DEFAULT_HYST_OFF, &mut detected),
+            0.0
+        );
         assert!(!detected);
     }
 
     #[test]
     fn test_hysteresis_zero() {
         let mut detected = true;
-        assert_eq!(apply_hysteresis(0.0, DEFAULT_HYST_ON, DEFAULT_HYST_OFF, &mut detected), 0.0);
+        assert_eq!(
+            apply_hysteresis(0.0, DEFAULT_HYST_ON, DEFAULT_HYST_OFF, &mut detected),
+            0.0
+        );
         assert!(!detected);
     }
 
