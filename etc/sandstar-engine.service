@@ -13,7 +13,7 @@ ExecStart=/home/eacio/sandstar/bin/sandstar-engine-server \
     --config-dir /home/eacio/sandstar/etc/EacIo \
     --pid-file /var/run/sandstar/sandstar-engine.pid \
     --log-file /var/log/sandstar/sandstar-engine.log \
-    --log-level info
+    --log-level info --http-bind 0.0.0.0 --sox --cluster
 
 ExecReload=/bin/kill -HUP $MAINPID
 
