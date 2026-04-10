@@ -926,21 +926,21 @@ mod tests {
 
     #[test]
     fn validate_unsupported_native_flagged() {
-        // CallNative to kit 2 (inet) method 15 — likely a stub
+        // CallNative to kit 100 (shaystack) method 5 — still a stub
         let code = vec![
             Opcode::CallNative as u8,
-            2,  // kit 2 (inet)
-            15, // method 15
-            0,  // nparams
+            100, // kit 100 (shaystack)
+            5,   // method 5
+            0,   // nparams
             Opcode::ReturnPop as u8,
         ];
         let data = make_valid_sab(&code);
         let report = validate_sab_bytes("test.sab", &data).unwrap();
 
-        // inet methods are stubs, so should appear in unsupported_natives
+        // shaystack methods are stubs, so should appear in unsupported_natives
         assert!(
             !report.unsupported_natives.is_empty(),
-            "should flag stubbed inet method as unsupported"
+            "should flag stubbed shaystack method as unsupported"
         );
     }
 

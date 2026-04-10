@@ -1,32 +1,33 @@
 #![allow(clippy::missing_safety_doc)]
-//! Sedona Virtual Machine FFI bridge for the Sandstar Rust engine.
+//! Pure Rust Sedona Virtual Machine for the Sandstar engine.
 //!
-//! This crate compiles the Sedona VM bytecode interpreter (`vm.c`) and its
-//! standard native method libraries via the `cc` crate, then provides Rust
-//! FFI bindings and a high-level runner API.
+//! This crate provides a complete Rust implementation of the Sedona VM
+//! bytecode interpreter, native method tables, and engine bridge.
+//! No C code is compiled — all native methods (sys, inet, datetimeStd,
+//! EacIo, shaystack) are implemented in Rust.
 //!
 //! # Architecture
 //!
 //! ```text
 //! ┌──────────────────────────────────────────────────┐
-//! │  Sedona VM (vm.c)                                │
-//! │  - bytecode interpreter                          │
-//! │  - calls native methods via nativeTable[kit][id] │
+//! │  Sedona VM (pure Rust)                           │
+//! │  - bytecode interpreter (vm_interpreter)         │
+//! │  - native methods via native_table               │
 //! └────────────┬─────────────────────────────────────┘
 //!              │
-//!    ┌─────────┴─────────┐
-//!    │   Kit 0,2,9 (C)   │  sys, inet, datetimeStd
-//!    │   Kit 4 (Rust)    │  EacIo — direct engine access
-//!    │   Kit 100 (Rust)  │  shaystack — stubs
-//!    └───────────────────┘
+//!    ┌─────────┴──────────────┐
+//!    │   Kit 0  (native_sys)  │  sys
+//!    │   Kit 2  (native_inet) │  inet
+//!    │   Kit 4  (native_eacio)│  EacIo
+//!    │   Kit 9  (native_datetime)│  datetimeStd
+//!    │   Kit 100 (stubs)      │  shaystack
+//!    └────────────────────────┘
 //! ```
 
 pub mod bridge;
-pub mod ffi;
-pub mod runner;
 pub mod types;
 
-// Pure Rust VM modules (Phase A)
+// Pure Rust VM modules
 pub mod opcodes;
 pub mod vm_error;
 pub mod image_loader;
@@ -44,7 +45,6 @@ pub mod native_mod;
 pub mod native_serial;
 pub mod native_eacio;
 pub mod sab_validator;
-// Future phases:
 pub mod vm_stack;
 pub mod vm_interpreter;
 pub mod rust_runner;
@@ -54,5 +54,5 @@ pub use bridge::{
     drain_writes, drain_tag_writes,
     ChannelInfo, ChannelSnapshot, SvmWrite, SvmTagWrite, TagValue,
 };
-pub use runner::SvmRunner;
+pub use rust_runner::RustSvmRunner;
 pub use types::{Cell, SedonaVM};

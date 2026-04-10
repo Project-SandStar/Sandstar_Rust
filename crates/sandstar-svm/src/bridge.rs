@@ -1,23 +1,20 @@
-//! Rust implementations of Sedona native methods that bridge the VM to
-//! the Rust engine's channel store.
+//! Bridge between the Sedona VM and the Rust engine's channel store.
 //!
-//! These `#[no_mangle] extern "C"` functions are referenced by nativetable.c
-//! and linked at build time.  They replace the C implementations in
-//! EAC_Gpio.cpp (kit 4) and provide stubs for shaystack (kit 100).
+//! Provides shared data structures (ChannelSnapshot, SvmWrite, SvmTagWrite)
+//! and queue primitives used by both the pure-Rust VM native methods
+//! (native_eacio, native_sys, etc.) and the server main loop.
 
 use std::collections::HashMap;
-use std::ffi::CStr;
 use std::sync::{Arc, Mutex, RwLock};
 
-use crate::types::{Cell, SedonaVM};
-
 // ════════════════════════════════════════════════════════════════
-// FFI safety: catch_unwind wrappers
+// Panic safety: catch_unwind wrappers
 // ════════════════════════════════════════════════════════════════
 
-/// Wraps an FFI function body with `catch_unwind` to prevent panics from
-/// crossing the FFI boundary (which is undefined behavior).
+/// Wraps a function body with `catch_unwind` to prevent panics from
+/// propagating across boundaries (which could be undefined behavior).
 /// On panic, logs the error and returns a safe default value.
+#[allow(unused_macros)]
 macro_rules! ffi_safe {
     ($default:expr, $body:block) => {
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $body)) {
@@ -28,7 +25,7 @@ macro_rules! ffi_safe {
                     .copied()
                     .or_else(|| e.downcast_ref::<String>().map(|s| s.as_str()))
                     .unwrap_or("<unknown panic>");
-                eprintln!("PANIC in FFI: {}", msg);
+                eprintln!("PANIC in bridge: {}", msg);
                 $default
             }
         }
@@ -58,7 +55,7 @@ pub struct ChannelInfo {
     pub tags: HashMap<String, TagValue>,
 }
 
-/// Tag value representation matching C engine's tag types.
+/// Tag value representation matching engine's tag types.
 #[derive(Clone, Debug)]
 pub enum TagValue {
     Marker,
@@ -210,7 +207,8 @@ pub fn drain_tag_writes() -> Vec<SvmTagWrite> {
         .unwrap_or_default()
 }
 
-fn queue_tag_write(channel: u32, tag: String, value: String) {
+#[allow(dead_code)]
+pub(crate) fn queue_tag_write(channel: u32, tag: String, value: String) {
     if let Some(q) = TAG_WRITE_QUEUE.get() {
         if let Ok(mut v) = q.lock() {
             v.push(SvmTagWrite { channel, tag, value });
@@ -218,595 +216,18 @@ fn queue_tag_write(channel: u32, tag: String, value: String) {
     }
 }
 
-fn get_snapshot() -> Option<Arc<RwLock<ChannelSnapshot>>> {
+#[allow(dead_code)]
+pub(crate) fn get_snapshot() -> Option<Arc<RwLock<ChannelSnapshot>>> {
     ENGINE_BRIDGE.get().cloned()
 }
 
-fn queue_write(channel: u32, value: f64) {
+#[allow(dead_code)]
+pub(crate) fn queue_write(channel: u32, value: f64) {
     if let Some(q) = WRITE_QUEUE.get() {
         if let Ok(mut v) = q.lock() {
             v.push(SvmWrite { channel, value });
         }
     }
-}
-
-/// Helper: read a C string from a Sedona `params[n].aval` pointer.
-unsafe fn read_sedona_str(ptr: *mut std::ffi::c_void) -> &'static str {
-    if ptr.is_null() {
-        return "";
-    }
-    CStr::from_ptr(ptr as *const std::ffi::c_char)
-        .to_str()
-        .unwrap_or("")
-}
-
-/// Helper: write a Rust string into a Sedona string buffer (params[n].aval).
-unsafe fn write_sedona_str(ptr: *mut std::ffi::c_void, s: &str) {
-    if ptr.is_null() {
-        return;
-    }
-    let dst = ptr as *mut u8;
-    let bytes = s.as_bytes();
-    let len = bytes.len().min(127); // Sedona strings are typically 128 bytes max
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, len);
-    *dst.add(len) = 0; // null terminate
-}
-
-// ════════════════════════════════════════════════════════════════
-// Kit 4: EacIo native methods (22 functions)
-// ════════════════════════════════════════════════════════════════
-
-/// bool boolInPoint.get(int channel)
-#[no_mangle]
-pub unsafe extern "C" fn EacIo_boolInPoint_get(
-    _vm: *mut SedonaVM,
-    params: *mut Cell,
-) -> Cell {
-    ffi_safe!(Cell { ival: 0 }, {
-        let channel = (*params).ival as u32;
-        let val = get_snapshot()
-            .and_then(|snap| snap.read().ok().and_then(|s| s.get_cur(channel)))
-            .unwrap_or(0.0);
-        Cell { ival: if val != 0.0 { 1 } else { 0 } }
-    })
-}
-
-/// bool boolOutPoint.set(int channel, bool value)
-#[no_mangle]
-pub unsafe extern "C" fn EacIo_boolOutPoint_set(
-    _vm: *mut SedonaVM,
-    params: *mut Cell,
-) -> Cell {
-    ffi_safe!(Cell { ival: 0 }, {
-        let channel = (*params).ival as u32;
-        let value = (*params.add(1)).ival;
-        queue_write(channel, if value == 1 { 1.0 } else { 0.0 });
-        Cell { ival: 0 }
-    })
-}
-
-/// bool binaryValuePoint.set(int channel, bool value)
-#[no_mangle]
-pub unsafe extern "C" fn EacIo_binaryValuePoint_set(
-    _vm: *mut SedonaVM,
-    params: *mut Cell,
-) -> Cell {
-    ffi_safe!(Cell { ival: 0 }, {
-        let channel = (*params).ival as u32;
-        let value = (*params.add(1)).ival;
-        queue_write(channel, if value == 1 { 1.0 } else { 0.0 });
-        Cell { ival: 0 }
-    })
-}
-
-/// float analogInPoint.get(int channel)
-#[no_mangle]
-pub unsafe extern "C" fn EacIo_analogInPoint_get(
-    _vm: *mut SedonaVM,
-    params: *mut Cell,
-) -> Cell {
-    ffi_safe!(Cell { fval: 0.0 }, {
-        let channel = (*params).ival as u32;
-        let val = get_snapshot()
-            .and_then(|snap| snap.read().ok().and_then(|s| s.get_cur(channel)))
-            .unwrap_or(0.0);
-        Cell { fval: val as f32 }
-    })
-}
-
-/// bool analogOutPoint.set(int channel, float value)
-#[no_mangle]
-pub unsafe extern "C" fn EacIo_analogOutPoint_set(
-    _vm: *mut SedonaVM,
-    params: *mut Cell,
-) -> Cell {
-    ffi_safe!(Cell { ival: 0 }, {
-        let channel = (*params).ival as u32;
-        let value = (*params.add(1)).fval as f64;
-        queue_write(channel, value);
-        Cell { ival: 0 }
-    })
-}
-
-/// bool analogValuePoint.set(int channel, float value)
-#[no_mangle]
-pub unsafe extern "C" fn EacIo_analogValuePoint_set(
-    _vm: *mut SedonaVM,
-    params: *mut Cell,
-) -> Cell {
-    ffi_safe!(Cell { ival: 0 }, {
-        let channel = (*params).ival as u32;
-        let value = (*params.add(1)).fval as f64;
-        queue_write(channel, value);
-        Cell { ival: 0 }
-    })
-}
-
-/// int eacio.resolveChannel(Str markers)
-#[no_mangle]
-pub unsafe extern "C" fn EacIo_eacio_resolveChannel(
-    _vm: *mut SedonaVM,
-    params: *mut Cell,
-) -> Cell {
-    ffi_safe!(Cell { ival: -1 }, {
-        let markers_ptr = (*params).aval;
-        let markers = read_sedona_str(markers_ptr);
-        let id = get_snapshot()
-            .and_then(|snap| snap.read().ok().and_then(|s| s.resolve_channel(markers)))
-            .map(|id| id as i32)
-            .unwrap_or(-1);
-        Cell { ival: id }
-    })
-}
-
-/// int eacio.getRecordCount(Str markers)
-#[no_mangle]
-pub unsafe extern "C" fn EacIo_eacio_getRecordCount(
-    _vm: *mut SedonaVM,
-    params: *mut Cell,
-) -> Cell {
-    ffi_safe!(Cell { ival: 0 }, {
-        let markers_ptr = (*params).aval;
-        let markers = read_sedona_str(markers_ptr);
-        let count = get_snapshot()
-            .and_then(|snap| snap.read().ok().map(|s| s.count_matching(markers) as i32))
-            .unwrap_or(0);
-        Cell { ival: count }
-    })
-}
-
-/// bool eacio.getCurStatus(int channel, Str statusBuf)
-#[no_mangle]
-pub unsafe extern "C" fn EacIo_eacio_getCurStatus(
-    _vm: *mut SedonaVM,
-    params: *mut Cell,
-) -> Cell {
-    ffi_safe!(Cell { ival: 0 }, {
-        let channel = (*params).ival as u32;
-        let status_buf = (*params.add(1)).aval;
-        let ok = get_snapshot()
-            .and_then(|snap| {
-                snap.read().ok().map(|s| {
-                    let status = if s.is_ok(channel) { "ok" } else { "down" };
-                    write_sedona_str(status_buf, status);
-                    true
-                })
-            })
-            .unwrap_or(false);
-        Cell { ival: if ok { 1 } else { 0 } }
-    })
-}
-
-/// bool eacio.getChannelName(int channel, Str nameBuf)
-#[no_mangle]
-pub unsafe extern "C" fn EacIo_eacio_getChannelName(
-    _vm: *mut SedonaVM,
-    params: *mut Cell,
-) -> Cell {
-    ffi_safe!(Cell { ival: 0 }, {
-        let channel = (*params).ival as u32;
-        let name_buf = (*params.add(1)).aval;
-        let found = get_snapshot()
-            .and_then(|snap| {
-                snap.read().ok().and_then(|s| {
-                    s.get(channel).map(|ch| {
-                        write_sedona_str(name_buf, &ch.label);
-                        true
-                    })
-                })
-            })
-            .unwrap_or(false);
-        Cell { ival: if found { 1 } else { 0 } }
-    })
-}
-
-/// bool triacPoint.set(int channel, bool cmd)
-#[no_mangle]
-pub unsafe extern "C" fn EacIo_triacPoint_set(
-    _vm: *mut SedonaVM,
-    params: *mut Cell,
-) -> Cell {
-    ffi_safe!(Cell { ival: 0 }, {
-        let channel = (*params).ival as u32;
-        let cmd = (*params.add(1)).ival;
-        queue_write(channel, if cmd == 1 { 1.0 } else { 0.0 });
-        Cell { ival: 0 }
-    })
-}
-
-/// int eacio.writeSedonaId(int channel, int id)
-#[no_mangle]
-pub unsafe extern "C" fn EacIo_eacio_writeSedonaId(
-    _vm: *mut SedonaVM,
-    params: *mut Cell,
-) -> Cell {
-    ffi_safe!(Cell { ival: 0 }, {
-        let channel = (*params).ival as u32;
-        let id = (*params.add(1)).ival;
-        queue_tag_write(channel, "sedonaId".to_string(), id.to_string());
-        Cell { ival: 0 }
-    })
-}
-
-/// int eacio.writeSedonaType(int channel, Str kit, Str name)
-#[no_mangle]
-pub unsafe extern "C" fn EacIo_eacio_writeSedonaType(
-    _vm: *mut SedonaVM,
-    params: *mut Cell,
-) -> Cell {
-    ffi_safe!(Cell { ival: 0 }, {
-        let channel = (*params).ival as u32;
-        let kit = read_sedona_str((*params.add(1)).aval);
-        let name = read_sedona_str((*params.add(2)).aval);
-        let type_str = format!("{}::{}", kit, name);
-        queue_tag_write(channel, "sedonaType".to_string(), type_str);
-        Cell { ival: 0 }
-    })
-}
-
-/// bool eacio.isChannelEnabled(int channel)
-#[no_mangle]
-pub unsafe extern "C" fn EacIo_eacio_isChannelEnabled(
-    _vm: *mut SedonaVM,
-    params: *mut Cell,
-) -> Cell {
-    ffi_safe!(Cell { ival: 0 }, {
-        let channel = (*params).ival as u32;
-        let enabled = get_snapshot()
-            .and_then(|snap| snap.read().ok().map(|s| s.is_enabled(channel)))
-            .unwrap_or(false);
-        Cell { ival: if enabled { 1 } else { 0 } }
-    })
-}
-
-/// bool eacio.getBoolTagValue(int channel, Str tag)
-#[no_mangle]
-pub unsafe extern "C" fn EacIo_eacio_getBoolTagValue(
-    _vm: *mut SedonaVM,
-    params: *mut Cell,
-) -> Cell {
-    ffi_safe!(Cell { ival: 0 }, {
-        let channel = (*params).ival as u32;
-        let tag_ptr = (*params.add(1)).aval;
-        let tag = read_sedona_str(tag_ptr);
-        let val = get_snapshot()
-            .and_then(|snap| {
-                snap.read().ok().and_then(|s| {
-                    s.get(channel).and_then(|ch| match ch.tags.get(tag) {
-                        Some(TagValue::Bool(b)) => Some(*b),
-                        Some(TagValue::Marker) => Some(true),
-                        _ => None,
-                    })
-                })
-            })
-            .unwrap_or(false);
-        Cell { ival: if val { 1 } else { 0 } }
-    })
-}
-
-/// float eacio.getNumberTagValue(int channel, Str tag)
-#[no_mangle]
-pub unsafe extern "C" fn EacIo_eacio_getNumberTagValue(
-    _vm: *mut SedonaVM,
-    params: *mut Cell,
-) -> Cell {
-    ffi_safe!(Cell { fval: 0.0 }, {
-        let channel = (*params).ival as u32;
-        let tag_ptr = (*params.add(1)).aval;
-        let tag = read_sedona_str(tag_ptr);
-        let val = get_snapshot()
-            .and_then(|snap| {
-                snap.read().ok().and_then(|s| {
-                    s.get(channel).and_then(|ch| match ch.tags.get(tag) {
-                        Some(TagValue::Number(n)) => Some(*n as f32),
-                        _ => None,
-                    })
-                })
-            })
-            .unwrap_or(0.0);
-        Cell { fval: val }
-    })
-}
-
-/// void eacio.getStringTagValue(int channel, Str tag, Str valBuf)
-#[no_mangle]
-pub unsafe extern "C" fn EacIo_eacio_getStringTagValue(
-    _vm: *mut SedonaVM,
-    params: *mut Cell,
-) -> Cell {
-    ffi_safe!(Cell { ival: 0 }, {
-        let channel = (*params).ival as u32;
-        let tag_ptr = (*params.add(1)).aval;
-        let val_buf = (*params.add(2)).aval;
-        let tag = read_sedona_str(tag_ptr);
-        if let Some(snap) = get_snapshot() {
-            if let Ok(s) = snap.read() {
-                if let Some(ch) = s.get(channel) {
-                    if let Some(TagValue::Str(v)) = ch.tags.get(tag) {
-                        write_sedona_str(val_buf, v);
-                    }
-                }
-            }
-        }
-        Cell { ival: 0 }
-    })
-}
-
-/// int eacio.getTagType(int channel, Str tag)
-#[no_mangle]
-pub unsafe extern "C" fn EacIo_eacio_getTagType(
-    _vm: *mut SedonaVM,
-    params: *mut Cell,
-) -> Cell {
-    ffi_safe!(Cell { ival: 0 }, {
-        let channel = (*params).ival as u32;
-        let tag_ptr = (*params.add(1)).aval;
-        let tag = read_sedona_str(tag_ptr);
-        let code = get_snapshot()
-            .and_then(|snap| {
-                snap.read().ok().and_then(|s| {
-                    s.get(channel)
-                        .and_then(|ch| ch.tags.get(tag).map(|tv| tv.type_code()))
-                })
-            })
-            .unwrap_or(0);
-        Cell { ival: code }
-    })
-}
-
-/// int eacio.getLevel(int channel) — get active write priority level.
-#[no_mangle]
-pub unsafe extern "C" fn EacIo_eacio_getLevel(
-    _vm: *mut SedonaVM,
-    params: *mut Cell,
-) -> Cell {
-    ffi_safe!(Cell { ival: 17 }, {
-        let channel = (*params).ival as u32;
-        let level = get_snapshot()
-            .and_then(|snap| {
-                snap.read().ok().and_then(|s| {
-                    s.get(channel).map(|ch| ch.write_level as i32)
-                })
-            })
-            .unwrap_or(17);
-        Cell { ival: level }
-    })
-}
-
-/// float eacio.getLevelValue(int channel, int level)
-#[no_mangle]
-pub unsafe extern "C" fn EacIo_eacio_getLevelValue(
-    _vm: *mut SedonaVM,
-    params: *mut Cell,
-) -> Cell {
-    ffi_safe!(Cell { fval: 0.0 }, {
-        let channel = (*params).ival as u32;
-        let level = (*params.add(1)).ival as usize;
-        let val = get_snapshot()
-            .and_then(|snap| {
-                snap.read().ok().and_then(|s| {
-                    s.get(channel).and_then(|ch| {
-                        if (1..=17).contains(&level) {
-                            Some(ch.write_levels[level - 1].unwrap_or(0.0))
-                        } else {
-                            None
-                        }
-                    })
-                })
-            })
-            .unwrap_or(0.0);
-        Cell { fval: val as f32 }
-    })
-}
-
-/// int eacio.getChannelIn(int channel) — get virtual channel input source.
-#[no_mangle]
-pub unsafe extern "C" fn EacIo_eacio_getChannelIn(
-    _vm: *mut SedonaVM,
-    params: *mut Cell,
-) -> Cell {
-    ffi_safe!(Cell { ival: -1 }, {
-        let channel = (*params).ival as u32;
-        let ch_in = get_snapshot()
-            .and_then(|snap| {
-                snap.read().ok().and_then(|s| {
-                    s.get(channel).map(|ch| ch.channel_in)
-                })
-            })
-            .unwrap_or(-1);
-        Cell { ival: ch_in }
-    })
-}
-
-/// float analogValuePoint.get(int channel)
-#[no_mangle]
-pub unsafe extern "C" fn EacIo_analogValuePoint_get(
-    _vm: *mut SedonaVM,
-    params: *mut Cell,
-) -> Cell {
-    ffi_safe!(Cell { fval: 0.0 }, {
-        let channel = (*params).ival as u32;
-        let val = get_snapshot()
-            .and_then(|snap| snap.read().ok().and_then(|s| s.get_cur(channel)))
-            .unwrap_or(0.0);
-        Cell { fval: val as f32 }
-    })
-}
-
-// ════════════════════════════════════════════════════════════════
-// Kit 100: shaystack native methods (28 functions) — stubs
-// ════════════════════════════════════════════════════════════════
-
-macro_rules! shaystack_stub {
-    ($name:ident) => {
-        #[no_mangle]
-        pub unsafe extern "C" fn $name(
-            _vm: *mut SedonaVM,
-            _params: *mut Cell,
-        ) -> Cell {
-            ffi_safe!(Cell { ival: 0 }, {
-                Cell { ival: 0 }
-            })
-        }
-    };
-}
-
-shaystack_stub!(shaystack_HaystackDevice_open);
-shaystack_stub!(shaystack_HaystackDevice_call);
-shaystack_stub!(shaystack_HaystackDevice_read_float);
-shaystack_stub!(shaystack_HaystackDevice_read_bool);
-shaystack_stub!(shaystack_HaystackDevice_eval_float);
-shaystack_stub!(shaystack_HaystackDevice_eval_bool);
-shaystack_stub!(shaystack_HaystackDevice_create_client);
-shaystack_stub!(shaystack_HaystackDevice_is_authenticated);
-shaystack_stub!(shaystack_HaystackDevice_get_auth_message);
-shaystack_stub!(shaystack_HaystackDevice_read_message);
-shaystack_stub!(shaystack_HaystackDevice_eval_message);
-shaystack_stub!(shaystack_HaystackDevice_watch_sub_message);
-shaystack_stub!(shaystack_HaystackDevice_watch_unsub_message);
-shaystack_stub!(shaystack_HaystackDevice_watch_poll_message);
-shaystack_stub!(shaystack_HaystackDevice_write_float_point_message);
-shaystack_stub!(shaystack_HaystackDevice_write_bool_point_message);
-shaystack_stub!(shaystack_HaystackDevice_write_read_point_message);
-shaystack_stub!(shaystack_HaystackDevice_reset_point_message);
-shaystack_stub!(shaystack_HaystackDevice_is_empty);
-shaystack_stub!(shaystack_HaystackDevice_is_err);
-shaystack_stub!(shaystack_HaystackDevice_has_float);
-shaystack_stub!(shaystack_HaystackDevice_has_bool);
-shaystack_stub!(shaystack_HaystackDevice_parse_bool_response);
-shaystack_stub!(shaystack_HaystackDevice_parse_float_response);
-shaystack_stub!(shaystack_HaystackDevice_parse_str_response);
-shaystack_stub!(shaystack_HaystackDevice_is_filter_valid);
-shaystack_stub!(shaystack_HaystackDevice_delete_client);
-shaystack_stub!(shaystack_HaystackDevice_isSessionConnected);
-
-// ════════════════════════════════════════════════════════════════
-// Windows dev stubs: kit 0/2/9 native methods
-// ════════════════════════════════════════════════════════════════
-
-#[cfg(not(unix))]
-mod win_stubs {
-    use super::*;
-
-    macro_rules! native_stub {
-        ($name:ident) => {
-            #[no_mangle]
-            pub unsafe extern "C" fn $name(
-                _vm: *mut SedonaVM,
-                _params: *mut Cell,
-            ) -> Cell {
-                ffi_safe!(Cell { ival: 0 }, {
-                    Cell { ival: 0 }
-                })
-            }
-        };
-    }
-
-    // Kit 0: sys (60 methods)
-    native_stub!(sys_Sys_platformType);
-    native_stub!(sys_Sys_copy);
-    native_stub!(sys_Sys_malloc);
-    native_stub!(sys_Sys_free);
-    native_stub!(sys_Sys_intStr);
-    native_stub!(sys_Sys_hexStr);
-    native_stub!(sys_Sys_longStr);
-    native_stub!(sys_Sys_longHexStr);
-    native_stub!(sys_Sys_floatStr);
-    native_stub!(sys_Sys_doubleStr);
-    native_stub!(sys_Sys_floatToBits);
-    native_stub!(sys_Sys_doubleToBits);
-    native_stub!(sys_Sys_bitsToFloat);
-    native_stub!(sys_Sys_bitsToDouble);
-    native_stub!(sys_Sys_ticks);
-    native_stub!(sys_Sys_sleep);
-    native_stub!(sys_Sys_compareBytes);
-    native_stub!(sys_Sys_setBytes);
-    native_stub!(sys_Sys_andBytes);
-    native_stub!(sys_Sys_orBytes);
-    native_stub!(sys_Sys_scodeAddr);
-    native_stub!(sys_Sys_rand);
-    native_stub!(sys_Component_invokeVoid);
-    native_stub!(sys_Component_invokeBool);
-    native_stub!(sys_Component_invokeInt);
-    native_stub!(sys_Component_invokeLong);
-    native_stub!(sys_Component_invokeFloat);
-    native_stub!(sys_Component_invokeDouble);
-    native_stub!(sys_Component_invokeBuf);
-    native_stub!(sys_Component_getBool);
-    native_stub!(sys_Component_getInt);
-    native_stub!(sys_Component_getLong);
-    native_stub!(sys_Component_getFloat);
-    native_stub!(sys_Component_getDouble);
-    native_stub!(sys_Component_getBuf);
-    native_stub!(sys_Component_doSetBool);
-    native_stub!(sys_Component_doSetInt);
-    native_stub!(sys_Component_doSetLong);
-    native_stub!(sys_Component_doSetFloat);
-    native_stub!(sys_Component_doSetDouble);
-    native_stub!(sys_Type_malloc);
-    native_stub!(sys_StdOutStream_doWrite);
-    native_stub!(sys_StdOutStream_doWriteBytes);
-    native_stub!(sys_StdOutStream_doFlush);
-    native_stub!(sys_FileStore_doSize);
-    native_stub!(sys_FileStore_doOpen);
-    native_stub!(sys_FileStore_doRead);
-    native_stub!(sys_FileStore_doReadBytes);
-    native_stub!(sys_FileStore_doWrite);
-    native_stub!(sys_FileStore_doWriteBytes);
-    native_stub!(sys_FileStore_doTell);
-    native_stub!(sys_FileStore_doSeek);
-    native_stub!(sys_FileStore_doFlush);
-    native_stub!(sys_FileStore_doClose);
-    native_stub!(sys_FileStore_rename);
-    native_stub!(sys_Test_doMain);
-    native_stub!(sys_Str_fromBytes);
-    native_stub!(sys_PlatformService_doPlatformId);
-    native_stub!(sys_PlatformService_getPlatVersion);
-    native_stub!(sys_PlatformService_getNativeMemAvailable);
-
-    // Kit 2: inet (17 methods)
-    native_stub!(inet_TcpSocket_connect);
-    native_stub!(inet_TcpSocket_finishConnect);
-    native_stub!(inet_TcpSocket_write);
-    native_stub!(inet_TcpSocket_read);
-    native_stub!(inet_TcpSocket_close);
-    native_stub!(inet_TcpServerSocket_bind);
-    native_stub!(inet_TcpServerSocket_accept);
-    native_stub!(inet_TcpServerSocket_close);
-    native_stub!(inet_UdpSocket_open);
-    native_stub!(inet_UdpSocket_bind);
-    native_stub!(inet_UdpSocket_send);
-    native_stub!(inet_UdpSocket_receive);
-    native_stub!(inet_UdpSocket_close);
-    native_stub!(inet_UdpSocket_maxPacketSize);
-    native_stub!(inet_UdpSocket_idealPacketSize);
-    native_stub!(inet_Crypto_sha1);
-    native_stub!(inet_UdpSocket_join);
-
-    // Kit 9: datetimeStd (3 methods)
-    native_stub!(datetimeStd_DateTimeServiceStd_doNow);
-    native_stub!(datetimeStd_DateTimeServiceStd_doSetClock);
-    native_stub!(datetimeStd_DateTimeServiceStd_doGetUtcOffset);
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -816,6 +237,7 @@ mod win_stubs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::Cell;
 
     #[test]
     fn test_channel_snapshot_empty() {
@@ -891,7 +313,7 @@ mod tests {
         let mut tags: HashMap<String, TagValue> = HashMap::new();
         tags.insert("enabled".into(), TagValue::Bool(true));
         tags.insert("maxVal".into(), TagValue::Number(100.0));
-        tags.insert("unit".into(), TagValue::Str("°F".into()));
+        tags.insert("unit".into(), TagValue::Str("\u{00b0}F".into()));
         tags.insert("cur".into(), TagValue::Marker);
 
         assert_eq!(tags.get("enabled").unwrap().type_code(), 2);
@@ -918,7 +340,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Phase 6.0: SVM integration tests — bridge communication layer
+    // SVM integration tests — bridge communication layer
     // ========================================================================
 
     #[test]
@@ -1138,16 +560,6 @@ mod tests {
     }
 
     #[test]
-    fn test_svm_runner_invalid_scode_path() {
-        use crate::runner::SvmRunner;
-        let mut runner = SvmRunner::new(std::path::PathBuf::from("/nonexistent/kits.scode"));
-        // start() should fail gracefully with nonexistent file
-        let result = runner.start();
-        assert!(result.is_err());
-        assert!(!runner.is_running());
-    }
-
-    #[test]
     fn test_drain_writes_returns_empty_when_no_queue() {
         // drain_writes uses OnceLock. If it hasn't been set, returns empty.
         // This test verifies the default empty behavior.
@@ -1165,7 +577,7 @@ mod tests {
     }
 
     // ========================================================================
-    // FFI panic safety tests
+    // Panic safety tests
     // ========================================================================
 
     #[test]

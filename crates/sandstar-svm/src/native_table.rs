@@ -166,7 +166,7 @@ impl NativeTable {
         // replace the stub entries for methods that have been ported.
         crate::native_sys::register_kit0_sys(&mut table);
         crate::native_file::register_kit0_file(&mut table);
-        // crate::native_inet::register_kit2(&mut table);  // uncomment when ready
+        crate::native_inet::register_kit2(&mut table);
         crate::native_datetime::register_kit9(&mut table);
         // Kit 3 (serial) and Kit 4 (EacIo) are registered above via
         // their dedicated register functions — no need to re-register.
@@ -796,11 +796,11 @@ mod tests {
     #[test]
     fn with_defaults_kit0_has_real_implementations() {
         let t = NativeTable::with_defaults();
-        // Kit 0 sys methods (22 from native_sys) + file methods (11 from native_file) = 33
+        // Kit 0 sys methods (22 from native_sys) + file methods (11 from native_file) + component methods (20) = 53+
         let count = t.implemented_count(0);
         assert!(
-            count >= 33,
-            "kit 0 should have at least 33 real implementations (sys + file), got {count}"
+            count >= 53,
+            "kit 0 should have at least 53 real implementations (sys + file + component), got {count}"
         );
     }
 

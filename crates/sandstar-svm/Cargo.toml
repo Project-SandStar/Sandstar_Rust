@@ -2,8 +2,7 @@
 name = "sandstar-svm"
 version.workspace = true
 edition.workspace = true
-build = "build.rs"
-description = "Sedona Virtual Machine FFI bridge for Sandstar engine"
+description = "Sedona Virtual Machine for Sandstar engine (pure Rust)"
 
 [dependencies]
 sandstar-engine = { path = "../sandstar-engine" }
@@ -12,9 +11,5 @@ tracing = { workspace = true }
 chrono = "0.4"
 smallvec = { workspace = true }
 
-[build-dependencies]
-cc = "1"
-
 [features]
 default = []
-pure-rust-vm = []

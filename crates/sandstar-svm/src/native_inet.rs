@@ -1330,18 +1330,15 @@ mod tests {
     }
 
     #[test]
-    fn register_kit2_replaces_stubs() {
-        let mut table = NativeTable::with_defaults();
+    fn register_kit2_already_registered_in_defaults() {
+        let table = NativeTable::with_defaults();
 
-        // Before registration, slot 0 is a Stub
+        // with_defaults() now registers inet (kit 2), so slot 0 should already be Normal
         let entry = table.lookup(2, 0).unwrap();
-        assert!(matches!(entry, crate::native_table::NativeEntry::Stub));
-
-        register_kit2(&mut table);
-
-        // After registration, slot 0 should be Normal
-        let entry = table.lookup(2, 0).unwrap();
-        assert!(matches!(entry, crate::native_table::NativeEntry::Normal(_)));
+        assert!(
+            matches!(entry, crate::native_table::NativeEntry::Normal(_)),
+            "kit 2 slot 0 should be Normal after with_defaults() registers inet"
+        );
     }
 
     #[test]

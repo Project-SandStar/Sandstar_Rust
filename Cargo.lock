@@ -1616,7 +1616,6 @@ dependencies = [
 name = "sandstar-svm"
 version = "1.6.0"
 dependencies = [
- "cc",
  "chrono",
  "sandstar-engine",
  "sandstar-hal",

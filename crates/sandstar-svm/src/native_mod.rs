@@ -19,11 +19,11 @@ pub fn register_all_natives(table: &mut NativeTable) {
     // Kit 0: file — FileStore and File I/O methods
     crate::native_file::register_kit0_file(table);
 
-    // Kit 0: component — Component lifecycle (uncomment when ready)
-    // crate::native_component::register_kit0_component(table);
+    // Kit 0: component — Component lifecycle
+    crate::native_component::register_kit0_component(table);
 
-    // Kit 2: inet — TCP/UDP sockets, crypto (uncomment when ready)
-    // crate::native_inet::register_kit2(table);
+    // Kit 2: inet — TCP/UDP sockets, crypto
+    crate::native_inet::register_kit2(table);
 
     // Kit 3: serial — SerialPort stub natives
     crate::native_serial::register_serial(table);
@@ -46,17 +46,28 @@ mod tests {
         for id in 0..60u16 {
             table.register_stub(0, id);
         }
+        for id in 0..17u16 {
+            table.register_stub(2, id);
+        }
         for id in 0..3u16 {
             table.register_stub(9, id);
         }
 
         register_all_natives(&mut table);
 
-        // Kit 0 should have real implementations (sys + file)
+        // Kit 0 should have real implementations (sys + file + component)
         assert!(
-            table.implemented_count(0) >= 33,
-            "expected >= 33 real kit 0 methods, got {}",
+            table.implemented_count(0) >= 60,
+            "expected >= 60 real kit 0 methods, got {}",
             table.implemented_count(0)
+        );
+
+        // Kit 2 (inet) should have 17 methods implemented
+        assert_eq!(
+            table.implemented_count(2),
+            17,
+            "expected 17 real kit 2 (inet) methods, got {}",
+            table.implemented_count(2)
         );
 
         // Kit 3 (serial) should have 6 methods implemented

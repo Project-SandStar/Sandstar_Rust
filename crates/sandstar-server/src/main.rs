@@ -30,7 +30,7 @@ use sandstar_server::{alerts, args, cmd_handler, config, control, dispatch, hist
 use sandstar_server::control::ControlRunner;
 use sandstar_server::history::HistoryPoint;
 #[cfg(feature = "svm")]
-use sandstar_svm::{ChannelInfo, ChannelSnapshot, SvmRunner};
+use sandstar_svm::{ChannelInfo, ChannelSnapshot, RustSvmRunner};
 use tokio::sync::mpsc;
 #[cfg(feature = "svm")]
 use tracing::debug;
@@ -310,12 +310,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "svm")]
     let svm_tag_write_queue: Arc<Mutex<Vec<sandstar_svm::SvmTagWrite>>> =
         Arc::new(Mutex::new(Vec::new()));
+    // Pure Rust SVM runner (synchronous, no background thread)
     #[cfg(feature = "svm")]
-    let mut svm_runner: Option<SvmRunner> = None;
+    let mut svm_runner: Option<RustSvmRunner> = None;
     #[cfg(feature = "svm")]
     if args.sedona {
         let scode_path = args.scode_path.clone().unwrap_or_else(|| {
-            // Default: look for kits.scode next to config dir
             args.config_dir
                 .as_ref()
                 .map(|d| d.join("kits.scode"))
@@ -325,14 +325,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         sandstar_svm::set_write_queue(svm_write_queue.clone());
         sandstar_svm::set_tag_write_queue(svm_tag_write_queue.clone());
 
-        let mut runner = SvmRunner::new(&scode_path);
+        let mut runner = RustSvmRunner::new(&scode_path);
         match runner.start() {
             Ok(()) => {
-                info!(path = %scode_path.display(), "Sedona VM started");
+                info!(path = %scode_path.display(), "Pure Rust Sedona VM started");
                 svm_runner = Some(runner);
             }
             Err(e) => {
-                error!(err = %e, "failed to start Sedona VM (continuing without SVM)");
+                error!(err = %e, "failed to start pure Rust Sedona VM (continuing without SVM)");
             }
         }
     }
@@ -800,6 +800,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             for tw in tag_writes {
                                 if let Some(ch) = eng.channels.get_mut(tw.channel) {
                                     ch.tags.insert(tw.tag, tw.value);
+                                }
+                            }
+                        }
+                    }
+
+                    // Resume pure Rust VM for one app cycle
+                    #[cfg(feature = "svm")]
+                    if let Some(ref mut runner) = svm_runner {
+                        if let Err(e) = runner.resume() {
+                            match e {
+                                sandstar_svm::vm_error::VmError::Stopped => {
+                                    info!("Sedona VM stopped");
+                                    svm_runner = None;
+                                }
+                                _ => {
+                                    debug!(err = %e, "SVM resume error");
                                 }
                             }
                         }
