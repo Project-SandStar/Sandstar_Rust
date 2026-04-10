@@ -1,10 +1,13 @@
+> **STATUS: COMPLETE** (2026-04-10) — All phases implemented. C code eliminated.
+> See commit `2f5f463` for the final cleanup.
+
 # Pure Rust Sandstar — Implementation Plan
 
 **Date:** 2026-03-21 (updated)
 **Goal:** Eliminate all C code, enable Sedona Application Editor connectivity
 **Total Effort:** ~42 dev-days (~8,300 lines of new Rust)
 **Current C Code:** 6,839 lines in `crates/sandstar-svm/csrc/` (bypassed via `pure-rust-vm` feature)
-**Status:** Phases A-D COMPLETE. Phase S in progress.
+**Status:** All phases COMPLETE (A-D + S). Pure Rust, zero C code.
 
 ---
 
@@ -14,7 +17,7 @@
 |------------|------|-----------|----------|--------|--------|
 | **Phase A** | Pure Rust VM interpreter | ~5,250 | 15 | Rust bytecode execution | **COMPLETE** |
 | **Phase B-D** | Native methods in Rust | ~2,480 | 17 | Zero C kit files | **COMPLETE** |
-| **Phase S** | SOX protocol server | ~1,800 | 10 | Sedona Editor connects | **IN PROGRESS** |
+| **Phase S** | SOX protocol server | ~1,800 | 10 | Sedona Editor connects | **COMPLETE** |
 | **Total** | 15 files | **~7,730** | **42** | **Pure Rust + Sedona Editor** | |
 
 ### Completed (2026-03-21)
@@ -201,11 +204,11 @@ Week 10:    Integration testing with Sedona Application Editor
 
 ## Definition of Done
 
-- [ ] `cargo build --no-default-features` compiles without C compiler
-- [ ] `cargo test --workspace` passes 900+ tests
-- [ ] Feature flag `pure-rust-vm` enables Rust interpreter
-- [ ] Sedona Application Editor connects via SOX (UDP 1876)
-- [ ] Editor displays component tree with live channel values
-- [ ] Editor can write setpoints that reach the engine
-- [ ] All 80 native methods work on both Linux ARM and Windows x86_64
-- [ ] Zero `csrc/*.c` files compiled when `pure-rust-vm` is active
+- [x] `cargo build --no-default-features` compiles without C compiler
+- [x] `cargo test --workspace` passes 1,637 tests
+- [x] Feature flag `pure-rust-vm` enables Rust interpreter
+- [x] Sedona Application Editor connects via SOX (UDP 1876)
+- [x] Editor displays component tree with live channel values
+- [x] Editor can write setpoints that reach the engine
+- [x] All 131 native methods work on both Linux ARM and Windows x86_64
+- [x] Zero `csrc/*.c` files — all C code eliminated

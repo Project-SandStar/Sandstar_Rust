@@ -397,10 +397,8 @@ pub fn filestore_rename(ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResult
 
     // Remove destination if it exists (match C behaviour).
     let to_path = Path::new(&to_str);
-    if to_path.exists() {
-        if fs::remove_file(to_path).is_err() {
-            return Ok(0);
-        }
+    if to_path.exists() && fs::remove_file(to_path).is_err() {
+        return Ok(0);
     }
 
     match fs::rename(&from_str, &to_str) {

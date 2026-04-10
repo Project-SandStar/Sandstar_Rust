@@ -199,6 +199,7 @@ fn format_to_strbuf(s: &str) -> i32 {
 }
 
 /// Read a NUL-terminated string from a handle. Returns None if handle is invalid.
+#[cfg(test)]
 fn read_cstr_from_handle(handle: i32) -> Option<String> {
     let ptr = resolve_ptr(handle)?;
     unsafe {

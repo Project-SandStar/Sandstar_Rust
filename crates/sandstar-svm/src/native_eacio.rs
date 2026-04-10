@@ -107,7 +107,7 @@ fn bridge_get_level_value(channel: u32, level: usize) -> Option<f64> {
     guard
         .get(channel)
         .and_then(|ch| {
-            if level >= 1 && level <= 17 {
+            if (1..=17).contains(&level) {
                 ch.write_levels[level - 1]
             } else {
                 None

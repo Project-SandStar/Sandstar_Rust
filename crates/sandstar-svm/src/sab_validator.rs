@@ -671,41 +671,40 @@ pub fn validate_sab_bytes(path: &str, data: &[u8]) -> Result<SabValidationReport
         }
 
         // Check if opcode is supported
-        if !supported[op_byte as usize] {
-            if !report.unsupported_opcodes.contains(&op_byte) {
-                report.unsupported_opcodes.push(op_byte);
-            }
+        if !supported[op_byte as usize]
+            && !report.unsupported_opcodes.contains(&op_byte)
+        {
+            report.unsupported_opcodes.push(op_byte);
         }
 
         // Extract native method references from CallNative* opcodes
-        if op_byte == Opcode::CallNative as u8
+        if (op_byte == Opcode::CallNative as u8
             || op_byte == Opcode::CallNativeWide as u8
-            || op_byte == Opcode::CallNativeVoid as u8
+            || op_byte == Opcode::CallNativeVoid as u8)
+            && pc + 3 < code_end
         {
-            if pc + 3 < code_end {
-                let kit_id = data[pc + 1];
-                let method_id = data[pc + 2];
-                let kit_name = natives
-                    .kit_name(kit_id)
-                    .unwrap_or("unknown")
-                    .to_string();
+            let kit_id = data[pc + 1];
+            let method_id = data[pc + 2];
+            let kit_name = natives
+                .kit_name(kit_id)
+                .unwrap_or("unknown")
+                .to_string();
 
-                let native_ref = NativeMethodRef {
-                    kit_id,
-                    method_id,
-                    kit_name: kit_name.clone(),
-                };
+            let native_ref = NativeMethodRef {
+                kit_id,
+                method_id,
+                kit_name: kit_name.clone(),
+            };
 
-                if !report.native_method_refs.contains(&native_ref) {
-                    report.native_method_refs.push(native_ref.clone());
-                }
+            if !report.native_method_refs.contains(&native_ref) {
+                report.native_method_refs.push(native_ref.clone());
+            }
 
-                // Check if we have a real implementation (not just a stub)
-                if !natives.is_implemented(kit_id, method_id as u16) {
-                    if !report.unsupported_natives.contains(&native_ref) {
-                        report.unsupported_natives.push(native_ref);
-                    }
-                }
+            // Check if we have a real implementation (not just a stub)
+            if !natives.is_implemented(kit_id, method_id as u16)
+                && !report.unsupported_natives.contains(&native_ref)
+            {
+                report.unsupported_natives.push(native_ref);
             }
         }
 

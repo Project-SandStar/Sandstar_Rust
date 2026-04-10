@@ -210,11 +210,9 @@ pub fn tcp_finish_connect(ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResu
     }
 
     with_sockets(|store| {
-        let state = match store.tcp_sockets.get(&handle) {
-            Some(_) => {}
-            None => return Ok(1), // no socket — treat as completed/failed
-        };
-        let _ = state;
+        if !store.tcp_sockets.contains_key(&handle) {
+            return Ok(1); // no socket — treat as completed/failed
+        }
 
         // Check if the socket is writable by attempting a zero-byte write peek.
         // For a Connecting socket, we check if the connection is established.
@@ -825,7 +823,7 @@ fn sha1_compute(data: &[u8]) -> [u8; 20] {
         let mut d = h3;
         let mut e = h4;
 
-        for t in 0..80 {
+        for (t, w_t) in w.iter().enumerate() {
             let (f, k) = match t {
                 0..=19 => ((b & c) | ((!b) & d), 0x5A827999u32),
                 20..=39 => (b ^ c ^ d, 0x6ED9EBA1u32),
@@ -839,7 +837,7 @@ fn sha1_compute(data: &[u8]) -> [u8; 20] {
                 .wrapping_add(f)
                 .wrapping_add(e)
                 .wrapping_add(k)
-                .wrapping_add(w[t]);
+                .wrapping_add(*w_t);
             e = d;
             d = c;
             c = b.rotate_left(30);
@@ -883,7 +881,7 @@ fn get_closed(memory: &[u8], self_ptr: usize) -> bool {
 }
 
 /// Set the `closed` flag on the component at `self_ptr`.
-fn set_closed(memory: &mut Vec<u8>, self_ptr: usize, closed: bool) {
+fn set_closed(memory: &mut [u8], self_ptr: usize, closed: bool) {
     if self_ptr < memory.len() {
         memory[self_ptr] = if closed { 1 } else { 0 };
     }
@@ -895,7 +893,7 @@ fn load_handle_at(memory: &[u8], self_ptr: usize) -> i32 {
 }
 
 /// Store a socket handle ID at the component's `self_ptr + 4`.
-fn store_handle_at(memory: &mut Vec<u8>, self_ptr: usize, handle: i32) {
+fn store_handle_at(memory: &mut [u8], self_ptr: usize, handle: i32) {
     write_i32(memory, self_ptr + 4, handle);
 }
 

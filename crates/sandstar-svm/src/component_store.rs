@@ -214,7 +214,7 @@ impl ComponentStore {
     pub fn contains(&self, id: u32) -> bool {
         self.slots
             .get(id as usize)
-            .map_or(false, |s| s.is_some())
+            .is_some_and(|s| s.is_some())
     }
 }
 

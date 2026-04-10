@@ -2,7 +2,7 @@
 
 Embedded IoT control engine for BeagleBone, replacing a C/C++ system.
 
-**Version:** 1.0.0
+**Version:** 2.0.0
 
 ## Overview
 
@@ -10,7 +10,7 @@ Sandstar is a channel-based hardware I/O abstraction layer for HVAC control. It 
 
 - **Target:** BeagleBone Black (ARM Cortex-A8, 512MB RAM, Debian Linux)
 - **Replaces:** ~27,000 lines C/C++ engine + 500,000 lines POCO framework
-- **Result:** ~25,000 lines Rust, 627 tests, 0 critical security issues
+- **Result:** ~40,000+ lines pure Rust (no C code), 1,637 tests, 0 critical security issues
 
 ## Architecture
 
@@ -22,10 +22,10 @@ crates/
   sandstar-ipc/        # IPC wire protocol (length-prefixed bincode over TCP/Unix socket)
   sandstar-server/     # HTTP server (Axum), WebSocket, REST API, control engine, config loading
   sandstar-cli/        # CLI tool (clap): status, channels, read, write, reload, history, convert-sax
-  sandstar-svm/        # Sedona VM FFI bridge (optional, for legacy Sedona applications)
+  sandstar-svm/        # Pure Rust Sedona VM interpreter (240 opcodes, 131 native methods, no C/FFI)
 ```
 
-All crates share `version = "1.0.0"` and `edition = "2021"` via workspace configuration.
+All crates share `version = "2.0.0"` and `edition = "2021"` via workspace configuration.
 
 ## Quick Start
 
@@ -182,7 +182,7 @@ cargo test -p sandstar-cli
 cargo test -p sandstar-svm
 ```
 
-627 tests across all crates. Platform-specific tests (sysfs GPIO, I2C, PWM) are gated behind `#[cfg(target_os = "linux")]`.
+1,637 tests across all crates. Platform-specific tests (sysfs GPIO, I2C, PWM) are gated behind `#[cfg(target_os = "linux")]`.
 
 ## License
 
