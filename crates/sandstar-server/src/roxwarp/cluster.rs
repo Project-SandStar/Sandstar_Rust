@@ -104,9 +104,14 @@ impl ClusterConfig {
 }
 
 /// Return a short hostname for default node ID generation.
+///
+/// Fallback order: $HOSTNAME → $COMPUTERNAME → /etc/hostname → "unknown".
+/// systemd strips $HOSTNAME from service child processes, so /etc/hostname
+/// is the reliable fallback on Linux.
 fn hostname() -> String {
     std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
+        .or_else(|_| std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string()))
         .unwrap_or_else(|_| "unknown".to_string())
         .chars()
         .take(32)

@@ -499,18 +499,28 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
         }
 
         // Snapshot fields for HAL dispatch
-        let (channel_type, address, device) = {
+        let (channel_type, address, device, has_adc_mode) = {
             let ch = self
                 .channels
                 .get(id)
                 .ok_or(EngineError::ChannelNotFound(id))?;
-            (ch.channel_type, ch.address, ch.device)
+            (ch.channel_type, ch.address, ch.device, ch.conv.adc_mode)
         };
 
         // 5-6. HAL dispatch
         let hal_result: std::result::Result<(), sandstar_hal::HalError> = match channel_type {
             ChannelType::Digital | ChannelType::Triac => {
-                self.hal.write_digital(address, value.raw > 0.5)
+                // For plain Digital/Triac (no adc_mode conversion), clamp
+                // to boolean representation so the stored value matches
+                // what was actually written to hardware. adc_mode channels
+                // intentionally keep raw as the ADC count that represents
+                // the threshold crossing.
+                let bit = value.raw > 0.5;
+                if !has_adc_mode {
+                    value.raw = if bit { 1.0 } else { 0.0 };
+                    value.cur = value.raw;
+                }
+                self.hal.write_digital(address, bit)
             }
             ChannelType::Pwm => self.hal.write_pwm(device, address, value.raw),
             ChannelType::VirtualAnalog | ChannelType::VirtualDigital => {
@@ -1452,6 +1462,49 @@ mod tests {
         assert_eq!(writes.len(), 1);
         assert_eq!(writes[0].address, 5);
         assert!(writes[0].value); // raw 1.0 > 0.5 → true
+    }
+
+    /// Regression test for production bug on channel 320: a Digital
+    /// output ended up with cur=60.0 stored after a non-boolean write.
+    /// A plain Digital channel (no adc_mode) must clamp raw and cur to
+    /// the boolean 0.0/1.0 representation regardless of input magnitude.
+    #[test]
+    fn test_write_digital_clamps_non_boolean_input() {
+        let mut engine = make_engine();
+        engine.channels.add(digital_out_channel(320)).unwrap();
+
+        let mut value = EngineValue::default();
+        value.set_raw(60.0); // Garbage non-boolean value
+
+        engine.channel_write(320, &mut value).unwrap();
+
+        // Both raw and cur must be clamped to the boolean representation
+        assert_eq!(value.raw, 1.0, "raw must be clamped to 1.0");
+        assert_eq!(value.cur, 1.0, "cur must be clamped to 1.0");
+
+        // Stored channel value must also be clamped
+        let ch = engine.channels.get(320).unwrap();
+        assert_eq!(ch.value.raw, 1.0);
+        assert_eq!(ch.value.cur, 1.0);
+
+        // HAL received a boolean true
+        let writes = engine.hal.digital_writes();
+        assert_eq!(writes.len(), 1);
+        assert!(writes[0].value);
+    }
+
+    #[test]
+    fn test_write_digital_clamps_zero() {
+        let mut engine = make_engine();
+        engine.channels.add(digital_out_channel(5)).unwrap();
+
+        let mut value = EngineValue::default();
+        value.set_raw(0.3); // Below 0.5 threshold
+
+        engine.channel_write(5, &mut value).unwrap();
+
+        assert_eq!(value.raw, 0.0);
+        assert_eq!(value.cur, 0.0);
     }
 
     #[test]
