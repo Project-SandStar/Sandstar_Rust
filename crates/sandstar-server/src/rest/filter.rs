@@ -23,6 +23,35 @@ use sandstar_ipc::types::ChannelInfo;
 
 use crate::sox::dyn_slots::DynValue;
 
+// ── Path ─────────────────────────────────────────────────────
+
+/// A tag path for `->` navigation in filter expressions.
+///
+/// A single-segment path (`name`) is the common case (e.g. `channel==1113`).
+/// Multi-segment paths follow Ref values across records (e.g. `siteRef->area`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Path {
+    segments: Vec<String>,
+}
+
+impl Path {
+    /// The first (or only) segment of the path.
+    pub fn head(&self) -> &str {
+        &self.segments[0]
+    }
+
+    fn tail(&self) -> &[String] {
+        &self.segments[1..]
+    }
+
+    fn is_single(&self) -> bool {
+        self.segments.len() == 1
+    }
+}
+
+/// Resolves a Ref string to a tag dictionary, for `->` path navigation.
+pub type Pather<'a> = dyn Fn(&str) -> Option<HashMap<String, DynValue>> + 'a;
+
 // ── AST ─────────────────────────────────────────────────────
 
 /// Filter expression AST node.
@@ -32,8 +61,10 @@ pub enum Expr {
     Has(String),
     /// Tag is absent.
     Missing(String),
+    /// Logical NOT of a compound expression.
+    Not(Box<Expr>),
     /// Comparison: path op value.
-    Cmp(String, CmpOp, Value),
+    Cmp(Path, CmpOp, Value),
     /// Logical AND.
     And(Box<Expr>, Box<Expr>),
     /// Logical OR.
@@ -77,6 +108,7 @@ enum Token {
     RParen,
     True,
     False,
+    Arrow, // ->
 }
 
 /// Maximum recursion depth for filter parsing (prevents stack overflow DoS).
@@ -123,6 +155,12 @@ fn parse_and(tokens: &[Token], pos: &mut usize, depth: usize) -> Result<Expr, St
 }
 
 fn parse_term(tokens: &[Token], pos: &mut usize, depth: usize) -> Result<Expr, String> {
+    if depth > MAX_PARSE_DEPTH {
+        return Err(format!(
+            "filter too deeply nested (max {} levels)",
+            MAX_PARSE_DEPTH
+        ));
+    }
     if *pos >= tokens.len() {
         return Err("unexpected end of filter".into());
     }
@@ -130,10 +168,10 @@ fn parse_term(tokens: &[Token], pos: &mut usize, depth: usize) -> Result<Expr, S
     // not term
     if tokens[*pos] == Token::Not {
         *pos += 1;
-        let inner = parse_term(tokens, pos, depth)?;
+        let inner = parse_term(tokens, pos, depth + 1)?;
         return Ok(match inner {
             Expr::Has(name) => Expr::Missing(name),
-            other => Expr::Missing(format!("{:?}", other)),
+            other => Expr::Not(Box::new(other)),
         });
     }
 
@@ -153,15 +191,32 @@ fn parse_term(tokens: &[Token], pos: &mut usize, depth: usize) -> Result<Expr, S
 }
 
 fn parse_cmp(tokens: &[Token], pos: &mut usize) -> Result<Expr, String> {
-    let name = match &tokens[*pos] {
+    let first = match &tokens[*pos] {
         Token::Name(n) => n.clone(),
         other => return Err(format!("expected tag name, got {:?}", other)),
     };
     *pos += 1;
 
+    // Collect -> segments to form a Path
+    let mut segments = vec![first];
+    while *pos < tokens.len() && tokens[*pos] == Token::Arrow {
+        *pos += 1;
+        match tokens.get(*pos) {
+            Some(Token::Name(n)) => {
+                segments.push(n.clone());
+                *pos += 1;
+            }
+            _ => return Err("expected tag name after '->'".into()),
+        }
+    }
+    let path = Path { segments };
+
     // Check for comparison operator
     if *pos >= tokens.len() {
-        return Ok(Expr::Has(name));
+        if path.is_single() {
+            return Ok(Expr::Has(path.segments.into_iter().next().unwrap()));
+        }
+        return Err("path expression requires a comparison operator".into());
     }
 
     let op = match &tokens[*pos] {
@@ -171,7 +226,13 @@ fn parse_cmp(tokens: &[Token], pos: &mut usize) -> Result<Expr, String> {
         Token::Le => CmpOp::Le,
         Token::Gt => CmpOp::Gt,
         Token::Ge => CmpOp::Ge,
-        _ => return Ok(Expr::Has(name)), // no operator = marker check
+        _ => {
+            // No operator — only valid as marker check for single-segment paths
+            if path.is_single() {
+                return Ok(Expr::Has(path.segments.into_iter().next().unwrap()));
+            }
+            return Err("path expression requires a comparison operator".into());
+        }
     };
     *pos += 1;
 
@@ -188,7 +249,7 @@ fn parse_cmp(tokens: &[Token], pos: &mut usize) -> Result<Expr, String> {
     };
     *pos += 1;
 
-    Ok(Expr::Cmp(name, op, val))
+    Ok(Expr::Cmp(path, op, val))
 }
 
 /// Tokenize a filter string.
@@ -245,6 +306,13 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 tokens.push(Token::Gt);
                 i += 1;
             }
+            continue;
+        }
+
+        // Arrow operator ->  (must precede negative-number check so '-' isn't consumed)
+        if chars[i] == '-' && i + 1 < chars.len() && chars[i + 1] == '>' {
+            tokens.push(Token::Arrow);
+            i += 2;
             continue;
         }
 
@@ -311,15 +379,9 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
 
 // ── Evaluator ───────────────────────────────────────────────
 
-/// Evaluate a filter expression against a ChannelInfo.
+/// Evaluate a filter expression against a ChannelInfo (static fields only).
 pub fn matches(expr: &Expr, ch: &ChannelInfo) -> bool {
-    match expr {
-        Expr::Has(tag) => has_tag(ch, tag),
-        Expr::Missing(tag) => !has_tag(ch, tag),
-        Expr::Cmp(tag, op, val) => cmp_tag(ch, tag, *op, val),
-        Expr::And(l, r) => matches(l, ch) && matches(r, ch),
-        Expr::Or(l, r) => matches(l, ch) || matches(r, ch),
-    }
+    matches_inner(expr, ch, None, None)
 }
 
 /// Evaluate a filter expression against a ChannelInfo with dynamic tag fallback.
@@ -332,33 +394,92 @@ pub fn matches_with_tags(
     ch: &ChannelInfo,
     tags: Option<&HashMap<String, DynValue>>,
 ) -> bool {
-    match tags {
-        None => matches(expr, ch),
-        Some(tags) => matches_with_tags_inner(expr, ch, tags),
+    matches_inner(expr, ch, tags, None)
+}
+
+/// Evaluate a filter expression with optional dynamic tags and path resolver.
+///
+/// The `pather` callback resolves Ref strings to tag dictionaries for `->` path
+/// navigation. Pass `None` when path dereference is not needed or supported.
+pub fn matches_full(
+    expr: &Expr,
+    ch: &ChannelInfo,
+    tags: Option<&HashMap<String, DynValue>>,
+    pather: Option<&Pather<'_>>,
+) -> bool {
+    matches_inner(expr, ch, tags, pather)
+}
+
+/// Unified recursive evaluator.
+fn matches_inner(
+    expr: &Expr,
+    ch: &ChannelInfo,
+    tags: Option<&HashMap<String, DynValue>>,
+    pather: Option<&Pather<'_>>,
+) -> bool {
+    match expr {
+        Expr::Has(tag) => has_tag(ch, tag) || tags.map(|t| has_dyn_tag(t, tag)).unwrap_or(false),
+        Expr::Missing(tag) => {
+            !has_tag(ch, tag) && tags.map(|t| !has_dyn_tag(t, tag)).unwrap_or(true)
+        }
+        Expr::Not(inner) => !matches_inner(inner, ch, tags, pather),
+        Expr::Cmp(path, op, val) => eval_path_cmp(path, *op, val, ch, tags, pather),
+        Expr::And(l, r) => matches_inner(l, ch, tags, pather) && matches_inner(r, ch, tags, pather),
+        Expr::Or(l, r) => matches_inner(l, ch, tags, pather) || matches_inner(r, ch, tags, pather),
     }
 }
 
-fn matches_with_tags_inner(
-    expr: &Expr,
+/// Evaluate a `Cmp` node, handling both single-segment and `->` paths.
+fn eval_path_cmp(
+    path: &Path,
+    op: CmpOp,
+    val: &Value,
     ch: &ChannelInfo,
-    tags: &HashMap<String, DynValue>,
+    tags: Option<&HashMap<String, DynValue>>,
+    pather: Option<&Pather<'_>>,
 ) -> bool {
-    match expr {
-        Expr::Has(tag) => has_tag(ch, tag) || has_dyn_tag(tags, tag),
-        Expr::Missing(tag) => !has_tag(ch, tag) && !has_dyn_tag(tags, tag),
-        Expr::Cmp(tag, op, val) => {
-            if cmp_tag(ch, tag, *op, val) {
-                return true;
-            }
-            cmp_dyn_tag(tags, tag, *op, val)
+    if path.is_single() {
+        // Single-segment: check channel fields first, then dynamic tags.
+        if cmp_tag(ch, path.head(), op, val) {
+            return true;
         }
-        Expr::And(l, r) => {
-            matches_with_tags_inner(l, ch, tags) && matches_with_tags_inner(r, ch, tags)
+        if let Some(t) = tags {
+            return cmp_dyn_tag(t, path.head(), op, val);
         }
-        Expr::Or(l, r) => {
-            matches_with_tags_inner(l, ch, tags) || matches_with_tags_inner(r, ch, tags)
-        }
+        return false;
     }
+
+    // Multi-segment path: requires a pather to resolve the Ref.
+    let Some(p) = pather else {
+        return false;
+    };
+
+    // Get the Ref value from the first segment (dynamic tags only for refs).
+    let ref_str = match get_ref_string(path.head(), tags) {
+        Some(s) => s,
+        None => return false,
+    };
+
+    // Resolve the Ref to a tag dictionary.
+    let next_tags = match p(&ref_str) {
+        Some(t) => t,
+        None => return false,
+    };
+
+    // Evaluate the tail path against the resolved record's tags.
+    let tail = Path {
+        segments: path.tail().to_vec(),
+    };
+    eval_path_cmp(&tail, op, val, ch, Some(&next_tags), Some(p))
+}
+
+/// Extract a Ref string from a dynamic tag (for `->` path navigation).
+fn get_ref_string(tag: &str, tags: Option<&HashMap<String, DynValue>>) -> Option<String> {
+    tags?.get(tag).and_then(|v| match v {
+        DynValue::Ref(r) => Some(r.clone()),
+        DynValue::Str(s) => Some(s.clone()),
+        _ => None,
+    })
 }
 
 /// Check if a dynamic tag exists (marker-style presence check).
@@ -538,7 +659,7 @@ mod tests {
     fn test_parse_equality() {
         let expr = parse("channel==1113").unwrap();
         assert!(
-            matches!(&expr, Expr::Cmp(n, CmpOp::Eq, Value::Num(v)) if n == "channel" && *v == 1113.0)
+            matches!(&expr, Expr::Cmp(n, CmpOp::Eq, Value::Num(v)) if n.head() == "channel" && *v == 1113.0)
         );
     }
 
@@ -546,7 +667,7 @@ mod tests {
     fn test_parse_string_equality() {
         let expr = parse("unit==\"°F\"").unwrap();
         assert!(
-            matches!(&expr, Expr::Cmp(n, CmpOp::Eq, Value::Str(s)) if n == "unit" && s == "°F")
+            matches!(&expr, Expr::Cmp(n, CmpOp::Eq, Value::Str(s)) if n.head() == "unit" && s == "°F")
         );
     }
 
@@ -572,7 +693,7 @@ mod tests {
     fn test_parse_comparison_gt() {
         let expr = parse("channel > 1000").unwrap();
         assert!(
-            matches!(&expr, Expr::Cmp(n, CmpOp::Gt, Value::Num(v)) if n == "channel" && *v == 1000.0)
+            matches!(&expr, Expr::Cmp(n, CmpOp::Gt, Value::Num(v)) if n.head() == "channel" && *v == 1000.0)
         );
     }
 
@@ -837,7 +958,7 @@ mod tests {
         );
 
         if let Ok(Expr::Cmp(tag, CmpOp::Eq, Value::Str(s))) = &result {
-            assert_eq!(tag, "dis");
+            assert_eq!(tag.head(), "dis");
             assert_eq!(s, "\u{6e29}\u{5ea6}");
         } else {
             panic!("expected Cmp(dis, Eq, Str), got: {:?}", result);
@@ -902,7 +1023,7 @@ mod tests {
             result.err()
         );
         if let Ok(Expr::Cmp(tag, CmpOp::Eq, Value::Str(s))) = &result {
-            assert_eq!(tag, "dis");
+            assert_eq!(tag.head(), "dis");
             assert_eq!(s, "\u{6e29}\u{5ea6}\u{4f20}\u{611f}\u{5668}");
         } else {
             panic!("expected Cmp(dis, Eq, Str), got: {:?}", result);
@@ -1208,5 +1329,246 @@ mod tests {
         // "not sensor" should be false when sensor is present
         let expr = parse("not sensor").unwrap();
         assert!(!matches_with_tags(&expr, &ch, Some(&tags)));
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // Phase A1 — compound `not` operator tests
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_parse_not_compound_and() {
+        // "not (enabled and point)" must produce Not(And(...)) not Missing("...")
+        let expr = parse("not (enabled and point)").unwrap();
+        assert!(
+            matches!(&expr, Expr::Not(inner) if matches!(inner.as_ref(), Expr::And(_, _))),
+            "expected Not(And(..)), got: {:?}",
+            expr
+        );
+    }
+
+    #[test]
+    fn test_parse_not_cmp() {
+        // "not channel==1113" — negation of a comparison
+        let expr = parse("not channel==1113").unwrap();
+        assert!(
+            matches!(&expr, Expr::Not(inner) if matches!(inner.as_ref(), Expr::Cmp(_, _, _))),
+            "expected Not(Cmp(..)), got: {:?}",
+            expr
+        );
+    }
+
+    #[test]
+    fn test_parse_not_or() {
+        // "not (analog or digital)" — negation of a disjunction
+        let expr = parse("not (analog or digital)").unwrap();
+        assert!(
+            matches!(&expr, Expr::Not(inner) if matches!(inner.as_ref(), Expr::Or(_, _))),
+            "expected Not(Or(..)), got: {:?}",
+            expr
+        );
+    }
+
+    #[test]
+    fn test_eval_not_compound_and() {
+        // Analog+Input channel: "not (analog and input)" should be false
+        let ch_analog_in = test_channel(1113, "AI1", "Analog", "In");
+        assert!(!matches(
+            &parse("not (analog and input)").unwrap(),
+            &ch_analog_in
+        ));
+
+        // Digital+In channel: "not (analog and input)" should be true
+        let ch_digital = test_channel(2001, "DO1", "Digital", "Out");
+        assert!(matches(
+            &parse("not (analog and input)").unwrap(),
+            &ch_digital
+        ));
+    }
+
+    #[test]
+    fn test_eval_not_cmp() {
+        let ch = test_channel(1113, "AI1", "Analog", "In");
+        // "not channel==1113" → false (channel IS 1113)
+        assert!(!matches(&parse("not channel==1113").unwrap(), &ch));
+        // "not channel==9999" → true (channel is NOT 9999)
+        assert!(matches(&parse("not channel==9999").unwrap(), &ch));
+    }
+
+    #[test]
+    fn test_eval_not_or() {
+        // Channel is analog — "not (analog or digital)" should be false
+        let ch = test_channel(1113, "AI1", "Analog", "In");
+        assert!(!matches(&parse("not (analog or digital)").unwrap(), &ch));
+
+        // Channel with type "Triac" — "not (analog or digital)" should be true
+        let ch_triac = test_channel(3001, "Triac1", "Triac", "Out");
+        assert!(matches(
+            &parse("not (analog or digital)").unwrap(),
+            &ch_triac
+        ));
+    }
+
+    #[test]
+    fn test_eval_double_not() {
+        // "not not analog" — double negation should equal plain "analog"
+        let ch_analog = test_channel(1113, "AI1", "Analog", "In");
+        let ch_digital = test_channel(2001, "DO1", "Digital", "Out");
+        assert!(matches(&parse("not not analog").unwrap(), &ch_analog));
+        assert!(!matches(&parse("not not analog").unwrap(), &ch_digital));
+    }
+
+    #[test]
+    fn test_eval_not_in_compound() {
+        // "enabled and not (analog and input)" — compound containing not
+        let ch_analog_in = test_channel(1113, "AI1", "Analog", "In");
+        assert!(!matches(
+            &parse("enabled and not (analog and input)").unwrap(),
+            &ch_analog_in
+        ));
+        let ch_digital_out = test_channel(2001, "DO1", "Digital", "Out");
+        assert!(matches(
+            &parse("enabled and not (analog and input)").unwrap(),
+            &ch_digital_out
+        ));
+    }
+
+    #[test]
+    fn test_dyn_tag_not_compound() {
+        let ch = test_channel(100, "AI1", "Analog", "In");
+        let tags = make_tags(&[
+            ("sensor", DynValue::Marker),
+            ("modbusAddr", DynValue::Int(40001)),
+        ]);
+        // "not (sensor and modbusAddr==40001)" — both true → not should be false
+        let expr = parse("not (sensor and modbusAddr==40001)").unwrap();
+        assert!(!matches_with_tags(&expr, &ch, Some(&tags)));
+
+        // "not (sensor and modbusAddr==99999)" — second false → not should be true
+        let expr2 = parse("not (sensor and modbusAddr==99999)").unwrap();
+        assert!(matches_with_tags(&expr2, &ch, Some(&tags)));
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // Phase A2 — `->` path dereference tests
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_parse_arrow_two_segment() {
+        // "siteRef->area == \"Zone 1\"" should parse to Cmp(Path[siteRef,area], Eq, Str)
+        let expr = parse("siteRef->area==\"Zone 1\"").unwrap();
+        if let Expr::Cmp(path, CmpOp::Eq, Value::Str(s)) = &expr {
+            assert_eq!(path.head(), "siteRef");
+            assert_eq!(path.tail(), &["area".to_string()]);
+            assert_eq!(s, "Zone 1");
+        } else {
+            panic!("expected Cmp path expr, got: {:?}", expr);
+        }
+    }
+
+    #[test]
+    fn test_parse_arrow_three_segment() {
+        // "a->b->c == 42" — three segments
+        let expr = parse("a->b->c==42").unwrap();
+        if let Expr::Cmp(path, CmpOp::Eq, Value::Num(_)) = &expr {
+            assert_eq!(path.segments, vec!["a", "b", "c"]);
+        } else {
+            panic!("expected 3-segment Cmp, got: {:?}", expr);
+        }
+    }
+
+    #[test]
+    fn test_parse_arrow_dangling_error() {
+        // "siteRef->" with nothing after the arrow should be an error
+        let err = parse("siteRef->").unwrap_err();
+        assert!(
+            err.contains("tag name after"),
+            "expected arrow-dangling error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_arrow_multi_segment_no_op_error() {
+        // "siteRef->area" with no comparison operator is invalid
+        let err = parse("siteRef->area").unwrap_err();
+        assert!(
+            err.contains("comparison operator"),
+            "expected operator-required error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_eval_single_segment_unchanged() {
+        // matches_full with no pather must behave identically to matches_with_tags
+        let ch = test_channel(1113, "AI1", "Analog", "In");
+        let tags = make_tags(&[("modbusAddr", DynValue::Int(40001))]);
+        let expr = parse("modbusAddr==40001 and analog").unwrap();
+        assert!(matches_full(&expr, &ch, Some(&tags), None));
+        assert!(!matches_full(
+            &parse("modbusAddr==99999").unwrap(),
+            &ch,
+            Some(&tags),
+            None
+        ));
+    }
+
+    #[test]
+    fn test_eval_path_no_pather_returns_false() {
+        // Multi-segment path with pather=None always returns false
+        let ch = test_channel(100, "AI1", "Analog", "In");
+        let tags = make_tags(&[("siteRef", DynValue::Ref("@site1".into()))]);
+        let expr = parse("siteRef->area==\"Zone 1\"").unwrap();
+        assert!(!matches_full(&expr, &ch, Some(&tags), None));
+    }
+
+    #[test]
+    fn test_eval_path_with_pather() {
+        // Provide a pather that resolves "@site1" to {area: "Zone 1"}
+        let ch = test_channel(100, "AI1", "Analog", "In");
+        let tags = make_tags(&[("siteRef", DynValue::Ref("@site1".into()))]);
+
+        let pather: &Pather = &|ref_str: &str| {
+            if ref_str == "@site1" {
+                let mut t = HashMap::new();
+                t.insert("area".to_string(), DynValue::Str("Zone 1".to_string()));
+                Some(t)
+            } else {
+                None
+            }
+        };
+
+        let expr = parse("siteRef->area==\"Zone 1\"").unwrap();
+        assert!(matches_full(&expr, &ch, Some(&tags), Some(pather)));
+
+        let expr_no_match = parse("siteRef->area==\"Zone 2\"").unwrap();
+        assert!(!matches_full(
+            &expr_no_match,
+            &ch,
+            Some(&tags),
+            Some(pather)
+        ));
+    }
+
+    #[test]
+    fn test_eval_path_pather_unknown_ref_returns_false() {
+        // Pather returns None for unknown refs
+        let ch = test_channel(100, "AI1", "Analog", "In");
+        let tags = make_tags(&[("siteRef", DynValue::Ref("@unknown".into()))]);
+        let pather: &Pather = &|_| None;
+        let expr = parse("siteRef->area==\"Zone 1\"").unwrap();
+        assert!(!matches_full(&expr, &ch, Some(&tags), Some(pather)));
+    }
+
+    #[test]
+    fn test_tokenize_arrow_not_confused_with_negative_number() {
+        // "->" must tokenize as Arrow, not consumed as part of a number
+        // "cur > -5 and siteRef->area==\"Z1\"" should parse cleanly
+        let result = parse("cur > -5 and siteRef->area==\"Z1\"");
+        assert!(
+            result.is_ok(),
+            "arrow after negative number should parse: {:?}",
+            result.err()
+        );
     }
 }
