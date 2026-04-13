@@ -280,7 +280,7 @@ New tests in `filter.rs`:
 }
 ```
 
-### A.5 Phase A4: Commit & deploy (~30 min)
+### A.5 Phase A4: Commit & deploy — ✅ COMPLETE (2026-04-14)
 
 ```bash
 cargo test --workspace
