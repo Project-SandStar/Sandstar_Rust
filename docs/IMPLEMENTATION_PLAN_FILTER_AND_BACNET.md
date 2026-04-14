@@ -429,7 +429,7 @@ The existing single-file `bacnet.rs` (120 lines) becomes the entry point `mod.rs
 
 **Checkpoint:** Can discover devices on a real or mock network.
 
-### B.5 Phase B3: ReadProperty request/response (Week 3, ~10 hours)
+### B.5 Phase B3: ReadProperty request/response (Week 3, ~10 hours) — ✅ COMPLETE (2026-04-14)
 
 **Goal:** `sync_cur()` reads present-value from configured points.
 

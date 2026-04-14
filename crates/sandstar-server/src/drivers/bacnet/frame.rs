@@ -188,6 +188,76 @@ pub fn encode_read_property(
     build_packet(BVLL_UNICAST, apdu)
 }
 
+/// Encode a Complex-ACK ReadProperty response.
+///
+/// Used in tests and potentially for a BACnet server role.
+///
+/// # Arguments
+/// * `invoke_id`   – must match the outstanding request
+/// * `object_type` – BACnet object type (0=AI, etc.)
+/// * `instance`    – object instance number
+/// * `property_id` – property identifier (e.g. 85 = Present_Value)
+/// * `value`       – the application-tagged value to include
+pub fn encode_read_property_ack(
+    invoke_id: u8,
+    object_type: u16,
+    instance: u32,
+    property_id: u32,
+    value: &super::value::BacnetValue,
+) -> Vec<u8> {
+    let mut apdu: Vec<u8> = vec![
+        0x30, // PDU type = Complex-ACK
+        invoke_id,
+        SVC_CONFIRMED_READ_PROPERTY,
+    ];
+
+    // Context tag 0: object-identifier (4 bytes)
+    let obj_id = ((object_type as u32) << 22) | (instance & 0x003F_FFFF);
+    apdu.push(0x0C); // (tag 0, context class, LVT=4)
+    apdu.extend_from_slice(&obj_id.to_be_bytes());
+
+    // Context tag 1: property-identifier
+    encode_context_unsigned(&mut apdu, 1, property_id);
+
+    // Context tag 3: property-value opening
+    apdu.push(0x3E);
+
+    // Application-tagged value
+    match value {
+        super::value::BacnetValue::Real(f) => {
+            apdu.push(0x44); // app tag 4 (Real), LVT=4
+            apdu.extend_from_slice(&f.to_be_bytes());
+        }
+        super::value::BacnetValue::Unsigned(n) => {
+            let v = *n;
+            if v <= 0xFF {
+                apdu.push(0x21); // app tag 2 (Unsigned), LVT=1
+                apdu.push(v as u8);
+            } else if v <= 0xFFFF {
+                apdu.push(0x22); // LVT=2
+                apdu.extend_from_slice(&(v as u16).to_be_bytes());
+            } else {
+                apdu.push(0x24); // LVT=4
+                apdu.extend_from_slice(&v.to_be_bytes());
+            }
+        }
+        super::value::BacnetValue::Boolean(b) => {
+            // BACnet Boolean: LVT encodes the value (0=false, 1=true), no following bytes
+            apdu.push(if *b { 0x11 } else { 0x10 });
+        }
+        _ => {
+            // Fallback: encode as Real(0.0)
+            apdu.push(0x44);
+            apdu.extend_from_slice(&0.0f32.to_be_bytes());
+        }
+    }
+
+    // Context tag 3: property-value closing
+    apdu.push(0x3F);
+
+    build_packet(BVLL_UNICAST, apdu)
+}
+
 // ── Decoding ───────────────────────────────────────────────
 
 /// Parse the 4-byte BVLL header.
@@ -1424,6 +1494,217 @@ mod tests {
                 device_instance, ..
             } => assert_eq!(device_instance, max),
             other => panic!("expected IAm, got {other:?}"),
+        }
+    }
+
+    // ── Phase B3: encode_read_property_ack + error/round-trip tests ────────────
+
+    /// Encode a Real value ACK and decode it back — all fields must match.
+    #[test]
+    fn read_property_ack_real_round_trip() {
+        use bacnet_value::BacnetValue;
+        let pkt = encode_read_property_ack(42, 0, 5, 85, &BacnetValue::Real(22.5));
+        let (_, apdu) = decode_packet(&pkt).unwrap();
+        assert_eq!(
+            apdu,
+            Apdu::ReadPropertyAck {
+                invoke_id: 42,
+                object_type: 0,
+                instance: 5,
+                property_id: 85,
+                value: BacnetValue::Real(22.5),
+            }
+        );
+    }
+
+    /// Encode an Unsigned value ACK and decode it back.
+    #[test]
+    fn read_property_ack_unsigned_round_trip() {
+        use bacnet_value::BacnetValue;
+        let pkt = encode_read_property_ack(7, 0, 1, 85, &BacnetValue::Unsigned(1234));
+        let (_, apdu) = decode_packet(&pkt).unwrap();
+        match apdu {
+            Apdu::ReadPropertyAck {
+                invoke_id, value, ..
+            } => {
+                assert_eq!(invoke_id, 7);
+                assert_eq!(value, BacnetValue::Unsigned(1234));
+            }
+            other => panic!("expected ReadPropertyAck, got {other:?}"),
+        }
+    }
+
+    /// Encode Boolean(true) ACK and decode it back.
+    #[test]
+    fn read_property_ack_boolean_true_round_trip() {
+        use bacnet_value::BacnetValue;
+        let pkt = encode_read_property_ack(1, 3, 0, 85, &BacnetValue::Boolean(true));
+        let (_, apdu) = decode_packet(&pkt).unwrap();
+        match apdu {
+            Apdu::ReadPropertyAck {
+                invoke_id, value, ..
+            } => {
+                assert_eq!(invoke_id, 1);
+                assert_eq!(value, BacnetValue::Boolean(true));
+            }
+            other => panic!("expected ReadPropertyAck, got {other:?}"),
+        }
+    }
+
+    /// Encode Boolean(false) ACK and decode it back.
+    #[test]
+    fn read_property_ack_boolean_false_round_trip() {
+        use bacnet_value::BacnetValue;
+        let pkt = encode_read_property_ack(1, 3, 0, 85, &BacnetValue::Boolean(false));
+        let (_, apdu) = decode_packet(&pkt).unwrap();
+        match apdu {
+            Apdu::ReadPropertyAck { value, .. } => {
+                assert_eq!(value, BacnetValue::Boolean(false));
+            }
+            other => panic!("expected ReadPropertyAck, got {other:?}"),
+        }
+    }
+
+    /// Hand-crafted Error PDU — invoke 55, svc ReadProperty, class=2, code=31.
+    #[test]
+    fn error_pdu_decode() {
+        let pkt = [
+            0x50, // PDU type = Error
+            55,   // invoke_id
+            0x0C, // service-choice = ReadProperty
+            0x91, 0x02, // error_class = Enumerated(2)
+            0x91, 0x1F, // error_code  = Enumerated(31)
+        ];
+        let apdu = decode_apdu(&pkt).unwrap();
+        match apdu {
+            Apdu::Error {
+                invoke_id,
+                service_choice,
+                error_class,
+                error_code,
+            } => {
+                assert_eq!(invoke_id, 55);
+                assert_eq!(service_choice, 0x0C);
+                assert_eq!(error_class, 2);
+                assert_eq!(error_code, 31);
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    /// A 2-byte Error PDU must not panic — it returns an error or Apdu::Other.
+    #[test]
+    fn error_pdu_wraps_to_other_if_truncated() {
+        // 2 bytes is below the 3-byte minimum; decode_error_pdu returns Err.
+        // decode_apdu propagates that error, so we just assert it doesn't panic.
+        let result = decode_apdu(&[0x50, 42]);
+        // Either an error or Other is acceptable — the key requirement is no panic.
+        match result {
+            Err(_) => {}
+            Ok(Apdu::Other { .. }) => {}
+            Ok(other) => panic!("unexpected successful variant: {other:?}"),
+        }
+    }
+
+    /// ReadProperty request round-trip: AV type, instance 3, property 85.
+    #[test]
+    fn read_property_request_encode_decode() {
+        let pkt = encode_read_property(10, 2, 3, 85, None);
+        let (_, apdu) = decode_packet(&pkt).unwrap();
+        assert_eq!(
+            apdu,
+            Apdu::ReadPropertyRequest {
+                invoke_id: 10,
+                object_type: 2,
+                instance: 3,
+                property_id: 85,
+                array_index: None,
+            }
+        );
+    }
+
+    /// ReadProperty request with array_index=Some(0) round-trips correctly.
+    #[test]
+    fn read_property_request_with_array_index() {
+        let pkt = encode_read_property(10, 2, 3, 85, Some(0));
+        let (_, apdu) = decode_packet(&pkt).unwrap();
+        match apdu {
+            Apdu::ReadPropertyRequest { array_index, .. } => {
+                assert_eq!(array_index, Some(0));
+            }
+            other => panic!("expected ReadPropertyRequest, got {other:?}"),
+        }
+    }
+
+    /// Who-Is with no range decodes to WhoIs { None, None }.
+    #[test]
+    fn who_is_no_range_decode() {
+        let pkt = encode_who_is(None, None);
+        let (_, apdu) = decode_packet(&pkt).unwrap();
+        assert_eq!(
+            apdu,
+            Apdu::WhoIs {
+                low_limit: None,
+                high_limit: None
+            }
+        );
+    }
+
+    /// Who-Is with range [100, 200] decodes correctly.
+    #[test]
+    fn who_is_with_range_decode() {
+        let pkt = encode_who_is(Some(100), Some(200));
+        let (_, apdu) = decode_packet(&pkt).unwrap();
+        assert_eq!(
+            apdu,
+            Apdu::WhoIs {
+                low_limit: Some(100),
+                high_limit: Some(200)
+            }
+        );
+    }
+
+    /// invoke_id is preserved for boundary values 0, 127, 255.
+    #[test]
+    fn complex_ack_different_invoke_ids() {
+        use bacnet_value::BacnetValue;
+        for invoke_id in [0u8, 127, 255] {
+            let pkt = encode_read_property_ack(invoke_id, 0, 1, 85, &BacnetValue::Real(1.0));
+            let (_, apdu) = decode_packet(&pkt).unwrap();
+            match apdu {
+                Apdu::ReadPropertyAck {
+                    invoke_id: decoded_id,
+                    ..
+                } => {
+                    assert_eq!(
+                        decoded_id, invoke_id,
+                        "invoke_id {invoke_id} must round-trip"
+                    );
+                }
+                other => {
+                    panic!("expected ReadPropertyAck for invoke_id {invoke_id}, got {other:?}")
+                }
+            }
+        }
+    }
+
+    /// Encode with instance = 4_194_302 (max 22-bit BACnet instance).
+    #[test]
+    fn read_property_ack_large_instance() {
+        use bacnet_value::BacnetValue;
+        let instance = 4_194_302u32; // 0x3F_FFFE
+        let pkt = encode_read_property_ack(0, 8, instance, 85, &BacnetValue::Real(0.0));
+        let (_, apdu) = decode_packet(&pkt).unwrap();
+        match apdu {
+            Apdu::ReadPropertyAck {
+                object_type,
+                instance: decoded_inst,
+                ..
+            } => {
+                assert_eq!(object_type, 8, "object_type Device (8)");
+                assert_eq!(decoded_inst, instance, "large instance must round-trip");
+            }
+            other => panic!("expected ReadPropertyAck, got {other:?}"),
         }
     }
 }

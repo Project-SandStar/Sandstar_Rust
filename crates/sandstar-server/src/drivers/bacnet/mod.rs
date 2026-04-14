@@ -21,6 +21,7 @@ pub mod value;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::net::UdpSocket;
@@ -145,9 +146,8 @@ pub struct BacnetDriver {
     device_registry: discovery::DeviceRegistry,
     /// Mapping from Sandstar `point_id` to BACnet object descriptor.
     objects: HashMap<u32, object::BacnetObject>,
-    /// Monotonically-increasing invoke ID counter — allocated by Phase B3 transaction logic.
-    #[allow(dead_code)]
-    next_invoke_id: u8,
+    /// In-flight BACnet transaction table — invoke ID allocation and response routing.
+    transactions: transaction::TransactionTable,
     /// How long to wait for I-Am responses after sending Who-Is.
     /// Default: 2 seconds. Set to 50–200 ms in tests.
     discovery_timeout: std::time::Duration,
@@ -172,7 +172,7 @@ impl BacnetDriver {
             socket: None,
             device_registry: discovery::DeviceRegistry::new(),
             objects: HashMap::new(),
-            next_invoke_id: 0,
+            transactions: transaction::TransactionTable::new(),
             discovery_timeout: std::time::Duration::from_secs(2),
         }
     }
@@ -226,6 +226,187 @@ impl BacnetDriver {
     /// Return a reference to the device registry (used in tests and Phase B2).
     pub fn device_registry(&self) -> &discovery::DeviceRegistry {
         &self.device_registry
+    }
+}
+
+// ── Free helpers ───────────────────────────────────────────
+
+/// Extract the invoke ID from an APDU if it carries one.
+///
+/// WhoIs and IAm are unconfirmed broadcast PDUs and carry no invoke ID.
+fn apdu_invoke_id(apdu: &frame::Apdu) -> Option<u8> {
+    match apdu {
+        frame::Apdu::ReadPropertyRequest { invoke_id, .. } => Some(*invoke_id),
+        frame::Apdu::ReadPropertyAck { invoke_id, .. } => Some(*invoke_id),
+        frame::Apdu::Error { invoke_id, .. } => Some(*invoke_id),
+        frame::Apdu::Other { invoke_id, .. } => Some(*invoke_id),
+        frame::Apdu::WhoIs { .. } | frame::Apdu::IAm { .. } => None,
+    }
+}
+
+/// Send a Confirmed-Request and wait for a matching response, with retries.
+///
+/// - Allocates an invoke ID from `transactions`
+/// - Sends `request_bytes` to `device_addr`
+/// - Loops `recv_from` on `socket`, dispatching any matching response
+/// - Returns the matched [`frame::Apdu`] or [`BacnetError::Timeout`]
+#[allow(dead_code)]
+async fn bacnet_transact(
+    socket: &UdpSocket,
+    transactions: &mut transaction::TransactionTable,
+    device_addr: SocketAddr,
+    request_bytes: &[u8],
+    per_attempt_timeout: Duration,
+    max_retries: u32,
+) -> Result<frame::Apdu, BacnetError> {
+    let (invoke_id, mut rx) = transactions
+        .allocate()
+        .ok_or_else(|| BacnetError::MalformedFrame("no invoke IDs available".into()))?;
+
+    let mut buf = [0u8; 1500];
+
+    for attempt in 0..=max_retries {
+        // (Re-)send on every attempt.
+        socket.send_to(request_bytes, device_addr).await?;
+
+        let deadline = tokio::time::Instant::now() + per_attempt_timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break; // timeout for this attempt — retry
+            }
+
+            match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
+                Err(_elapsed) => break, // per-attempt timeout expired
+                Ok(Err(_io)) => break,  // IO error — retry
+                Ok(Ok((n, _src))) => {
+                    // Decode and dispatch to the correct waiter.
+                    if let Ok((_npdu, apdu)) = frame::decode_packet(&buf[..n]) {
+                        if let Some(id) = apdu_invoke_id(&apdu) {
+                            transactions.dispatch(id, apdu);
+                        }
+                    }
+
+                    // Check whether OUR response arrived.
+                    if let Ok(result) = rx.try_recv() {
+                        return result;
+                    }
+                }
+            }
+        }
+
+        // Last attempt — don't restart the loop.
+        if attempt == max_retries {
+            break;
+        }
+    }
+
+    // All retries exhausted.
+    transactions.timeout(invoke_id);
+    Err(BacnetError::Timeout(max_retries))
+}
+
+// ── Per-point read helper ──────────────────────────────────
+
+impl BacnetDriver {
+    /// Read the Present_Value property (property 85) from a BACnet object.
+    ///
+    /// Applies `obj.scale` and `obj.offset` to the raw device value before
+    /// returning.
+    async fn read_present_value(
+        &mut self,
+        device_addr: SocketAddr,
+        obj: &object::BacnetObject,
+    ) -> Result<f64, DriverError> {
+        // Split borrows: `socket` borrows self.socket; `transactions` borrows
+        // self.transactions.  These are different fields so NLL allows both.
+        let socket = self
+            .socket
+            .as_ref()
+            .ok_or_else(|| DriverError::CommFault("bacnet: not connected".into()))?;
+
+        // Allocate invoke ID so we can encode the frame with it.
+        let (invoke_id, rx) = self
+            .transactions
+            .allocate()
+            .ok_or_else(|| DriverError::CommFault("bacnet: no invoke IDs available".into()))?;
+
+        let request =
+            frame::encode_read_property(invoke_id, obj.object_type, obj.instance, 85, None);
+
+        // We need to send + recv inline (cannot call bacnet_transact because
+        // allocate() already consumed the slot).  Run the retry loop directly.
+        let per_attempt = Duration::from_secs(3);
+        let max_retries = 3u32;
+        let mut buf = [0u8; 1500];
+        let mut rx = rx;
+
+        'retry: for attempt in 0..=max_retries {
+            if let Err(e) = socket.send_to(&request, device_addr).await {
+                return Err(DriverError::CommFault(format!("bacnet send: {e}")));
+            }
+
+            let deadline = tokio::time::Instant::now() + per_attempt;
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    if attempt < max_retries {
+                        continue 'retry;
+                    } else {
+                        break 'retry;
+                    }
+                }
+
+                match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
+                    Err(_) => {
+                        if attempt < max_retries {
+                            continue 'retry;
+                        } else {
+                            break 'retry;
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        return Err(DriverError::CommFault(format!("bacnet recv: {e}")));
+                    }
+                    Ok(Ok((n, _src))) => {
+                        if let Ok((_npdu, apdu)) = frame::decode_packet(&buf[..n]) {
+                            if let Some(id) = apdu_invoke_id(&apdu) {
+                                self.transactions.dispatch(id, apdu);
+                            }
+                        }
+                        if let Ok(result) = rx.try_recv() {
+                            return match result {
+                                Ok(frame::Apdu::ReadPropertyAck { value, .. }) => {
+                                    let raw = value.to_f64().ok_or_else(|| {
+                                        DriverError::CommFault(
+                                            "bacnet: non-numeric present value".into(),
+                                        )
+                                    })?;
+                                    Ok(raw * obj.scale + obj.offset)
+                                }
+                                Ok(frame::Apdu::Error {
+                                    error_class,
+                                    error_code,
+                                    ..
+                                }) => Err(DriverError::RemoteStatus(format!(
+                                    "BACnet error class={error_class} code={error_code}"
+                                ))),
+                                Ok(other) => Err(DriverError::CommFault(format!(
+                                    "bacnet: unexpected response: {other:?}"
+                                ))),
+                                Err(e) => Err(DriverError::CommFault(e.to_string())),
+                            };
+                        }
+                    }
+                }
+            }
+        }
+
+        // All retries exhausted — cancel the waiter.
+        self.transactions.timeout(invoke_id);
+        Err(DriverError::CommFault(format!(
+            "bacnet: timeout after {max_retries} retries"
+        )))
     }
 }
 
@@ -315,10 +496,47 @@ impl AsyncDriver for BacnetDriver {
 
     async fn sync_cur(
         &mut self,
-        _points: &[DriverPointRef],
+        points: &[DriverPointRef],
     ) -> Vec<(u32, Result<f64, DriverError>)> {
-        // Phase B3 will implement ReadProperty requests here.
-        Vec::new()
+        let mut results = Vec::with_capacity(points.len());
+
+        for pt in points {
+            // Look up the object config.
+            let obj = match self.objects.get(&pt.point_id).cloned() {
+                Some(o) => o,
+                None => {
+                    results.push((
+                        pt.point_id,
+                        Err(DriverError::ConfigFault(format!(
+                            "no BACnet object configured for point {}",
+                            pt.point_id
+                        ))),
+                    ));
+                    continue;
+                }
+            };
+
+            // Look up the device address.
+            let device_addr = match self.device_registry.get(obj.device_id) {
+                Some(d) => d.addr,
+                None => {
+                    results.push((
+                        pt.point_id,
+                        Err(DriverError::CommFault(format!(
+                            "BACnet device {} not in registry",
+                            obj.device_id
+                        ))),
+                    ));
+                    continue;
+                }
+            };
+
+            // Read the value.
+            let value = self.read_present_value(device_addr, &obj).await;
+            results.push((pt.point_id, value));
+        }
+
+        results
     }
 
     async fn write(&mut self, _writes: &[(u32, f64)]) -> Vec<(u32, Result<(), DriverError>)> {
@@ -490,6 +708,234 @@ mod tests {
             BacnetError::RemoteError { class: 2, code: 31 }.to_string(),
             "remote error class=2 code=31"
         );
+    }
+}
+
+// ── Phase B3 unit tests ────────────────────────────────────
+
+#[cfg(test)]
+mod sync_cur_unit_tests {
+    use super::*;
+
+    fn make_driver() -> BacnetDriver {
+        BacnetDriver::new("b3-test", "127.0.0.1", 0)
+    }
+
+    fn make_point(point_id: u32) -> DriverPointRef {
+        DriverPointRef {
+            point_id,
+            address: String::new(),
+        }
+    }
+
+    fn insert_object(driver: &mut BacnetDriver, point_id: u32, device_id: u32) {
+        driver.add_object(
+            point_id,
+            object::BacnetObject {
+                device_id,
+                object_type: 0, // Analog Input
+                instance: 1,
+                scale: 1.0,
+                offset: 0.0,
+                unit: None,
+            },
+        );
+    }
+
+    fn insert_device(driver: &mut BacnetDriver, device_id: u32, port: u16) {
+        driver.device_registry.insert(DeviceInfo {
+            instance: device_id,
+            addr: format!("127.0.0.1:{port}").parse().unwrap(),
+            max_apdu: 1476,
+            vendor_id: 8,
+            segmentation: 3,
+        });
+    }
+
+    // ── Test 1 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn sync_cur_empty_points_returns_empty() {
+        let mut d = make_driver();
+        let result = d.sync_cur(&[]).await;
+        assert!(result.is_empty(), "empty slice must produce empty result");
+    }
+
+    // ── Test 2 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn sync_cur_unknown_point_returns_config_fault() {
+        let mut d = make_driver();
+        // No objects registered — any point_id must yield ConfigFault.
+        let pts = [make_point(9999)];
+        let result = d.sync_cur(&pts).await;
+        assert_eq!(result.len(), 1);
+        let (id, err) = &result[0];
+        assert_eq!(*id, 9999);
+        assert!(
+            matches!(err, Err(DriverError::ConfigFault(_))),
+            "expected ConfigFault, got {err:?}"
+        );
+    }
+
+    // ── Test 3 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn sync_cur_device_not_in_registry_returns_comm_fault() {
+        let mut d = make_driver();
+        // Object is registered but its device is NOT in the registry.
+        insert_object(&mut d, 100, 42);
+        let pts = [make_point(100)];
+        let result = d.sync_cur(&pts).await;
+        assert_eq!(result.len(), 1);
+        let (id, err) = &result[0];
+        assert_eq!(*id, 100);
+        assert!(
+            matches!(err, Err(DriverError::CommFault(_))),
+            "expected CommFault, got {err:?}"
+        );
+    }
+
+    // ── Test 4 ─────────────────────────────────────────────
+
+    #[test]
+    fn apdu_invoke_id_extracts_correctly() {
+        // IAm and WhoIs carry no invoke ID.
+        let iam = frame::Apdu::IAm {
+            device_instance: 1,
+            max_apdu: 1476,
+            segmentation: 3,
+            vendor_id: 8,
+        };
+        assert_eq!(apdu_invoke_id(&iam), None);
+
+        let whois = frame::Apdu::WhoIs {
+            low_limit: None,
+            high_limit: None,
+        };
+        assert_eq!(apdu_invoke_id(&whois), None);
+
+        // Confirmed PDUs carry an invoke ID.
+        let ack = frame::Apdu::ReadPropertyAck {
+            invoke_id: 42,
+            object_type: 0,
+            instance: 1,
+            property_id: 85,
+            value: value::BacnetValue::Real(23.5),
+        };
+        assert_eq!(apdu_invoke_id(&ack), Some(42));
+
+        let err = frame::Apdu::Error {
+            invoke_id: 7,
+            service_choice: 0x0C,
+            error_class: 2,
+            error_code: 31,
+        };
+        assert_eq!(apdu_invoke_id(&err), Some(7));
+
+        let other = frame::Apdu::Other {
+            pdu_type: 0x30,
+            invoke_id: 5,
+            data: vec![],
+        };
+        assert_eq!(apdu_invoke_id(&other), Some(5));
+    }
+
+    // ── Test 5 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn read_present_value_applies_scale_and_offset() {
+        use std::net::TcpListener;
+
+        // Find a free port via TCP probe.
+        fn find_free_port() -> u16 {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        }
+
+        let mock_port = find_free_port();
+
+        // Spawn a mock UDP server that replies with a ReadPropertyAck.
+        tokio::spawn(async move {
+            let sock = tokio::net::UdpSocket::bind(format!("127.0.0.1:{mock_port}"))
+                .await
+                .expect("mock bind");
+            let mut buf = [0u8; 1500];
+            if let Ok((n, from)) = sock.recv_from(&mut buf).await {
+                // Parse the incoming request to extract invoke_id (byte 6, index 2 of APDU).
+                // BVLL(4) + NPDU(2) = 6 bytes offset; APDU[2] = invoke_id
+                let invoke_id = if n >= 9 { buf[8] } else { 0 };
+                // Build a ReadPropertyAck with Real(23.5) at invoke_id.
+                let ack = frame::encode_read_property_ack(
+                    invoke_id,
+                    0,  // Analog Input
+                    1,  // instance
+                    85, // Present_Value
+                    &value::BacnetValue::Real(23.5),
+                );
+                let _ = sock.send_to(&ack, from).await;
+            }
+        });
+
+        // Give mock time to bind.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // Build driver with mock device and open a socket.
+        let mut driver = BacnetDriver::new("b3-rpv", "127.0.0.1", 0)
+            .with_broadcast_port(mock_port)
+            .with_discovery_timeout(Duration::from_millis(30));
+
+        // Manually insert a device at mock_port without going through open()
+        // discovery (which would consume the one Who-Is packet the mock sends).
+        // Instead open with a throw-away mock listener to satisfy bind, then
+        // replace the registry entry.
+        let throwaway = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let throwaway_port = throwaway.local_addr().unwrap().port();
+        driver.socket = Some(
+            tokio::net::UdpSocket::bind("127.0.0.1:0")
+                .await
+                .expect("driver socket bind"),
+        );
+        driver.status = DriverStatus::Ok;
+        let _ = throwaway_port;
+
+        // Register a device pointing at the mock.
+        driver.device_registry.insert(DeviceInfo {
+            instance: 42,
+            addr: format!("127.0.0.1:{mock_port}").parse().unwrap(),
+            max_apdu: 1476,
+            vendor_id: 8,
+            segmentation: 3,
+        });
+
+        // Register object: scale=2.0, offset=1.0  → expected = 23.5 * 2.0 + 1.0 = 48.0
+        driver.add_object(
+            200,
+            object::BacnetObject {
+                device_id: 42,
+                object_type: 0,
+                instance: 1,
+                scale: 2.0,
+                offset: 1.0,
+                unit: None,
+            },
+        );
+
+        let pts = [DriverPointRef {
+            point_id: 200,
+            address: String::new(),
+        }];
+        let results = driver.sync_cur(&pts).await;
+        assert_eq!(results.len(), 1);
+        let (id, val) = &results[0];
+        assert_eq!(*id, 200);
+        match val {
+            Ok(v) => {
+                let expected = 23.5f64 * 2.0 + 1.0;
+                assert!((v - expected).abs() < 0.001, "expected {expected}, got {v}");
+            }
+            Err(e) => panic!("expected Ok value, got Err: {e:?}"),
+        }
     }
 }
 

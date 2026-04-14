@@ -248,4 +248,220 @@ mod tests {
         assert_eq!(recycled, id0, "recycled slot should be id0");
         let _ = id1; // keep alive
     }
+
+    // ── New edge-case / concurrent-use tests ────────────────
+
+    #[test]
+    fn multiple_concurrent_allocations() {
+        let mut t = TransactionTable::new();
+        let mut ids = Vec::new();
+        let mut receivers = Vec::new();
+        for _ in 0..5 {
+            let (id, rx) = t.allocate().expect("should allocate");
+            ids.push(id);
+            receivers.push(rx);
+        }
+        // All five IDs are distinct values 0-4.
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted, vec![0, 1, 2, 3, 4]);
+        assert_eq!(t.pending_count(), 5);
+    }
+
+    #[tokio::test]
+    async fn dispatch_multiple_concurrent_waiters() {
+        let mut t = TransactionTable::new();
+        let (id0, rx0) = t.allocate().unwrap(); // 0
+        let (id1, rx1) = t.allocate().unwrap(); // 1
+        let (id2, rx2) = t.allocate().unwrap(); // 2
+
+        // Dispatch in REVERSE order — routing must be by invoke_id, not alloc order.
+        t.dispatch(id2, dummy_apdu(id2));
+        t.dispatch(id1, dummy_apdu(id1));
+        t.dispatch(id0, dummy_apdu(id0));
+
+        let r0 = rx0.await.expect("rx0 closed");
+        let r1 = rx1.await.expect("rx1 closed");
+        let r2 = rx2.await.expect("rx2 closed");
+
+        match r0 {
+            Ok(Apdu::Other { invoke_id, .. }) => assert_eq!(invoke_id, 0),
+            other => panic!("rx0 unexpected: {other:?}"),
+        }
+        match r1 {
+            Ok(Apdu::Other { invoke_id, .. }) => assert_eq!(invoke_id, 1),
+            other => panic!("rx1 unexpected: {other:?}"),
+        }
+        match r2 {
+            Ok(Apdu::Other { invoke_id, .. }) => assert_eq!(invoke_id, 2),
+            other => panic!("rx2 unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn allocate_after_partial_dispatch() {
+        let mut t = TransactionTable::new();
+        let (id0, _rx0) = t.allocate().unwrap(); // 0
+        let (_id1, _rx1) = t.allocate().unwrap(); // 1
+        let (id2, _rx2) = t.allocate().unwrap(); // 2
+        let (_id3, _rx3) = t.allocate().unwrap(); // 3
+
+        // Dispatch (free) 0 and 2.
+        t.dispatch(id0, dummy_apdu(id0));
+        t.dispatch(id2, dummy_apdu(id2));
+        assert_eq!(t.pending_count(), 2, "1 and 3 remain pending");
+
+        // next_id is 4 after allocating 0-3, so next free slot is 4.
+        let (new_id, _rx_new) = t.allocate().expect("should allocate next free slot");
+        assert_eq!(new_id, 4, "next sequential free slot after 0-3 is 4");
+        // pending_count rises from 2 to 3 after the new allocation.
+        assert_eq!(t.pending_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn timeout_with_multiple_pending() {
+        let mut t = TransactionTable::new();
+        let (_id0, mut rx0) = t.allocate().unwrap(); // 0
+        let (id1, rx1) = t.allocate().unwrap(); // 1
+        let (_id2, mut rx2) = t.allocate().unwrap(); // 2
+
+        // Only timeout ID 1.
+        t.timeout(id1);
+
+        assert_eq!(t.pending_count(), 2, "0 and 2 still pending");
+
+        // rx1 should resolve immediately with Timeout(3).
+        let r1 = rx1.await.expect("rx1 sender dropped unexpectedly");
+        match r1 {
+            Err(BacnetError::Timeout(retries)) => assert_eq!(retries, 3),
+            other => panic!("expected Timeout, got {other:?}"),
+        }
+
+        // rx0 and rx2 must still be pending (not resolved).
+        assert!(
+            rx0.try_recv().is_err(),
+            "rx0 should still be pending (no message yet)"
+        );
+        assert!(
+            rx2.try_recv().is_err(),
+            "rx2 should still be pending (no message yet)"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_error_apdu_as_ok() {
+        let mut t = TransactionTable::new();
+        let (id, rx) = t.allocate().unwrap();
+        assert_eq!(id, 0);
+
+        // Manually craft the specific ID for this test — allocate until we get 7.
+        // Since this is a fresh table, id == 0; allocate up to 7.
+        for _ in 1u8..7 {
+            t.allocate().unwrap();
+        }
+        let (id7, rx7) = t.allocate().unwrap();
+        assert_eq!(id7, 7);
+
+        let error_apdu = Apdu::Error {
+            invoke_id: 7,
+            service_choice: 0x0C,
+            error_class: 2,
+            error_code: 31,
+        };
+        t.dispatch(id7, error_apdu.clone());
+
+        let result = rx7.await.expect("sender dropped");
+        match result {
+            Ok(Apdu::Error {
+                invoke_id: 7,
+                service_choice: 0x0C,
+                error_class: 2,
+                error_code: 31,
+            }) => {} // correct
+            other => panic!("expected Ok(Apdu::Error {{...}}), got {other:?}"),
+        }
+
+        // Keep rx alive (its slot was 0, no dispatch — just drop it).
+        drop(rx);
+    }
+
+    #[test]
+    fn pending_count_starts_at_zero() {
+        let t = TransactionTable::new();
+        assert_eq!(t.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn allocate_wraps_correctly_after_255_dispatched() {
+        let mut t = TransactionTable::new();
+        // Hold all receivers so slots stay in-flight.
+        let mut receivers: Vec<(u8, _)> = Vec::with_capacity(256);
+        for _ in 0u16..256 {
+            let (id, rx) = t.allocate().expect("should allocate");
+            receivers.push((id, rx));
+        }
+        assert_eq!(t.pending_count(), 256);
+
+        // Dispatch ID 200 to free that slot.
+        t.dispatch(200, dummy_apdu(200));
+        assert_eq!(t.pending_count(), 255);
+
+        // After wrapping next_id == 0 (all 256 IDs were allocated).
+        // Scan from 0: 0-199 still occupied, 200 free → returns 200.
+        let (recycled, _rx) = t.allocate().expect("ID 200 slot should be reusable");
+        assert_eq!(recycled, 200, "should recycle freed slot 200");
+    }
+
+    #[test]
+    fn receiver_dropped_dispatch_does_not_panic() {
+        let mut t = TransactionTable::new();
+        // Allocate IDs 0-2, then the target is ID 3.
+        for _ in 0u8..3 {
+            t.allocate().unwrap();
+        }
+        let (id3, rx3) = t.allocate().unwrap();
+        assert_eq!(id3, 3);
+
+        // Drop the receiver before dispatching.
+        drop(rx3);
+
+        // Dispatch must not panic even though the receiver is gone.
+        t.dispatch(id3, dummy_apdu(id3));
+
+        // Entry was removed by dispatch regardless of send result.
+        assert_eq!(t.pending_count(), 3, "only IDs 0-2 remain pending");
+    }
+
+    #[tokio::test]
+    async fn timeout_retry_count_is_3() {
+        let mut t = TransactionTable::new();
+        let (id, rx) = t.allocate().unwrap();
+        t.timeout(id);
+        let result = rx.await.expect("sender dropped");
+        match result {
+            Err(BacnetError::Timeout(retries)) => {
+                assert_eq!(retries, 3, "hardcoded retry count must be exactly 3");
+            }
+            other => panic!("expected Timeout, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn allocate_then_dispatch_clears_slot_for_reuse_in_sequence() {
+        let mut t = TransactionTable::new();
+        let mut sequence = Vec::new();
+        for _ in 0u8..5 {
+            let (id, rx) = t.allocate().unwrap();
+            sequence.push(id);
+            t.dispatch(id, dummy_apdu(id));
+            // Consume the receiver to avoid the channel backing up.
+            let _ = rx.await;
+        }
+        assert_eq!(
+            sequence,
+            vec![0, 1, 2, 3, 4],
+            "IDs should be allocated sequentially when each is freed before the next"
+        );
+    }
 }
