@@ -837,14 +837,31 @@ async fn load_bacnet_drivers(handle: &crate::drivers::actor::DriverHandle) {
         }
     };
 
+    let mut registered_any = false;
     for config in configs {
         let id = config.id.clone();
         let driver = crate::drivers::bacnet::BacnetDriver::from_config(config);
         let any_driver = crate::drivers::async_driver::AnyDriver::Async(Box::new(driver));
         match handle.register(any_driver).await {
-            Ok(()) => tracing::info!(driver = %id, "BACnet driver registered"),
+            Ok(()) => {
+                tracing::info!(driver = %id, "BACnet driver registered");
+                registered_any = true;
+            }
             Err(e) => {
                 tracing::error!(driver = %id, error = %e, "failed to register BACnet driver")
+            }
+        }
+    }
+
+    // Open all registered drivers so they bind sockets and run Who-Is discovery.
+    // Without this, drivers stay in Pending status and `learn()` returns empty.
+    if registered_any {
+        match handle.open_all().await {
+            Ok(metas) => {
+                tracing::info!(count = metas.len(), "BACnet drivers opened");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to open BACnet drivers");
             }
         }
     }
