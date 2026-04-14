@@ -27,7 +27,9 @@ use async_trait::async_trait;
 use tokio::net::UdpSocket;
 
 use super::async_driver::AsyncDriver;
-use super::{DriverError, DriverMeta, DriverPointRef, DriverStatus, LearnGrid, PollMode};
+use super::{
+    DriverError, DriverMeta, DriverPointRef, DriverStatus, LearnGrid, LearnPoint, PollMode,
+};
 
 // Re-export DeviceRegistry for use in tests and Phase B3.
 pub use discovery::DeviceRegistry;
@@ -408,6 +410,146 @@ impl BacnetDriver {
             "bacnet: timeout after {max_retries} retries"
         )))
     }
+
+    /// Send a ReadProperty request and return the decoded `BacnetValue`.
+    ///
+    /// Generic version of `read_present_value()` — reads any property from
+    /// any object on any device.
+    async fn read_property_generic(
+        &mut self,
+        device_addr: std::net::SocketAddr,
+        object_type: u16,
+        object_instance: u32,
+        property_id: u32,
+    ) -> Result<value::BacnetValue, BacnetError> {
+        let socket = self.socket.as_ref().ok_or_else(|| {
+            BacnetError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "not connected",
+            ))
+        })?;
+
+        let (invoke_id, rx) = self
+            .transactions
+            .allocate()
+            .ok_or_else(|| BacnetError::MalformedFrame("no invoke IDs available".into()))?;
+
+        let request =
+            frame::encode_read_property(invoke_id, object_type, object_instance, property_id, None);
+
+        let per_attempt = std::time::Duration::from_secs(3);
+        let max_retries = 3u32;
+        let mut buf = [0u8; 1500];
+        let mut rx = rx;
+
+        'retry: for attempt in 0..=max_retries {
+            socket.send_to(&request, device_addr).await?;
+
+            let deadline = tokio::time::Instant::now() + per_attempt;
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    if attempt < max_retries {
+                        continue 'retry;
+                    } else {
+                        break 'retry;
+                    }
+                }
+                match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
+                    Err(_) => {
+                        if attempt < max_retries {
+                            continue 'retry;
+                        } else {
+                            break 'retry;
+                        }
+                    }
+                    Ok(Err(e)) => return Err(BacnetError::Io(e)),
+                    Ok(Ok((n, _src))) => {
+                        if let Ok((_npdu, apdu)) = frame::decode_packet(&buf[..n]) {
+                            if let Some(id) = apdu_invoke_id(&apdu) {
+                                self.transactions.dispatch(id, apdu);
+                            }
+                        }
+                        if let Ok(result) = rx.try_recv() {
+                            return match result {
+                                Ok(frame::Apdu::ReadPropertyAck { value, .. }) => Ok(value),
+                                Ok(frame::Apdu::Error {
+                                    error_class,
+                                    error_code,
+                                    ..
+                                }) => Err(BacnetError::RemoteError {
+                                    class: error_class,
+                                    code: error_code,
+                                }),
+                                Ok(_) => {
+                                    Err(BacnetError::MalformedFrame("unexpected APDU type".into()))
+                                }
+                                Err(e) => Err(e),
+                            };
+                        }
+                    }
+                }
+            }
+        }
+
+        self.transactions.timeout(invoke_id);
+        Err(BacnetError::Timeout(max_retries))
+    }
+
+    /// Read the Device object-list property (property 76) from a device.
+    ///
+    /// Returns a list of `(object_type, instance)` pairs for all objects
+    /// on the device. Device objects (type 8) are filtered out.
+    async fn read_object_list(
+        &mut self,
+        device_addr: std::net::SocketAddr,
+        device_instance: u32,
+    ) -> Result<Vec<(u16, u32)>, BacnetError> {
+        let val = self
+            .read_property_generic(device_addr, 8, device_instance, 76)
+            .await?;
+
+        let items: Vec<value::BacnetValue> = match val {
+            value::BacnetValue::Array(items) => items,
+            single => vec![single],
+        };
+
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            if let value::BacnetValue::ObjectId {
+                object_type,
+                instance,
+            } = item
+            {
+                // Skip the Device object itself (type 8) — not a data point.
+                if object_type != 8 {
+                    out.push((object_type, instance));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Read the object-name property (property 77) from a BACnet object.
+    ///
+    /// Returns the name as a `String`. Falls back to `"type-instance"` format
+    /// on any error (caller uses `unwrap_or_else`).
+    async fn read_object_name(
+        &mut self,
+        device_addr: std::net::SocketAddr,
+        object_type: u16,
+        object_instance: u32,
+    ) -> Result<String, BacnetError> {
+        let val = self
+            .read_property_generic(device_addr, object_type, object_instance, 77)
+            .await?;
+        match val {
+            value::BacnetValue::CharacterString(s) => Ok(s),
+            other => Err(BacnetError::MalformedFrame(format!(
+                "expected CharacterString for object-name, got {other:?}"
+            ))),
+        }
+    }
 }
 
 // ── AsyncDriver impl ───────────────────────────────────────
@@ -491,7 +633,66 @@ impl AsyncDriver for BacnetDriver {
     }
 
     async fn learn(&mut self, _path: Option<&str>) -> Result<LearnGrid, DriverError> {
-        Err(DriverError::NotSupported("bacnet learn"))
+        use std::collections::HashMap;
+
+        // Clone device list to avoid holding a borrow across awaits.
+        let devices: Vec<DeviceInfo> = self.device_registry.all().into_iter().cloned().collect();
+
+        let mut grid = Vec::new();
+
+        for device in devices {
+            tracing::debug!(
+                driver = %self.id,
+                device = device.instance,
+                "BACnet learn: reading object-list"
+            );
+
+            let object_list = match self.read_object_list(device.addr, device.instance).await {
+                Ok(list) => list,
+                Err(e) => {
+                    tracing::warn!(
+                        driver = %self.id,
+                        device = device.instance,
+                        error = %e,
+                        "BACnet learn: could not read object-list"
+                    );
+                    continue;
+                }
+            };
+
+            for (obj_type, instance) in object_list {
+                // Determine point kind from BACnet object type:
+                //   0=AI 1=AO 2=AV → Number
+                //   3=BI 4=BO 5=BV → Bool
+                //   everything else → skip
+                let kind = match obj_type {
+                    0..=2 => "Number".to_string(),
+                    3..=5 => "Bool".to_string(),
+                    _ => continue,
+                };
+
+                // Try to read the object name; fall back to a generated name.
+                let name = self
+                    .read_object_name(device.addr, obj_type, instance)
+                    .await
+                    .unwrap_or_else(|_| format!("{obj_type}-{instance}"));
+
+                let mut tags = HashMap::new();
+                tags.insert("deviceId".to_string(), device.instance.to_string());
+                tags.insert("objectType".to_string(), obj_type.to_string());
+                tags.insert("instance".to_string(), instance.to_string());
+
+                grid.push(LearnPoint {
+                    name: format!("{}-{name}", device.instance),
+                    address: format!("{}:{}:{}", device.instance, obj_type, instance),
+                    kind,
+                    unit: None,
+                    tags,
+                });
+            }
+        }
+
+        Ok(grid)
     }
 
     async fn sync_cur(
@@ -567,9 +768,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bacnet_learn_not_supported() {
+    async fn bacnet_learn_empty_registry_returns_empty_grid() {
+        // With no discovered devices, learn() must return Ok([]).
         let mut d = BacnetDriver::new("bac-2", "255.255.255.255", DEFAULT_BACNET_PORT);
-        assert!(d.learn(None).await.is_err());
+        let grid = d.learn(None).await.expect("learn should succeed");
+        assert!(grid.is_empty(), "expected empty grid, got {:?}", grid);
     }
 
     #[tokio::test]
@@ -1156,5 +1359,248 @@ mod discovery_integration {
         assert!(reg.get(0).is_none());
 
         driver.close().await;
+    }
+}
+
+// ── Phase B4 learn() tests ─────────────────────────────────
+
+#[cfg(test)]
+mod learn_tests {
+    use super::*;
+
+    // ── Test 1 ─────────────────────────────────────────────
+
+    /// learn() with no devices in registry returns empty grid immediately.
+    #[tokio::test]
+    async fn learn_with_no_devices_returns_empty_grid() {
+        let mut driver = BacnetDriver::new("b4-empty", "127.0.0.1", 0);
+        let grid = driver.learn(None).await.expect("learn should succeed");
+        assert!(grid.is_empty(), "expected empty grid, got {grid:?}");
+    }
+
+    // ── Test 2 ─────────────────────────────────────────────
+
+    /// Unit test for ObjectId filtering logic used by read_object_list.
+    /// Verifies that Device objects (type 8) are excluded and data objects
+    /// (types 0-5) are kept.
+    #[test]
+    fn read_object_list_parses_array_of_object_ids() {
+        let items = vec![
+            value::BacnetValue::ObjectId {
+                object_type: 0,
+                instance: 1,
+            },
+            value::BacnetValue::ObjectId {
+                object_type: 8,
+                instance: 99,
+            }, // Device — should be skipped
+            value::BacnetValue::ObjectId {
+                object_type: 3,
+                instance: 0,
+            },
+        ];
+        let filtered: Vec<(u16, u32)> = items
+            .into_iter()
+            .filter_map(|v| match v {
+                value::BacnetValue::ObjectId {
+                    object_type,
+                    instance,
+                } if object_type != 8 => Some((object_type, instance)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(filtered, vec![(0, 1), (3, 0)]);
+    }
+
+    // ── Test 3 ─────────────────────────────────────────────
+
+    /// Integration test: mock device responds to object-list and name queries.
+    ///
+    /// The mock handles (in order):
+    ///   1. Who-Is → I-Am (device 1001)
+    ///   2. ReadProperty(Device 1001, ObjectList=76) → [AI-0, AO-1, BI-0]
+    ///   3. ReadProperty(AI 0, ObjectName=77) → "TempSensor"
+    ///   4. ReadProperty(AO 1, ObjectName=77) → "Valve"
+    ///   5. ReadProperty(BI 0, ObjectName=77) → "MotionSensor"
+    #[tokio::test]
+    async fn learn_integration_with_mock_device() {
+        use std::net::TcpListener;
+
+        fn find_free_port() -> u16 {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        }
+
+        let mock_port = find_free_port();
+        let device_instance = 1001u32;
+
+        // Spawn mock that handles Who-Is → I-Am, then object-list and name reads.
+        tokio::spawn(async move {
+            let sock = tokio::net::UdpSocket::bind(format!("127.0.0.1:{mock_port}"))
+                .await
+                .expect("mock bind");
+            let mut buf = [0u8; 1500];
+
+            // 1. Respond to Who-Is with I-Am
+            if let Ok((_, from)) = sock.recv_from(&mut buf).await {
+                let obj_id_val: u32 = (8u32 << 22) | (device_instance & 0x3F_FFFF);
+                let obj_id = obj_id_val.to_be_bytes();
+                let mut apdu: Vec<u8> = vec![
+                    0x10, 0x00, 0xC4, obj_id[0], obj_id[1], obj_id[2], obj_id[3], 0x22, 0x05,
+                    0xC4, // max-apdu = 1476
+                    0x91, 0x03, // segmentation = 3
+                    0x21, 0x08, // vendor-id = 8
+                ];
+                let total_len = (4u16 + 2 + apdu.len() as u16).to_be_bytes();
+                let mut frame = vec![0x81, 0x0A, total_len[0], total_len[1], 0x01, 0x00];
+                frame.append(&mut apdu);
+                let _ = sock.send_to(&frame, from).await;
+            }
+
+            // Helper to extract invoke_id from a received ReadProperty request.
+            // Packet layout: BVLL(4) + NPDU(2) + APDU; APDU[2] = invoke_id.
+            let get_invoke_id = |data: &[u8], n: usize| -> u8 {
+                if n >= 9 {
+                    data[8]
+                } else {
+                    0
+                }
+            };
+
+            // 2. Object-list request → respond with AI-0, AO-1, BI-0
+            if let Ok((n, from)) = sock.recv_from(&mut buf).await {
+                let invoke_id = get_invoke_id(&buf, n);
+                let object_list_values = vec![
+                    value::BacnetValue::ObjectId {
+                        object_type: 0,
+                        instance: 0,
+                    }, // AI-0
+                    value::BacnetValue::ObjectId {
+                        object_type: 1,
+                        instance: 1,
+                    }, // AO-1
+                    value::BacnetValue::ObjectId {
+                        object_type: 3,
+                        instance: 0,
+                    }, // BI-0
+                ];
+                let ack = frame::encode_read_property_ack_multi(
+                    invoke_id,
+                    8, // Device object
+                    device_instance,
+                    76, // ObjectList property
+                    &object_list_values,
+                );
+                let _ = sock.send_to(&ack, from).await;
+            }
+
+            // Name requests: AI-0 → "TempSensor", AO-1 → "Valve", BI-0 → "MotionSensor"
+            // Use encode_read_property_ack_multi which fully handles CharacterString.
+            let names = ["TempSensor", "Valve", "MotionSensor"];
+            let obj_types = [0u16, 1u16, 3u16];
+            let instances = [0u32, 1u32, 0u32];
+            for i in 0..3 {
+                if let Ok((n, from)) = sock.recv_from(&mut buf).await {
+                    let invoke_id = get_invoke_id(&buf, n);
+                    let name_val = value::BacnetValue::CharacterString(names[i].to_string());
+                    let ack = frame::encode_read_property_ack_multi(
+                        invoke_id,
+                        obj_types[i],
+                        instances[i],
+                        77,
+                        &[name_val],
+                    );
+                    let _ = sock.send_to(&ack, from).await;
+                }
+            }
+        });
+
+        // Give mock time to bind.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let mut driver = BacnetDriver::new("b4-integ", "127.0.0.1", 0)
+            .with_broadcast_port(mock_port)
+            .with_discovery_timeout(std::time::Duration::from_millis(200));
+
+        driver.open().await.expect("open should succeed");
+        assert_eq!(
+            driver.device_registry().len(),
+            1,
+            "should have discovered 1 device"
+        );
+
+        let grid = driver.learn(None).await.expect("learn should succeed");
+        assert_eq!(grid.len(), 3, "expected 3 points, got {grid:?}");
+
+        // Check names/kinds
+        let names_found: Vec<_> = grid.iter().map(|p| p.name.as_str()).collect();
+        assert!(
+            names_found.contains(&"1001-TempSensor"),
+            "missing TempSensor: {names_found:?}"
+        );
+        assert!(
+            names_found.contains(&"1001-Valve"),
+            "missing Valve: {names_found:?}"
+        );
+        assert!(
+            names_found.contains(&"1001-MotionSensor"),
+            "missing MotionSensor: {names_found:?}"
+        );
+
+        // Check kinds
+        let temp = grid.iter().find(|p| p.name == "1001-TempSensor").unwrap();
+        assert_eq!(temp.kind, "Number");
+        let valve = grid.iter().find(|p| p.name == "1001-Valve").unwrap();
+        assert_eq!(valve.kind, "Number");
+        let motion = grid.iter().find(|p| p.name == "1001-MotionSensor").unwrap();
+        assert_eq!(motion.kind, "Bool");
+
+        driver.close().await;
+    }
+
+    // ── Test 4 ─────────────────────────────────────────────
+
+    /// Verify object type filtering: types 0-5 → included, others → skipped.
+    #[test]
+    fn learn_skips_device_objects_and_unknown_types() {
+        // Simulate the filtering logic used in learn()
+        let candidates: &[(u16, &str)] = &[
+            (0, "Number"), // AI
+            (1, "Number"), // AO
+            (2, "Number"), // AV
+            (3, "Bool"),   // BI
+            (4, "Bool"),   // BO
+            (5, "Bool"),   // BV
+            (6, "skip"),   // Multi-state input
+            (7, "skip"),   // Multi-state output
+            (8, "skip"),   // Device
+            (20, "skip"),  // Trendlog
+        ];
+
+        let included: Vec<(u16, &str)> = candidates
+            .iter()
+            .filter_map(|(obj_type, expected_kind)| {
+                let kind = match *obj_type {
+                    0..=2 => "Number",
+                    3..=5 => "Bool",
+                    _ => return None,
+                };
+                assert_eq!(kind, *expected_kind, "wrong kind for type {obj_type}");
+                Some((*obj_type, kind))
+            })
+            .collect();
+
+        assert_eq!(
+            included.len(),
+            6,
+            "expected 6 included types, got {included:?}"
+        );
+        for (ot, k) in &included {
+            match ot {
+                0..=2 => assert_eq!(*k, "Number"),
+                3..=5 => assert_eq!(*k, "Bool"),
+                _ => panic!("unexpected type {ot} in included"),
+            }
+        }
     }
 }

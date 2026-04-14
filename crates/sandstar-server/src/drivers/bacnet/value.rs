@@ -61,6 +61,8 @@ pub enum BacnetValue {
     },
     /// Any other / unrecognised tag — skipped cleanly by the decoder.
     Unknown,
+    /// A sequence of values (used for array properties like ObjectList).
+    Array(Vec<BacnetValue>),
 }
 
 impl BacnetValue {
@@ -79,6 +81,10 @@ impl BacnetValue {
             BacnetValue::Signed(v) => Some(*v as f64),
             BacnetValue::Boolean(b) => Some(if *b { 1.0 } else { 0.0 }),
             BacnetValue::Enumerated(v) => Some(*v as f64),
+            BacnetValue::Array(items) => {
+                // For array properties used numerically, try the first element.
+                items.first().and_then(|v| v.to_f64())
+            }
             _ => None,
         }
     }
@@ -175,22 +181,50 @@ pub fn decode_application_tag(data: &[u8]) -> Result<(BacnetValue, usize), Bacne
         }
 
         // CHARACTER STRING — first value byte is encoding (0 = UTF-8), rest is string
+        //
+        // LVT 0-4: direct byte count (header = 1 byte total overhead).
+        // LVT 5:   next byte holds actual length (2 bytes overhead).
+        // LVT 6:   next 2 bytes (BE u16) hold actual length (3 bytes overhead).
         7 => {
-            if lvt == 0 {
-                return Ok((BacnetValue::CharacterString(String::new()), 1));
+            let (str_len, header_len) = match lvt {
+                0..=4 => (lvt, 1usize),
+                5 => {
+                    if data.len() < 2 {
+                        return Err(BacnetError::MalformedFrame(
+                            "CharacterString extended length truncated".into(),
+                        ));
+                    }
+                    (data[1] as usize, 2)
+                }
+                6 => {
+                    if data.len() < 3 {
+                        return Err(BacnetError::MalformedFrame(
+                            "CharacterString extended length truncated".into(),
+                        ));
+                    }
+                    (u16::from_be_bytes([data[1], data[2]]) as usize, 3)
+                }
+                _ => {
+                    return Err(BacnetError::MalformedFrame(
+                        "CharacterString LVT=7 not supported".into(),
+                    ))
+                }
+            };
+            if str_len == 0 {
+                return Ok((BacnetValue::CharacterString(String::new()), header_len));
             }
-            if data.len() < 1 + lvt {
+            if data.len() < header_len + str_len {
                 return Err(BacnetError::MalformedFrame(
                     "CharacterString truncated".into(),
                 ));
             }
-            // data[1] = encoding byte (0 = UTF-8); data[2..1+lvt] = string bytes
-            let s = if lvt > 1 {
-                String::from_utf8_lossy(&data[2..1 + lvt]).into_owned()
+            // First byte of string data is the encoding byte (0 = UTF-8)
+            let s = if str_len > 1 {
+                String::from_utf8_lossy(&data[header_len + 1..header_len + str_len]).into_owned()
             } else {
                 String::new()
             };
-            Ok((BacnetValue::CharacterString(s), 1 + lvt))
+            Ok((BacnetValue::CharacterString(s), header_len + str_len))
         }
 
         // BIT STRING
@@ -739,16 +773,33 @@ mod tests {
         );
     }
 
-    /// CharString "hello": tag 7, LVT=6 (encoding byte 0x00 + 5 chars).
+    /// CharString "hello": tag 7, LVT=5 (extended 1-byte length), length=6
+    /// (encoding byte 0x00 + 5 chars).
     #[test]
     fn decode_charstring_hello() {
-        // tag byte 0x76 = (7 << 4) | 6: tag 7, app, LVT=6
-        // payload: 0x00 (UTF-8 encoding byte) + "hello" (5 bytes) = 6 bytes total
-        let data = [0x76u8, 0x00, b'h', b'e', b'l', b'l', b'o'];
+        // tag byte 0x75 = (7 << 4) | 5: tag 7, app, LVT=5 (extended 1-byte length)
+        // next byte: 0x06 = length (encoding byte + 5 chars = 6)
+        // payload: 0x00 (UTF-8 encoding byte) + "hello" (5 bytes)
+        let data = [0x75u8, 0x06, 0x00, b'h', b'e', b'l', b'l', b'o'];
         let (val, consumed) = decode_application_tag(&data).unwrap();
-        assert_eq!(consumed, 7, "1 tag byte + 6 payload bytes");
+        assert_eq!(consumed, 8, "1 tag byte + 1 length byte + 6 payload bytes");
         match val {
             BacnetValue::CharacterString(s) => assert_eq!(s, "hello"),
+            other => panic!("expected CharacterString, got {:?}", other),
+        }
+    }
+
+    /// CharString "hello" using direct LVT encoding (LVT = byte count ≤ 4).
+    /// LVT=3 would encode "hi" (2 chars + encoding byte = 3 bytes total).
+    #[test]
+    fn decode_charstring_short_direct_lvt() {
+        // tag byte 0x73 = (7 << 4) | 3: tag 7, app, LVT=3 (direct count = 3 bytes)
+        // payload: 0x00 (UTF-8 encoding byte) + "hi" (2 bytes)
+        let data = [0x73u8, 0x00, b'h', b'i'];
+        let (val, consumed) = decode_application_tag(&data).unwrap();
+        assert_eq!(consumed, 4, "1 tag byte + 3 payload bytes");
+        match val {
+            BacnetValue::CharacterString(s) => assert_eq!(s, "hi"),
             other => panic!("expected CharacterString, got {:?}", other),
         }
     }
@@ -866,5 +917,127 @@ mod tests {
         assert_eq!(encoded, vec![0x22, 0x05, 0xC4]);
         let (val, _) = decode_application_tag(&encoded).unwrap();
         assert!(matches!(val, BacnetValue::Unsigned(1476)));
+    }
+
+    // ── Array variant tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn array_variant_exists_and_holds_values() {
+        let arr = BacnetValue::Array(vec![
+            BacnetValue::Real(1.0),
+            BacnetValue::Real(2.0),
+            BacnetValue::Real(3.0),
+        ]);
+        match &arr {
+            BacnetValue::Array(items) => assert_eq!(items.len(), 3),
+            _ => panic!("expected Array variant"),
+        }
+    }
+
+    #[test]
+    fn array_to_f64_returns_first_numeric() {
+        let arr = BacnetValue::Array(vec![BacnetValue::Real(42.5), BacnetValue::Unsigned(100)]);
+        assert_eq!(arr.to_f64(), Some(42.5_f64));
+    }
+
+    #[test]
+    fn array_to_f64_empty_returns_none() {
+        let arr = BacnetValue::Array(vec![]);
+        assert_eq!(arr.to_f64(), None);
+    }
+
+    #[test]
+    fn array_to_f64_first_non_numeric_returns_none() {
+        let arr = BacnetValue::Array(vec![
+            BacnetValue::CharacterString("hello".into()),
+            BacnetValue::Real(1.0),
+        ]);
+        assert_eq!(
+            arr.to_f64(),
+            None,
+            "first element is non-numeric so should return None"
+        );
+    }
+
+    #[test]
+    fn array_to_f64_object_ids_returns_none() {
+        let arr = BacnetValue::Array(vec![
+            BacnetValue::ObjectId {
+                object_type: 0,
+                instance: 1,
+            },
+            BacnetValue::ObjectId {
+                object_type: 3,
+                instance: 0,
+            },
+        ]);
+        assert_eq!(arr.to_f64(), None, "ObjectId is non-numeric");
+    }
+
+    #[test]
+    fn array_can_hold_mixed_types() {
+        let arr = BacnetValue::Array(vec![
+            BacnetValue::ObjectId {
+                object_type: 0,
+                instance: 1,
+            },
+            BacnetValue::ObjectId {
+                object_type: 8,
+                instance: 99,
+            },
+            BacnetValue::ObjectId {
+                object_type: 3,
+                instance: 0,
+            },
+        ]);
+        if let BacnetValue::Array(items) = &arr {
+            let object_ids: Vec<(u16, u32)> = items
+                .iter()
+                .filter_map(|v| match v {
+                    BacnetValue::ObjectId {
+                        object_type,
+                        instance,
+                    } => Some((*object_type, *instance)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(object_ids, vec![(0, 1), (8, 99), (3, 0)]);
+        } else {
+            panic!("expected Array");
+        }
+    }
+
+    #[test]
+    fn array_equality() {
+        let a = BacnetValue::Array(vec![BacnetValue::Real(1.0), BacnetValue::Unsigned(2)]);
+        let b = BacnetValue::Array(vec![BacnetValue::Real(1.0), BacnetValue::Unsigned(2)]);
+        let c = BacnetValue::Array(vec![BacnetValue::Real(1.0)]);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn array_to_f64_nested_array_first_element() {
+        let inner = BacnetValue::Array(vec![BacnetValue::Real(3.14)]);
+        let outer = BacnetValue::Array(vec![inner]);
+        // to_f64 on outer → tries first element (inner Array) → tries inner's first (Real(3.14))
+        // Real is f32, so we compare via f32→f64 widening to avoid precision mismatch.
+        assert_eq!(outer.to_f64(), Some(3.14_f32 as f64));
+    }
+
+    #[test]
+    fn array_clone_and_debug() {
+        let arr = BacnetValue::Array(vec![BacnetValue::Boolean(true)]);
+        let cloned = arr.clone();
+        assert_eq!(arr, cloned);
+        // Debug formatting should not panic
+        let _ = format!("{arr:?}");
+    }
+
+    #[test]
+    fn empty_array_equality() {
+        let a = BacnetValue::Array(vec![]);
+        let b = BacnetValue::Array(vec![]);
+        assert_eq!(a, b);
     }
 }

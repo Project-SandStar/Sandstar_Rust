@@ -258,6 +258,114 @@ pub fn encode_read_property_ack(
     build_packet(BVLL_UNICAST, apdu)
 }
 
+/// Encode a Complex-ACK ReadProperty response with MULTIPLE values.
+///
+/// Used for array properties like ObjectList where the response contains
+/// several application-tagged values inside the `3E...3F` wrapper.
+pub fn encode_read_property_ack_multi(
+    invoke_id: u8,
+    object_type: u16,
+    instance: u32,
+    property_id: u32,
+    values: &[super::value::BacnetValue],
+) -> Vec<u8> {
+    let mut apdu: Vec<u8> = vec![
+        0x30, // Complex-ACK PDU type
+        invoke_id, 0x0C, // service-choice = ReadProperty
+    ];
+
+    // Context tag 0: ObjectIdentifier
+    let obj_id = ((object_type as u32) << 22) | (instance & 0x003F_FFFF);
+    apdu.push(0x0C);
+    apdu.extend_from_slice(&obj_id.to_be_bytes());
+
+    // Context tag 1: PropertyIdentifier
+    encode_context_unsigned(&mut apdu, 1, property_id);
+
+    // Context tag 3 opening
+    apdu.push(0x3E);
+
+    // Encode each value
+    for val in values {
+        encode_bacnet_value(&mut apdu, val);
+    }
+
+    // Context tag 3 closing
+    apdu.push(0x3F);
+
+    build_packet(BVLL_UNICAST, apdu)
+}
+
+/// Encode a single `BacnetValue` as application-tagged bytes.
+fn encode_bacnet_value(buf: &mut Vec<u8>, val: &super::value::BacnetValue) {
+    use super::value::BacnetValue::*;
+    match val {
+        Real(f) => {
+            buf.push(0x44); // tag 4, LVT=4
+            buf.extend_from_slice(&f.to_be_bytes());
+        }
+        Double(d) => {
+            buf.push(0x55); // tag 5, LVT=5 (extended length indicator)
+            buf.push(8); // 8 bytes
+            buf.extend_from_slice(&d.to_be_bytes());
+        }
+        Unsigned(n) => {
+            if *n <= 0xFF {
+                buf.extend_from_slice(&[0x21, *n as u8]);
+            } else if *n <= 0xFFFF {
+                let b = (*n as u16).to_be_bytes();
+                buf.extend_from_slice(&[0x22, b[0], b[1]]);
+            } else {
+                buf.push(0x24);
+                buf.extend_from_slice(&n.to_be_bytes());
+            }
+        }
+        Boolean(b) => {
+            buf.push(if *b { 0x11 } else { 0x10 });
+        }
+        ObjectId {
+            object_type,
+            instance,
+        } => {
+            let raw: u32 = ((*object_type as u32) << 22) | (*instance & 0x3F_FFFF);
+            buf.push(0xC4); // tag 12, LVT=4
+            buf.extend_from_slice(&raw.to_be_bytes());
+        }
+        Enumerated(v) => {
+            if *v <= 0xFF {
+                buf.extend_from_slice(&[0x91, *v as u8]);
+            } else {
+                buf.push(0x92);
+                let b = (*v as u16).to_be_bytes();
+                buf.extend_from_slice(&b);
+            }
+        }
+        CharacterString(s) => {
+            // Tag 7, LVT = byte count (UTF-8 string length + 1 for encoding byte)
+            let bytes = s.as_bytes();
+            let len = bytes.len() + 1; // +1 for charset byte (0x00 = UTF-8)
+            if len <= 4 {
+                buf.push(0x70 | len as u8);
+            } else if len <= 253 {
+                buf.push(0x75); // extended length, 1 byte
+                buf.push(len as u8);
+            } else {
+                buf.push(0x76); // extended length, 2 bytes
+                buf.extend_from_slice(&(len as u16).to_be_bytes());
+            }
+            buf.push(0x00); // charset = UTF-8
+            buf.extend_from_slice(bytes);
+        }
+        Null => buf.push(0x00),
+        Array(items) => {
+            for item in items {
+                encode_bacnet_value(buf, item);
+            }
+        }
+        _ => {} // skip unknown/unhandled types
+    }
+}
+
 // ── Decoding ───────────────────────────────────────────────
 
 /// Parse the 4-byte BVLL header.
@@ -633,8 +741,25 @@ fn decode_read_property_ack(invoke_id: u8, payload: &[u8]) -> Result<Apdu, Bacne
     }
     pos += 1;
 
-    // Decode the application-tagged value inside the opening/closing context
-    let (value, _n) = decode_application_tag(&payload[pos..])?;
+    // Collect ALL application-tagged values until closing tag 3 (0x3F).
+    // For scalar properties this yields exactly 1 item (backward compatible).
+    // For array properties (like ObjectList) this yields all items.
+    let mut values: Vec<super::value::BacnetValue> = Vec::new();
+    while pos < payload.len() && payload[pos] != 0x3F {
+        let (val, n) = decode_application_tag(&payload[pos..])?;
+        pos += n;
+        // Skip Unknown (context-tagged items) — not application values.
+        if !matches!(val, super::value::BacnetValue::Unknown) {
+            values.push(val);
+        }
+    }
+
+    // Backward-compatible: single value → scalar; multiple values → Array.
+    let value = if values.len() == 1 {
+        values.remove(0)
+    } else {
+        super::value::BacnetValue::Array(values)
+    };
 
     Ok(Apdu::ReadPropertyAck {
         invoke_id,
@@ -1705,6 +1830,194 @@ mod tests {
                 assert_eq!(decoded_inst, instance, "large instance must round-trip");
             }
             other => panic!("expected ReadPropertyAck, got {other:?}"),
+        }
+    }
+
+    // ── Phase B4: multi-value ReadPropertyAck tests ─────────────
+
+    /// Three ObjectId values (ObjectList property) round-trip as BacnetValue::Array.
+    #[test]
+    fn read_property_ack_multi_object_list_round_trip() {
+        use bacnet_value::BacnetValue;
+        let objects = vec![
+            BacnetValue::ObjectId {
+                object_type: 0,
+                instance: 1,
+            }, // AI-1
+            BacnetValue::ObjectId {
+                object_type: 1,
+                instance: 2,
+            }, // AO-2
+            BacnetValue::ObjectId {
+                object_type: 3,
+                instance: 0,
+            }, // BI-0
+        ];
+        let frame = encode_read_property_ack_multi(42, 8, 1001, 76, &objects);
+        let (_, apdu) = decode_packet(&frame).expect("should decode");
+        match apdu {
+            Apdu::ReadPropertyAck {
+                invoke_id,
+                object_type,
+                instance,
+                property_id,
+                value,
+            } => {
+                assert_eq!(invoke_id, 42);
+                assert_eq!(object_type, 8); // Device
+                assert_eq!(instance, 1001);
+                assert_eq!(property_id, 76); // ObjectList
+                match value {
+                    BacnetValue::Array(items) => {
+                        assert_eq!(items.len(), 3);
+                        assert_eq!(
+                            items[0],
+                            BacnetValue::ObjectId {
+                                object_type: 0,
+                                instance: 1
+                            }
+                        );
+                        assert_eq!(
+                            items[1],
+                            BacnetValue::ObjectId {
+                                object_type: 1,
+                                instance: 2
+                            }
+                        );
+                        assert_eq!(
+                            items[2],
+                            BacnetValue::ObjectId {
+                                object_type: 3,
+                                instance: 0
+                            }
+                        );
+                    }
+                    other => panic!("expected Array, got {other:?}"),
+                }
+            }
+            other => panic!("expected ReadPropertyAck, got {other:?}"),
+        }
+    }
+
+    /// Single value encoded via encode_read_property_ack returns scalar, not Array.
+    #[test]
+    fn read_property_ack_single_value_not_wrapped_in_array() {
+        use bacnet_value::BacnetValue;
+        let frame = encode_read_property_ack(7, 0, 5, 85, &BacnetValue::Real(22.5));
+        let (_, apdu) = decode_packet(&frame).expect("should decode");
+        match apdu {
+            Apdu::ReadPropertyAck { value, .. } => {
+                assert_eq!(
+                    value,
+                    BacnetValue::Real(22.5),
+                    "single value should NOT be wrapped in Array"
+                );
+            }
+            other => panic!("expected ReadPropertyAck, got {other:?}"),
+        }
+    }
+
+    /// Encoding zero values returns BacnetValue::Array(vec![]).
+    #[test]
+    fn read_property_ack_empty_array() {
+        use bacnet_value::BacnetValue;
+        let frame = encode_read_property_ack_multi(1, 8, 100, 76, &[]);
+        let (_, apdu) = decode_packet(&frame).expect("should decode");
+        match apdu {
+            Apdu::ReadPropertyAck { value, .. } => {
+                assert_eq!(
+                    value,
+                    BacnetValue::Array(vec![]),
+                    "empty multi should give Array([])"
+                );
+            }
+            other => panic!("expected ReadPropertyAck, got {other:?}"),
+        }
+    }
+
+    /// Two Real values round-trip as BacnetValue::Array([Real(1.0), Real(2.5)]).
+    #[test]
+    fn read_property_ack_two_reals() {
+        use bacnet_value::BacnetValue;
+        let vals = vec![BacnetValue::Real(1.0_f32), BacnetValue::Real(2.5_f32)];
+        let frame = encode_read_property_ack_multi(5, 2, 3, 85, &vals);
+        let (_, apdu) = decode_packet(&frame).expect("decode");
+        match apdu {
+            Apdu::ReadPropertyAck { value, .. } => match value {
+                BacnetValue::Array(items) => {
+                    assert_eq!(items.len(), 2);
+                    assert_eq!(items[0], BacnetValue::Real(1.0));
+                    assert_eq!(items[1], BacnetValue::Real(2.5));
+                }
+                other => panic!("expected Array, got {other:?}"),
+            },
+            other => panic!("expected ReadPropertyAck, got {other:?}"),
+        }
+    }
+
+    /// Single CharacterString via multi encoder returns scalar (not Array).
+    #[test]
+    fn read_property_ack_char_string_round_trip() {
+        use bacnet_value::BacnetValue;
+        let vals = vec![BacnetValue::CharacterString("TempSensor".into())];
+        let frame = encode_read_property_ack_multi(3, 0, 1, 77, &vals);
+        let (_, apdu) = decode_packet(&frame).unwrap();
+        match apdu {
+            Apdu::ReadPropertyAck { value, .. } => {
+                // Single CharacterString — should NOT be wrapped in Array
+                assert_eq!(value, BacnetValue::CharacterString("TempSensor".into()));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Three Unsigned values round-trip as BacnetValue::Array.
+    #[test]
+    fn read_property_ack_multi_unsigned_values() {
+        use bacnet_value::BacnetValue;
+        let vals = vec![
+            BacnetValue::Unsigned(10),
+            BacnetValue::Unsigned(20),
+            BacnetValue::Unsigned(30),
+        ];
+        let frame = encode_read_property_ack_multi(99, 2, 7, 85, &vals);
+        let (_, apdu) = decode_packet(&frame).unwrap();
+        match apdu {
+            Apdu::ReadPropertyAck { value, .. } => match value {
+                BacnetValue::Array(items) => {
+                    assert_eq!(items.len(), 3);
+                    assert_eq!(items[0], BacnetValue::Unsigned(10));
+                }
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// ObjectList with Device itself included encodes/decodes correctly.
+    #[test]
+    fn encode_read_property_ack_multi_with_device_self() {
+        use bacnet_value::BacnetValue;
+        let objects = vec![
+            BacnetValue::ObjectId {
+                object_type: 8,
+                instance: 1001,
+            }, // Device itself
+            BacnetValue::ObjectId {
+                object_type: 0,
+                instance: 0,
+            }, // AI-0
+        ];
+        let frame = encode_read_property_ack_multi(10, 8, 1001, 76, &objects);
+        let (_, apdu) = decode_packet(&frame).unwrap();
+        match apdu {
+            Apdu::ReadPropertyAck { value, .. } => match value {
+                BacnetValue::Array(items) => {
+                    assert_eq!(items.len(), 2);
+                }
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
         }
     }
 }

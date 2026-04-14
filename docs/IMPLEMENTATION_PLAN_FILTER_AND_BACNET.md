@@ -494,7 +494,7 @@ The existing single-file `bacnet.rs` (120 lines) becomes the entry point `mod.rs
 
 **Checkpoint:** Can read one property from one object. Sandstar can now be a BACnet client.
 
-### B.6 Phase B4: `learn()` — Object enumeration (Week 4, ~6 hours)
+### B.6 Phase B4: `learn()` — Object enumeration (Week 4, ~6 hours) — ✅ COMPLETE (2026-04-14)
 
 **Goal:** `GET /api/drivers/<id>/learn` returns all readable points from all discovered devices.
 
