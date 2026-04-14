@@ -23,6 +23,7 @@ svm = ["dep:sandstar-svm"]
 tls = []
 
 [dependencies]
+thiserror.workspace = true
 sandstar-engine = { path = "../sandstar-engine" }
 sandstar-hal = { path = "../sandstar-hal" }
 sandstar-hal-linux = { path = "../sandstar-hal-linux", optional = true }
