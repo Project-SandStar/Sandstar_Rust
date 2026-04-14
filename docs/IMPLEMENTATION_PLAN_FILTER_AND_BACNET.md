@@ -336,7 +336,7 @@ crates/sandstar-server/src/drivers/bacnet/
 
 The existing single-file `bacnet.rs` (120 lines) becomes the entry point `mod.rs`.
 
-### B.3 Phase B1: Frame encoding & unit tests (Week 1, ~8 hours)
+### B.3 Phase B1: Frame encoding & unit tests — ✅ COMPLETE (2026-04-14)
 
 **Goal:** Build the byte-level frame encoder/decoder. No network I/O yet.
 
@@ -375,7 +375,7 @@ The existing single-file `bacnet.rs` (120 lines) becomes the entry point `mod.rs
 
 **Checkpoint:** Can generate and parse bytes, but nothing talks to the network yet.
 
-### B.4 Phase B2: Discovery state machine (Week 2, ~8 hours)
+### B.4 Phase B2: Discovery state machine (Week 2, ~8 hours) — ✅ COMPLETE (2026-04-14)
 
 **Goal:** `open()` sends Who-Is, collects I-Am responses into a device table.
 

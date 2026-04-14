@@ -28,6 +28,9 @@ use tokio::net::UdpSocket;
 use super::async_driver::AsyncDriver;
 use super::{DriverError, DriverMeta, DriverPointRef, DriverStatus, LearnGrid, PollMode};
 
+// Re-export DeviceRegistry for use in tests and Phase B3.
+pub use discovery::DeviceRegistry;
+
 // ── BacnetError ────────────────────────────────────────────
 
 /// Errors specific to the BACnet/IP driver.
@@ -139,12 +142,19 @@ pub struct BacnetDriver {
     port: u16,
     broadcast_addr: String,
     socket: Option<UdpSocket>,
-    device_registry: HashMap<u32, DeviceInfo>,
+    device_registry: discovery::DeviceRegistry,
     /// Mapping from Sandstar `point_id` to BACnet object descriptor.
     objects: HashMap<u32, object::BacnetObject>,
     /// Monotonically-increasing invoke ID counter — allocated by Phase B3 transaction logic.
     #[allow(dead_code)]
     next_invoke_id: u8,
+    /// How long to wait for I-Am responses after sending Who-Is.
+    /// Default: 2 seconds. Set to 50–200 ms in tests.
+    discovery_timeout: std::time::Duration,
+    /// Port to send Who-Is broadcast to (defaults to `self.port`).
+    /// In tests, set this to the mock device's port while `port` is 0
+    /// (letting the OS assign an ephemeral bind port).
+    broadcast_port: u16,
 }
 
 impl BacnetDriver {
@@ -156,13 +166,28 @@ impl BacnetDriver {
         Self {
             id: id.into(),
             status: DriverStatus::Pending,
+            broadcast_port: port,
             port,
             broadcast_addr: broadcast.into(),
             socket: None,
-            device_registry: HashMap::new(),
+            device_registry: discovery::DeviceRegistry::new(),
             objects: HashMap::new(),
             next_invoke_id: 0,
+            discovery_timeout: std::time::Duration::from_secs(2),
         }
+    }
+
+    /// Override the discovery timeout (useful in tests to speed things up).
+    pub fn with_discovery_timeout(mut self, t: std::time::Duration) -> Self {
+        self.discovery_timeout = t;
+        self
+    }
+
+    /// Override the broadcast port (useful in tests where the mock listens on
+    /// a non-standard port while `port` is 0 for an OS-assigned bind port).
+    pub fn with_broadcast_port(mut self, port: u16) -> Self {
+        self.broadcast_port = port;
+        self
     }
 
     /// Register a BACnet object that should be polled for a given point ID.
@@ -175,6 +200,8 @@ impl BacnetDriver {
         let port = config.port.unwrap_or(DEFAULT_BACNET_PORT);
         let broadcast = config.broadcast.unwrap_or_else(|| "255.255.255.255".into());
         let mut driver = Self::new(config.id, broadcast, port);
+        // broadcast_port tracks the configured port, not the bind port.
+        driver.broadcast_port = port;
         for obj_cfg in config.objects {
             driver.add_object(
                 obj_cfg.point_id,
@@ -197,7 +224,7 @@ impl BacnetDriver {
     }
 
     /// Return a reference to the device registry (used in tests and Phase B2).
-    pub fn device_registry(&self) -> &HashMap<u32, DeviceInfo> {
+    pub fn device_registry(&self) -> &discovery::DeviceRegistry {
         &self.device_registry
     }
 }
@@ -218,12 +245,14 @@ impl AsyncDriver for BacnetDriver {
         &self.status
     }
 
-    /// Bind the UDP socket, enable broadcast, and send a Who-Is.
+    /// Bind the UDP socket, broadcast a Who-Is, and collect I-Am responses
+    /// for [`Self::discovery_timeout`] before returning.
     ///
-    /// Phase B2 will add an I-Am listener loop to populate the device
-    /// registry from responses received after the broadcast.
+    /// The discovery window is intentionally short in tests (50–200 ms) and
+    /// the default production value is 2 s.  `open()` always succeeds even
+    /// when no devices respond — the registry simply stays empty.
     async fn open(&mut self) -> Result<DriverMeta, DriverError> {
-        // 1. Bind UDP socket.
+        // 1. Bind UDP socket (port 0 = OS-assigned ephemeral, useful in tests).
         let socket = UdpSocket::bind(format!("0.0.0.0:{}", self.port))
             .await
             .map_err(|e| DriverError::CommFault(format!("bacnet bind: {e}")))?;
@@ -231,17 +260,35 @@ impl AsyncDriver for BacnetDriver {
             .set_broadcast(true)
             .map_err(|e| DriverError::CommFault(format!("bacnet set_broadcast: {e}")))?;
 
-        // 2. Send Who-Is broadcast (fire-and-forget — discovery fills in phase B2).
-        let bcast: SocketAddr = format!("{}:{}", self.broadcast_addr, self.port)
+        // 2. Send Who-Is broadcast.
+        let bcast: SocketAddr = format!("{}:{}", self.broadcast_addr, self.broadcast_port)
             .parse()
-            .map_err(|e| DriverError::ConfigFault(format!("invalid broadcast addr: {e}")))?;
-        let who_is = frame::encode_who_is(None, None);
-        let _ = socket.send_to(&who_is, bcast).await;
+            .map_err(|e: std::net::AddrParseError| {
+                DriverError::ConfigFault(format!("invalid broadcast addr: {e}"))
+            })?;
+
+        if let Err(e) = discovery::send_who_is(&socket, bcast).await {
+            tracing::warn!(driver = %self.id, "bacnet who-is send failed: {e}");
+            // Non-fatal: we still listen for any I-Am packets that arrive.
+        }
+
+        // 3. Collect I-Am responses during the discovery window.
+        let devices = discovery::collect_i_am(&socket, self.discovery_timeout).await;
+        let n = devices.len();
+        tracing::info!(driver = %self.id, devices = n, "BACnet discovery complete");
+
+        // 4. Update registry.
+        self.device_registry.bulk_insert(devices);
 
         self.socket = Some(socket);
         self.status = DriverStatus::Ok;
         Ok(DriverMeta {
-            model: Some(format!("BACnet/IP port={}", self.port)),
+            model: Some(format!(
+                "BACnet/IP port={} ({} device{})",
+                self.port,
+                n,
+                if n == 1 { "" } else { "s" }
+            )),
             ..Default::default()
         })
     }
@@ -443,5 +490,225 @@ mod tests {
             BacnetError::RemoteError { class: 2, code: 31 }.to_string(),
             "remote error class=2 code=31"
         );
+    }
+}
+
+// ── Integration tests ──────────────────────────────────────
+
+#[cfg(test)]
+mod discovery_integration {
+    use super::*;
+
+    // ── Helpers ────────────────────────────────────────────
+
+    /// Bind TCP to port 0 to obtain an OS-assigned free port, then release it.
+    /// (Tiny TOCTOU race is acceptable for tests.)
+    fn find_free_port() -> u16 {
+        use std::net::TcpListener;
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    }
+
+    /// Encode a minimal BACnet I-Am frame.
+    fn encode_i_am(
+        device_instance: u32,
+        max_apdu: u16,
+        segmentation: u8,
+        vendor_id: u16,
+    ) -> Vec<u8> {
+        let obj_id_val: u32 = (8u32 << 22) | (device_instance & 0x3F_FFFF);
+        let obj_id = obj_id_val.to_be_bytes();
+
+        let mut apdu: Vec<u8> = vec![
+            0x10, 0x00, // Unconfirmed-Request, I-Am service
+            // Object ID: application tag 12, LVT=4
+            0xC4, obj_id[0], obj_id[1], obj_id[2], obj_id[3],
+        ];
+
+        // Max-APDU length accepted: application tag 2 (Unsigned)
+        if max_apdu <= 0xFF {
+            apdu.extend_from_slice(&[0x21, max_apdu as u8]);
+        } else {
+            apdu.extend_from_slice(&[0x22, (max_apdu >> 8) as u8, (max_apdu & 0xFF) as u8]);
+        }
+        // Segmentation: application tag 9 (Enumerated), LVT=1
+        apdu.extend_from_slice(&[0x91, segmentation]);
+        // Vendor ID: application tag 2 (Unsigned)
+        if vendor_id <= 0xFF {
+            apdu.extend_from_slice(&[0x21, vendor_id as u8]);
+        } else {
+            apdu.extend_from_slice(&[0x22, (vendor_id >> 8) as u8, (vendor_id & 0xFF) as u8]);
+        }
+
+        // BVLL unicast header + NPDU
+        let total_len = 4u16 + 2 + apdu.len() as u16;
+        let mut frame = vec![
+            0x81,
+            0x0A, // BVLL unicast
+            (total_len >> 8) as u8,
+            (total_len & 0xFF) as u8,
+            0x01,
+            0x00, // NPDU version=1, control=0
+        ];
+        frame.extend_from_slice(&apdu);
+        frame
+    }
+
+    /// Spawn a UDP task on `port` that waits for ONE packet (the Who-Is),
+    /// then replies with an I-Am from `device_instance`.
+    async fn spawn_mock_device(port: u16, device_instance: u32) -> tokio::task::JoinHandle<()> {
+        let sock = tokio::net::UdpSocket::bind(format!("127.0.0.1:{port}"))
+            .await
+            .expect("mock bind failed");
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1500];
+            if let Ok((_, from)) = sock.recv_from(&mut buf).await {
+                let reply = encode_i_am(device_instance, 1476, 3, 8);
+                let _ = sock.send_to(&reply, from).await;
+            }
+        })
+    }
+
+    // ── Tests ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_open_with_no_response_succeeds_but_registry_empty() {
+        // Listen on a mock port but never respond — driver should still return Ok.
+        let mock_port = find_free_port();
+        let _sock = tokio::net::UdpSocket::bind(format!("127.0.0.1:{mock_port}"))
+            .await
+            .unwrap();
+
+        let mut driver = BacnetDriver::new("no-resp", "127.0.0.1", 0)
+            .with_broadcast_port(mock_port)
+            .with_discovery_timeout(std::time::Duration::from_millis(50));
+
+        let meta = driver
+            .open()
+            .await
+            .expect("open should succeed even with no devices");
+        assert!(
+            meta.model.as_deref().unwrap_or("").contains("0 devices"),
+            "model should report 0 devices, got: {:?}",
+            meta.model
+        );
+        assert_eq!(*driver.status(), DriverStatus::Ok);
+        assert!(driver.device_registry().is_empty());
+        driver.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_open_discovers_single_device() {
+        let mock_port = find_free_port();
+        let device_instance = 12345u32;
+
+        let _handle = spawn_mock_device(mock_port, device_instance).await;
+        // Give the mock task time to bind before the driver sends Who-Is.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let mut driver = BacnetDriver::new("single-dev", "127.0.0.1", 0)
+            .with_broadcast_port(mock_port)
+            .with_discovery_timeout(std::time::Duration::from_millis(200));
+
+        let meta = driver.open().await.expect("open should succeed");
+        assert!(
+            meta.model.as_deref().unwrap_or("").contains("1 device"),
+            "model should report 1 device, got: {:?}",
+            meta.model
+        );
+
+        let dev = driver
+            .device_registry()
+            .get(device_instance)
+            .expect("device 12345 should be in registry");
+        assert_eq!(dev.instance, device_instance);
+        assert_eq!(dev.max_apdu, 1476);
+        assert_eq!(dev.vendor_id, 8);
+
+        driver.close().await;
+        assert_eq!(*driver.status(), DriverStatus::Down);
+    }
+
+    #[tokio::test]
+    async fn test_open_discovers_multiple_devices() {
+        // One mock socket sends 3 I-Am replies in response to a single Who-Is.
+        let mock_port = find_free_port();
+
+        let sock = tokio::net::UdpSocket::bind(format!("127.0.0.1:{mock_port}"))
+            .await
+            .unwrap();
+
+        let _handle = tokio::spawn(async move {
+            let mut buf = [0u8; 1500];
+            if let Ok((_, from)) = sock.recv_from(&mut buf).await {
+                for instance in [100u32, 200, 300] {
+                    let reply = encode_i_am(instance, 1476, 3, 8);
+                    let _ = sock.send_to(&reply, from).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            }
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let mut driver = BacnetDriver::new("multi-dev", "127.0.0.1", 0)
+            .with_broadcast_port(mock_port)
+            .with_discovery_timeout(std::time::Duration::from_millis(300));
+
+        driver.open().await.expect("open should succeed");
+        assert_eq!(driver.device_registry().len(), 3);
+        assert!(driver.device_registry().get(100).is_some());
+        assert!(driver.device_registry().get(200).is_some());
+        assert!(driver.device_registry().get(300).is_some());
+
+        driver.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_ping_fails_before_open() {
+        let mut driver = BacnetDriver::new("ping-test", "127.0.0.1", 0).with_broadcast_port(47900);
+        assert!(driver.ping().await.is_err(), "ping before open must fail");
+    }
+
+    #[tokio::test]
+    async fn test_close_releases_socket_and_sets_status_down() {
+        let mock_port = find_free_port();
+        let _sock = tokio::net::UdpSocket::bind(format!("127.0.0.1:{mock_port}"))
+            .await
+            .unwrap();
+
+        let mut driver = BacnetDriver::new("close-test", "127.0.0.1", 0)
+            .with_broadcast_port(mock_port)
+            .with_discovery_timeout(std::time::Duration::from_millis(20));
+
+        driver.open().await.unwrap();
+        // After open(), ping must succeed (socket is bound).
+        assert!(driver.ping().await.is_ok(), "ping after open must succeed");
+
+        driver.close().await;
+        assert_eq!(*driver.status(), DriverStatus::Down);
+        // After close(), ping must fail (socket dropped).
+        assert!(driver.ping().await.is_err(), "ping after close must fail");
+    }
+
+    #[tokio::test]
+    async fn test_device_registry_accessor_get_and_len() {
+        // Verify that device_registry() returns &DeviceRegistry with working get/len.
+        let mock_port = find_free_port();
+        let _handle = spawn_mock_device(mock_port, 9999).await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let mut driver = BacnetDriver::new("registry-acc", "127.0.0.1", 0)
+            .with_broadcast_port(mock_port)
+            .with_discovery_timeout(std::time::Duration::from_millis(200));
+
+        driver.open().await.unwrap();
+
+        let reg: &discovery::DeviceRegistry = driver.device_registry();
+        assert_eq!(reg.len(), 1);
+        assert!(reg.get(9999).is_some());
+        assert!(reg.get(0).is_none());
+
+        driver.close().await;
     }
 }

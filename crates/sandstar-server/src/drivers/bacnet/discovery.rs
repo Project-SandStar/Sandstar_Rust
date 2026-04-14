@@ -211,4 +211,81 @@ mod tests {
         let all = r.all();
         assert_eq!(all.len(), 2);
     }
+
+    // ── Phase B2 edge-case tests ────────────────────────────
+
+    #[test]
+    fn all_returns_correct_count() {
+        let mut r = DeviceRegistry::new();
+        assert_eq!(r.all().len(), 0);
+        r.insert(make_device(1, 47808));
+        assert_eq!(r.all().len(), 1);
+        r.insert(make_device(2, 47808));
+        assert_eq!(r.all().len(), 2);
+        r.insert(make_device(3, 47808));
+        assert_eq!(r.all().len(), 3);
+    }
+
+    #[test]
+    fn registry_handles_max_instance() {
+        // Max valid BACnet instance is 4,194,302 (22 bits, 0x3FFFFE)
+        let max_instance: u32 = 0x3F_FFFE;
+        let mut r = DeviceRegistry::new();
+        r.insert(DeviceInfo {
+            instance: max_instance,
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 47808),
+            max_apdu: 1476,
+            vendor_id: 8,
+            segmentation: 0,
+        });
+        let d = r
+            .get(max_instance)
+            .expect("max-instance device should be present");
+        assert_eq!(d.instance, max_instance);
+        assert_eq!(r.len(), 1);
+    }
+
+    #[test]
+    fn registry_overwrite_preserves_count() {
+        let mut r = DeviceRegistry::new();
+        r.insert(make_device(1, 47808));
+        r.insert(make_device(1, 9999)); // overwrite same instance with different port
+        assert_eq!(r.len(), 1, "count should still be 1 after overwrite");
+        // The most-recently inserted address should win
+        let d = r.get(1).unwrap();
+        assert_eq!(d.addr.port(), 9999, "overwrite should update the address");
+    }
+
+    #[test]
+    fn all_returns_all_instances() {
+        let mut r = DeviceRegistry::new();
+        for i in 1u32..=10 {
+            r.insert(make_device(i, 47808));
+        }
+        let all = r.all();
+        assert_eq!(all.len(), 10);
+        let instances: std::collections::HashSet<u32> = all.iter().map(|d| d.instance).collect();
+        for i in 1u32..=10 {
+            assert!(instances.contains(&i), "instance {i} should be in the set");
+        }
+    }
+
+    #[test]
+    fn registry_zero_instance_is_valid() {
+        // Instance 0 is a valid BACnet device instance
+        let mut r = DeviceRegistry::new();
+        r.insert(make_device(0, 47808));
+        assert!(r.get(0).is_some());
+        assert_eq!(r.len(), 1);
+    }
+
+    #[test]
+    fn bulk_insert_overwrites_duplicates() {
+        let mut r = DeviceRegistry::new();
+        r.insert(make_device(5, 47808));
+        // bulk_insert with the same instance should overwrite, not grow
+        r.bulk_insert(vec![make_device(5, 9000), make_device(6, 47808)]);
+        assert_eq!(r.len(), 2, "duplicate in bulk should still only count once");
+        assert_eq!(r.get(5).unwrap().addr.port(), 9000);
+    }
 }

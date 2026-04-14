@@ -708,4 +708,163 @@ mod tests {
         assert_eq!(lvt, 2);
         assert_eq!(encoded.len(), 3);
     }
+
+    // ── Phase B2 edge-case tests ─────────────────────────────────────────────
+
+    /// Two-byte Unsigned: 1476 = 0x05C4, tag 2, LVT=2.
+    #[test]
+    fn decode_unsigned_two_bytes_1476() {
+        // [0x22, 0x05, 0xC4]: tag=2, app, LVT=2, value=0x05C4=1476
+        let data = [0x22u8, 0x05, 0xC4];
+        let (val, consumed) = decode_application_tag(&data).unwrap();
+        assert_eq!(consumed, 3);
+        assert!(
+            matches!(val, BacnetValue::Unsigned(1476)),
+            "expected Unsigned(1476), got {:?}",
+            val
+        );
+    }
+
+    /// Enumerated one byte: tag 9, LVT=1, value=3.
+    #[test]
+    fn decode_enumerated_segmentation_none() {
+        // [0x91, 0x03]: tag=9, app, LVT=1, value=3 (segmentation=none)
+        let data = [0x91u8, 0x03];
+        let (val, consumed) = decode_application_tag(&data).unwrap();
+        assert_eq!(consumed, 2);
+        assert!(
+            matches!(val, BacnetValue::Enumerated(3)),
+            "expected Enumerated(3), got {:?}",
+            val
+        );
+    }
+
+    /// CharString "hello": tag 7, LVT=6 (encoding byte 0x00 + 5 chars).
+    #[test]
+    fn decode_charstring_hello() {
+        // tag byte 0x76 = (7 << 4) | 6: tag 7, app, LVT=6
+        // payload: 0x00 (UTF-8 encoding byte) + "hello" (5 bytes) = 6 bytes total
+        let data = [0x76u8, 0x00, b'h', b'e', b'l', b'l', b'o'];
+        let (val, consumed) = decode_application_tag(&data).unwrap();
+        assert_eq!(consumed, 7, "1 tag byte + 6 payload bytes");
+        match val {
+            BacnetValue::CharacterString(s) => assert_eq!(s, "hello"),
+            other => panic!("expected CharacterString, got {:?}", other),
+        }
+    }
+
+    /// ObjectId: AnalogInput (type 0), instance 1.
+    #[test]
+    fn decode_object_id_analog_input_instance_1() {
+        // tag=12, LVT=4: (0 << 22) | 1 = 0x00000001
+        let data = [0xC4u8, 0x00, 0x00, 0x00, 0x01];
+        let (val, consumed) = decode_application_tag(&data).unwrap();
+        assert_eq!(consumed, 5);
+        match val {
+            BacnetValue::ObjectId {
+                object_type,
+                instance,
+            } => {
+                assert_eq!(object_type, 0, "AnalogInput type = 0");
+                assert_eq!(instance, 1);
+            }
+            other => panic!("expected ObjectId, got {:?}", other),
+        }
+    }
+
+    /// ObjectId: Device type (8) at max instance 4,194,302.
+    #[test]
+    fn decode_object_id_device_max_instance() {
+        let max_instance = 4_194_302u32;
+        let raw: u32 = (8u32 << 22) | max_instance;
+        let b = raw.to_be_bytes();
+        let data = [0xC4u8, b[0], b[1], b[2], b[3]];
+        let (val, consumed) = decode_application_tag(&data).unwrap();
+        assert_eq!(consumed, 5);
+        match val {
+            BacnetValue::ObjectId {
+                object_type,
+                instance,
+            } => {
+                assert_eq!(object_type, 8, "Device type = 8");
+                assert_eq!(instance, max_instance);
+            }
+            other => panic!("expected ObjectId, got {:?}", other),
+        }
+    }
+
+    /// to_f64 for Real with a specific known value.
+    #[test]
+    fn to_f64_real_72_5() {
+        let v = BacnetValue::Real(72.5f32);
+        let f = v.to_f64().unwrap();
+        assert!((f - 72.5f64).abs() < 0.001, "expected ~72.5, got {f}");
+    }
+
+    /// to_f64 for Enumerated returns the numeric value as f64.
+    #[test]
+    fn to_f64_enumerated_value() {
+        assert_eq!(BacnetValue::Enumerated(5).to_f64(), Some(5.0));
+        assert_eq!(BacnetValue::Enumerated(0).to_f64(), Some(0.0));
+    }
+
+    /// to_f64 for OctetString returns None (non-numeric).
+    #[test]
+    fn to_f64_octet_string_returns_none() {
+        assert_eq!(BacnetValue::OctetString(vec![0xDE, 0xAD]).to_f64(), None);
+    }
+
+    /// to_f64 for ObjectId returns None (not a scalar).
+    #[test]
+    fn to_f64_object_id_none() {
+        let v = BacnetValue::ObjectId {
+            object_type: 0,
+            instance: 1,
+        };
+        assert!(v.to_f64().is_none());
+    }
+
+    /// Signed negative value round-trip: -128 as i8.
+    #[test]
+    fn decode_signed_min_i8() {
+        // [0x31, 0x80]: tag=3, app, LVT=1, byte=0x80 → -128i8 → -128i32
+        let (val, consumed) = decode_application_tag(&[0x31u8, 0x80]).unwrap();
+        assert_eq!(consumed, 2);
+        assert!(
+            matches!(val, BacnetValue::Signed(-128)),
+            "expected Signed(-128), got {:?}",
+            val
+        );
+    }
+
+    /// Double round-trip for a specific value.
+    #[test]
+    fn decode_double_neg_inf() {
+        let bytes = f64::NEG_INFINITY.to_be_bytes();
+        let mut data = vec![0x55u8]; // tag=5, LVT=don't-care
+        data.extend_from_slice(&bytes);
+        let (val, consumed) = decode_application_tag(&data).unwrap();
+        assert_eq!(consumed, 9);
+        match val {
+            BacnetValue::Double(v) => assert!(v.is_infinite() && v.is_sign_negative()),
+            other => panic!("expected Double, got {:?}", other),
+        }
+    }
+
+    /// Unsigned zero encodes and decodes cleanly.
+    #[test]
+    fn decode_unsigned_zero() {
+        let (val, consumed) = decode_application_tag(&[0x21u8, 0x00]).unwrap();
+        assert_eq!(consumed, 2);
+        assert!(matches!(val, BacnetValue::Unsigned(0)));
+    }
+
+    /// encode_unsigned for value 1476 produces exactly [0x22, 0x05, 0xC4].
+    #[test]
+    fn encode_unsigned_1476() {
+        let encoded = encode_unsigned(1476);
+        assert_eq!(encoded, vec![0x22, 0x05, 0xC4]);
+        let (val, _) = decode_application_tag(&encoded).unwrap();
+        assert!(matches!(val, BacnetValue::Unsigned(1476)));
+    }
 }

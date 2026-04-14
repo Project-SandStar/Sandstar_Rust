@@ -674,6 +674,7 @@ fn decode_enumerated_at(data: &[u8], pos: &mut usize) -> Result<u32, BacnetError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::drivers::bacnet::value as bacnet_value;
 
     // ── Encoding ───────────────────────────────────────────────
 
@@ -1254,6 +1255,175 @@ mod tests {
                 assert_eq!(property_id, 103);
             }
             other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    // ── Phase B2 edge-case tests ────────────────────────────────
+
+    /// Hand-crafted I-Am packet for device 12345, max_apdu=1476, seg=3, vendor=8.
+    #[test]
+    fn decode_i_am_known_packet() {
+        let device_instance = 12345u32;
+        let obj_id_val: u32 = (8u32 << 22) | device_instance;
+        let obj_id = obj_id_val.to_be_bytes();
+
+        let mut apdu = vec![
+            0x10,
+            SVC_UNCONFIRMED_IAM, // Unconfirmed-Request, I-Am
+            0xC4,
+            obj_id[0],
+            obj_id[1],
+            obj_id[2],
+            obj_id[3], // ObjectId app-tag 12, LVT=4
+            0x22,
+            0x05,
+            0xC4, // max_apdu=1476 (Unsigned 2 bytes: 0x05C4)
+            0x91,
+            0x03, // segmentation=3 (Enumerated 1 byte)
+            0x21,
+            0x08, // vendor_id=8 (Unsigned 1 byte)
+        ];
+
+        // Wrap in BVLL + NPDU
+        let total = (4 + 2 + apdu.len()) as u16;
+        let mut packet = vec![
+            0x81,
+            0x0B,
+            (total >> 8) as u8,
+            (total & 0xFF) as u8,
+            0x01,
+            0x00,
+        ];
+        packet.append(&mut apdu);
+
+        let (_, decoded) = decode_packet(&packet).expect("should decode");
+        match decoded {
+            Apdu::IAm {
+                device_instance: di,
+                max_apdu,
+                segmentation,
+                vendor_id,
+            } => {
+                assert_eq!(di, 12345);
+                assert_eq!(max_apdu, 1476);
+                assert_eq!(segmentation, 3);
+                assert_eq!(vendor_id, 8);
+            }
+            other => panic!("expected IAm, got {:?}", other),
+        }
+    }
+
+    /// Who-Is with full range [0, 4194302] round-trips cleanly.
+    #[test]
+    fn who_is_with_full_range_round_trip() {
+        let encoded = encode_who_is(Some(0), Some(4_194_302));
+        let (_, apdu) = decode_packet(&encoded).expect("should decode");
+        match apdu {
+            Apdu::WhoIs {
+                low_limit,
+                high_limit,
+            } => {
+                assert_eq!(low_limit, Some(0));
+                assert_eq!(high_limit, Some(4_194_302));
+            }
+            other => panic!("expected WhoIs, got {:?}", other),
+        }
+    }
+
+    /// Verify that the 22-bit device instance and object type can be recovered
+    /// from the BACnet ObjectId encoding for max instance value 4,194,302.
+    #[test]
+    fn device_object_id_max_instance() {
+        let instance = 4_194_302u32;
+        let obj_id_val: u32 = (8u32 << 22) | instance;
+        let recovered_instance = obj_id_val & 0x3F_FFFF;
+        let recovered_type = (obj_id_val >> 22) as u16;
+        assert_eq!(
+            recovered_instance, instance,
+            "instance bits should round-trip"
+        );
+        assert_eq!(recovered_type, 8, "object type should be Device (8)");
+
+        // Also verify via the application-tag decoder
+        let bytes = obj_id_val.to_be_bytes();
+        let data = [0xC4u8, bytes[0], bytes[1], bytes[2], bytes[3]];
+        let (val, consumed) = bacnet_value::decode_application_tag(&data).unwrap();
+        assert_eq!(consumed, 5);
+        match val {
+            bacnet_value::BacnetValue::ObjectId {
+                object_type,
+                instance: decoded_instance,
+            } => {
+                assert_eq!(object_type, 8);
+                assert_eq!(decoded_instance, instance);
+            }
+            other => panic!("expected ObjectId, got {:?}", other),
+        }
+    }
+
+    /// Detailed structure check for encode_read_property output bytes.
+    #[test]
+    fn encode_read_property_structure() {
+        // AnalogInput (type 0), instance 1, PresentValue (85 = 0x55), invoke_id=5, no array index
+        let frame = encode_read_property(0x05, 0, 1, 85, None);
+
+        // BVLL header
+        assert_eq!(frame[0], 0x81, "BVLL magic");
+        assert_eq!(frame[1], BVLL_UNICAST, "BVLL unicast type");
+        let len = u16::from_be_bytes([frame[2], frame[3]]) as usize;
+        assert_eq!(len, frame.len(), "BVLL length field matches actual length");
+
+        // NPDU
+        assert_eq!(frame[4], 0x01, "NPDU version");
+        assert_eq!(frame[5], 0x00, "NPDU control");
+
+        // APDU: Confirmed-Request
+        assert_eq!(frame[6], 0x00, "Confirmed-Request PDU type");
+        assert_eq!(frame[7], 0x05, "max-segs/max-apdu byte");
+        assert_eq!(frame[8], 0x05, "invoke_id = 5");
+        assert_eq!(
+            frame[9], SVC_CONFIRMED_READ_PROPERTY,
+            "service = ReadProperty"
+        );
+
+        // Context tag 0 (ObjectIdentifier): 0x0C = (0 << 4) | 0x08 | 4
+        assert_eq!(frame[10], 0x0C, "context tag 0, LVT=4");
+
+        // Object ID: AnalogInput(0) instance 1 → (0 << 22) | 1 = 0x00000001
+        let obj_id = u32::from_be_bytes([frame[11], frame[12], frame[13], frame[14]]);
+        assert_eq!(obj_id & 0x3F_FFFF, 1, "instance = 1");
+        assert_eq!((obj_id >> 22) as u16, 0, "type = AnalogInput(0)");
+
+        // Context tag 1 (PropertyId = 85 = 0x55):
+        // 0x19 = (1 << 4) | 0x08 | 1 = tag 1, context, LVT=1
+        assert_eq!(frame[15], 0x19, "context tag 1, LVT=1");
+        assert_eq!(frame[16], 0x55, "property_id = 85 = PresentValue");
+    }
+
+    /// I-Am for device instance 0 (boundary: minimum valid instance).
+    #[test]
+    fn decode_i_am_instance_zero() {
+        let pkt = make_i_am_packet(0, 480, 3, 1);
+        let (_, apdu) = decode_packet(&pkt).unwrap();
+        match apdu {
+            Apdu::IAm {
+                device_instance, ..
+            } => assert_eq!(device_instance, 0),
+            other => panic!("expected IAm, got {other:?}"),
+        }
+    }
+
+    /// I-Am for max valid BACnet device instance (4,194,302).
+    #[test]
+    fn decode_i_am_max_instance() {
+        let max = 4_194_302u32;
+        let pkt = make_i_am_packet(max, 1476, 0, 260);
+        let (_, apdu) = decode_packet(&pkt).unwrap();
+        match apdu {
+            Apdu::IAm {
+                device_instance, ..
+            } => assert_eq!(device_instance, max),
+            other => panic!("expected IAm, got {other:?}"),
         }
     }
 }
