@@ -750,6 +750,26 @@ impl AsyncDriver for BacnetDriver {
     }
 }
 
+// ── Environment config loader ──────────────────────────────
+
+/// Parse BACnet driver configs from `SANDSTAR_BACNET_CONFIGS` env var.
+///
+/// Returns an empty vec if the env var is not set.
+/// Returns an error if the JSON is malformed.
+pub fn load_bacnet_drivers_from_env() -> Result<Vec<BacnetDriver>, String> {
+    let json_str = match std::env::var("SANDSTAR_BACNET_CONFIGS") {
+        Ok(s) => s,
+        Err(_) => return Ok(vec![]),
+    };
+    let configs: Vec<BacnetConfig> = serde_json::from_str(&json_str)
+        .map_err(|e| format!("SANDSTAR_BACNET_CONFIGS parse error: {e}"))?;
+    Ok(configs.into_iter().map(BacnetDriver::from_config).collect())
+}
+
+// ── End-to-end integration test (Phase B5) ────────────────
+#[cfg(test)]
+mod e2e_test;
+
 // ── Tests ──────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1601,6 +1621,234 @@ mod learn_tests {
                 3..=5 => assert_eq!(*k, "Bool"),
                 _ => panic!("unexpected type {ot} in included"),
             }
+        }
+    }
+}
+
+// ── Phase B5 config loader tests ───────────────────────────
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Mutex that serialises all tests that mutate `SANDSTAR_BACNET_CONFIGS`.
+    /// Tests 1-7 don't touch the env var and can run freely in parallel.
+    /// Tests 8-10 acquire this lock so they don't race against each other.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    // ── Test 1 ─────────────────────────────────────────────
+
+    #[test]
+    fn bacnet_config_deserializes_from_json_minimal() {
+        let json = r#"{
+            "id": "bac-1",
+            "objects": []
+        }"#;
+        let config: BacnetConfig = serde_json::from_str(json).expect("should parse");
+        assert_eq!(config.id, "bac-1");
+        assert!(config.port.is_none());
+        assert!(config.broadcast.is_none());
+        assert!(config.objects.is_empty());
+    }
+
+    // ── Test 2 ─────────────────────────────────────────────
+
+    #[test]
+    fn bacnet_config_deserializes_from_json_full() {
+        let json = r#"{
+            "id": "bac-full",
+            "port": 47808,
+            "broadcast": "192.168.1.255",
+            "objects": [
+                {
+                    "point_id": 1001,
+                    "device_id": 42,
+                    "object_type": 0,
+                    "instance": 5,
+                    "unit": "degF",
+                    "scale": 1.8,
+                    "offset": 32.0
+                }
+            ]
+        }"#;
+        let config: BacnetConfig = serde_json::from_str(json).expect("should parse");
+        assert_eq!(config.port, Some(47808));
+        assert_eq!(config.broadcast.as_deref(), Some("192.168.1.255"));
+        assert_eq!(config.objects.len(), 1);
+        let obj = &config.objects[0];
+        assert_eq!(obj.point_id, 1001);
+        assert_eq!(obj.device_id, 42);
+        assert_eq!(obj.object_type, 0);
+        assert_eq!(obj.instance, 5);
+        assert_eq!(obj.unit.as_deref(), Some("degF"));
+        assert_eq!(obj.scale, Some(1.8));
+        assert_eq!(obj.offset, Some(32.0));
+    }
+
+    // ── Test 3 ─────────────────────────────────────────────
+
+    #[test]
+    fn bacnet_config_array_deserializes() {
+        let json = r#"[
+            {"id": "bac-a", "objects": []},
+            {"id": "bac-b", "port": 47809, "objects": []}
+        ]"#;
+        let configs: Vec<BacnetConfig> = serde_json::from_str(json).expect("should parse array");
+        assert_eq!(configs.len(), 2);
+        assert_eq!(configs[0].id, "bac-a");
+        assert_eq!(configs[1].port, Some(47809));
+    }
+
+    // ── Test 4 ─────────────────────────────────────────────
+
+    #[test]
+    fn from_config_applies_defaults() {
+        let config = BacnetConfig {
+            id: "bac-defaults".into(),
+            port: None,
+            broadcast: None,
+            objects: vec![],
+        };
+        let driver = BacnetDriver::from_config(config);
+        assert_eq!(driver.id(), "bac-defaults");
+        assert!(driver.objects().is_empty());
+        // Verify default port and broadcast via the private fields accessible
+        // inside the same file's test modules.
+        assert_eq!(driver.port, DEFAULT_BACNET_PORT);
+        assert_eq!(driver.broadcast_addr, "255.255.255.255");
+    }
+
+    // ── Test 5 ─────────────────────────────────────────────
+
+    #[test]
+    fn from_config_with_objects_sets_scale_offset() {
+        let config = BacnetConfig {
+            id: "bac-objs".into(),
+            port: Some(47808),
+            broadcast: Some("255.255.255.255".into()),
+            objects: vec![
+                BacnetObjectConfig {
+                    point_id: 500,
+                    device_id: 10,
+                    object_type: 0,
+                    instance: 1,
+                    unit: Some("psi".into()),
+                    scale: Some(0.5),
+                    offset: Some(-10.0),
+                },
+                BacnetObjectConfig {
+                    point_id: 501,
+                    device_id: 10,
+                    object_type: 2,
+                    instance: 0,
+                    unit: None,
+                    scale: None,
+                    offset: None,
+                },
+            ],
+        };
+        let driver = BacnetDriver::from_config(config);
+        let objects = driver.objects();
+        assert_eq!(objects.len(), 2);
+        let obj500 = objects.get(&500).unwrap();
+        assert_eq!(obj500.scale, 0.5);
+        assert_eq!(obj500.offset, -10.0);
+        assert_eq!(obj500.unit.as_deref(), Some("psi"));
+        let obj501 = objects.get(&501).unwrap();
+        assert_eq!(obj501.scale, 1.0, "default scale");
+        assert_eq!(obj501.offset, 0.0, "default offset");
+        assert!(obj501.unit.is_none());
+    }
+
+    // ── Test 6 ─────────────────────────────────────────────
+
+    #[test]
+    fn bacnet_config_invalid_json_fails_gracefully() {
+        let bad_json = r#"{"id": "bac-bad", "port": "not-a-number", "objects": []}"#;
+        let result = serde_json::from_str::<BacnetConfig>(bad_json);
+        assert!(
+            result.is_err(),
+            "invalid port type should fail to deserialize"
+        );
+    }
+
+    // ── Test 7 ─────────────────────────────────────────────
+
+    #[test]
+    fn bacnet_object_config_missing_optional_fields() {
+        let json = r#"{
+            "point_id": 9,
+            "device_id": 1,
+            "object_type": 3,
+            "instance": 0
+        }"#;
+        let obj: BacnetObjectConfig =
+            serde_json::from_str(json).expect("minimal object should parse");
+        assert_eq!(obj.point_id, 9);
+        assert!(obj.unit.is_none());
+        assert!(obj.scale.is_none());
+        assert!(obj.offset.is_none());
+    }
+
+    // ── Test 8 ─────────────────────────────────────────────
+
+    #[test]
+    fn load_bacnet_drivers_from_env_empty_when_not_set() {
+        // Hold ENV_LOCK so tests 8/9/10 don't race on SANDSTAR_BACNET_CONFIGS.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: serialised by ENV_LOCK; no other test mutates this var concurrently.
+        unsafe {
+            std::env::remove_var("SANDSTAR_BACNET_CONFIGS");
+        }
+        let drivers = load_bacnet_drivers_from_env().expect("should succeed when env var absent");
+        assert!(drivers.is_empty());
+    }
+
+    // ── Test 9 ─────────────────────────────────────────────
+
+    #[test]
+    fn load_bacnet_drivers_from_env_creates_drivers() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: serialised by ENV_LOCK.
+        unsafe {
+            std::env::set_var(
+                "SANDSTAR_BACNET_CONFIGS",
+                r#"[
+                    {"id":"bac-env-1","port":47808,"broadcast":"255.255.255.255","objects":[]},
+                    {"id":"bac-env-2","port":47809,"broadcast":"192.168.0.255","objects":[]}
+                ]"#,
+            );
+        }
+        let drivers = load_bacnet_drivers_from_env().expect("should parse");
+        assert_eq!(drivers.len(), 2);
+        assert_eq!(drivers[0].id(), "bac-env-1");
+        assert_eq!(drivers[1].id(), "bac-env-2");
+        unsafe {
+            std::env::remove_var("SANDSTAR_BACNET_CONFIGS");
+        }
+    }
+
+    // ── Test 10 ────────────────────────────────────────────
+
+    #[test]
+    fn load_bacnet_drivers_from_env_returns_error_on_bad_json() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: serialised by ENV_LOCK.
+        unsafe {
+            std::env::set_var("SANDSTAR_BACNET_CONFIGS", "not valid json {{{");
+        }
+        let result = load_bacnet_drivers_from_env();
+        assert!(result.is_err());
+        // Use .err().expect() instead of .unwrap_err() — the latter requires T: Debug,
+        // but BacnetDriver does not derive Debug.
+        let err = result.err().expect("expected Err");
+        assert!(
+            err.contains("parse error"),
+            "error should mention parse error, got: {err}"
+        );
+        unsafe {
+            std::env::remove_var("SANDSTAR_BACNET_CONFIGS");
         }
     }
 }

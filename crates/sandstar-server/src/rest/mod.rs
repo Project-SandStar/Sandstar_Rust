@@ -758,10 +758,17 @@ pub fn router_with_auth(
         ])
         .max_age(Duration::from_secs(3600));
 
-    // Driver framework REST endpoints (read-only, public).
-    let driver_mgr: crate::drivers::SharedDriverManager =
-        Arc::new(std::sync::Mutex::new(crate::drivers::DriverManager::new()));
-    let driver_routes = crate::drivers::driver_router(driver_mgr);
+    // Driver framework REST endpoints — backed by the async DriverHandle actor.
+    // BACnet drivers (and future async drivers) are loaded from environment config
+    // asynchronously in the background so they don't block router construction.
+    let driver_handle = crate::drivers::actor::spawn_driver_actor(64);
+    {
+        let handle_clone = driver_handle.clone();
+        tokio::spawn(async move {
+            load_bacnet_drivers(&handle_clone).await;
+        });
+    }
+    let driver_routes = crate::drivers::driver_router(driver_handle);
 
     // Merge and apply global middleware.
     // Layer order (axum applies bottom-up): CORS → body limit → rate limit → count.
@@ -804,6 +811,43 @@ pub fn router_with_auth(
     }
 
     app.layer(DefaultBodyLimit::max(1_048_576)).layer(cors)
+}
+
+// ── BACnet driver loader ─────────────────────────────────────
+
+/// Load BACnet drivers from the `SANDSTAR_BACNET_CONFIGS` environment variable.
+///
+/// The variable should be a JSON array of `BacnetConfig` objects, e.g.:
+/// ```json
+/// [{"id":"bac-1","port":47808,"broadcast":"255.255.255.255","objects":[]}]
+/// ```
+///
+/// Errors are logged but do not prevent server startup.
+async fn load_bacnet_drivers(handle: &crate::drivers::actor::DriverHandle) {
+    let json_str = match std::env::var("SANDSTAR_BACNET_CONFIGS") {
+        Ok(s) => s,
+        Err(_) => return, // Not configured — skip silently.
+    };
+
+    let configs: Vec<crate::drivers::bacnet::BacnetConfig> = match serde_json::from_str(&json_str) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "SANDSTAR_BACNET_CONFIGS: failed to parse JSON");
+            return;
+        }
+    };
+
+    for config in configs {
+        let id = config.id.clone();
+        let driver = crate::drivers::bacnet::BacnetDriver::from_config(config);
+        let any_driver = crate::drivers::async_driver::AnyDriver::Async(Box::new(driver));
+        match handle.register(any_driver).await {
+            Ok(()) => tracing::info!(driver = %id, "BACnet driver registered"),
+            Err(e) => {
+                tracing::error!(driver = %id, error = %e, "failed to register BACnet driver")
+            }
+        }
+    }
 }
 
 // ── roxWarp cluster routes ──────────────────────────────────

@@ -683,28 +683,69 @@ impl Driver for LocalIoDriver {
 
 // ── REST API handlers ───────────────────────────────────────
 
-use axum::extract::{Path, State};
+/// Build an Axum router for driver REST endpoints backed by the async [`DriverHandle`] actor.
+///
+/// Mount under the main router with `.merge(drivers::driver_router(handle))`.
+pub fn driver_router(handle: crate::drivers::actor::DriverHandle) -> axum::Router {
+    axum::Router::new()
+        .route("/api/drivers", axum::routing::get(list_drivers_async))
+        .route(
+            "/api/drivers/{id}/status",
+            axum::routing::get(driver_status_async),
+        )
+        .route(
+            "/api/drivers/{id}/learn",
+            axum::routing::get(driver_learn_async),
+        )
+        .route(
+            "/api/drivers/{id}/write",
+            axum::routing::post(driver_write_async),
+        )
+        .with_state(handle)
+}
+
+// ── Async REST handlers (DriverHandle-backed) ────────────────
+
+use axum::extract::Path;
 use axum::response::IntoResponse;
 use axum::Json;
-use std::sync::{Arc, Mutex};
-
-/// Shared driver manager state for REST endpoints.
-pub type SharedDriverManager = Arc<Mutex<DriverManager>>;
 
 /// GET /api/drivers — list all registered drivers with status.
-pub async fn list_drivers(State(mgr): State<SharedDriverManager>) -> impl IntoResponse {
-    let mgr = mgr.lock().expect("driver manager lock poisoned");
-    Json(mgr.driver_summaries())
+async fn list_drivers_async(
+    axum::extract::State(handle): axum::extract::State<crate::drivers::actor::DriverHandle>,
+) -> impl IntoResponse {
+    match handle.status().await {
+        Ok(summaries) => {
+            let json: Vec<serde_json::Value> = summaries
+                .into_iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "id": s.id,
+                        "driverType": s.driver_type,
+                        "status": s.status,
+                        "pollMode": s.poll_mode,
+                        "pollBuckets": s.poll_buckets,
+                        "pollPoints": s.poll_points,
+                    })
+                })
+                .collect();
+            (axum::http::StatusCode::OK, Json(serde_json::json!(json))).into_response()
+        }
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
 }
 
 /// GET /api/drivers/{id}/status — get driver status with point statuses.
-pub async fn driver_status(
+async fn driver_status_async(
     Path(id): Path<String>,
-    State(mgr): State<SharedDriverManager>,
+    axum::extract::State(handle): axum::extract::State<crate::drivers::actor::DriverHandle>,
 ) -> impl IntoResponse {
-    let mgr = mgr.lock().expect("driver manager lock poisoned");
-    match mgr.driver_with_points_status(&id) {
-        Some((status, point_statuses)) => {
+    match handle.driver_status(&id).await {
+        Ok(Some((status, point_statuses))) => {
             let points: Vec<serde_json::Value> = point_statuses
                 .into_iter()
                 .map(|(pid, ps)| {
@@ -721,21 +762,25 @@ pub async fn driver_status(
             }))
             .into_response()
         }
-        None => (
+        Ok(None) => (
             axum::http::StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": format!("driver '{id}' not found") })),
+            Json(serde_json::json!({"error": format!("driver '{id}' not found")})),
+        )
+            .into_response(),
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
         )
             .into_response(),
     }
 }
 
 /// GET /api/drivers/{id}/learn — discover points from a driver.
-pub async fn driver_learn(
+async fn driver_learn_async(
     Path(id): Path<String>,
-    State(mgr): State<SharedDriverManager>,
+    axum::extract::State(handle): axum::extract::State<crate::drivers::actor::DriverHandle>,
 ) -> impl IntoResponse {
-    let mut mgr = mgr.lock().expect("driver manager lock poisoned");
-    match mgr.learn(&id, None) {
+    match handle.learn(&id, None).await {
         Ok(grid) => Json(serde_json::json!({
             "driverId": id,
             "points": grid,
@@ -743,12 +788,12 @@ pub async fn driver_learn(
         .into_response(),
         Err(DriverError::NotSupported(_)) => (
             axum::http::StatusCode::NOT_IMPLEMENTED,
-            Json(serde_json::json!({ "error": "learn not supported by this driver" })),
+            Json(serde_json::json!({"error": "learn not supported by this driver"})),
         )
             .into_response(),
         Err(e) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
+            Json(serde_json::json!({"error": e.to_string()})),
         )
             .into_response(),
     }
@@ -758,9 +803,9 @@ pub async fn driver_learn(
 ///
 /// Request body: `{"writes": [[pointId, value], ...]}`.
 /// Returns per-point results.
-pub async fn driver_write(
+async fn driver_write_async(
     Path(id): Path<String>,
-    State(mgr): State<SharedDriverManager>,
+    axum::extract::State(handle): axum::extract::State<crate::drivers::actor::DriverHandle>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let writes: Vec<(u32, f64)> = match body.get("writes").and_then(|w| w.as_array()) {
@@ -780,14 +825,15 @@ pub async fn driver_write(
         None => {
             return (
                 axum::http::StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "expected {\"writes\": [[pointId, value], ...]}" })),
+                Json(
+                    serde_json::json!({"error": "expected {\"writes\": [[pointId, value], ...]}"}),
+                ),
             )
                 .into_response();
         }
     };
 
-    let mut mgr = mgr.lock().expect("driver manager lock poisoned");
-    match mgr.write(&id, &writes) {
+    match handle.write(&id, writes).await {
         Ok(results) => {
             let items: Vec<serde_json::Value> = results
                 .into_iter()
@@ -806,25 +852,10 @@ pub async fn driver_write(
         }
         Err(e) => (
             axum::http::StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": e.to_string() })),
+            Json(serde_json::json!({"error": e.to_string()})),
         )
             .into_response(),
     }
-}
-
-/// Build an Axum router for driver REST endpoints.
-///
-/// Mount under the main router with `.merge(drivers::driver_router(mgr))`.
-pub fn driver_router(mgr: SharedDriverManager) -> axum::Router {
-    axum::Router::new()
-        .route("/api/drivers", axum::routing::get(list_drivers))
-        .route(
-            "/api/drivers/{id}/status",
-            axum::routing::get(driver_status),
-        )
-        .route("/api/drivers/{id}/learn", axum::routing::get(driver_learn))
-        .route("/api/drivers/{id}/write", axum::routing::post(driver_write))
-        .with_state(mgr)
 }
 
 // ── Tests ───────────────────────────────────────────────────

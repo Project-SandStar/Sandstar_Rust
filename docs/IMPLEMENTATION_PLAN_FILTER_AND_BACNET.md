@@ -551,7 +551,7 @@ The existing single-file `bacnet.rs` (120 lines) becomes the entry point `mod.rs
 
 **Checkpoint:** Point discovery works. Operators can now see what a BACnet device exposes.
 
-### B.7 Phase B5: Wire into main.rs + end-to-end test (Week 5, ~4 hours)
+### B.7 Phase B5: Wire into main.rs + end-to-end test (Week 5, ~4 hours) — ✅ COMPLETE (2026-04-14)
 
 **Goal:** The server can create a BacnetDriver via config/CLI and it actually works in production mode.
 
