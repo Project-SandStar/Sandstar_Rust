@@ -102,27 +102,45 @@ pub async fn collect_i_am(socket: &UdpSocket, timeout: Duration) -> Vec<DeviceIn
 
         match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
             Ok(Ok((n, addr))) => {
-                if let Ok((
-                    _,
-                    super::frame::Apdu::IAm {
+                let hex: String = buf[..n].iter().map(|b| format!("{:02x}", b)).collect();
+                tracing::info!(from = %addr, bytes = n, hex = %hex, "BACnet discovery: RX");
+                match super::frame::decode_packet(&buf[..n]) {
+                    Ok((_, super::frame::Apdu::IAm {
                         device_instance,
                         max_apdu,
                         segmentation,
                         vendor_id,
-                    },
-                )) = super::frame::decode_packet(&buf[..n])
-                {
-                    devices.push(DeviceInfo {
-                        instance: device_instance,
-                        addr,
-                        max_apdu,
-                        vendor_id,
-                        segmentation,
-                    });
+                    })) => {
+                        tracing::info!(
+                            device = device_instance,
+                            max_apdu,
+                            vendor_id,
+                            "BACnet discovery: decoded I-Am"
+                        );
+                        devices.push(DeviceInfo {
+                            instance: device_instance,
+                            addr,
+                            max_apdu,
+                            vendor_id,
+                            segmentation,
+                        });
+                    }
+                    Ok((_, other)) => {
+                        tracing::debug!(apdu = ?other, "BACnet discovery: ignored non-IAm APDU");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "BACnet discovery: decode failed");
+                    }
                 }
             }
-            // Timeout or socket error — stop listening.
-            _ => break,
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "BACnet discovery: socket recv error");
+                break;
+            }
+            Err(_) => {
+                // Discovery window expired.
+                break;
+            }
         }
     }
 
