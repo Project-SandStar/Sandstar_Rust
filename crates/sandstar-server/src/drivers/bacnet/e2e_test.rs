@@ -6,12 +6,17 @@
 #![cfg(test)]
 
 use std::collections::HashMap;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use std::time::Duration;
 
 use tokio::net::UdpSocket;
 
 use super::{
-    frame, object::BacnetObject, value::BacnetValue, BacnetConfig, BacnetDriver, BacnetObjectConfig,
+    frame, object::BacnetObject, value, value::BacnetValue, BacnetConfig, BacnetDriver,
+    BacnetObjectConfig,
 };
 use crate::drivers::{
     actor::spawn_driver_actor, async_driver::AnyDriver, DriverError, DriverPointRef, DriverStatus,
@@ -144,18 +149,51 @@ async fn spawn_mock_bacnet_device(port: u16) -> tokio::task::JoinHandle<()> {
 
         // ── 6-7. PresentValue requests for AI-0 and AI-1 ─────────────────
         // AI-0 → Real(21.5), AI-1 → Real(65.0)
-        let pv_values = [21.5f32, 65.0f32];
-        for pv in pv_values {
+        //
+        // The driver may send a single ReadPropertyMultiple request for
+        // both points, or two individual ReadProperty requests, or a mix
+        // (RPM failing with a transport-level error then falling back).
+        // This loop handles up to 3 incoming requests and replies with
+        // the correct APDU type based on the service choice byte.
+        let mut remaining: Vec<(u16, u32, f32)> = vec![(0, 0, 21.5), (0, 1, 65.0)];
+        for _ in 0..3 {
+            if remaining.is_empty() {
+                break;
+            }
             if let Ok((n, from)) = sock.recv_from(&mut buf).await {
                 let invoke_id = extract_invoke_id(&buf, n);
-                let ack = frame::encode_read_property_ack(
-                    invoke_id,
-                    0,  // Analog Input
-                    0,  // instance (driver uses object config — mock just echoes)
-                    85, // PresentValue
-                    &BacnetValue::Real(pv),
-                );
-                let _ = sock.send_to(&ack, from).await;
+                // Service choice = byte 9 in a Confirmed-Request
+                // (BVLL 4 + NPDU 2 + PDU hdr 2 + invoke 1 = offset 9).
+                let service = if n >= 10 { buf[9] } else { 0 };
+                if service == frame::SVC_CONFIRMED_READ_PROPERTY_MULTIPLE {
+                    // Batch: respond with one RPM-ACK containing all pending values.
+                    let results: Vec<frame::RpmResult> = remaining
+                        .iter()
+                        .map(|(ot, inst, v)| frame::RpmResult {
+                            object_type: *ot,
+                            instance: *inst,
+                            property_id: 85,
+                            array_index: None,
+                            value: Ok(BacnetValue::Real(*v)),
+                        })
+                        .collect();
+                    let ack = frame::encode_read_property_multiple_ack(invoke_id, &results);
+                    let _ = sock.send_to(&ack, from).await;
+                    remaining.clear();
+                } else {
+                    // Individual ReadProperty: pop the next expected value.
+                    if let Some((ot, inst, pv)) = remaining.first().copied() {
+                        let ack = frame::encode_read_property_ack(
+                            invoke_id,
+                            ot,
+                            inst,
+                            85, // PresentValue
+                            &BacnetValue::Real(pv),
+                        );
+                        let _ = sock.send_to(&ack, from).await;
+                        remaining.remove(0);
+                    }
+                }
             }
         }
     })
@@ -598,6 +636,166 @@ async fn e2e_write_error_pdu_returns_remote_status() {
         }
         other => panic!("expected Err(RemoteStatus), got {other:?}"),
     }
+
+    handle.close_all().await.expect("close_all should succeed");
+}
+
+// ── Phase B9: ReadPropertyMultiple E2E test ────────────────────────────────
+
+/// Phase B9: sync_cur batches points on the same device into a single
+/// ReadPropertyMultiple request, rather than issuing N individual ReadProperty
+/// requests. The mock responder:
+///   1. Handles Who-Is → I-Am
+///   2. Handles exactly ONE RPM request → replies with an RPM-ACK containing
+///      two Real values
+///
+/// The test then asserts:
+///   - both points come back with the expected values (42.0 and 84.0)
+///   - the responder observed exactly ONE inbound service 0x0E request
+///     (proving the driver took the batched RPM path, not the per-point
+///     ReadProperty fallback)
+#[tokio::test]
+async fn e2e_sync_cur_uses_rpm() {
+    // 1. Bind mock UDP socket on an ephemeral port.
+    let mock_port = find_free_port();
+    let sock = UdpSocket::bind(format!("127.0.0.1:{mock_port}"))
+        .await
+        .expect("mock bind failed");
+
+    // Counter of RPM requests the mock has seen. Asserted at the end of the
+    // test to confirm the driver batched instead of issuing 2 individual reads.
+    let request_counter = Arc::new(AtomicUsize::new(0));
+    let rc = request_counter.clone();
+
+    tokio::spawn(async move {
+        let mut buf = [0u8; 1500];
+
+        // Exchange 1: Who-Is → I-Am for device 12345
+        if let Ok((_, from)) = sock.recv_from(&mut buf).await {
+            let reply = encode_i_am(12345, 1476, 3, 999);
+            let _ = sock.send_to(&reply, from).await;
+        }
+
+        // Exchange 2: RPM request → RPM-ACK with two Real values.
+        // Confirmed-Request layout after 6-byte BVLL+NPDU header:
+        //   byte[8] = invoke_id, byte[9] = service choice (0x0E = RPM)
+        if let Ok((n, from)) = sock.recv_from(&mut buf).await {
+            rc.fetch_add(1, Ordering::SeqCst);
+            if n >= 10 && buf[0] == 0x81 && buf[6] == 0x00 && buf[9] == 0x0E {
+                let invoke_id = buf[8];
+                let results = vec![
+                    frame::RpmResult {
+                        object_type: 0,
+                        instance: 0,
+                        property_id: 85,
+                        array_index: None,
+                        value: Ok(value::BacnetValue::Real(42.0)),
+                    },
+                    frame::RpmResult {
+                        object_type: 0,
+                        instance: 1,
+                        property_id: 85,
+                        array_index: None,
+                        value: Ok(value::BacnetValue::Real(84.0)),
+                    },
+                ];
+                let ack = frame::encode_read_property_multiple_ack(invoke_id, &results);
+                let _ = sock.send_to(&ack, from).await;
+            }
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // 2. Config: 2 points both on device 12345, so sync_cur batches them.
+    let config = BacnetConfig {
+        id: "bac-rpm".into(),
+        port: Some(0), // OS-assigned ephemeral bind
+        broadcast: Some("127.0.0.1".into()),
+        objects: vec![
+            BacnetObjectConfig {
+                point_id: 7001,
+                device_id: 12345,
+                object_type: 0, // AnalogInput
+                instance: 0,
+                unit: None,
+                scale: Some(1.0),
+                offset: Some(0.0),
+            },
+            BacnetObjectConfig {
+                point_id: 7002,
+                device_id: 12345,
+                object_type: 0, // AnalogInput
+                instance: 1,
+                unit: None,
+                scale: Some(1.0),
+                offset: Some(0.0),
+            },
+        ],
+    };
+    let driver = BacnetDriver::from_config(config)
+        .with_broadcast_port(mock_port)
+        .with_discovery_timeout(Duration::from_millis(300));
+
+    // 3. Register + open_all via DriverHandle.
+    let handle = spawn_driver_actor(16);
+    handle
+        .register(AnyDriver::Async(Box::new(driver)))
+        .await
+        .expect("register should succeed");
+
+    let open_results = handle
+        .open_all()
+        .await
+        .expect("open_all channel should work");
+    assert_eq!(open_results.len(), 1);
+    open_results[0].1.as_ref().expect("open() should succeed");
+
+    // 4. sync_all with the 2 points — should produce one RPM request.
+    let mut point_map = HashMap::new();
+    point_map.insert(
+        "bac-rpm".to_string(),
+        vec![
+            DriverPointRef {
+                point_id: 7001,
+                address: String::new(),
+            },
+            DriverPointRef {
+                point_id: 7002,
+                address: String::new(),
+            },
+        ],
+    );
+
+    let sync_results = handle
+        .sync_all(point_map)
+        .await
+        .expect("sync_all channel should work");
+
+    // 5. Assert both values came back correctly.
+    assert_eq!(sync_results.len(), 2, "expected 2 sync results");
+    let by_point: HashMap<u32, f64> = sync_results
+        .into_iter()
+        .map(|(_did, pid, res)| (pid, res.expect("sync_cur value should be Ok")))
+        .collect();
+
+    let v1 = *by_point.get(&7001).expect("point 7001 should have a value");
+    assert!(
+        (v1 - 42.0f64).abs() < 0.01,
+        "point 7001 PresentValue should be 42.0, got {v1}"
+    );
+    let v2 = *by_point.get(&7002).expect("point 7002 should have a value");
+    assert!(
+        (v2 - 84.0f64).abs() < 0.01,
+        "point 7002 PresentValue should be 84.0, got {v2}"
+    );
+
+    // 6. Critical assertion: exactly ONE RPM request observed by the mock.
+    // If the driver had fallen back to individual ReadProperty, we'd see 2.
+    assert_eq!(
+        request_counter.load(Ordering::SeqCst),
+        1,
+        "should send exactly one RPM request for 2 points on same device"
+    );
 
     handle.close_all().await.expect("close_all should succeed");
 }

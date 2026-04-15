@@ -46,8 +46,38 @@ pub const SVC_UNCONFIRMED_IAM: u8 = 0x00;
 pub const SVC_UNCONFIRMED_WHOIS: u8 = 0x08;
 /// Confirmed service: ReadProperty.
 pub const SVC_CONFIRMED_READ_PROPERTY: u8 = 0x0C;
+/// Confirmed service: ReadPropertyMultiple.
+pub const SVC_CONFIRMED_READ_PROPERTY_MULTIPLE: u8 = 0x0E;
 /// Confirmed service: WriteProperty.
 pub const SVC_CONFIRMED_WRITE_PROPERTY: u8 = 0x0F;
+
+// ── ReadPropertyMultiple (Phase B9) ────────────────────────
+
+/// A single property specification within a ReadPropertyMultiple request.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RpmRequestSpec {
+    /// BACnet object type (0=AI, 1=AO, 2=AV, 8=Device, …).
+    pub object_type: u16,
+    /// BACnet object instance number (22-bit).
+    pub instance: u32,
+    /// Property identifier (e.g. 85 = Present_Value).
+    pub property_id: u32,
+    /// Optional array index for array properties.
+    pub array_index: Option<u32>,
+}
+
+/// A single result within a ReadPropertyMultiple-ACK response.
+///
+/// `value` is `Ok(BacnetValue)` on success or `Err((class, code))` when the
+/// device reports an error for this specific property.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RpmResult {
+    pub object_type: u16,
+    pub instance: u32,
+    pub property_id: u32,
+    pub array_index: Option<u32>,
+    pub value: Result<super::value::BacnetValue, (u32, u32)>,
+}
 
 // ── Header structs ─────────────────────────────────────────
 
@@ -125,6 +155,16 @@ pub enum Apdu {
     /// Simple-ACK PDU (PDU type 0x20) — acknowledges a confirmed service
     /// that returns no result data (e.g. WriteProperty).
     SimpleAck { invoke_id: u8, service_choice: u8 },
+    /// Confirmed ReadPropertyMultiple request (Phase B9).
+    ReadPropertyMultipleRequest {
+        invoke_id: u8,
+        specs: Vec<RpmRequestSpec>,
+    },
+    /// Complex-ACK ReadPropertyMultiple response (Phase B9).
+    ReadPropertyMultipleAck {
+        invoke_id: u8,
+        results: Vec<RpmResult>,
+    },
     /// Catch-all for PDU types / services not explicitly handled above.
     ///
     /// Used internally by `TransactionTable` tests and returned for
@@ -308,6 +348,180 @@ pub fn encode_read_property_ack_multi(
     // Context tag 3 closing
     apdu.push(0x3F);
 
+    build_packet(BVLL_UNICAST, apdu)
+}
+
+/// Encode a ReadPropertyMultiple-Request (Confirmed-Request) frame.
+///
+/// Each spec is encoded as:
+/// - Context tag 0: ObjectIdentifier (4 bytes)
+/// - Context tag 1 opening (0x1E)
+///     - Context tag 0 (property-id) per property
+///     - Optional context tag 1 (array-index)
+/// - Context tag 1 closing (0x1F)
+///
+/// # Arguments
+/// * `invoke_id` – 0–255 transaction ID
+/// * `specs`     – list of properties to read (from potentially multiple objects)
+pub fn encode_read_property_multiple(invoke_id: u8, specs: &[RpmRequestSpec]) -> Vec<u8> {
+    let mut apdu: Vec<u8> = vec![
+        0x00, // PDU type = Confirmed-Request, no segmentation
+        0x05, // max-segments=unspecified, max-apdu=1476
+        invoke_id,
+        SVC_CONFIRMED_READ_PROPERTY_MULTIPLE,
+    ];
+
+    // Group specs by (object_type, instance) so each BACnet ReadAccessSpecification
+    // groups multiple properties for the same object.
+    let mut groups: Vec<(u16, u32, Vec<&RpmRequestSpec>)> = Vec::new();
+    for spec in specs {
+        if let Some(g) = groups
+            .iter_mut()
+            .find(|(ot, inst, _)| *ot == spec.object_type && *inst == spec.instance)
+        {
+            g.2.push(spec);
+        } else {
+            groups.push((spec.object_type, spec.instance, vec![spec]));
+        }
+    }
+
+    for (object_type, instance, props) in &groups {
+        // Context tag 0: ObjectIdentifier (4 bytes)
+        let obj_id = ((*object_type as u32) << 22) | (*instance & 0x003F_FFFF);
+        apdu.push(0x0C);
+        apdu.extend_from_slice(&obj_id.to_be_bytes());
+
+        // Context tag 1 opening: list-of-property-references
+        apdu.push(0x1E);
+
+        for spec in props {
+            // Inner context tag 0: property-id
+            encode_context_unsigned(&mut apdu, 0, spec.property_id);
+            // Inner context tag 1: property-array-index (optional)
+            if let Some(idx) = spec.array_index {
+                encode_context_unsigned(&mut apdu, 1, idx);
+            }
+        }
+
+        // Context tag 1 closing
+        apdu.push(0x1F);
+    }
+
+    build_packet(BVLL_UNICAST, apdu)
+}
+
+/// Encode a ReadPropertyMultiple-ACK (Complex-ACK) frame.
+///
+/// Used by the mock server in tests. Each result is encoded as:
+/// - Context tag 0: ObjectIdentifier
+/// - Context tag 1 opening
+///     - Context tag 2: property-id (per result)
+///     - Optional context tag 3: property-array-index
+///     - Context tag 4 opening (property-value) + application value + closing
+///       (on success), OR context tag 5 opening (property-access-error) +
+///       error-class + error-code + closing (on failure)
+/// - Context tag 1 closing
+pub fn encode_read_property_multiple_ack(invoke_id: u8, results: &[RpmResult]) -> Vec<u8> {
+    let mut apdu: Vec<u8> = vec![
+        0x30, // PDU type = Complex-ACK
+        invoke_id,
+        SVC_CONFIRMED_READ_PROPERTY_MULTIPLE,
+    ];
+
+    // Group results by (object_type, instance).
+    let mut groups: Vec<(u16, u32, Vec<&RpmResult>)> = Vec::new();
+    for r in results {
+        if let Some(g) = groups
+            .iter_mut()
+            .find(|(ot, inst, _)| *ot == r.object_type && *inst == r.instance)
+        {
+            g.2.push(r);
+        } else {
+            groups.push((r.object_type, r.instance, vec![r]));
+        }
+    }
+
+    for (object_type, instance, items) in &groups {
+        // Context tag 0: ObjectIdentifier
+        let obj_id = ((*object_type as u32) << 22) | (*instance & 0x003F_FFFF);
+        apdu.push(0x0C);
+        apdu.extend_from_slice(&obj_id.to_be_bytes());
+
+        // Context tag 1 opening: list-of-results
+        apdu.push(0x1E);
+
+        for r in items {
+            // Context tag 2: property-identifier
+            encode_context_unsigned(&mut apdu, 2, r.property_id);
+            // Context tag 3: property-array-index (optional)
+            if let Some(idx) = r.array_index {
+                encode_context_unsigned(&mut apdu, 3, idx);
+            }
+
+            match &r.value {
+                Ok(v) => {
+                    // Context tag 4 opening: property-value
+                    apdu.push(0x4E);
+                    encode_bacnet_value(&mut apdu, v);
+                    apdu.push(0x4F); // closing
+                }
+                Err((class, code)) => {
+                    // Context tag 5 opening: property-access-error
+                    apdu.push(0x5E);
+                    // error-class (Enumerated)
+                    if *class <= 0xFF {
+                        apdu.extend_from_slice(&[0x91, *class as u8]);
+                    } else {
+                        apdu.push(0x92);
+                        apdu.extend_from_slice(&(*class as u16).to_be_bytes());
+                    }
+                    // error-code (Enumerated)
+                    if *code <= 0xFF {
+                        apdu.extend_from_slice(&[0x91, *code as u8]);
+                    } else {
+                        apdu.push(0x92);
+                        apdu.extend_from_slice(&(*code as u16).to_be_bytes());
+                    }
+                    apdu.push(0x5F); // closing
+                }
+            }
+        }
+
+        // Context tag 1 closing
+        apdu.push(0x1F);
+    }
+
+    build_packet(BVLL_UNICAST, apdu)
+}
+
+/// Encode a BACnet Error PDU (PDU type 0x50).
+///
+/// Used by mock tests to simulate device-level errors.
+pub fn encode_error_pdu(
+    invoke_id: u8,
+    service_choice: u8,
+    error_class: u32,
+    error_code: u32,
+) -> Vec<u8> {
+    let mut apdu: Vec<u8> = vec![
+        0x50, // PDU type = Error
+        invoke_id,
+        service_choice,
+    ];
+    // error-class (Enumerated)
+    if error_class <= 0xFF {
+        apdu.extend_from_slice(&[0x91, error_class as u8]);
+    } else {
+        apdu.push(0x92);
+        apdu.extend_from_slice(&(error_class as u16).to_be_bytes());
+    }
+    // error-code (Enumerated)
+    if error_code <= 0xFF {
+        apdu.extend_from_slice(&[0x91, error_code as u8]);
+    } else {
+        apdu.push(0x92);
+        apdu.extend_from_slice(&(error_code as u16).to_be_bytes());
+    }
     build_packet(BVLL_UNICAST, apdu)
 }
 
@@ -622,6 +836,9 @@ fn decode_confirmed_request(data: &[u8]) -> Result<Apdu, BacnetError> {
     match service {
         SVC_CONFIRMED_READ_PROPERTY => decode_read_property_request(invoke_id, &data[4..]),
         SVC_CONFIRMED_WRITE_PROPERTY => decode_write_property_request(invoke_id, &data[4..]),
+        SVC_CONFIRMED_READ_PROPERTY_MULTIPLE => {
+            decode_read_property_multiple_request(invoke_id, &data[4..])
+        }
         _ => Ok(Apdu::Other {
             pdu_type: data[0],
             invoke_id,
@@ -658,12 +875,229 @@ fn decode_complex_ack(data: &[u8]) -> Result<Apdu, BacnetError> {
 
     match service {
         SVC_CONFIRMED_READ_PROPERTY => decode_read_property_ack(invoke_id, &data[3..]),
+        SVC_CONFIRMED_READ_PROPERTY_MULTIPLE => {
+            decode_read_property_multiple_ack(invoke_id, &data[3..])
+        }
         _ => Ok(Apdu::Other {
             pdu_type: data[0],
             invoke_id,
             data: data.to_vec(),
         }),
     }
+}
+
+/// Decode a ReadPropertyMultiple-Request payload (Phase B9).
+///
+/// The payload holds one or more ReadAccessSpecification structures:
+///   [0x0C, <objid:4>]            — context tag 0: object-identifier
+///   [0x1E]                       — context tag 1 opening: list-of-property-references
+///     for each property reference (context tags reset here):
+///       context tag 0: property-identifier
+///       optional context tag 1: property-array-index
+///   [0x1F]                       — context tag 1 closing
+fn decode_read_property_multiple_request(
+    invoke_id: u8,
+    payload: &[u8],
+) -> Result<Apdu, BacnetError> {
+    let mut pos = 0usize;
+    let mut specs: Vec<RpmRequestSpec> = Vec::new();
+
+    while pos < payload.len() {
+        // Object-identifier: context tag 0, LVT=4  → 0x0C
+        if pos + 5 > payload.len() {
+            return Err(BacnetError::MalformedFrame(
+                "RPM request: object-identifier truncated".into(),
+            ));
+        }
+        if payload[pos] != 0x0C {
+            return Err(BacnetError::MalformedFrame(format!(
+                "RPM request: expected context tag 0 (0x0C), got 0x{:02X}",
+                payload[pos]
+            )));
+        }
+        let raw_id = u32::from_be_bytes([
+            payload[pos + 1],
+            payload[pos + 2],
+            payload[pos + 3],
+            payload[pos + 4],
+        ]);
+        let object_type = ((raw_id >> 22) & 0x3FF) as u16;
+        let instance = raw_id & 0x003F_FFFF;
+        pos += 5;
+
+        // list-of-property-references opening: 0x1E
+        if pos >= payload.len() || payload[pos] != 0x1E {
+            return Err(BacnetError::MalformedFrame(
+                "RPM request: expected list-of-property-references opening 0x1E".into(),
+            ));
+        }
+        pos += 1;
+
+        while pos < payload.len() && payload[pos] != 0x1F {
+            // Inner context tag 0: property-identifier
+            let (prop_id, consumed) = read_context_unsigned(&payload[pos..], 0)?;
+            pos += consumed;
+
+            // Optional inner context tag 1: property-array-index
+            let mut array_index: Option<u32> = None;
+            if pos < payload.len() {
+                let tb = payload[pos];
+                let tag_num = (tb >> 4) & 0x0F;
+                let is_context = (tb & 0x08) != 0;
+                if is_context && tag_num == 1 && tb != 0x1E && tb != 0x1F {
+                    let (ai, ai_consumed) = read_context_unsigned(&payload[pos..], 1)?;
+                    array_index = Some(ai);
+                    pos += ai_consumed;
+                }
+            }
+
+            specs.push(RpmRequestSpec {
+                object_type,
+                instance,
+                property_id: prop_id,
+                array_index,
+            });
+        }
+
+        // list-of-property-references closing: 0x1F
+        if pos >= payload.len() || payload[pos] != 0x1F {
+            return Err(BacnetError::MalformedFrame(
+                "RPM request: expected list-of-property-references closing 0x1F".into(),
+            ));
+        }
+        pos += 1;
+    }
+
+    Ok(Apdu::ReadPropertyMultipleRequest { invoke_id, specs })
+}
+
+/// Decode a ReadPropertyMultiple-ACK complex-ACK payload (Phase B9).
+///
+/// The payload holds a sequence of BACnetReadAccessResult structures:
+///   [0x0C, <objid:4>]            — context tag 0: object-identifier
+///   [0x1E]                       — context tag 1 opening: list-of-results
+///     for each property:
+///       [context tag 2: property-id]
+///       [context tag 3: property-array-index]?
+///       either [0x4E, <value>, 0x4F]  — property-value
+///       or     [0x5E, <class>, <code>, 0x5F]  — property-access-error
+///   [0x1F]                       — context tag 1 closing
+fn decode_read_property_multiple_ack(invoke_id: u8, payload: &[u8]) -> Result<Apdu, BacnetError> {
+    let mut pos = 0usize;
+    let mut results: Vec<RpmResult> = Vec::new();
+
+    while pos < payload.len() {
+        // Object-identifier: context tag 0, LVT=4
+        if pos + 5 > payload.len() {
+            return Err(BacnetError::MalformedFrame(
+                "RPM-ACK: object-identifier truncated".into(),
+            ));
+        }
+        if payload[pos] != 0x0C {
+            return Err(BacnetError::MalformedFrame(format!(
+                "RPM-ACK: expected context tag 0 (0x0C), got 0x{:02X}",
+                payload[pos]
+            )));
+        }
+        let raw_id = u32::from_be_bytes([
+            payload[pos + 1],
+            payload[pos + 2],
+            payload[pos + 3],
+            payload[pos + 4],
+        ]);
+        let object_type = ((raw_id >> 22) & 0x3FF) as u16;
+        let instance = raw_id & 0x003F_FFFF;
+        pos += 5;
+
+        // list-of-results opening: 0x1E
+        if pos >= payload.len() || payload[pos] != 0x1E {
+            return Err(BacnetError::MalformedFrame(
+                "RPM-ACK: expected list-of-results opening tag 0x1E".into(),
+            ));
+        }
+        pos += 1;
+
+        while pos < payload.len() && payload[pos] != 0x1F {
+            // Context tag 2: property-identifier
+            let (prop_id, consumed) = read_context_unsigned(&payload[pos..], 2)?;
+            pos += consumed;
+
+            // Optional context tag 3: property-array-index
+            let mut array_index: Option<u32> = None;
+            if pos < payload.len() {
+                let tb = payload[pos];
+                if (tb >> 4) & 0x0F == 3 && (tb & 0x08) != 0 && tb != 0x3E && tb != 0x3F {
+                    let (ai, ai_consumed) = read_context_unsigned(&payload[pos..], 3)?;
+                    array_index = Some(ai);
+                    pos += ai_consumed;
+                }
+            }
+
+            if pos >= payload.len() {
+                return Err(BacnetError::MalformedFrame(
+                    "RPM-ACK: truncated after property-id".into(),
+                ));
+            }
+
+            match payload[pos] {
+                0x4E => {
+                    // property-value opening
+                    pos += 1;
+                    // Decode one application-tagged value.
+                    let (val, consumed) = decode_application_tag(&payload[pos..])?;
+                    pos += consumed;
+                    // Expect closing 0x4F.
+                    if pos >= payload.len() || payload[pos] != 0x4F {
+                        return Err(BacnetError::MalformedFrame(
+                            "RPM-ACK: expected property-value closing 0x4F".into(),
+                        ));
+                    }
+                    pos += 1;
+                    results.push(RpmResult {
+                        object_type,
+                        instance,
+                        property_id: prop_id,
+                        array_index,
+                        value: Ok(val),
+                    });
+                }
+                0x5E => {
+                    // property-access-error opening
+                    pos += 1;
+                    let error_class = decode_enumerated_at(payload, &mut pos)?;
+                    let error_code = decode_enumerated_at(payload, &mut pos)?;
+                    if pos >= payload.len() || payload[pos] != 0x5F {
+                        return Err(BacnetError::MalformedFrame(
+                            "RPM-ACK: expected property-access-error closing 0x5F".into(),
+                        ));
+                    }
+                    pos += 1;
+                    results.push(RpmResult {
+                        object_type,
+                        instance,
+                        property_id: prop_id,
+                        array_index,
+                        value: Err((error_class, error_code)),
+                    });
+                }
+                tb => {
+                    return Err(BacnetError::MalformedFrame(format!(
+                        "RPM-ACK: unexpected tag 0x{tb:02X} in result"
+                    )));
+                }
+            }
+        }
+
+        // list-of-results closing: 0x1F
+        if pos >= payload.len() || payload[pos] != 0x1F {
+            return Err(BacnetError::MalformedFrame(
+                "RPM-ACK: expected list-of-results closing 0x1F".into(),
+            ));
+        }
+        pos += 1;
+    }
+
+    Ok(Apdu::ReadPropertyMultipleAck { invoke_id, results })
 }
 
 fn decode_error_pdu(data: &[u8]) -> Result<Apdu, BacnetError> {
@@ -2429,5 +2863,424 @@ mod tests {
         expected.extend_from_slice(&expected_apdu);
 
         assert_eq!(pkt, expected, "WriteProperty wire layout golden mismatch");
+    }
+
+    // ── Phase B9: ReadPropertyMultiple tests ────────────────────
+
+    /// RPM request with a single spec round-trips cleanly.
+    #[test]
+    fn rpm_request_single_spec_round_trip() {
+        let specs = vec![RpmRequestSpec {
+            object_type: 0, // AI
+            instance: 0,
+            property_id: 85, // PresentValue
+            array_index: None,
+        }];
+        let pkt = encode_read_property_multiple(5, &specs);
+        let (_, apdu) = decode_packet(&pkt).unwrap();
+        match apdu {
+            Apdu::ReadPropertyMultipleRequest {
+                invoke_id,
+                specs: got,
+            } => {
+                assert_eq!(invoke_id, 5);
+                assert_eq!(got.len(), 1);
+                assert_eq!(got[0].object_type, 0);
+                assert_eq!(got[0].instance, 0);
+                assert_eq!(got[0].property_id, 85);
+                assert_eq!(got[0].array_index, None);
+            }
+            other => panic!("expected ReadPropertyMultipleRequest, got {other:?}"),
+        }
+    }
+
+    /// RPM request with three specs for different objects preserves order.
+    #[test]
+    fn rpm_request_multiple_specs_round_trip() {
+        let specs = vec![
+            RpmRequestSpec {
+                object_type: 0, // AI
+                instance: 0,
+                property_id: 85,
+                array_index: None,
+            },
+            RpmRequestSpec {
+                object_type: 1, // AO
+                instance: 5,
+                property_id: 85,
+                array_index: None,
+            },
+            RpmRequestSpec {
+                object_type: 3, // BI
+                instance: 2,
+                property_id: 85,
+                array_index: None,
+            },
+        ];
+        let pkt = encode_read_property_multiple(0x10, &specs);
+        let (_, apdu) = decode_packet(&pkt).unwrap();
+        match apdu {
+            Apdu::ReadPropertyMultipleRequest {
+                invoke_id,
+                specs: got,
+            } => {
+                assert_eq!(invoke_id, 0x10);
+                assert_eq!(got.len(), 3);
+                assert_eq!(got[0].object_type, 0);
+                assert_eq!(got[0].instance, 0);
+                assert_eq!(got[1].object_type, 1);
+                assert_eq!(got[1].instance, 5);
+                assert_eq!(got[2].object_type, 3);
+                assert_eq!(got[2].instance, 2);
+                for s in &got {
+                    assert_eq!(s.property_id, 85);
+                    assert_eq!(s.array_index, None);
+                }
+            }
+            other => panic!("expected ReadPropertyMultipleRequest, got {other:?}"),
+        }
+    }
+
+    /// RPM request with a property-array-index is preserved round-trip.
+    #[test]
+    fn rpm_request_with_array_index() {
+        let specs = vec![RpmRequestSpec {
+            object_type: 8, // Device
+            instance: 1001,
+            property_id: 76, // ObjectList
+            array_index: Some(0),
+        }];
+        let pkt = encode_read_property_multiple(3, &specs);
+        let (_, apdu) = decode_packet(&pkt).unwrap();
+        match apdu {
+            Apdu::ReadPropertyMultipleRequest { specs: got, .. } => {
+                assert_eq!(got.len(), 1);
+                assert_eq!(got[0].array_index, Some(0));
+                assert_eq!(got[0].property_id, 76);
+            }
+            other => panic!("expected ReadPropertyMultipleRequest, got {other:?}"),
+        }
+    }
+
+    /// RPM request with a 2-byte property identifier round-trips.
+    #[test]
+    fn rpm_request_two_byte_property_id() {
+        let specs = vec![RpmRequestSpec {
+            object_type: 0,
+            instance: 0,
+            property_id: 512, // forces 2-byte encoding
+            array_index: None,
+        }];
+        let pkt = encode_read_property_multiple(1, &specs);
+        // Verify the wire really used the 2-byte form (0x0A = context 0 LVT=2).
+        assert!(
+            pkt.iter().any(|&b| b == 0x0A),
+            "expected context tag 0 LVT=2 byte (0x0A) in wire bytes"
+        );
+        let (_, apdu) = decode_packet(&pkt).unwrap();
+        match apdu {
+            Apdu::ReadPropertyMultipleRequest { specs: got, .. } => {
+                assert_eq!(got.len(), 1);
+                assert_eq!(got[0].property_id, 512);
+            }
+            other => panic!("expected ReadPropertyMultipleRequest, got {other:?}"),
+        }
+    }
+
+    /// RPM ACK with a single Real value round-trips.
+    #[test]
+    fn rpm_ack_single_real_value_round_trip() {
+        let results = vec![RpmResult {
+            object_type: 0,
+            instance: 1,
+            property_id: 85,
+            array_index: None,
+            value: Ok(BacnetValue::Real(23.5)),
+        }];
+        let pkt = encode_read_property_multiple_ack(9, &results);
+        let (_, apdu) = decode_packet(&pkt).unwrap();
+        match apdu {
+            Apdu::ReadPropertyMultipleAck {
+                invoke_id,
+                results: got,
+            } => {
+                assert_eq!(invoke_id, 9);
+                assert_eq!(got.len(), 1);
+                assert_eq!(got[0].object_type, 0);
+                assert_eq!(got[0].instance, 1);
+                assert_eq!(got[0].property_id, 85);
+                assert_eq!(got[0].value, Ok(BacnetValue::Real(23.5)));
+            }
+            other => panic!("expected ReadPropertyMultipleAck, got {other:?}"),
+        }
+    }
+
+    /// RPM ACK with three heterogeneous results round-trips and preserves order.
+    #[test]
+    fn rpm_ack_multiple_results() {
+        let results = vec![
+            RpmResult {
+                object_type: 0,
+                instance: 0,
+                property_id: 85,
+                array_index: None,
+                value: Ok(BacnetValue::Real(10.0)),
+            },
+            RpmResult {
+                object_type: 1,
+                instance: 1,
+                property_id: 85,
+                array_index: None,
+                value: Ok(BacnetValue::Real(20.0)),
+            },
+            RpmResult {
+                object_type: 3,
+                instance: 0,
+                property_id: 85,
+                array_index: None,
+                value: Ok(BacnetValue::Enumerated(1)),
+            },
+        ];
+        let pkt = encode_read_property_multiple_ack(0x20, &results);
+        let (_, apdu) = decode_packet(&pkt).unwrap();
+        match apdu {
+            Apdu::ReadPropertyMultipleAck {
+                invoke_id,
+                results: got,
+            } => {
+                assert_eq!(invoke_id, 0x20);
+                assert_eq!(got.len(), 3);
+                assert_eq!(got[0].value, Ok(BacnetValue::Real(10.0)));
+                assert_eq!(got[0].object_type, 0);
+                assert_eq!(got[1].value, Ok(BacnetValue::Real(20.0)));
+                assert_eq!(got[1].object_type, 1);
+                assert_eq!(got[2].value, Ok(BacnetValue::Enumerated(1)));
+                assert_eq!(got[2].object_type, 3);
+            }
+            other => panic!("expected ReadPropertyMultipleAck, got {other:?}"),
+        }
+    }
+
+    /// RPM ACK with an error result (property-access-error) round-trips.
+    #[test]
+    fn rpm_ack_with_error_result() {
+        let results = vec![RpmResult {
+            object_type: 0,
+            instance: 0,
+            property_id: 85,
+            array_index: None,
+            value: Err((2, 31)), // object class, write-access-denied code
+        }];
+        let pkt = encode_read_property_multiple_ack(1, &results);
+        let (_, apdu) = decode_packet(&pkt).unwrap();
+        match apdu {
+            Apdu::ReadPropertyMultipleAck { results: got, .. } => {
+                assert_eq!(got.len(), 1);
+                assert_eq!(got[0].value, Err((2, 31)));
+            }
+            other => panic!("expected ReadPropertyMultipleAck, got {other:?}"),
+        }
+    }
+
+    /// RPM ACK mixing Ok and Err results preserves ordering and types.
+    #[test]
+    fn rpm_ack_mixed_ok_and_err() {
+        let results = vec![
+            RpmResult {
+                object_type: 0,
+                instance: 0,
+                property_id: 85,
+                array_index: None,
+                value: Ok(BacnetValue::Real(10.0)),
+            },
+            RpmResult {
+                object_type: 1,
+                instance: 2,
+                property_id: 85,
+                array_index: None,
+                value: Err((2, 32)),
+            },
+        ];
+        let pkt = encode_read_property_multiple_ack(7, &results);
+        let (_, apdu) = decode_packet(&pkt).unwrap();
+        match apdu {
+            Apdu::ReadPropertyMultipleAck { results: got, .. } => {
+                assert_eq!(got.len(), 2);
+                assert_eq!(got[0].value, Ok(BacnetValue::Real(10.0)));
+                assert_eq!(got[0].object_type, 0);
+                assert_eq!(got[1].value, Err((2, 32)));
+                assert_eq!(got[1].object_type, 1);
+            }
+            other => panic!("expected ReadPropertyMultipleAck, got {other:?}"),
+        }
+    }
+
+    /// Hand-computed golden wire layout for an RPM request:
+    /// invoke_id=0x42, 2 specs: (AI-0 prop 85), (AO-5 prop 85).
+    ///
+    /// APDU layout:
+    ///   0x00 0x05 0x42 0x0E           PDU type, max-segs, invoke_id, service
+    ///   0x0C 0x00 0x00 0x00 0x00      ctx tag 0 object-id AI-0
+    ///   0x1E                          ctx tag 1 opening
+    ///   0x09 0x55                     inner ctx tag 0 LVT=1, property 85
+    ///   0x1F                          ctx tag 1 closing
+    ///   0x0C 0x00 0x40 0x00 0x05      ctx tag 0 object-id AO-5
+    ///   0x1E
+    ///   0x09 0x55
+    ///   0x1F
+    #[test]
+    fn rpm_request_wire_snapshot() {
+        let specs = vec![
+            RpmRequestSpec {
+                object_type: 0,
+                instance: 0,
+                property_id: 85,
+                array_index: None,
+            },
+            RpmRequestSpec {
+                object_type: 1,
+                instance: 5,
+                property_id: 85,
+                array_index: None,
+            },
+        ];
+        let pkt = encode_read_property_multiple(0x42, &specs);
+
+        #[rustfmt::skip]
+        let expected_apdu: Vec<u8> = vec![
+            0x00, 0x05, 0x42, 0x0E,
+            0x0C, 0x00, 0x00, 0x00, 0x00,
+            0x1E,
+            0x09, 0x55,
+            0x1F,
+            0x0C, 0x00, 0x40, 0x00, 0x05,
+            0x1E,
+            0x09, 0x55,
+            0x1F,
+        ];
+
+        let total_len = 6 + expected_apdu.len();
+        let mut expected: Vec<u8> = Vec::with_capacity(total_len);
+        expected.push(0x81);
+        expected.push(BVLL_UNICAST);
+        expected.push((total_len >> 8) as u8);
+        expected.push((total_len & 0xFF) as u8);
+        expected.push(0x01);
+        expected.push(0x00);
+        expected.extend_from_slice(&expected_apdu);
+
+        assert_eq!(pkt, expected, "RPM request wire layout golden mismatch");
+    }
+
+    /// Hand-computed golden wire layout for an RPM ACK:
+    /// invoke_id=0x42, 2 results: AI-0 prop 85 Real(50.0), AO-5 prop 85 Real(75.5).
+    ///
+    /// APDU layout:
+    ///   0x30 0x42 0x0E                PDU type, invoke_id, service
+    ///   0x0C 0x00 0x00 0x00 0x00      ctx tag 0 object-id AI-0
+    ///   0x1E                          ctx tag 1 opening
+    ///   0x29 0x55                     ctx tag 2 LVT=1, property 85
+    ///   0x4E                          ctx tag 4 opening (property-value)
+    ///   0x44 <4 bytes Real(50.0)>     app tag 4 LVT=4, Real
+    ///   0x4F                          ctx tag 4 closing
+    ///   0x1F                          ctx tag 1 closing
+    ///   (same for AO-5 Real(75.5))
+    #[test]
+    fn rpm_ack_wire_snapshot() {
+        let results = vec![
+            RpmResult {
+                object_type: 0,
+                instance: 0,
+                property_id: 85,
+                array_index: None,
+                value: Ok(BacnetValue::Real(50.0)),
+            },
+            RpmResult {
+                object_type: 1,
+                instance: 5,
+                property_id: 85,
+                array_index: None,
+                value: Ok(BacnetValue::Real(75.5)),
+            },
+        ];
+        let pkt = encode_read_property_multiple_ack(0x42, &results);
+
+        let real50 = 50.0f32.to_be_bytes();
+        let real75 = 75.5f32.to_be_bytes();
+
+        let mut expected_apdu: Vec<u8> = vec![
+            0x30, 0x42, 0x0E, // Complex-ACK, invoke_id, service
+            0x0C, 0x00, 0x00, 0x00, 0x00, // object-id AI-0
+            0x1E, // list-of-results opening
+            0x29, 0x55, // ctx 2 LVT=1 property 85
+            0x4E, // value opening
+            0x44,
+        ];
+        expected_apdu.extend_from_slice(&real50);
+        expected_apdu.extend_from_slice(&[0x4F, 0x1F]); // value closing, list closing
+        expected_apdu
+            .extend_from_slice(&[0x0C, 0x00, 0x40, 0x00, 0x05, 0x1E, 0x29, 0x55, 0x4E, 0x44]);
+        expected_apdu.extend_from_slice(&real75);
+        expected_apdu.extend_from_slice(&[0x4F, 0x1F]);
+
+        let total_len = 6 + expected_apdu.len();
+        let mut expected: Vec<u8> = Vec::with_capacity(total_len);
+        expected.push(0x81);
+        expected.push(BVLL_UNICAST);
+        expected.push((total_len >> 8) as u8);
+        expected.push((total_len & 0xFF) as u8);
+        expected.push(0x01);
+        expected.push(0x00);
+        expected.extend_from_slice(&expected_apdu);
+
+        assert_eq!(pkt, expected, "RPM ACK wire layout golden mismatch");
+    }
+
+    /// RPM request for object-name property (77 = 0x4D) round-trips.
+    #[test]
+    fn rpm_request_char_string_property() {
+        let specs = vec![RpmRequestSpec {
+            object_type: 0,
+            instance: 1,
+            property_id: 77, // ObjectName
+            array_index: None,
+        }];
+        let pkt = encode_read_property_multiple(2, &specs);
+        let (_, apdu) = decode_packet(&pkt).unwrap();
+        match apdu {
+            Apdu::ReadPropertyMultipleRequest { specs: got, .. } => {
+                assert_eq!(got.len(), 1);
+                assert_eq!(got[0].property_id, 77);
+            }
+            other => panic!("expected ReadPropertyMultipleRequest, got {other:?}"),
+        }
+    }
+
+    /// A truncated RPM ACK (missing closing 0x1F) must return MalformedFrame.
+    #[test]
+    fn decode_rpm_ack_truncated_returns_error() {
+        // Start with a valid ACK and strip the trailing list-of-results closing.
+        let results = vec![RpmResult {
+            object_type: 0,
+            instance: 0,
+            property_id: 85,
+            array_index: None,
+            value: Ok(BacnetValue::Real(1.0)),
+        }];
+        let pkt = encode_read_property_multiple_ack(1, &results);
+        // Sanity: last byte of APDU is the 0x1F list-of-results close.
+        assert_eq!(*pkt.last().unwrap(), 0x1F);
+
+        // Build a truncated copy: drop the final 0x1F and patch BVLL length.
+        let mut truncated = pkt.clone();
+        truncated.pop();
+        let new_len = truncated.len() as u16;
+        truncated[2] = (new_len >> 8) as u8;
+        truncated[3] = (new_len & 0xFF) as u8;
+
+        match decode_packet(&truncated) {
+            Err(BacnetError::MalformedFrame(_)) => {}
+            other => panic!("expected MalformedFrame error, got {other:?}"),
+        }
     }
 }

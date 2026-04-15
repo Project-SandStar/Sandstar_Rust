@@ -153,6 +153,74 @@ def make_present_value_ack(invoke_id, obj_type, instance):
             return make_read_property_ack(invoke_id, obj_type, instance, 85, value_fn())
     return None
 
+# ── ReadPropertyMultiple (Phase B9) ────────────────────────────────────────
+
+def encode_rpm_ack(invoke_id, results):
+    """Encode a ReadPropertyMultiple-ACK.
+    `results` is a list of (obj_type, instance, property_id, value_bytes).
+    `value_bytes` is a pre-encoded application-tagged BacnetValue.
+    """
+    apdu = bytes([0x30, invoke_id, 0x0E])  # Complex-ACK, invoke, service=RPM
+    for (ot, inst, pid, value_bytes) in results:
+        # Context 0: ObjectIdentifier
+        raw_id = ((ot & 0x3FF) << 22) | (inst & 0x3F_FFFF)
+        apdu += bytes([0x0C]) + raw_id.to_bytes(4, "big")
+        # Context 1: listOfResults opening
+        apdu += bytes([0x1E])
+        # Context 2: PropertyIdentifier (1-byte for common props)
+        if pid <= 0xFF:
+            apdu += bytes([0x29, pid])
+        else:
+            apdu += bytes([0x2A]) + pid.to_bytes(2, "big")
+        # Context 4: propertyValue opening
+        apdu += bytes([0x4E])
+        apdu += value_bytes
+        # Context 4: propertyValue closing
+        apdu += bytes([0x4F])
+        # Context 1: listOfResults closing
+        apdu += bytes([0x1F])
+    return build_bvll(0x0A, apdu)
+
+def parse_rpm_request(apdu):
+    """Extract the list of (obj_type, instance, property_id) tuples from an RPM request.
+    Returns [(ot, inst, pid), ...] or None if parsing fails.
+    """
+    if len(apdu) < 4 or apdu[3] != 0x0E:
+        return None
+    pos = 4
+    specs = []
+    while pos < len(apdu):
+        if apdu[pos] != 0x0C:  # context 0 ObjectIdentifier
+            break
+        raw = int.from_bytes(apdu[pos+1:pos+5], "big")
+        ot = (raw >> 22) & 0x3FF
+        inst = raw & 0x3F_FFFF
+        pos += 5
+        if pos >= len(apdu) or apdu[pos] != 0x1E:  # context 1 opening
+            break
+        pos += 1
+        # Parse inner property references until 0x1F
+        while pos < len(apdu) and apdu[pos] != 0x1F:
+            tag = apdu[pos]
+            # context 0 PropertyIdentifier: 0x09 (1-byte) or 0x0A (2-byte)
+            if tag == 0x09:
+                pid = apdu[pos + 1]
+                pos += 2
+            elif tag == 0x0A:
+                pid = int.from_bytes(apdu[pos+1:pos+3], "big")
+                pos += 3
+            else:
+                # Unknown/optional tag — skip
+                pos += 1 + (tag & 0x07)
+                continue
+            specs.append((ot, inst, pid))
+            # Optional array index (context 1) — skip if present
+            if pos < len(apdu) and (apdu[pos] & 0xF8) == 0x18:
+                pos += 1 + (apdu[pos] & 0x07)
+        if pos < len(apdu) and apdu[pos] == 0x1F:
+            pos += 1  # consume closing tag
+    return specs
+
 def main():
     bind_ip = sys.argv[1] if len(sys.argv) > 1 else "0.0.0.0"
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -185,6 +253,25 @@ def main():
             if header is None:
                 continue
             iid, service, _ = header
+            if service == 0x0E:  # ReadPropertyMultiple
+                specs = parse_rpm_request(apdu)
+                if specs is None:
+                    print("  (RPM parse failed)", flush=True)
+                    continue
+                print(f"  ReadPropertyMultiple invoke={iid} specs={specs}", flush=True)
+                # Build results: one per spec, using the object's hardcoded value
+                results = []
+                for (ot, inst, pid) in specs:
+                    if pid == 85:  # PresentValue
+                        for (o_ot, o_inst, _, value_fn) in OBJECTS:
+                            if o_ot == ot and o_inst == inst:
+                                results.append((ot, inst, pid, value_fn()))
+                                break
+                if results:
+                    reply = encode_rpm_ack(iid, results)
+                    s.sendto(reply, addr)
+                    print(f"  TX RPM-ACK -> {addr}: {reply.hex()[:80]}...", flush=True)
+                continue
             if service == 0x0F:  # WriteProperty
                 # Simple-ACK: [0x81, 0x0A, 0x00, 0x09, 0x01, 0x00, 0x20, iid, 0x0F]
                 ack = bytes([0x81, 0x0A, 0x00, 0x09, 0x01, 0x00, 0x20, iid, 0x0F])

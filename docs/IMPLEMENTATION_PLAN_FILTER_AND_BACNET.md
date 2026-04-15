@@ -636,7 +636,18 @@ The existing single-file `bacnet.rs` (120 lines) becomes the entry point `mod.rs
   `e2e_write_succeeds_with_simple_ack` and `e2e_write_error_pdu_returns_remote_status` cover both the
   SimpleAck and Error PDU paths via UDP loopback.
 - **SubscribeCOV** — Phase B8 (~1-2 weeks) — Adds true COV, maps to `on_watch`/`on_unwatch`
-- **ReadPropertyMultiple** — Phase B9 (~3 days) — Optimization, batches reads into fewer network packets
+- **ReadPropertyMultiple** — ✅ Phase B9 complete (2026-04-16) — `sync_cur()` now batches points
+  by device into a single RPM request and falls back to individual `ReadProperty` on transport
+  error or when the device replies with an Error PDU. Delivered: `frame::RpmRequestSpec` +
+  `frame::RpmResult`, `encode_read_property_multiple` + `encode_read_property_multiple_ack`,
+  matching `Apdu::ReadPropertyMultipleRequest` + `Apdu::ReadPropertyMultipleAck` decoder variants,
+  and `BacnetDriver::read_properties_multiple()` with a retry loop mirroring the single-RP path.
+  End-to-end test `e2e_sync_cur_uses_rpm` in `e2e_test.rs` drives a 2-point batch through the
+  `DriverHandle` actor, asserts both values flow back correctly, and asserts the mock responder
+  observed exactly ONE inbound service-0x0E request (proving the batched path — 2 individual
+  reads would fail the test). The Python simulator `tools/bacnet_sim.py` gained `parse_rpm_request`
+  + `encode_rpm_ack` helpers wired into the main dispatch loop so that running
+  `py tools/bacnet_sim.py` now answers RPM as well as ReadProperty/WriteProperty.
 - **Router support** — Phase B10 (~1 week) — Adds DNET/DADR for multi-network deployments
 
 ### B.9 Risks and mitigations
@@ -805,7 +816,8 @@ The existing `drivers/bacnet.rs` (120 lines) gets replaced by the new `drivers/b
 | **Week 5** | BACnet Phase B5 — integration | End-to-end test + config |
 | **Week 6** | BACnet Phase B6 — production | Deployed to 1-11 |
 | **Week 7** | BACnet Phase B7 — WriteProperty ✅ 2026-04-15 | `encode_write_property`, `SimpleAck`, `write_property()`, `AsyncDriver::write()`, 2 E2E tests |
-| **Week 8+** | Optional: COV, RPM, router | Per-feature |
+| **Week 8** | BACnet Phase B9 — ReadPropertyMultiple ✅ 2026-04-16 | `RpmRequestSpec` + `RpmResult`, `encode_read_property_multiple` + ACK, `read_properties_multiple()`, batched `sync_cur()` with fallback, `e2e_sync_cur_uses_rpm` E2E test, Python sim RPM handler |
+| **Week 9+** | Optional: COV, router | Per-feature |
 
 Each phase ends with a verification gate and a git commit. No long-running branches — commit and push at every checkpoint.
 

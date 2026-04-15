@@ -244,6 +244,8 @@ fn apdu_invoke_id(apdu: &frame::Apdu) -> Option<u8> {
         frame::Apdu::SimpleAck { invoke_id, .. } => Some(*invoke_id),
         frame::Apdu::Error { invoke_id, .. } => Some(*invoke_id),
         frame::Apdu::Other { invoke_id, .. } => Some(*invoke_id),
+        frame::Apdu::ReadPropertyMultipleRequest { invoke_id, .. } => Some(*invoke_id),
+        frame::Apdu::ReadPropertyMultipleAck { invoke_id, .. } => Some(*invoke_id),
         frame::Apdu::WhoIs { .. } | frame::Apdu::IAm { .. } => None,
     }
 }
@@ -486,6 +488,120 @@ impl BacnetDriver {
                                 Ok(_) => {
                                     Err(BacnetError::MalformedFrame("unexpected APDU type".into()))
                                 }
+                                Err(e) => Err(e),
+                            };
+                        }
+                    }
+                }
+            }
+        }
+
+        self.transactions.timeout(invoke_id);
+        Err(BacnetError::Timeout(max_retries))
+    }
+
+    /// Send a ReadPropertyMultiple request and parse the response.
+    ///
+    /// Returns a Vec of the SAME length as `specs`, in the same order.
+    /// Each element is either:
+    ///   - `Ok(BacnetValue)` — successful read
+    ///   - `Err(DriverError::RemoteStatus)` — per-property error from device
+    ///
+    /// Returns `Err(BacnetError)` for transport failures (timeout, malformed
+    /// frame) that affect the whole batch — the caller should decide whether
+    /// to fall back to individual reads.
+    async fn read_properties_multiple(
+        &mut self,
+        device_addr: std::net::SocketAddr,
+        specs: &[frame::RpmRequestSpec],
+    ) -> Result<Vec<Result<value::BacnetValue, DriverError>>, BacnetError> {
+        // NLL split borrow: `socket` borrows self.socket (immutable) and
+        // `transactions` borrows self.transactions mutably — different fields.
+        let socket = self.socket.as_ref().ok_or_else(|| {
+            BacnetError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "not connected",
+            ))
+        })?;
+
+        let (invoke_id, rx) = self
+            .transactions
+            .allocate()
+            .ok_or_else(|| BacnetError::MalformedFrame("no invoke IDs available".into()))?;
+
+        let request = frame::encode_read_property_multiple(invoke_id, specs);
+
+        let per_attempt = Duration::from_secs(3);
+        let max_retries = 3u32;
+        let mut buf = [0u8; 1500];
+        let mut rx = rx;
+
+        'retry: for attempt in 0..=max_retries {
+            socket.send_to(&request, device_addr).await?;
+
+            let deadline = tokio::time::Instant::now() + per_attempt;
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    if attempt < max_retries {
+                        continue 'retry;
+                    } else {
+                        break 'retry;
+                    }
+                }
+                match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
+                    Err(_) => {
+                        if attempt < max_retries {
+                            continue 'retry;
+                        } else {
+                            break 'retry;
+                        }
+                    }
+                    Ok(Err(e)) => return Err(BacnetError::Io(e)),
+                    Ok(Ok((n, _src))) => {
+                        if let Ok((_npdu, apdu)) = frame::decode_packet(&buf[..n]) {
+                            if let Some(id) = apdu_invoke_id(&apdu) {
+                                self.transactions.dispatch(id, apdu);
+                            }
+                        }
+                        if let Ok(result) = rx.try_recv() {
+                            return match result {
+                                Ok(frame::Apdu::ReadPropertyMultipleAck { results, .. }) => {
+                                    let mut out: Vec<Result<value::BacnetValue, DriverError>> =
+                                        Vec::with_capacity(specs.len());
+                                    for spec in specs {
+                                        let matched = results.iter().find(|r| {
+                                            r.object_type == spec.object_type
+                                                && r.instance == spec.instance
+                                                && r.property_id == spec.property_id
+                                        });
+                                        match matched {
+                                            Some(r) => match &r.value {
+                                                Ok(v) => out.push(Ok(v.clone())),
+                                                Err((cls, code)) => out.push(Err(
+                                                    DriverError::RemoteStatus(format!(
+                                                        "BACnet error class={cls} code={code}"
+                                                    )),
+                                                )),
+                                            },
+                                            None => out.push(Err(DriverError::CommFault(
+                                                "BACnet RPM: missing result for spec".into(),
+                                            ))),
+                                        }
+                                    }
+                                    Ok(out)
+                                }
+                                Ok(frame::Apdu::Error {
+                                    error_class,
+                                    error_code,
+                                    ..
+                                }) => Err(BacnetError::RemoteError {
+                                    class: error_class,
+                                    code: error_code,
+                                }),
+                                Ok(other) => Err(BacnetError::MalformedFrame(format!(
+                                    "unexpected APDU type: {other:?}"
+                                ))),
                                 Err(e) => Err(e),
                             };
                         }
@@ -806,12 +922,22 @@ impl AsyncDriver for BacnetDriver {
         &mut self,
         points: &[DriverPointRef],
     ) -> Vec<(u32, Result<f64, DriverError>)> {
-        let mut results = Vec::with_capacity(points.len());
+        use std::collections::HashMap;
+
+        // Group points by device_id. Points whose object isn't configured get
+        // a ConfigFault immediately. Points whose device isn't in the registry
+        // get a CommFault.
+        let mut by_device: HashMap<u32, Vec<(u32, object::BacnetObject)>> = HashMap::new();
+        let mut results: Vec<(u32, Result<f64, DriverError>)> = Vec::with_capacity(points.len());
 
         for pt in points {
-            // Look up the object config.
-            let obj = match self.objects.get(&pt.point_id).cloned() {
-                Some(o) => o,
+            match self.objects.get(&pt.point_id).cloned() {
+                Some(obj) => {
+                    by_device
+                        .entry(obj.device_id)
+                        .or_default()
+                        .push((pt.point_id, obj));
+                }
                 None => {
                     results.push((
                         pt.point_id,
@@ -820,28 +946,71 @@ impl AsyncDriver for BacnetDriver {
                             pt.point_id
                         ))),
                     ));
-                    continue;
                 }
-            };
+            }
+        }
 
-            // Look up the device address.
-            let device_addr = match self.device_registry.get(obj.device_id) {
+        for (device_id, group) in by_device {
+            let device_addr = match self.device_registry.get(device_id) {
                 Some(d) => d.addr,
                 None => {
-                    results.push((
-                        pt.point_id,
-                        Err(DriverError::CommFault(format!(
-                            "BACnet device {} not in registry",
-                            obj.device_id
-                        ))),
-                    ));
+                    for (pid, _) in &group {
+                        results.push((
+                            *pid,
+                            Err(DriverError::CommFault(format!(
+                                "BACnet device {device_id} not in registry"
+                            ))),
+                        ));
+                    }
                     continue;
                 }
             };
 
-            // Read the value.
-            let value = self.read_present_value(device_addr, &obj).await;
-            results.push((pt.point_id, value));
+            if group.len() == 1 {
+                // Single point — use the simpler read_present_value path.
+                let (pid, obj) = &group[0];
+                let res = self.read_present_value(device_addr, obj).await;
+                results.push((*pid, res));
+            } else {
+                // Multiple points — try RPM, fall back to individual reads on error.
+                let specs: Vec<frame::RpmRequestSpec> = group
+                    .iter()
+                    .map(|(_, obj)| frame::RpmRequestSpec {
+                        object_type: obj.object_type,
+                        instance: obj.instance,
+                        property_id: 85, // PresentValue
+                        array_index: None,
+                    })
+                    .collect();
+
+                match self.read_properties_multiple(device_addr, &specs).await {
+                    Ok(values) => {
+                        for ((pid, obj), val_res) in group.iter().zip(values.into_iter()) {
+                            let final_res = match val_res {
+                                Ok(v) => v
+                                    .to_f64()
+                                    .ok_or_else(|| {
+                                        DriverError::CommFault("bacnet: non-numeric value".into())
+                                    })
+                                    .map(|raw| raw * obj.scale + obj.offset),
+                                Err(e) => Err(e),
+                            };
+                            results.push((*pid, final_res));
+                        }
+                    }
+                    Err(e) => {
+                        // RPM not supported or failed — fall back to individual reads.
+                        tracing::debug!(
+                            error = %e,
+                            "BACnet RPM failed, falling back to individual ReadProperty"
+                        );
+                        for (pid, obj) in &group {
+                            let res = self.read_present_value(device_addr, obj).await;
+                            results.push((*pid, res));
+                        }
+                    }
+                }
+            }
         }
 
         results
@@ -1330,6 +1499,382 @@ mod sync_cur_unit_tests {
                 assert!((v - expected).abs() < 0.001, "expected {expected}, got {v}");
             }
             Err(e) => panic!("expected Ok value, got Err: {e:?}"),
+        }
+    }
+}
+
+// ── Phase B9: ReadPropertyMultiple tests ──────────────────
+
+#[cfg(test)]
+mod rpm_sync_tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    fn make_driver() -> BacnetDriver {
+        BacnetDriver::new("b9-test", "127.0.0.1", 0)
+    }
+
+    fn make_point(point_id: u32) -> DriverPointRef {
+        DriverPointRef {
+            point_id,
+            address: String::new(),
+        }
+    }
+
+    fn insert_object(driver: &mut BacnetDriver, point_id: u32, device_id: u32, instance: u32) {
+        driver.add_object(
+            point_id,
+            object::BacnetObject {
+                device_id,
+                object_type: 0, // Analog Input
+                instance,
+                scale: 1.0,
+                offset: 0.0,
+                unit: None,
+            },
+        );
+    }
+
+    fn insert_device(driver: &mut BacnetDriver, device_id: u32, port: u16) {
+        driver.device_registry.insert(DeviceInfo {
+            instance: device_id,
+            addr: format!("127.0.0.1:{port}").parse().unwrap(),
+            max_apdu: 1476,
+            vendor_id: 8,
+            segmentation: 3,
+        });
+    }
+
+    fn find_free_port() -> u16 {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    }
+
+    /// Parse invoke_id from an APDU byte slice that starts at BVLL byte 0.
+    /// For Confirmed-Request: byte offset 8 (BVLL 4 + NPDU 2 + APDU hdr 2).
+    fn parse_invoke_id_confirmed(buf: &[u8]) -> u8 {
+        if buf.len() >= 9 {
+            buf[8]
+        } else {
+            0
+        }
+    }
+
+    /// Parse service choice from a Confirmed-Request APDU.
+    fn parse_service_choice(buf: &[u8]) -> u8 {
+        if buf.len() >= 10 {
+            buf[9]
+        } else {
+            0
+        }
+    }
+
+    // ── Test 1: single point path ──────────────────────────
+
+    #[tokio::test]
+    async fn sync_cur_single_point_uses_read_present_value() {
+        // Single configured point with no registered device — should yield
+        // a CommFault (device not in registry) but preserve the point_id.
+        let mut d = make_driver();
+        insert_object(&mut d, 500, 42, 1);
+        let pts = [make_point(500)];
+        let result = d.sync_cur(&pts).await;
+        assert_eq!(result.len(), 1);
+        let (id, err) = &result[0];
+        assert_eq!(*id, 500);
+        assert!(
+            matches!(err, Err(DriverError::CommFault(_))),
+            "expected CommFault (device not in registry), got {err:?}"
+        );
+    }
+
+    // ── Test 2: grouping by device ─────────────────────────
+
+    #[tokio::test]
+    async fn sync_cur_groups_points_by_device() {
+        // 3 points: 2 on device 10, 1 on device 20 — no devices registered,
+        // so each group emits CommFault. We verify every point_id is present
+        // in the results regardless of grouping order.
+        let mut d = make_driver();
+        insert_object(&mut d, 601, 10, 1);
+        insert_object(&mut d, 602, 10, 2);
+        insert_object(&mut d, 603, 20, 5);
+
+        let pts = [make_point(601), make_point(602), make_point(603)];
+        let result = d.sync_cur(&pts).await;
+        assert_eq!(result.len(), 3);
+        let ids: Vec<u32> = result.iter().map(|(id, _)| *id).collect();
+        assert!(ids.contains(&601));
+        assert!(ids.contains(&602));
+        assert!(ids.contains(&603));
+        for (_, r) in &result {
+            assert!(
+                matches!(r, Err(DriverError::CommFault(_))),
+                "expected CommFault, got {r:?}"
+            );
+        }
+    }
+
+    // ── Test 3: unknown point still returns ConfigFault ────
+
+    #[tokio::test]
+    async fn sync_cur_unknown_point_still_returns_config_fault() {
+        let mut d = make_driver();
+        let pts = [make_point(9001)];
+        let result = d.sync_cur(&pts).await;
+        assert_eq!(result.len(), 1);
+        let (id, err) = &result[0];
+        assert_eq!(*id, 9001);
+        assert!(
+            matches!(err, Err(DriverError::ConfigFault(_))),
+            "expected ConfigFault, got {err:?}"
+        );
+    }
+
+    // ── Test 4: device not in registry → CommFault for group ──
+
+    #[tokio::test]
+    async fn sync_cur_device_not_in_registry_returns_comm_fault_for_group() {
+        let mut d = make_driver();
+        // Two points both mapped to device_id=42, no device registered.
+        insert_object(&mut d, 701, 42, 1);
+        insert_object(&mut d, 702, 42, 2);
+
+        let pts = [make_point(701), make_point(702)];
+        let result = d.sync_cur(&pts).await;
+        assert_eq!(result.len(), 2);
+        for (_, r) in &result {
+            assert!(
+                matches!(r, Err(DriverError::CommFault(_))),
+                "expected CommFault, got {r:?}"
+            );
+        }
+        let ids: Vec<u32> = result.iter().map(|(id, _)| *id).collect();
+        assert!(ids.contains(&701));
+        assert!(ids.contains(&702));
+    }
+
+    // ── Test 5: mock RPM happy-path ────────────────────────
+
+    #[tokio::test]
+    async fn read_properties_multiple_mock_success() {
+        let mock_port = find_free_port();
+
+        // Spawn a mock UDP server that replies to a single RPM request with
+        // an RPM-ACK containing two AI values: AI-0 -> 10.0, AI-1 -> 20.0.
+        tokio::spawn(async move {
+            let sock = tokio::net::UdpSocket::bind(format!("127.0.0.1:{mock_port}"))
+                .await
+                .expect("mock bind");
+            let mut buf = [0u8; 1500];
+            if let Ok((n, from)) = sock.recv_from(&mut buf).await {
+                let invoke_id = parse_invoke_id_confirmed(&buf[..n]);
+                let results = vec![
+                    frame::RpmResult {
+                        object_type: 0,
+                        instance: 0,
+                        property_id: 85,
+                        array_index: None,
+                        value: Ok(value::BacnetValue::Real(10.0)),
+                    },
+                    frame::RpmResult {
+                        object_type: 0,
+                        instance: 1,
+                        property_id: 85,
+                        array_index: None,
+                        value: Ok(value::BacnetValue::Real(20.0)),
+                    },
+                ];
+                let ack = frame::encode_read_property_multiple_ack(invoke_id, &results);
+                let _ = sock.send_to(&ack, from).await;
+            }
+        });
+
+        // Give the mock time to bind.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // Build driver with a real socket and point it at the mock.
+        let mut driver = make_driver();
+        driver.socket = Some(
+            tokio::net::UdpSocket::bind("127.0.0.1:0")
+                .await
+                .expect("driver socket bind"),
+        );
+        driver.status = DriverStatus::Ok;
+        insert_device(&mut driver, 42, mock_port);
+
+        let device_addr = driver.device_registry.get(42).unwrap().addr;
+        let specs = vec![
+            frame::RpmRequestSpec {
+                object_type: 0,
+                instance: 0,
+                property_id: 85,
+                array_index: None,
+            },
+            frame::RpmRequestSpec {
+                object_type: 0,
+                instance: 1,
+                property_id: 85,
+                array_index: None,
+            },
+        ];
+
+        let result = driver
+            .read_properties_multiple(device_addr, &specs)
+            .await
+            .expect("rpm should succeed");
+        assert_eq!(result.len(), 2);
+        match &result[0] {
+            Ok(value::BacnetValue::Real(v)) => assert!((v - 10.0).abs() < 0.001),
+            other => panic!("expected Real(10.0), got {other:?}"),
+        }
+        match &result[1] {
+            Ok(value::BacnetValue::Real(v)) => assert!((v - 20.0).abs() < 0.001),
+            other => panic!("expected Real(20.0), got {other:?}"),
+        }
+    }
+
+    // ── Test 6: mock replies with Error PDU ────────────────
+
+    #[tokio::test]
+    async fn read_properties_multiple_mock_batch_error_pdu() {
+        let mock_port = find_free_port();
+
+        tokio::spawn(async move {
+            let sock = tokio::net::UdpSocket::bind(format!("127.0.0.1:{mock_port}"))
+                .await
+                .expect("mock bind");
+            let mut buf = [0u8; 1500];
+            if let Ok((n, from)) = sock.recv_from(&mut buf).await {
+                let invoke_id = parse_invoke_id_confirmed(&buf[..n]);
+                let err = frame::encode_error_pdu(
+                    invoke_id,
+                    frame::SVC_CONFIRMED_READ_PROPERTY_MULTIPLE,
+                    2,
+                    31,
+                );
+                let _ = sock.send_to(&err, from).await;
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let mut driver = make_driver();
+        driver.socket = Some(
+            tokio::net::UdpSocket::bind("127.0.0.1:0")
+                .await
+                .expect("driver socket bind"),
+        );
+        driver.status = DriverStatus::Ok;
+        insert_device(&mut driver, 42, mock_port);
+
+        let device_addr = driver.device_registry.get(42).unwrap().addr;
+        let specs = vec![frame::RpmRequestSpec {
+            object_type: 0,
+            instance: 0,
+            property_id: 85,
+            array_index: None,
+        }];
+
+        let result = driver.read_properties_multiple(device_addr, &specs).await;
+        match result {
+            Err(BacnetError::RemoteError { class, code }) => {
+                assert_eq!(class, 2);
+                assert_eq!(code, 31);
+            }
+            other => panic!("expected RemoteError, got {other:?}"),
+        }
+    }
+
+    // ── Test 7: sync_cur fallback to individual reads ─────
+
+    #[tokio::test]
+    async fn sync_cur_falls_back_to_individual_reads_on_rpm_error() {
+        let mock_port = find_free_port();
+
+        // Mock responds to:
+        //   1. RPM request → Error PDU (service = 0x0E)
+        //   2. First ReadProperty request → ReadPropertyAck(Real 30.0)
+        //   3. Second ReadProperty request → ReadPropertyAck(Real 40.0)
+        tokio::spawn(async move {
+            let sock = tokio::net::UdpSocket::bind(format!("127.0.0.1:{mock_port}"))
+                .await
+                .expect("mock bind");
+            let mut buf = [0u8; 1500];
+
+            // 1: RPM request → Error PDU
+            if let Ok((n, from)) = sock.recv_from(&mut buf).await {
+                let invoke_id = parse_invoke_id_confirmed(&buf[..n]);
+                let svc = parse_service_choice(&buf[..n]);
+                // Only respond with Error if it's actually an RPM request.
+                if svc == frame::SVC_CONFIRMED_READ_PROPERTY_MULTIPLE {
+                    let err = frame::encode_error_pdu(invoke_id, svc, 2, 31);
+                    let _ = sock.send_to(&err, from).await;
+                }
+            }
+
+            // 2 & 3: two ReadProperty requests → acks with real values.
+            for value_f in [30.0f32, 40.0f32] {
+                if let Ok((n, from)) = sock.recv_from(&mut buf).await {
+                    let invoke_id = parse_invoke_id_confirmed(&buf[..n]);
+                    // Read object_type (bytes 11..13) and instance from the request
+                    // to mirror it back correctly. Instance is encoded in the
+                    // low 22 bits of the 4-byte ObjectId at offset 11.
+                    let (object_type, instance) = if n >= 15 && buf[10] == 0x0C {
+                        let raw = u32::from_be_bytes([buf[11], buf[12], buf[13], buf[14]]);
+                        (((raw >> 22) & 0x3FF) as u16, raw & 0x003F_FFFF)
+                    } else {
+                        (0, 0)
+                    };
+                    let ack = frame::encode_read_property_ack(
+                        invoke_id,
+                        object_type,
+                        instance,
+                        85,
+                        &value::BacnetValue::Real(value_f),
+                    );
+                    let _ = sock.send_to(&ack, from).await;
+                }
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let mut driver = make_driver();
+        driver.socket = Some(
+            tokio::net::UdpSocket::bind("127.0.0.1:0")
+                .await
+                .expect("driver socket bind"),
+        );
+        driver.status = DriverStatus::Ok;
+        insert_device(&mut driver, 42, mock_port);
+        // Two points on the same device → triggers the RPM path.
+        insert_object(&mut driver, 801, 42, 0);
+        insert_object(&mut driver, 802, 42, 1);
+
+        let pts = [make_point(801), make_point(802)];
+        let results = driver.sync_cur(&pts).await;
+        assert_eq!(results.len(), 2);
+        // Build a map so we don't depend on iteration order (HashMap).
+        let map: std::collections::HashMap<u32, &Result<f64, DriverError>> =
+            results.iter().map(|(id, r)| (*id, r)).collect();
+
+        let r801 = map.get(&801).expect("801 missing").as_ref();
+        let r802 = map.get(&802).expect("802 missing").as_ref();
+
+        match r801 {
+            Ok(v) => assert!(
+                (*v - 30.0).abs() < 0.001 || (*v - 40.0).abs() < 0.001,
+                "expected 30 or 40, got {v}"
+            ),
+            Err(e) => panic!("expected Ok for 801, got {e:?}"),
+        }
+        match r802 {
+            Ok(v) => assert!(
+                (*v - 30.0).abs() < 0.001 || (*v - 40.0).abs() < 0.001,
+                "expected 30 or 40, got {v}"
+            ),
+            Err(e) => panic!("expected Ok for 802, got {e:?}"),
         }
     }
 }
