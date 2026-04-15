@@ -240,6 +240,8 @@ fn apdu_invoke_id(apdu: &frame::Apdu) -> Option<u8> {
     match apdu {
         frame::Apdu::ReadPropertyRequest { invoke_id, .. } => Some(*invoke_id),
         frame::Apdu::ReadPropertyAck { invoke_id, .. } => Some(*invoke_id),
+        frame::Apdu::WritePropertyRequest { invoke_id, .. } => Some(*invoke_id),
+        frame::Apdu::SimpleAck { invoke_id, .. } => Some(*invoke_id),
         frame::Apdu::Error { invoke_id, .. } => Some(*invoke_id),
         frame::Apdu::Other { invoke_id, .. } => Some(*invoke_id),
         frame::Apdu::WhoIs { .. } | frame::Apdu::IAm { .. } => None,
@@ -550,6 +552,111 @@ impl BacnetDriver {
             ))),
         }
     }
+
+    /// Write a property-value to a BACnet object.
+    ///
+    /// Mirrors [`Self::read_present_value`]: sends a WriteProperty request,
+    /// retries up to three times (3 second per-attempt timeout), and
+    /// dispatches incoming frames to the transaction table until a matching
+    /// response arrives.
+    ///
+    /// Returns:
+    /// * `Ok(())` when the device sends a Simple-ACK.
+    /// * [`DriverError::RemoteStatus`] on Error PDU.
+    /// * [`DriverError::CommFault`] on timeout, socket error, or unexpected
+    ///   response type.
+    async fn write_property(
+        &mut self,
+        device_addr: std::net::SocketAddr,
+        object_type: u16,
+        object_instance: u32,
+        property_id: u32,
+        value: value::BacnetValue,
+        priority: Option<u8>,
+    ) -> Result<(), DriverError> {
+        // NLL split borrow of self.socket / self.transactions (different fields).
+        let socket = self
+            .socket
+            .as_ref()
+            .ok_or_else(|| DriverError::CommFault("bacnet: not connected".into()))?;
+
+        let (invoke_id, rx) = self
+            .transactions
+            .allocate()
+            .ok_or_else(|| DriverError::CommFault("bacnet: no invoke IDs available".into()))?;
+
+        let request = frame::encode_write_property(
+            invoke_id,
+            object_type,
+            object_instance,
+            property_id,
+            &value,
+            None, // array_index
+            priority,
+        );
+
+        let per_attempt = Duration::from_secs(3);
+        let max_retries = 3u32;
+        let mut buf = [0u8; 1500];
+        let mut rx = rx;
+
+        'retry: for attempt in 0..=max_retries {
+            if let Err(e) = socket.send_to(&request, device_addr).await {
+                return Err(DriverError::CommFault(format!("bacnet send: {e}")));
+            }
+
+            let deadline = tokio::time::Instant::now() + per_attempt;
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    if attempt < max_retries {
+                        continue 'retry;
+                    } else {
+                        break 'retry;
+                    }
+                }
+
+                match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
+                    Err(_) => {
+                        if attempt < max_retries {
+                            continue 'retry;
+                        } else {
+                            break 'retry;
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        return Err(DriverError::CommFault(format!("bacnet recv: {e}")));
+                    }
+                    Ok(Ok((n, _src))) => {
+                        if let Ok((_npdu, apdu)) = frame::decode_packet(&buf[..n]) {
+                            if let Some(id) = apdu_invoke_id(&apdu) {
+                                self.transactions.dispatch(id, apdu);
+                            }
+                        }
+                        if let Ok(result) = rx.try_recv() {
+                            return match result {
+                                Ok(frame::Apdu::SimpleAck { .. }) => Ok(()),
+                                Ok(frame::Apdu::Error {
+                                    error_class,
+                                    error_code,
+                                    ..
+                                }) => Err(DriverError::RemoteStatus(format!(
+                                    "BACnet error class={error_class} code={error_code}"
+                                ))),
+                                Ok(other) => Err(DriverError::CommFault(format!(
+                                    "bacnet: unexpected response: {other:?}"
+                                ))),
+                                Err(e) => Err(DriverError::CommFault(e.to_string())),
+                            };
+                        }
+                    }
+                }
+            }
+        }
+
+        self.transactions.timeout(invoke_id);
+        Err(DriverError::CommFault("bacnet write timeout".into()))
+    }
 }
 
 // ── AsyncDriver impl ───────────────────────────────────────
@@ -740,9 +847,74 @@ impl AsyncDriver for BacnetDriver {
         results
     }
 
-    async fn write(&mut self, _writes: &[(u32, f64)]) -> Vec<(u32, Result<(), DriverError>)> {
-        // Phase B3 will implement WriteProperty requests here.
-        Vec::new()
+    async fn write(&mut self, writes: &[(u32, f64)]) -> Vec<(u32, Result<(), DriverError>)> {
+        let mut results = Vec::with_capacity(writes.len());
+
+        for &(point_id, val) in writes {
+            // Look up the BacnetObject config for this Sandstar point.
+            let obj = match self.objects.get(&point_id).cloned() {
+                Some(o) => o,
+                None => {
+                    results.push((
+                        point_id,
+                        Err(DriverError::ConfigFault(format!(
+                            "no BACnet object configured for point {point_id}"
+                        ))),
+                    ));
+                    continue;
+                }
+            };
+
+            // Look up the device's UDP address.
+            let device_addr = match self.device_registry.get(obj.device_id) {
+                Some(d) => d.addr,
+                None => {
+                    results.push((
+                        point_id,
+                        Err(DriverError::CommFault(format!(
+                            "BACnet device {} not in registry",
+                            obj.device_id
+                        ))),
+                    ));
+                    continue;
+                }
+            };
+
+            // Invert the sync_cur conversion: val = raw * scale + offset,
+            // so raw = (val - offset) / scale.
+            let raw = if obj.scale != 0.0 {
+                (val - obj.offset) / obj.scale
+            } else {
+                val
+            };
+
+            // Choose the BACnet application tag based on object type:
+            //   0=AI, 1=AO, 2=AV → Real
+            //   3=BI, 4=BO, 5=BV → Enumerated (0=inactive, 1=active)
+            let bv = match obj.object_type {
+                0..=2 => value::BacnetValue::Real(raw as f32),
+                3..=5 => value::BacnetValue::Enumerated(if raw != 0.0 { 1 } else { 0 }),
+                _ => {
+                    results.push((
+                        point_id,
+                        Err(DriverError::ConfigFault(format!(
+                            "unsupported object type {} for write",
+                            obj.object_type
+                        ))),
+                    ));
+                    continue;
+                }
+            };
+
+            // Priority 16 = lowest; a higher-priority command automatically
+            // wins via BACnet's priority-array mechanism.
+            let result = self
+                .write_property(device_addr, obj.object_type, obj.instance, 85, bv, Some(16))
+                .await;
+            results.push((point_id, result));
+        }
+
+        results
     }
 
     fn poll_mode(&self) -> PollMode {
@@ -1849,6 +2021,227 @@ mod config_tests {
         );
         unsafe {
             std::env::remove_var("SANDSTAR_BACNET_CONFIGS");
+        }
+    }
+}
+
+// ── Phase B7 write() tests ────────────────────────────────
+
+#[cfg(test)]
+mod write_tests {
+    use super::*;
+
+    fn make_driver() -> BacnetDriver {
+        BacnetDriver::new("b7-test", "127.0.0.1", 0)
+    }
+
+    /// Build a minimal driver with an open socket bound to an OS-assigned port
+    /// and a registered device pointing at `mock_addr`.
+    async fn make_ready_driver(mock_addr: std::net::SocketAddr) -> BacnetDriver {
+        let mut d = make_driver();
+        d.socket = Some(
+            tokio::net::UdpSocket::bind("127.0.0.1:0")
+                .await
+                .expect("bind driver socket"),
+        );
+        d.status = DriverStatus::Ok;
+        d.device_registry.insert(DeviceInfo {
+            instance: 42,
+            addr: mock_addr,
+            max_apdu: 1476,
+            vendor_id: 999,
+            segmentation: 3,
+        });
+        d
+    }
+
+    // ── Test 1 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn write_empty_returns_empty() {
+        let mut d = make_driver();
+        let result = d.write(&[]).await;
+        assert!(result.is_empty());
+    }
+
+    // ── Test 2 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn write_unknown_point_returns_config_fault() {
+        let mut d = make_driver();
+        let result = d.write(&[(999, 1.0)]).await;
+        assert_eq!(result.len(), 1);
+        let (id, err) = &result[0];
+        assert_eq!(*id, 999);
+        assert!(
+            matches!(err, Err(DriverError::ConfigFault(_))),
+            "expected ConfigFault, got {err:?}"
+        );
+    }
+
+    // ── Test 3 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn write_device_not_in_registry_returns_comm_fault() {
+        let mut d = make_driver();
+        d.add_object(
+            100,
+            object::BacnetObject {
+                device_id: 42,
+                object_type: 1, // Analog Output
+                instance: 5,
+                scale: 1.0,
+                offset: 0.0,
+                unit: None,
+            },
+        );
+        // Note: registry is empty — device 42 is unknown.
+        let result = d.write(&[(100, 50.0)]).await;
+        assert_eq!(result.len(), 1);
+        let (id, err) = &result[0];
+        assert_eq!(*id, 100);
+        assert!(
+            matches!(err, Err(DriverError::CommFault(_))),
+            "expected CommFault, got {err:?}"
+        );
+    }
+
+    // ── Test 4 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn write_object_type_out_of_range_returns_config_fault() {
+        let mut d = make_driver();
+        d.add_object(
+            200,
+            object::BacnetObject {
+                device_id: 42,
+                object_type: 99, // unsupported
+                instance: 1,
+                scale: 1.0,
+                offset: 0.0,
+                unit: None,
+            },
+        );
+        d.device_registry.insert(DeviceInfo {
+            instance: 42,
+            addr: "127.0.0.1:47808".parse().unwrap(),
+            max_apdu: 1476,
+            vendor_id: 8,
+            segmentation: 3,
+        });
+        let result = d.write(&[(200, 1.0)]).await;
+        assert_eq!(result.len(), 1);
+        let (_id, err) = &result[0];
+        match err {
+            Err(DriverError::ConfigFault(msg)) => {
+                assert!(
+                    msg.contains("unsupported object type"),
+                    "msg should mention unsupported object type, got: {msg}"
+                );
+            }
+            other => panic!("expected ConfigFault, got {other:?}"),
+        }
+    }
+
+    // ── Test 5 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn write_property_direct_mock_socket_success() {
+        // Bind the mock UDP socket BEFORE spawning the task to eliminate any
+        // TOCTOU race between `find_free_port` and the task's bind.
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("mock bind");
+        let mock_addr: std::net::SocketAddr = sock.local_addr().unwrap();
+
+        // Mock UDP responder: reads incoming WriteProperty, extracts the
+        // invoke_id from byte [8], replies with a Simple-ACK.
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1500];
+            if let Ok((n, from)) = sock.recv_from(&mut buf).await {
+                let invoke_id = if n >= 9 { buf[8] } else { 0 };
+                // Sanity-check that it's a WriteProperty confirmed-request.
+                // Frame layout: [BVLL(4) .. NPDU(2) .. APDU]
+                //   APDU[0]=0x00 (Confirmed-Req), APDU[1]=max-seg/max-apdu,
+                //   APDU[2]=invoke_id, APDU[3]=service_choice(0x0F)
+                if n >= 10 {
+                    assert_eq!(buf[9], 0x0F, "service choice should be WriteProperty");
+                }
+                let reply = frame::encode_simple_ack(invoke_id, 0x0F);
+                let _ = sock.send_to(&reply, from).await;
+            }
+        });
+
+        let mut driver = make_ready_driver(mock_addr).await;
+
+        // Call write_property directly — we want to isolate the write path
+        // from the public write() dispatcher.
+        let result = driver
+            .write_property(
+                mock_addr,
+                1, // Analog Output
+                5,
+                85, // Present_Value
+                value::BacnetValue::Real(50.0),
+                Some(16),
+            )
+            .await;
+
+        assert!(result.is_ok(), "expected Ok(()), got {result:?}");
+    }
+
+    // ── Test 6 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn write_property_direct_mock_error_pdu() {
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("mock bind");
+        let mock_addr: std::net::SocketAddr = sock.local_addr().unwrap();
+
+        // Mock UDP responder: replies with an Error PDU instead of Simple-ACK.
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1500];
+            if let Ok((n, from)) = sock.recv_from(&mut buf).await {
+                let invoke_id = if n >= 9 { buf[8] } else { 0 };
+
+                // Build an Error PDU:
+                //   [0x50, invoke_id, service_choice,
+                //    0x91, class, 0x91, code]
+                // wrapped in BVLL(4)+NPDU(2).
+                let apdu: Vec<u8> = vec![
+                    0x50, invoke_id, 0x0F, // service choice = WriteProperty
+                    0x91, 0x02, // error class = 2 (object)
+                    0x91, 0x1F, // error code = 31 (write-access-denied)
+                ];
+                let total_len = (4u16 + 2 + apdu.len() as u16).to_be_bytes();
+                let mut frame = vec![0x81, 0x0A, total_len[0], total_len[1], 0x01, 0x00];
+                frame.extend_from_slice(&apdu);
+                let _ = sock.send_to(&frame, from).await;
+            }
+        });
+
+        let mut driver = make_ready_driver(mock_addr).await;
+
+        let result = driver
+            .write_property(
+                mock_addr,
+                1,
+                5,
+                85,
+                value::BacnetValue::Real(50.0),
+                Some(16),
+            )
+            .await;
+
+        match result {
+            Err(DriverError::RemoteStatus(msg)) => {
+                assert!(
+                    msg.contains("class=2") && msg.contains("code=31"),
+                    "error message should mention class/code, got: {msg}"
+                );
+            }
+            other => panic!("expected RemoteStatus, got {other:?}"),
         }
     }
 }

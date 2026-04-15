@@ -78,6 +78,14 @@ def make_i_am():
     apdu += encode_unsigned(VENDOR_ID)
     return build_bvll(0x0A, apdu)  # BVLL unicast
 
+def parse_confirmed_request(apdu):
+    """Parse a Confirmed-Request APDU header.
+    Returns (invoke_id, service, payload_offset) or None.
+    """
+    if len(apdu) < 4 or (apdu[0] & 0xF0) != 0x00:
+        return None
+    return (apdu[2], apdu[3], 4)
+
 def parse_read_property(apdu):
     """Parse a Confirmed-Request ReadProperty APDU.
     Returns (invoke_id, object_type, instance, property_id, array_index) or None.
@@ -173,6 +181,16 @@ def main():
                 s.sendto(reply, addr)
                 print(f"  TX I-Am -> {addr}: {reply.hex()}", flush=True)
         elif pdu_type == 0x00:  # Confirmed-Request
+            header = parse_confirmed_request(apdu)
+            if header is None:
+                continue
+            iid, service, _ = header
+            if service == 0x0F:  # WriteProperty
+                # Simple-ACK: [0x81, 0x0A, 0x00, 0x09, 0x01, 0x00, 0x20, iid, 0x0F]
+                ack = bytes([0x81, 0x0A, 0x00, 0x09, 0x01, 0x00, 0x20, iid, 0x0F])
+                s.sendto(ack, addr)
+                print(f"  WriteProperty invoke={iid} -> TX Simple-ACK {ack.hex()}", flush=True)
+                continue
             parsed = parse_read_property(apdu)
             if parsed:
                 iid, ot, inst, pid, aidx = parsed

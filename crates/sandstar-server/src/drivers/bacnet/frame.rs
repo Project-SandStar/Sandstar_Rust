@@ -46,6 +46,8 @@ pub const SVC_UNCONFIRMED_IAM: u8 = 0x00;
 pub const SVC_UNCONFIRMED_WHOIS: u8 = 0x08;
 /// Confirmed service: ReadProperty.
 pub const SVC_CONFIRMED_READ_PROPERTY: u8 = 0x0C;
+/// Confirmed service: WriteProperty.
+pub const SVC_CONFIRMED_WRITE_PROPERTY: u8 = 0x0F;
 
 // ── Header structs ─────────────────────────────────────────
 
@@ -110,6 +112,19 @@ pub enum Apdu {
         error_class: u32,
         error_code: u32,
     },
+    /// Confirmed WriteProperty request.
+    WritePropertyRequest {
+        invoke_id: u8,
+        object_type: u16,
+        instance: u32,
+        property_id: u32,
+        array_index: Option<u32>,
+        value: BacnetValue,
+        priority: Option<u8>,
+    },
+    /// Simple-ACK PDU (PDU type 0x20) — acknowledges a confirmed service
+    /// that returns no result data (e.g. WriteProperty).
+    SimpleAck { invoke_id: u8, service_choice: u8 },
     /// Catch-all for PDU types / services not explicitly handled above.
     ///
     /// Used internally by `TransactionTable` tests and returned for
@@ -296,6 +311,90 @@ pub fn encode_read_property_ack_multi(
     build_packet(BVLL_UNICAST, apdu)
 }
 
+/// Encode a Simple-ACK PDU (PDU type 0x20).
+///
+/// Used to acknowledge confirmed services with no result data
+/// (e.g. WriteProperty). Mostly used in tests as the mock-device reply.
+pub fn encode_simple_ack(invoke_id: u8, service_choice: u8) -> Vec<u8> {
+    let apdu: Vec<u8> = vec![
+        0x20, // PDU type = Simple-ACK
+        invoke_id,
+        service_choice,
+    ];
+    build_packet(BVLL_UNICAST, apdu)
+}
+
+/// Encode a WriteProperty-Request (Confirmed-Request) frame.
+///
+/// # Arguments
+/// * `invoke_id`    – 0–255 transaction ID
+/// * `object_type`  – BACnet object type (0=AI, 1=AO, 2=AV, …)
+/// * `instance`     – Object instance number (22 bits max)
+/// * `property_id`  – Property identifier (e.g. 85 = Present_Value)
+/// * `value`        – the application-tagged value to write
+/// * `array_index`  – optional array index for array properties
+/// * `priority`     – optional write priority (1-16, 1=highest, 16=auto-relinquish).
+///   Most callers should pass `Some(16)` or `None` (=16 default).
+///
+/// # Wire layout
+/// ```text
+/// APDU:
+///   0x00              PDU type = Confirmed-Request (no segmentation)
+///   0x05              max-segments=0, max-apdu=1476
+///   invoke_id
+///   0x0F              service-choice = WriteProperty
+///   context 0: ObjectIdentifier   (0x0C + 4 bytes)
+///   context 1: PropertyIdentifier
+///   context 2 (optional): ArrayIndex
+///   context 3 opening (0x3E)
+///     application-tagged value
+///   context 3 closing (0x3F)
+///   context 4 (optional): Priority
+/// ```
+pub fn encode_write_property(
+    invoke_id: u8,
+    object_type: u16,
+    instance: u32,
+    property_id: u32,
+    value: &super::value::BacnetValue,
+    array_index: Option<u32>,
+    priority: Option<u8>,
+) -> Vec<u8> {
+    let mut apdu: Vec<u8> = vec![
+        0x00, // PDU type = Confirmed-Request, no segmentation
+        0x05, // max-segments=unspecified (0), max-apdu=1476 (5)
+        invoke_id,
+        SVC_CONFIRMED_WRITE_PROPERTY,
+    ];
+
+    // Context tag 0: ObjectIdentifier (4 bytes)
+    // Tag byte: (0 << 4) | 0x08 | 4 = 0x0C
+    let obj_id = ((object_type as u32) << 22) | (instance & 0x003F_FFFF);
+    apdu.push(0x0C);
+    apdu.extend_from_slice(&obj_id.to_be_bytes());
+
+    // Context tag 1: PropertyIdentifier
+    encode_context_unsigned(&mut apdu, 1, property_id);
+
+    // Context tag 2: ArrayIndex (optional)
+    if let Some(idx) = array_index {
+        encode_context_unsigned(&mut apdu, 2, idx);
+    }
+
+    // Context tag 3: property-value opening (0x3E)
+    apdu.push(0x3E);
+    encode_bacnet_value(&mut apdu, value);
+    // Context tag 3: property-value closing (0x3F)
+    apdu.push(0x3F);
+
+    // Context tag 4: Priority (optional)
+    if let Some(prio) = priority {
+        encode_context_unsigned(&mut apdu, 4, prio as u32);
+    }
+
+    build_packet(BVLL_UNICAST, apdu)
+}
+
 /// Encode a single `BacnetValue` as application-tagged bytes.
 fn encode_bacnet_value(buf: &mut Vec<u8>, val: &super::value::BacnetValue) {
     use super::value::BacnetValue::*;
@@ -475,6 +574,7 @@ pub fn decode_apdu(data: &[u8]) -> Result<Apdu, BacnetError> {
     match pdu_type {
         0x00 => decode_confirmed_request(data),
         0x10 => decode_unconfirmed_request(data),
+        0x20 => decode_simple_ack(data),
         0x30 => decode_complex_ack(data),
         0x50 => decode_error_pdu(data),
         _ => Ok(Apdu::Other {
@@ -483,6 +583,18 @@ pub fn decode_apdu(data: &[u8]) -> Result<Apdu, BacnetError> {
             data: data.to_vec(),
         }),
     }
+}
+
+/// Decode a Simple-ACK PDU (PDU type 0x20).
+/// Layout: `[0x20, invoke_id, service_choice]`.
+fn decode_simple_ack(data: &[u8]) -> Result<Apdu, BacnetError> {
+    if data.len() < 3 {
+        return Err(BacnetError::MalformedFrame("Simple-ACK too short".into()));
+    }
+    Ok(Apdu::SimpleAck {
+        invoke_id: data[1],
+        service_choice: data[2],
+    })
 }
 
 /// Full packet decode: BVLL → NPDU → APDU.
@@ -509,6 +621,7 @@ fn decode_confirmed_request(data: &[u8]) -> Result<Apdu, BacnetError> {
 
     match service {
         SVC_CONFIRMED_READ_PROPERTY => decode_read_property_request(invoke_id, &data[4..]),
+        SVC_CONFIRMED_WRITE_PROPERTY => decode_write_property_request(invoke_id, &data[4..]),
         _ => Ok(Apdu::Other {
             pdu_type: data[0],
             invoke_id,
@@ -693,6 +806,103 @@ fn decode_read_property_request(invoke_id: u8, payload: &[u8]) -> Result<Apdu, B
         instance,
         property_id: prop_id,
         array_index,
+    })
+}
+
+/// Decode a WriteProperty-Request payload (after invoke_id and service byte).
+///
+/// Layout mirrors `decode_read_property_request` but additionally parses the
+/// `0x3E ... 0x3F` property-value wrapper and an optional context tag 4 (priority).
+fn decode_write_property_request(invoke_id: u8, payload: &[u8]) -> Result<Apdu, BacnetError> {
+    // Context tag 0: ObjectIdentifier — tag byte 0x0C
+    if payload.len() < 5 {
+        return Err(BacnetError::MalformedFrame(
+            "WriteProperty request: ObjectId truncated".into(),
+        ));
+    }
+    if payload[0] != 0x0C {
+        return Err(BacnetError::MalformedFrame(format!(
+            "WriteProperty request: expected context tag 0 (0x0C), got 0x{:02X}",
+            payload[0]
+        )));
+    }
+    let raw_id = u32::from_be_bytes([payload[1], payload[2], payload[3], payload[4]]);
+    let object_type = ((raw_id >> 22) & 0x3FF) as u16;
+    let instance = raw_id & 0x003F_FFFF;
+    let mut pos = 5;
+
+    // Context tag 1: PropertyIdentifier
+    let (prop_id, consumed) = read_context_unsigned(&payload[pos..], 1)?;
+    pos += consumed;
+
+    // Optional context tag 2: ArrayIndex
+    let array_index = if pos < payload.len() {
+        let tag_byte = payload[pos];
+        let tag_num = (tag_byte >> 4) & 0x0F;
+        let is_context = (tag_byte & 0x08) != 0;
+        if is_context && tag_num == 2 {
+            let (idx, consumed) = read_context_unsigned(&payload[pos..], 2)?;
+            pos += consumed;
+            Some(idx)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Opening tag 3: 0x3E
+    if pos >= payload.len() || payload[pos] != 0x3E {
+        return Err(BacnetError::MalformedFrame(format!(
+            "WriteProperty request: expected opening tag 3 (0x3E) at pos {pos}, got 0x{:02X}",
+            if pos < payload.len() { payload[pos] } else { 0 }
+        )));
+    }
+    pos += 1;
+
+    // Application-tagged value (single value between 0x3E and 0x3F)
+    if pos >= payload.len() {
+        return Err(BacnetError::MalformedFrame(
+            "WriteProperty request: value truncated".into(),
+        ));
+    }
+    let (value, consumed) = decode_application_tag(&payload[pos..])?;
+    pos += consumed;
+
+    // Closing tag 3: 0x3F
+    if pos >= payload.len() || payload[pos] != 0x3F {
+        return Err(BacnetError::MalformedFrame(format!(
+            "WriteProperty request: expected closing tag 3 (0x3F) at pos {pos}, got 0x{:02X}",
+            if pos < payload.len() { payload[pos] } else { 0 }
+        )));
+    }
+    pos += 1;
+
+    // Optional context tag 4: Priority
+    let priority = if pos < payload.len() {
+        let tag_byte = payload[pos];
+        let tag_num = (tag_byte >> 4) & 0x0F;
+        let is_context = (tag_byte & 0x08) != 0;
+        if is_context && tag_num == 4 {
+            let (prio, consumed) = read_context_unsigned(&payload[pos..], 4)?;
+            pos += consumed;
+            let _ = pos;
+            Some(prio as u8)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(Apdu::WritePropertyRequest {
+        invoke_id,
+        object_type,
+        instance,
+        property_id: prop_id,
+        array_index,
+        value,
+        priority,
     })
 }
 
@@ -1411,11 +1621,20 @@ mod tests {
     }
 
     #[test]
-    fn decode_apdu_simple_ack_returns_other() {
-        // Simple-ACK (0x20) is returned as Other
-        let pkt = [0x20, 0x05, 0x0C];
+    fn decode_apdu_simple_ack_decodes_to_simple_ack_variant() {
+        // Simple-ACK (0x20) is now decoded to Apdu::SimpleAck.
+        let pkt = [0x20, 0x05, 0x0F];
         let apdu = decode_apdu(&pkt).unwrap();
-        assert!(matches!(apdu, Apdu::Other { .. }));
+        match apdu {
+            Apdu::SimpleAck {
+                invoke_id,
+                service_choice,
+            } => {
+                assert_eq!(invoke_id, 0x05);
+                assert_eq!(service_choice, 0x0F);
+            }
+            other => panic!("expected SimpleAck, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2019,5 +2238,196 @@ mod tests {
             },
             other => panic!("{other:?}"),
         }
+    }
+
+    // ── Phase B7: WriteProperty + SimpleAck tests ──────────────
+
+    /// WriteProperty with Real(72.5), priority Some(16), no array index.
+    /// Byte spot-checks: 0x0F (service), 0x0C (obj-id tag), 0x3E/0x3F wrappers,
+    /// 0x44 (Real app tag).
+    #[test]
+    fn encode_write_property_real_value() {
+        use bacnet_value::BacnetValue;
+        let pkt = encode_write_property(5, 0, 1, 85, &BacnetValue::Real(72.5), None, Some(16));
+
+        // Scan the APDU portion (after BVLL(4)+NPDU(2)=6).
+        let apdu = &pkt[6..];
+        assert_eq!(apdu[0], 0x00, "Confirmed-Request PDU type");
+        assert_eq!(apdu[1], 0x05, "max-segs/max-apdu");
+        assert_eq!(apdu[2], 5, "invoke_id");
+        assert_eq!(apdu[3], 0x0F, "service = WriteProperty");
+        assert_eq!(apdu[4], 0x0C, "context tag 0 ObjectIdentifier");
+
+        // The full packet must contain the 0x3E/0x3F wrappers and 0x44 (Real).
+        assert!(pkt.contains(&0x3E), "opening tag 3 present");
+        assert!(pkt.contains(&0x3F), "closing tag 3 present");
+        assert!(pkt.contains(&0x44), "Real app-tag present");
+
+        // Priority 16 → context tag 4, LVT=1, value 0x10 → 0x49 0x10.
+        let has_prio = pkt.windows(2).any(|w| w == [0x49, 0x10]);
+        assert!(has_prio, "priority context tag 4 (0x49 0x10) present");
+    }
+
+    /// No priority: must NOT contain the 0x49 context-tag-4 byte after the
+    /// closing tag 3.
+    #[test]
+    fn encode_write_property_no_priority() {
+        use bacnet_value::BacnetValue;
+        let pkt = encode_write_property(5, 0, 1, 85, &BacnetValue::Real(10.0), None, None);
+        let close_idx = pkt
+            .iter()
+            .rposition(|&b| b == 0x3F)
+            .expect("closing tag 3 present");
+        let tail = &pkt[close_idx + 1..];
+        assert!(
+            !tail.contains(&0x49),
+            "no priority context tag 4 should appear after closing tag"
+        );
+    }
+
+    /// With array_index=Some(1) → context tag 2, LVT=1, value 1 → 0x29 0x01
+    /// must appear before the 0x3E opening tag.
+    #[test]
+    fn encode_write_property_with_array_index() {
+        use bacnet_value::BacnetValue;
+        let pkt = encode_write_property(5, 0, 1, 85, &BacnetValue::Real(1.0), Some(1), Some(16));
+        let open_idx = pkt
+            .iter()
+            .position(|&b| b == 0x3E)
+            .expect("opening tag 3 present");
+        let prefix = &pkt[..open_idx];
+        let has_array = prefix.windows(2).any(|w| w == [0x29, 0x01]);
+        assert!(has_array, "context tag 2 (0x29 0x01) must precede 0x3E");
+    }
+
+    /// Round-trip: encode then decode_packet → WritePropertyRequest matches.
+    #[test]
+    fn write_property_request_round_trip() {
+        use bacnet_value::BacnetValue;
+        let pkt = encode_write_property(9, 1, 5, 85, &BacnetValue::Real(23.5), None, Some(16));
+        let (_, apdu) = decode_packet(&pkt).unwrap();
+        assert_eq!(
+            apdu,
+            Apdu::WritePropertyRequest {
+                invoke_id: 9,
+                object_type: 1,
+                instance: 5,
+                property_id: 85,
+                array_index: None,
+                value: BacnetValue::Real(23.5),
+                priority: Some(16),
+            }
+        );
+    }
+
+    /// Boolean round-trip — BO object with Boolean(true).
+    #[test]
+    fn write_property_request_boolean_round_trip() {
+        use bacnet_value::BacnetValue;
+        let pkt = encode_write_property(3, 4, 2, 85, &BacnetValue::Boolean(true), None, Some(16));
+        let (_, apdu) = decode_packet(&pkt).unwrap();
+        match apdu {
+            Apdu::WritePropertyRequest {
+                invoke_id,
+                object_type,
+                instance,
+                property_id,
+                value,
+                priority,
+                array_index,
+            } => {
+                assert_eq!(invoke_id, 3);
+                assert_eq!(object_type, 4);
+                assert_eq!(instance, 2);
+                assert_eq!(property_id, 85);
+                assert_eq!(value, BacnetValue::Boolean(true));
+                assert_eq!(priority, Some(16));
+                assert_eq!(array_index, None);
+            }
+            other => panic!("expected WritePropertyRequest, got {other:?}"),
+        }
+    }
+
+    /// Bare Simple-ACK frame decodes to Apdu::SimpleAck.
+    #[test]
+    fn simple_ack_decode() {
+        let pkt = [
+            0x81, 0x0A, 0x00, 0x09, // BVLL unicast, length 9
+            0x01, 0x00, // NPDU version, control
+            0x20, 0x42, 0x0F, // PDU type SimpleAck, invoke_id 0x42, svc 0x0F
+        ];
+        let (_, apdu) = decode_packet(&pkt).unwrap();
+        assert_eq!(
+            apdu,
+            Apdu::SimpleAck {
+                invoke_id: 0x42,
+                service_choice: 0x0F,
+            }
+        );
+    }
+
+    /// Truncated Simple-ACK (missing invoke_id/service) returns Err.
+    #[test]
+    fn simple_ack_truncated_returns_error() {
+        let pkt = [
+            0x81, 0x0A, 0x00, 0x07, // BVLL unicast, length 7
+            0x01, 0x00, // NPDU
+            0x20, // PDU type only
+        ];
+        assert!(decode_packet(&pkt).is_err());
+    }
+
+    /// Unsigned round-trip — value 100 encoded and decoded cleanly.
+    #[test]
+    fn encode_write_property_unsigned() {
+        use bacnet_value::BacnetValue;
+        let pkt = encode_write_property(4, 2, 7, 85, &BacnetValue::Unsigned(100), None, Some(16));
+        let (_, apdu) = decode_packet(&pkt).unwrap();
+        match apdu {
+            Apdu::WritePropertyRequest { value, .. } => {
+                assert_eq!(value, BacnetValue::Unsigned(100));
+            }
+            other => panic!("expected WritePropertyRequest, got {other:?}"),
+        }
+    }
+
+    /// Hand-computed golden wire layout for a specific WriteProperty:
+    /// invoke_id=7, AO (1), instance 5, property 85, Real(50.0), priority 16.
+    ///
+    /// This pins the byte layout so any future encoder change is flagged.
+    #[test]
+    fn encode_write_property_wire_snapshot() {
+        use bacnet_value::BacnetValue;
+        let pkt = encode_write_property(7, 1, 5, 85, &BacnetValue::Real(50.0), None, Some(16));
+
+        // Build the expected APDU manually.
+        // 0x00 0x05 0x07 0x0F  — Confirmed-Req, max-seg/apdu, invoke, svc WriteProp
+        // 0x0C <4-byte obj-id> — context tag 0: (AO=1 << 22) | 5 = 0x00400005
+        // 0x19 0x55            — context tag 1 LVT=1, property 85
+        // 0x3E                 — opening tag 3
+        // 0x44 <4-byte Real>   — app tag 4, LVT=4, Real(50.0) big-endian
+        // 0x3F                 — closing tag 3
+        // 0x49 0x10            — context tag 4 LVT=1, priority 16
+        let real_bytes = 50.0f32.to_be_bytes();
+        let obj_id: u32 = (1u32 << 22) | 5;
+        let obj_bytes = obj_id.to_be_bytes();
+        let mut expected_apdu: Vec<u8> = vec![0x00, 0x05, 0x07, 0x0F, 0x0C];
+        expected_apdu.extend_from_slice(&obj_bytes);
+        expected_apdu.extend_from_slice(&[0x19, 0x55, 0x3E, 0x44]);
+        expected_apdu.extend_from_slice(&real_bytes);
+        expected_apdu.extend_from_slice(&[0x3F, 0x49, 0x10]);
+
+        // Wrap with BVLL + NPDU (6 bytes header)
+        let total_len = 6 + expected_apdu.len();
+        let mut expected: Vec<u8> = Vec::with_capacity(total_len);
+        expected.push(0x81);
+        expected.push(BVLL_UNICAST);
+        expected.push((total_len >> 8) as u8);
+        expected.push((total_len & 0xFF) as u8);
+        expected.push(0x01);
+        expected.push(0x00);
+        expected.extend_from_slice(&expected_apdu);
+
+        assert_eq!(pkt, expected, "WriteProperty wire layout golden mismatch");
     }
 }

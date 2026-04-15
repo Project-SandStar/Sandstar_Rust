@@ -10,9 +10,11 @@ use std::time::Duration;
 
 use tokio::net::UdpSocket;
 
-use super::{frame, object::BacnetObject, value::BacnetValue, BacnetDriver};
+use super::{
+    frame, object::BacnetObject, value::BacnetValue, BacnetConfig, BacnetDriver, BacnetObjectConfig,
+};
 use crate::drivers::{
-    actor::spawn_driver_actor, async_driver::AnyDriver, DriverPointRef, DriverStatus,
+    actor::spawn_driver_actor, async_driver::AnyDriver, DriverError, DriverPointRef, DriverStatus,
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -393,4 +395,209 @@ fn read_property_invoke_id_is_at_offset_8() {
     assert!(req.len() >= 9, "request must be at least 9 bytes");
     assert_eq!(req[8], 42, "invoke_id should be at byte index 8");
     assert_eq!(extract_invoke_id(&req, req.len()), 42);
+}
+
+// ── Phase B7: WriteProperty E2E tests ──────────────────────────────────────
+
+/// Spawn a mock BACnet device that handles two exchanges in sequence:
+///   1. Who-Is → I-Am (device instance 12345)
+///   2. WriteProperty → Simple-ACK
+///
+/// The Simple-ACK is hand-crafted bytes rather than using a codec helper,
+/// which keeps this test independent of any particular frame.rs API surface.
+async fn spawn_mock_write_responder(port: u16) -> tokio::task::JoinHandle<()> {
+    let sock = UdpSocket::bind(format!("127.0.0.1:{port}"))
+        .await
+        .expect("mock bind failed");
+    tokio::spawn(async move {
+        let mut buf = [0u8; 1500];
+
+        // Exchange 1: Who-Is → I-Am
+        if let Ok((_n, from)) = sock.recv_from(&mut buf).await {
+            let reply = encode_i_am(12345, 1476, 3, 999);
+            let _ = sock.send_to(&reply, from).await;
+        }
+
+        // Exchange 2: WriteProperty → SimpleAck.
+        // Incoming layout (confirmed-request):
+        //   [0]=0x81 BVLL magic
+        //   [6]=0x00 PDU type confirmed-req
+        //   [8]=invoke_id
+        //   [9]=0x0F service choice WriteProperty
+        if let Ok((n, from)) = sock.recv_from(&mut buf).await {
+            if n >= 10 && buf[0] == 0x81 && buf[6] == 0x00 && buf[9] == 0x0F {
+                let invoke_id = buf[8];
+                let ack = [
+                    0x81, 0x0A, 0x00, 0x09, // BVLL unicast, length = 9
+                    0x01, 0x00, // NPDU version=1, control=0
+                    0x20, invoke_id, 0x0F, // Simple-ACK, invoke_id, WriteProperty
+                ];
+                let _ = sock.send_to(&ack, from).await;
+            }
+        }
+    })
+}
+
+/// Spawn a mock device that replies to a WriteProperty with a BACnet Error PDU.
+///
+/// Mirrors [`spawn_mock_write_responder`] but swaps the SimpleAck for an
+/// Error PDU carrying class=2, code=31 (write-access-denied).
+async fn spawn_mock_write_error_responder(port: u16) -> tokio::task::JoinHandle<()> {
+    let sock = UdpSocket::bind(format!("127.0.0.1:{port}"))
+        .await
+        .expect("mock bind failed");
+    tokio::spawn(async move {
+        let mut buf = [0u8; 1500];
+
+        // Exchange 1: Who-Is → I-Am
+        if let Ok((_n, from)) = sock.recv_from(&mut buf).await {
+            let reply = encode_i_am(12345, 1476, 3, 999);
+            let _ = sock.send_to(&reply, from).await;
+        }
+
+        // Exchange 2: WriteProperty → Error PDU
+        if let Ok((n, from)) = sock.recv_from(&mut buf).await {
+            if n >= 10 && buf[0] == 0x81 && buf[6] == 0x00 && buf[9] == 0x0F {
+                let invoke_id = buf[8];
+                let error = [
+                    0x81, 0x0A, 0x00, 0x0D, // BVLL unicast, length = 13
+                    0x01, 0x00, // NPDU version=1, control=0
+                    0x50, invoke_id, 0x0F, // Error PDU, invoke_id, WriteProperty
+                    0x91, 0x02, // error_class: Enumerated 2 (object)
+                    0x91, 0x1F, // error_code:  Enumerated 31 (write-access-denied)
+                ];
+                let _ = sock.send_to(&error, from).await;
+            }
+        }
+    })
+}
+
+/// Phase B7: write path E2E — SimpleAck → Ok(()).
+#[tokio::test]
+async fn e2e_write_succeeds_with_simple_ack() {
+    // 1. Spawn mock device.
+    let mock_port = find_free_port();
+    let _mock = spawn_mock_write_responder(mock_port).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // 2. Build driver from config — AO-5 on device 12345 mapped to point 1001.
+    let config = BacnetConfig {
+        id: "bac-write".into(),
+        port: Some(0), // OS-assigned ephemeral bind
+        broadcast: Some("127.0.0.1".into()),
+        objects: vec![BacnetObjectConfig {
+            point_id: 1001,
+            device_id: 12345,
+            object_type: 1, // AnalogOutput
+            instance: 5,
+            unit: None,
+            scale: Some(1.0),
+            offset: Some(0.0),
+        }],
+    };
+    let driver = BacnetDriver::from_config(config)
+        .with_broadcast_port(mock_port)
+        .with_discovery_timeout(Duration::from_millis(300));
+
+    // 3. Register with DriverHandle, open, then write.
+    let handle = spawn_driver_actor(16);
+    handle
+        .register(AnyDriver::Async(Box::new(driver)))
+        .await
+        .expect("register should succeed");
+
+    let open_results = handle
+        .open_all()
+        .await
+        .expect("open_all channel should work");
+    assert_eq!(open_results.len(), 1);
+    open_results[0].1.as_ref().expect("open() should succeed");
+
+    // Driver status should be Ok after open.
+    let status = handle
+        .get_driver_status("bac-write")
+        .await
+        .expect("get_driver_status channel ok")
+        .expect("driver should exist");
+    assert_eq!(status, DriverStatus::Ok);
+
+    // 4. Issue the write through the handle.
+    let results = handle
+        .write("bac-write", vec![(1001, 72.5)])
+        .await
+        .expect("write channel should work");
+
+    assert_eq!(results.len(), 1, "expected one write result");
+    let (pid, result) = &results[0];
+    assert_eq!(*pid, 1001, "point id should echo back");
+    assert!(
+        result.is_ok(),
+        "write should succeed with SimpleAck, got {result:?}"
+    );
+
+    handle.close_all().await.expect("close_all should succeed");
+}
+
+/// Phase B7: write path E2E — Error PDU → `DriverError::RemoteStatus`.
+#[tokio::test]
+async fn e2e_write_error_pdu_returns_remote_status() {
+    // 1. Spawn mock device that replies with an Error PDU on the write.
+    let mock_port = find_free_port();
+    let _mock = spawn_mock_write_error_responder(mock_port).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // 2. Build driver — same shape as the success test.
+    let config = BacnetConfig {
+        id: "bac-write-err".into(),
+        port: Some(0),
+        broadcast: Some("127.0.0.1".into()),
+        objects: vec![BacnetObjectConfig {
+            point_id: 1001,
+            device_id: 12345,
+            object_type: 1, // AnalogOutput
+            instance: 5,
+            unit: None,
+            scale: Some(1.0),
+            offset: Some(0.0),
+        }],
+    };
+    let driver = BacnetDriver::from_config(config)
+        .with_broadcast_port(mock_port)
+        .with_discovery_timeout(Duration::from_millis(300));
+
+    let handle = spawn_driver_actor(16);
+    handle
+        .register(AnyDriver::Async(Box::new(driver)))
+        .await
+        .expect("register should succeed");
+
+    handle
+        .open_all()
+        .await
+        .expect("open_all channel should work");
+
+    // 3. Write — expect a RemoteStatus error with "class=2" and "code=31".
+    let results = handle
+        .write("bac-write-err", vec![(1001, 72.5)])
+        .await
+        .expect("write channel should work");
+
+    assert_eq!(results.len(), 1);
+    let (pid, result) = &results[0];
+    assert_eq!(*pid, 1001);
+    match result {
+        Err(DriverError::RemoteStatus(msg)) => {
+            assert!(
+                msg.contains("class=2"),
+                "error message should contain 'class=2', got: {msg}"
+            );
+            assert!(
+                msg.contains("code=31"),
+                "error message should contain 'code=31', got: {msg}"
+            );
+        }
+        other => panic!("expected Err(RemoteStatus), got {other:?}"),
+    }
+
+    handle.close_all().await.expect("close_all should succeed");
 }

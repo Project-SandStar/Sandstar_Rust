@@ -628,7 +628,13 @@ The existing single-file `bacnet.rs` (120 lines) becomes the entry point `mod.rs
 3. **Test against a real BACnet device** (if you have one available) or continue with the simulator
 
 **Optional extensions (not required for MVP):**
-- **WriteProperty** — Phase B7 (~1 week) — Adds write capability, maps to `AsyncDriver::write()`
+- **WriteProperty** — ✅ Phase B7 complete (2026-04-15) — adds write capability via `AsyncDriver::write()`.
+  Delivered: `frame::encode_write_property` + `encode_simple_ack`, `Apdu::WritePropertyRequest` +
+  `Apdu::SimpleAck` decoder variants, `BacnetDriver::write_property()` with retry loop,
+  `AsyncDriver::write()` impl that inverts the `sync_cur` scale/offset and dispatches Real (AI/AO/AV)
+  or Enumerated (BI/BO/BV) values at priority 16. End-to-end tests
+  `e2e_write_succeeds_with_simple_ack` and `e2e_write_error_pdu_returns_remote_status` cover both the
+  SimpleAck and Error PDU paths via UDP loopback.
 - **SubscribeCOV** — Phase B8 (~1-2 weeks) — Adds true COV, maps to `on_watch`/`on_unwatch`
 - **ReadPropertyMultiple** — Phase B9 (~3 days) — Optimization, batches reads into fewer network packets
 - **Router support** — Phase B10 (~1 week) — Adds DNET/DADR for multi-network deployments
@@ -798,7 +804,8 @@ The existing `drivers/bacnet.rs` (120 lines) gets replaced by the new `drivers/b
 | **Week 4** | BACnet Phase B4 — learn | Object enumeration works |
 | **Week 5** | BACnet Phase B5 — integration | End-to-end test + config |
 | **Week 6** | BACnet Phase B6 — production | Deployed to 1-11 |
-| **Week 7+** | Optional: WriteProperty, COV, RPM | Per-feature |
+| **Week 7** | BACnet Phase B7 — WriteProperty ✅ 2026-04-15 | `encode_write_property`, `SimpleAck`, `write_property()`, `AsyncDriver::write()`, 2 E2E tests |
+| **Week 8+** | Optional: COV, RPM, router | Per-feature |
 
 Each phase ends with a verification gate and a git commit. No long-running branches — commit and push at every checkpoint.
 

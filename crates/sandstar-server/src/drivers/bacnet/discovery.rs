@@ -105,12 +105,15 @@ pub async fn collect_i_am(socket: &UdpSocket, timeout: Duration) -> Vec<DeviceIn
                 let hex: String = buf[..n].iter().map(|b| format!("{:02x}", b)).collect();
                 tracing::info!(from = %addr, bytes = n, hex = %hex, "BACnet discovery: RX");
                 match super::frame::decode_packet(&buf[..n]) {
-                    Ok((_, super::frame::Apdu::IAm {
-                        device_instance,
-                        max_apdu,
-                        segmentation,
-                        vendor_id,
-                    })) => {
+                    Ok((
+                        _,
+                        super::frame::Apdu::IAm {
+                            device_instance,
+                            max_apdu,
+                            segmentation,
+                            vendor_id,
+                        },
+                    )) => {
                         tracing::info!(
                             device = device_instance,
                             max_apdu,
