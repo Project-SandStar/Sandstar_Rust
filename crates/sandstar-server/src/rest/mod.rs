@@ -736,7 +736,7 @@ pub fn router_with_auth(
         .route("/api/nav", post(handlers::nav))
         .route("/api/invokeAction", post(handlers::invoke_action))
         .route_layer(middleware::from_fn_with_state(auth_state, check_auth))
-        .with_state(handle);
+        .with_state(handle.clone());
 
     // CORS policy: allow any origin (embedded device accessed by various IPs)
     // but restrict methods and headers to only what we actually use.
@@ -763,9 +763,10 @@ pub fn router_with_auth(
     // asynchronously in the background so they don't block router construction.
     let driver_handle = crate::drivers::actor::spawn_driver_actor(64);
     {
-        let handle_clone = driver_handle.clone();
+        let driver_handle_clone = driver_handle.clone();
+        let engine_handle_clone = handle.clone();
         tokio::spawn(async move {
-            load_bacnet_drivers(&handle_clone).await;
+            load_bacnet_drivers(&driver_handle_clone, &engine_handle_clone).await;
         });
     }
     let driver_routes = crate::drivers::driver_router(driver_handle);
@@ -823,7 +824,10 @@ pub fn router_with_auth(
 /// ```
 ///
 /// Errors are logged but do not prevent server startup.
-async fn load_bacnet_drivers(handle: &crate::drivers::actor::DriverHandle) {
+async fn load_bacnet_drivers(
+    handle: &crate::drivers::actor::DriverHandle,
+    engine_handle: &EngineHandle,
+) {
     let json_str = match std::env::var("SANDSTAR_BACNET_CONFIGS") {
         Ok(s) => s,
         Err(_) => return, // Not configured — skip silently.
@@ -935,7 +939,15 @@ async fn load_bacnet_drivers(handle: &crate::drivers::actor::DriverHandle) {
             .collect();
         if !tick_points.is_empty() {
             let handle_tick = handle.clone();
+            let engine_tick = engine_handle.clone();
             tokio::spawn(async move {
+                // BACnet driver writes are low-priority (16 of 16) so operator
+                // or manual writes at lower levels always take precedence.
+                // Duration is 30s — longer than our 5s poll so values don't gap,
+                // but short enough to expire if the driver stops reporting.
+                const BACNET_WRITE_LEVEL: u8 = 16;
+                const BACNET_WRITE_DURATION_SECS: f64 = 30.0;
+
                 let mut ticker = tokio::time::interval(Duration::from_secs(5));
                 ticker.set_missed_tick_behavior(
                     tokio::time::MissedTickBehavior::Skip,
@@ -951,17 +963,42 @@ async fn load_bacnet_drivers(handle: &crate::drivers::actor::DriverHandle) {
                             continue;
                         }
                     };
-                    let (mut ok_count, mut err_count) = (0usize, 0usize);
+                    let (mut ok_count, mut err_count, mut write_err_count) =
+                        (0usize, 0usize, 0usize);
                     for (driver_id, point_id, res) in &results {
                         match res {
                             Ok(v) => {
                                 ok_count += 1;
-                                tracing::debug!(
+                                tracing::info!(
                                     driver = %driver_id,
                                     point_id,
                                     value = v,
-                                    "BACnet sync_cur ok"
+                                    "BACnet sync_cur -> write_channel"
                                 );
+                                // Stage 2: write the value into the engine channel so
+                                // /read?filter=channel==N returns it. Fails silently
+                                // (logged as warn) if the point_id doesn't correspond
+                                // to a configured virtual channel.
+                                let who = format!("bacnet:{driver_id}");
+                                if let Err(e) = engine_tick
+                                    .write_channel(
+                                        *point_id,
+                                        Some(*v),
+                                        BACNET_WRITE_LEVEL,
+                                        who,
+                                        BACNET_WRITE_DURATION_SECS,
+                                    )
+                                    .await
+                                {
+                                    write_err_count += 1;
+                                    tracing::warn!(
+                                        driver = %driver_id,
+                                        point_id,
+                                        error = %e,
+                                        "BACnet engine write_channel failed — \
+                                         is point_id a configured virtual channel?"
+                                    );
+                                }
                             }
                             Err(e) => {
                                 err_count += 1;
@@ -977,6 +1014,7 @@ async fn load_bacnet_drivers(handle: &crate::drivers::actor::DriverHandle) {
                     tracing::info!(
                         ok = ok_count,
                         err = err_count,
+                        write_err = write_err_count,
                         "BACnet poll tick complete"
                     );
                 }

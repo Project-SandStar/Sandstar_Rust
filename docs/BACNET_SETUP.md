@@ -191,19 +191,26 @@ Returns all objects from all discovered devices (traverses Device.ObjectList + O
 
 ### Live values
 
-> **Stage 1 status (v2.6.1):** The driver polls BACnet devices every 5s
-> and the values are visible in the log output (see below). Wiring those
-> values back into engine channels so that `/read?filter=channel==N`
-> returns them is **Stage 2** — pending. If you need the values right
-> now, parse them out of the log stream. Once Stage 2 lands the
-> following will work:
->
-> ```bash
-> curl -s "http://localhost:8085/read?filter=channel==3001"
-> ```
->
-> Replace `3001` with your `point_id`. Values appear ~5s after a
-> successful discovery.
+**v2.7.0+ — fully wired end-to-end.**
+
+```bash
+curl -s "http://localhost:8085/api/read?id=102"
+# [{"channel":102,"cur":72.5,"raw":72.5,"status":"Ok"}]
+```
+
+Replace `102` with your configured `point_id`. Values appear ~5s after a successful discovery, and refresh every 5s.
+
+**Important: the `point_id` in `SANDSTAR_BACNET_CONFIGS` must correspond to an existing VirtualAnalog channel** defined in `database.zinc` / `points.csv`. The driver does NOT auto-create channels — writes to non-existent channels fail with `channel N not found` (logged as WARN).
+
+To add a new BACnet-backed channel, define a VirtualAnalog entry in `database.zinc`:
+
+```zinc
+// In database.zinc:
+id,dis,point,virtual,kind,unit
+102,"Test Writable",M,M,Number,"°F"
+```
+
+BACnet writes use priority **16** (lowest — automatically relinquished) so operator manual writes at lower levels always take precedence. Write duration is 30s; the value expires if the driver stops polling. Use this to detect driver outages: a channel whose `cur` hasn't changed in >30s indicates either the device is offline or the driver stopped.
 
 ### Logs
 
@@ -263,6 +270,22 @@ Run the `tools/bacnet_sim.py` simulator on another machine on the same segment t
 If `sync_cur` succeeds for some points and fails for others:
 - `CommFault("bacnet device N not in registry")` — configured `device_id` didn't respond to Who-Is. Check the device is online.
 - `RemoteStatus("BACnet error class=2 code=31")` — device returned an Error PDU. `class=2 code=31` = write-access-denied (wrong property, read-only object, etc.).
+
+### `/read` returns wrong value (not what the BACnet device reports)
+
+The channel has a higher-priority writer overriding our level-16 BACnet write. Check the priority array:
+
+```bash
+curl -s 'http://localhost:8085/api/pointWrite?id=<channel>&channel=<channel>'
+```
+
+If a SOX/HVAC control component is writing at level 1-15, its value wins. Either pick a different channel for BACnet, or reconfigure the SOX logic.
+
+Relevant log line: `BACnet sync_cur -> write_channel driver=X point_id=N value=V` shows the value we're pushing. If `cur` doesn't match, something else is writing at higher priority.
+
+### `channel N not found` in logs
+
+The `point_id` in your BACnet config doesn't correspond to a defined channel. Add a VirtualAnalog entry to `database.zinc` (see "Live values" section above) and restart the service.
 
 ### COV notifications not updating the cache
 
