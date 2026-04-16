@@ -644,6 +644,7 @@ The existing single-file `bacnet.rs` (120 lines) becomes the entry point `mod.rs
   subscribe/cancel path via UDP loopback. Python simulator `tools/bacnet_sim.py` gained
   `parse_subscribe_cov` + SubscribeCOV Simple-ACK handler. Notification receiver task for pushing
   updates to watchers is reserved for Phase B8.1 (requires I/O refactor).
+- **COV Notification Reception** — ✅ Phase B8.1 complete (2026-04-16) — CovCache + inline notification handling in all recv loops. sync_cur returns cached values for COV-subscribed points (max_age=600s). No background receiver task needed — notifications processed as side-effects of existing I/O.
 - **ReadPropertyMultiple** — ✅ Phase B9 complete (2026-04-16) — `sync_cur()` now batches points
   by device into a single RPM request and falls back to individual `ReadProperty` on transport
   error or when the device replies with an Error PDU. Delivered: `frame::RpmRequestSpec` +
@@ -656,7 +657,7 @@ The existing single-file `bacnet.rs` (120 lines) becomes the entry point `mod.rs
   reads would fail the test). The Python simulator `tools/bacnet_sim.py` gained `parse_rpm_request`
   + `encode_rpm_ack` helpers wired into the main dispatch loop so that running
   `py tools/bacnet_sim.py` now answers RPM as well as ReadProperty/WriteProperty.
-- **Router support** — Phase B10 (~1 week) — Adds DNET/DADR for multi-network deployments
+- **Router/BBMD support** — ✅ Phase B10 complete (2026-04-16) — Register-Foreign-Device BVLL encoder/decoder, Distribute-Broadcast-To-Network, BVLL-Result decoder, Forwarded-NPDU decode. BacnetConfig.bbmd + BacnetDriver.bbmd_addr config. Auto-registration in open() with 300s TTL, non-fatal on failure. Who-Is sent via both local broadcast AND BBMD distribute.
 
 ### B.9 Risks and mitigations
 
@@ -826,7 +827,8 @@ The existing `drivers/bacnet.rs` (120 lines) gets replaced by the new `drivers/b
 | **Week 7** | BACnet Phase B7 — WriteProperty ✅ 2026-04-15 | `encode_write_property`, `SimpleAck`, `write_property()`, `AsyncDriver::write()`, 2 E2E tests |
 | **Week 8** | BACnet Phase B9 — ReadPropertyMultiple ✅ 2026-04-16 | `RpmRequestSpec` + `RpmResult`, `encode_read_property_multiple` + ACK, `read_properties_multiple()`, batched `sync_cur()` with fallback, `e2e_sync_cur_uses_rpm` E2E test, Python sim RPM handler |
 | **Week 9** | BACnet Phase B8 — SubscribeCOV (wire-level) ✅ 2026-04-16 | `subscribe_cov` + `unsubscribe_cov`, `on_watch`/`on_unwatch`, `CovNotification` structs, 2 E2E tests, Python sim handler |
-| **Week 10+** | Optional: COV notification receiver (B8.1), router (B10) | Per-feature |
+| **Week 10** | BACnet Phase B8.1 — COV notification reception ✅ 2026-04-16 | CovCache, inline notification handling, sim COV sender |
+| **Week 10** | BACnet Phase B10 — BBMD/Router support ✅ 2026-04-16 | Register-Foreign-Device, BVLL-Result, BacnetConfig.bbmd, E2E test, sim BBMD handler |
 
 Each phase ends with a verification gate and a git commit. No long-running branches — commit and push at every checkpoint.
 

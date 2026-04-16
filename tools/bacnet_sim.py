@@ -248,6 +248,34 @@ def parse_rpm_request(apdu):
             pos += 1  # consume closing tag
     return specs
 
+def encode_unconfirmed_cov_notification(subscriber_process_id, device_instance, obj_type, obj_instance, time_remaining, value_bytes):
+    """Encode an Unconfirmed-COV-Notification (service 0x02).
+
+    Returns a complete BVLL-wrapped frame ready to send via UDP.
+    """
+    apdu = bytes([0x10, 0x02])  # Unconfirmed-Request, service 0x02
+    # Context 0: subscriberProcessIdentifier
+    apdu += encode_ctx_unsigned(0, subscriber_process_id)
+    # Context 1: initiatingDeviceIdentifier (Device object)
+    dev_id = ((8 & 0x3FF) << 22) | (device_instance & 0x3F_FFFF)
+    apdu += bytes([0x1C]) + dev_id.to_bytes(4, "big")
+    # Context 2: monitoredObjectIdentifier
+    mon_id = ((obj_type & 0x3FF) << 22) | (obj_instance & 0x3F_FFFF)
+    apdu += bytes([0x2C]) + mon_id.to_bytes(4, "big")
+    # Context 3: timeRemaining
+    apdu += encode_ctx_unsigned(3, time_remaining)
+    # Context 4 opening: listOfValues
+    apdu += bytes([0x4E])
+    # PropertyValue: PresentValue (propertyIdentifier = 85)
+    apdu += bytes([0x09, 0x55])  # context 0: propertyIdentifier = 85
+    apdu += bytes([0x2E])        # context 2 opening: value
+    apdu += value_bytes           # application-tagged value
+    apdu += bytes([0x2F])        # context 2 closing
+    # Context 4 closing
+    apdu += bytes([0x4F])
+    return build_bvll(0x0A, apdu)  # BVLL unicast
+
+
 def main():
     bind_ip = sys.argv[1] if len(sys.argv) > 1 else "0.0.0.0"
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -263,6 +291,17 @@ def main():
 
         if len(data) < 6 or data[0] != 0x81:
             continue
+
+        # ── BVLL-level handlers (before APDU parsing) ──────────────────
+        if data[1] == 0x05:  # BVLL Register-Foreign-Device
+            ttl = int.from_bytes(data[4:6], "big") if len(data) >= 6 else 0
+            print(f"  Register-Foreign-Device TTL={ttl}s from {addr}", flush=True)
+            # BVLL-Result success
+            result = bytes([0x81, 0x00, 0x00, 0x06, 0x00, 0x00])
+            s.sendto(result, addr)
+            print(f"  TX BVLL-Result(success) -> {addr}", flush=True)
+            continue
+
         # bvll_type = data[1]  # 0x0A unicast or 0x0B broadcast
         # Skip 4-byte BVLL and 2-byte NPDU
         apdu = data[6:]
@@ -311,6 +350,19 @@ def main():
                 ack = bytes([0x81, 0x0A, 0x00, 0x09, 0x01, 0x00, 0x20, s_iid, 0x05])
                 s.sendto(ack, addr)
                 print(f"  TX Simple-ACK -> {addr}: {ack.hex()}", flush=True)
+                # After a successful SUBSCRIBE (not CANCEL), send an initial
+                # Unconfirmed-COV-Notification with the object's current value.
+                if not is_cancel:
+                    for (o_ot, o_inst, _, value_fn) in OBJECTS:
+                        if o_ot == s_ot and o_inst == s_oi:
+                            cov = encode_unconfirmed_cov_notification(
+                                s_pid, DEVICE_INSTANCE, s_ot, s_oi,
+                                time_remaining=300,
+                                value_bytes=value_fn(),
+                            )
+                            s.sendto(cov, addr)
+                            print(f"  TX COV-Notification proc={s_pid} obj={s_ot}:{s_oi} -> {addr}: {cov.hex()[:80]}...", flush=True)
+                            break
                 continue
             if service == 0x0F:  # WriteProperty
                 # Simple-ACK: [0x81, 0x0A, 0x00, 0x09, 0x01, 0x00, 0x20, iid, 0x0F]
