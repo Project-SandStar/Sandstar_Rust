@@ -907,6 +907,82 @@ async fn load_bacnet_drivers(handle: &crate::drivers::actor::DriverHandle) {
                 tracing::error!(error = %e, "failed to open BACnet drivers");
             }
         }
+
+        // Spawn a periodic tick task that calls sync_all() every 5s with the
+        // BACnet points configured above. Without this, the poll buckets we
+        // just added sit idle — the driver actor's loop is command-driven
+        // and has no internal scheduler. This task is what actually makes
+        // sync_cur fire in production.
+        //
+        // Stage 1: results are only logged. Wiring them back into engine
+        // channels (so /read returns them) is Stage 2.
+        let tick_points: std::collections::HashMap<
+            crate::drivers::DriverId,
+            Vec<crate::drivers::DriverPointRef>,
+        > = driver_points
+            .into_iter()
+            .filter(|(_, pids)| !pids.is_empty())
+            .map(|(id, pids)| {
+                let refs = pids
+                    .into_iter()
+                    .map(|pid| crate::drivers::DriverPointRef {
+                        point_id: pid,
+                        address: String::new(),
+                    })
+                    .collect();
+                (id, refs)
+            })
+            .collect();
+        if !tick_points.is_empty() {
+            let handle_tick = handle.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(Duration::from_secs(5));
+                ticker.set_missed_tick_behavior(
+                    tokio::time::MissedTickBehavior::Skip,
+                );
+                // Discard the immediate first tick so we don't race open_all.
+                ticker.tick().await;
+                loop {
+                    ticker.tick().await;
+                    let results = match handle_tick.sync_all(tick_points.clone()).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "BACnet poll tick: sync_all failed");
+                            continue;
+                        }
+                    };
+                    let (mut ok_count, mut err_count) = (0usize, 0usize);
+                    for (driver_id, point_id, res) in &results {
+                        match res {
+                            Ok(v) => {
+                                ok_count += 1;
+                                tracing::debug!(
+                                    driver = %driver_id,
+                                    point_id,
+                                    value = v,
+                                    "BACnet sync_cur ok"
+                                );
+                            }
+                            Err(e) => {
+                                err_count += 1;
+                                tracing::warn!(
+                                    driver = %driver_id,
+                                    point_id,
+                                    error = %e,
+                                    "BACnet sync_cur failed"
+                                );
+                            }
+                        }
+                    }
+                    tracing::info!(
+                        ok = ok_count,
+                        err = err_count,
+                        "BACnet poll tick complete"
+                    );
+                }
+            });
+            tracing::info!("BACnet poll tick task spawned (5s interval)");
+        }
     }
 }
 

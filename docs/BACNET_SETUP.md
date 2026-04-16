@@ -191,11 +191,19 @@ Returns all objects from all discovered devices (traverses Device.ObjectList + O
 
 ### Live values
 
-```bash
-curl -s "http://localhost:8085/read?filter=channel==3001"
-```
-
-Replace `3001` with your `point_id`. Values appear ~5s after a successful discovery.
+> **Stage 1 status (v2.6.1):** The driver polls BACnet devices every 5s
+> and the values are visible in the log output (see below). Wiring those
+> values back into engine channels so that `/read?filter=channel==N`
+> returns them is **Stage 2** — pending. If you need the values right
+> now, parse them out of the log stream. Once Stage 2 lands the
+> following will work:
+>
+> ```bash
+> curl -s "http://localhost:8085/read?filter=channel==3001"
+> ```
+>
+> Replace `3001` with your `point_id`. Values appear ~5s after a
+> successful discovery.
 
 ### Logs
 
@@ -205,9 +213,13 @@ sudo journalctl -u sandstar-engine.service -f | grep -iE 'bacnet'
 
 Key log lines to look for:
 - `BACnet driver registered driver=bacnet-local` — config loaded
+- `BACnet poll bucket added (5s interval) driver=... points=N` — points enrolled
 - `BACnet discovery: RX from=... bytes=...` — receiving Who-Is/I-Am traffic
 - `BACnet discovery: decoded I-Am device=<id>` — a device answered
 - `BACnet discovery complete devices=<n>` — final count
+- `BACnet poll tick task spawned (5s interval)` — tick task alive
+- `BACnet poll tick complete ok=N err=0` — every 5s, one per tick
+- `BACnet sync_cur failed driver=... point_id=... error=...` — per-point failure
 - `BACnet COV subscribed process_id=<id>` — COV active
 - `BACnet COV subscription renewed` — lifetime renewal working
 
