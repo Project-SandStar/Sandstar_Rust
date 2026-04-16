@@ -106,6 +106,11 @@ pub struct BacnetConfig {
     pub broadcast: Option<String>,
     /// List of BACnet objects to poll.
     pub objects: Vec<BacnetObjectConfig>,
+    /// Optional BBMD (Broadcast Management Device) address for multi-subnet support.
+    /// Format: "host:port" (e.g. "192.168.2.1:47808").
+    /// When set, the driver registers as a foreign device with this BBMD during open().
+    #[serde(default)]
+    pub bbmd: Option<String>,
 }
 
 /// Configuration for a single BACnet object to poll.
@@ -248,6 +253,10 @@ pub struct BacnetDriver {
     next_process_id: u32,
     /// Cache of latest COV values (Phase B8.1).
     cov_cache: CovCache,
+    /// BBMD address to register with. `None` = local broadcast only.
+    bbmd_addr: Option<std::net::SocketAddr>,
+    /// Whether we're registered as a foreign device.
+    is_foreign_device: bool,
 }
 
 impl BacnetDriver {
@@ -270,6 +279,8 @@ impl BacnetDriver {
             cov_subscriptions: HashMap::new(),
             next_process_id: 1,
             cov_cache: CovCache::new(),
+            bbmd_addr: None,
+            is_foreign_device: false,
         }
     }
 
@@ -286,6 +297,12 @@ impl BacnetDriver {
         self
     }
 
+    /// Set the BBMD address (useful in tests).
+    pub fn with_bbmd_addr(mut self, addr: std::net::SocketAddr) -> Self {
+        self.bbmd_addr = Some(addr);
+        self
+    }
+
     /// Register a BACnet object that should be polled for a given point ID.
     pub fn add_object(&mut self, point_id: u32, obj: object::BacnetObject) {
         self.objects.insert(point_id, obj);
@@ -298,6 +315,12 @@ impl BacnetDriver {
         let mut driver = Self::new(config.id, broadcast, port);
         // broadcast_port tracks the configured port, not the bind port.
         driver.broadcast_port = port;
+        if let Some(ref bbmd_str) = config.bbmd {
+            driver.bbmd_addr = bbmd_str.parse().ok();
+            if driver.bbmd_addr.is_none() {
+                tracing::warn!(bbmd = %bbmd_str, "invalid BBMD address, ignoring");
+            }
+        }
         for obj_cfg in config.objects {
             driver.add_object(
                 obj_cfg.point_id,
@@ -925,6 +948,57 @@ impl BacnetDriver {
         self.cov_cache.update(notification);
     }
 
+    // ── Phase B10: BBMD / Foreign Device Registration ──────
+
+    /// Register as a foreign device with the configured BBMD.
+    ///
+    /// Sends Register-Foreign-Device with the given TTL and waits for a
+    /// BVLL-Result response. Returns `Ok(())` on success (result code 0),
+    /// `Err` on failure or timeout.
+    async fn register_foreign_device(
+        &self,
+        socket: &tokio::net::UdpSocket,
+        bbmd_addr: std::net::SocketAddr,
+        ttl_seconds: u16,
+    ) -> Result<(), BacnetError> {
+        let request = frame::encode_register_foreign_device(ttl_seconds);
+
+        // Send + wait for BVLL-Result (no invoke_id — this is BVLL-level, not APDU-level)
+        let mut buf = [0u8; 1500];
+        let timeout = std::time::Duration::from_secs(5);
+
+        for attempt in 0..3u32 {
+            socket.send_to(&request, bbmd_addr).await?;
+
+            match tokio::time::timeout(timeout, socket.recv_from(&mut buf)).await {
+                Ok(Ok((n, _addr))) => match frame::decode_bvll_result(&buf[..n]) {
+                    Ok(0) => {
+                        tracing::info!(bbmd = %bbmd_addr, ttl = ttl_seconds, "registered as foreign device");
+                        return Ok(());
+                    }
+                    Ok(code) => {
+                        return Err(BacnetError::MalformedFrame(format!(
+                            "BBMD registration NAK: result code 0x{code:04X}"
+                        )));
+                    }
+                    Err(_) => {
+                        // Not a BVLL-Result — might be another packet, ignore and retry
+                        if attempt < 2 {
+                            continue;
+                        }
+                    }
+                },
+                _ => {
+                    if attempt < 2 {
+                        continue;
+                    }
+                }
+            }
+        }
+
+        Err(BacnetError::Timeout(3))
+    }
+
     // ── Phase B8: COV subscription management ──────────────
 
     /// Allocate a new subscriber-process-identifier for a subscription.
@@ -1182,24 +1256,55 @@ impl AsyncDriver for BacnetDriver {
             .set_broadcast(true)
             .map_err(|e| DriverError::CommFault(format!("bacnet set_broadcast: {e}")))?;
 
-        // 2. Send Who-Is broadcast.
+        // 2. Register as foreign device with BBMD (if configured).
+        if let Some(bbmd) = self.bbmd_addr {
+            match self.register_foreign_device(&socket, bbmd, 300).await {
+                Ok(()) => {
+                    self.is_foreign_device = true;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        driver = %self.id,
+                        bbmd = %bbmd,
+                        error = %e,
+                        "BBMD registration failed — discovery will be local-broadcast only"
+                    );
+                    // Continue with local broadcast — non-fatal
+                }
+            }
+        }
+
+        // 3. Send Who-Is broadcast.
         let bcast: SocketAddr = format!("{}:{}", self.broadcast_addr, self.broadcast_port)
             .parse()
             .map_err(|e: std::net::AddrParseError| {
                 DriverError::ConfigFault(format!("invalid broadcast addr: {e}"))
             })?;
 
+        // Always send local broadcast
         if let Err(e) = discovery::send_who_is(&socket, bcast).await {
             tracing::warn!(driver = %self.id, "bacnet who-is send failed: {e}");
             // Non-fatal: we still listen for any I-Am packets that arrive.
         }
 
-        // 3. Collect I-Am responses during the discovery window.
+        // Additionally distribute via BBMD for remote subnets
+        if self.is_foreign_device {
+            if let Some(bbmd) = self.bbmd_addr {
+                let who_is_apdu = [0x10, frame::SVC_UNCONFIRMED_WHOIS];
+                let npdu_apdu = [&[0x01u8, 0x00][..], &who_is_apdu[..]].concat();
+                let distribute = frame::encode_distribute_broadcast_to_network(&npdu_apdu);
+                if let Err(e) = socket.send_to(&distribute, bbmd).await {
+                    tracing::warn!(driver = %self.id, "bbmd distribute who-is failed: {e}");
+                }
+            }
+        }
+
+        // 4. Collect I-Am responses during the discovery window.
         let devices = discovery::collect_i_am(&socket, self.discovery_timeout).await;
         let n = devices.len();
         tracing::info!(driver = %self.id, devices = n, "BACnet discovery complete");
 
-        // 4. Update registry.
+        // 5. Update registry.
         self.device_registry.bulk_insert(devices);
 
         self.socket = Some(socket);
@@ -1749,6 +1854,7 @@ mod tests {
                     offset: None,
                 },
             ],
+            bbmd: None,
         };
 
         let d = BacnetDriver::from_config(config);
@@ -1774,6 +1880,7 @@ mod tests {
             port: None,
             broadcast: None,
             objects: vec![],
+            bbmd: None,
         };
         let d = BacnetDriver::from_config(config);
         assert_eq!(d.port, DEFAULT_BACNET_PORT);
@@ -2960,6 +3067,7 @@ mod config_tests {
             port: None,
             broadcast: None,
             objects: vec![],
+            bbmd: None,
         };
         let driver = BacnetDriver::from_config(config);
         assert_eq!(driver.id(), "bac-defaults");
@@ -2998,6 +3106,7 @@ mod config_tests {
                     offset: None,
                 },
             ],
+            bbmd: None,
         };
         let driver = BacnetDriver::from_config(config);
         let objects = driver.objects();
@@ -3776,5 +3885,230 @@ mod cov_cache_tests {
             .expect("cache hit after handle_cov_notification");
         assert_eq!(entry.value, value::BacnetValue::Real(72.5));
         assert_eq!(entry.process_id, 3);
+    }
+}
+
+// ── Phase B10: BBMD tests ─────────────────────────────────
+
+#[cfg(test)]
+mod bbmd_tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    /// Encode a minimal I-Am response for test mocks.
+    fn encode_i_am(
+        device_instance: u32,
+        max_apdu: u16,
+        segmentation: u8,
+        vendor_id: u16,
+    ) -> Vec<u8> {
+        let obj_id_val: u32 = (8u32 << 22) | (device_instance & 0x3F_FFFF);
+        let obj_id = obj_id_val.to_be_bytes();
+        let mut apdu: Vec<u8> = vec![
+            0x10, 0x00, // Unconfirmed-Request, I-Am
+            0xC4, obj_id[0], obj_id[1], obj_id[2], obj_id[3], // Object ID
+        ];
+        if max_apdu <= 0xFF {
+            apdu.extend_from_slice(&[0x21, max_apdu as u8]);
+        } else {
+            apdu.extend_from_slice(&[0x22, (max_apdu >> 8) as u8, (max_apdu & 0xFF) as u8]);
+        }
+        apdu.extend_from_slice(&[0x91, segmentation]); // Segmentation
+        if vendor_id <= 0xFF {
+            apdu.extend_from_slice(&[0x21, vendor_id as u8]);
+        } else {
+            apdu.extend_from_slice(&[0x22, (vendor_id >> 8) as u8, (vendor_id & 0xFF) as u8]);
+        }
+        let total_len = 4u16 + 2 + apdu.len() as u16;
+        let mut pkt = vec![
+            0x81,
+            0x0A, // BVLL unicast
+            (total_len >> 8) as u8,
+            (total_len & 0xFF) as u8,
+            0x01,
+            0x00, // NPDU
+        ];
+        pkt.extend_from_slice(&apdu);
+        pkt
+    }
+
+    // ── Test 1 ─────────────────────────────────────────────
+
+    #[test]
+    fn bbmd_addr_none_by_default() {
+        let d = BacnetDriver::new("bac-1", "255.255.255.255", DEFAULT_BACNET_PORT);
+        assert!(d.bbmd_addr.is_none());
+        assert!(!d.is_foreign_device);
+    }
+
+    // ── Test 2 ─────────────────────────────────────────────
+
+    #[test]
+    fn from_config_with_bbmd() {
+        let config = BacnetConfig {
+            id: "bac-bbmd".into(),
+            port: Some(47808),
+            broadcast: Some("255.255.255.255".into()),
+            objects: vec![],
+            bbmd: Some("192.168.2.1:47808".into()),
+        };
+        let d = BacnetDriver::from_config(config);
+        let addr = d.bbmd_addr.expect("bbmd_addr should be Some");
+        assert_eq!(addr.ip(), IpAddr::V4(Ipv4Addr::new(192, 168, 2, 1)));
+        assert_eq!(addr.port(), 47808);
+        assert!(!d.is_foreign_device, "not registered until open()");
+    }
+
+    // ── Test 3 ─────────────────────────────────────────────
+
+    #[test]
+    fn from_config_with_invalid_bbmd_logs_warning() {
+        let config = BacnetConfig {
+            id: "bac-bad-bbmd".into(),
+            port: None,
+            broadcast: None,
+            objects: vec![],
+            bbmd: Some("not-an-address".into()),
+        };
+        let d = BacnetDriver::from_config(config);
+        assert!(
+            d.bbmd_addr.is_none(),
+            "invalid bbmd should be silently ignored"
+        );
+    }
+
+    // ── Test 4 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn register_foreign_device_mock_success() {
+        // Spawn mock BBMD that replies with BVLL-Result success.
+        let mock = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock");
+        let mock_addr = mock.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 64];
+            if let Ok((n, from)) = mock.recv_from(&mut buf).await {
+                // Verify it's a Register-Foreign-Device (0x81 0x05)
+                assert!(n >= 6);
+                assert_eq!(buf[0], 0x81);
+                assert_eq!(buf[1], frame::BVLL_REGISTER_FOREIGN_DEVICE);
+                // Reply with BVLL-Result success (result code 0x0000)
+                let reply = [0x81u8, 0x00, 0x00, 0x06, 0x00, 0x00];
+                let _ = mock.send_to(&reply, from).await;
+            }
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let driver = BacnetDriver::new("bac-test", "127.0.0.1", 0);
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind driver");
+
+        let result = driver
+            .register_foreign_device(&socket, mock_addr, 300)
+            .await;
+        assert!(
+            result.is_ok(),
+            "registration should succeed, got {result:?}"
+        );
+    }
+
+    // ── Test 5 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn register_foreign_device_mock_nak() {
+        // Spawn mock BBMD that replies with NAK (result code 0x0030).
+        let mock = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock");
+        let mock_addr = mock.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 64];
+            if let Ok((_n, from)) = mock.recv_from(&mut buf).await {
+                // Reply with BVLL-Result NAK (result code 0x0030)
+                let reply = [0x81u8, 0x00, 0x00, 0x06, 0x00, 0x30];
+                let _ = mock.send_to(&reply, from).await;
+            }
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let driver = BacnetDriver::new("bac-test", "127.0.0.1", 0);
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind driver");
+
+        let result = driver
+            .register_foreign_device(&socket, mock_addr, 300)
+            .await;
+        assert!(result.is_err(), "NAK should result in error");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("NAK"),
+            "error should mention NAK, got: {err_msg}"
+        );
+    }
+
+    // ── Test 6 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn open_with_bbmd_registers_and_discovers() {
+        // 1. Bind mock that handles Register-Foreign-Device and Who-Is -> I-Am.
+        let mock = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock");
+        let mock_addr = mock.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1500];
+
+            // Exchange 1: Register-Foreign-Device -> BVLL-Result success
+            if let Ok((n, from)) = mock.recv_from(&mut buf).await {
+                if n >= 2 && buf[0] == 0x81 && buf[1] == frame::BVLL_REGISTER_FOREIGN_DEVICE {
+                    let reply = [0x81u8, 0x00, 0x00, 0x06, 0x00, 0x00];
+                    let _ = mock.send_to(&reply, from).await;
+                }
+            }
+
+            // Exchange 2: Who-Is (local broadcast) -> I-Am
+            if let Ok((_n, from)) = mock.recv_from(&mut buf).await {
+                let i_am = encode_i_am(12345, 1476, 3, 999);
+                let _ = mock.send_to(&i_am, from).await;
+            }
+
+            // Exchange 3: Distribute-Broadcast Who-Is (via BBMD) -- just consume it
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                mock.recv_from(&mut buf),
+            )
+            .await;
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // 2. Configure driver with BBMD pointing to our mock.
+        let mut driver = BacnetDriver::new("bac-bbmd-e2e", "127.0.0.1", 0)
+            .with_bbmd_addr(mock_addr)
+            .with_broadcast_port(mock_addr.port())
+            .with_discovery_timeout(std::time::Duration::from_millis(200));
+
+        // 3. Open -- should register as foreign device + discover the mock device.
+        let meta = driver.open().await.expect("open should succeed");
+        assert!(
+            driver.is_foreign_device,
+            "should be registered as foreign device"
+        );
+        assert!(
+            driver.device_registry().len() >= 1,
+            "should have discovered at least one device"
+        );
+        assert!(
+            meta.model.as_deref().unwrap_or("").contains("BACnet/IP"),
+            "meta should mention BACnet/IP"
+        );
     }
 }

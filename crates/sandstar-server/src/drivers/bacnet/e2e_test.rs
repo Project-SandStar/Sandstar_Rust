@@ -532,6 +532,7 @@ async fn e2e_write_succeeds_with_simple_ack() {
             scale: Some(1.0),
             offset: Some(0.0),
         }],
+        bbmd: None,
     };
     let driver = BacnetDriver::from_config(config)
         .with_broadcast_port(mock_port)
@@ -598,6 +599,7 @@ async fn e2e_write_error_pdu_returns_remote_status() {
             scale: Some(1.0),
             offset: Some(0.0),
         }],
+        bbmd: None,
     };
     let driver = BacnetDriver::from_config(config)
         .with_broadcast_port(mock_port)
@@ -706,6 +708,7 @@ async fn e2e_on_watch_subscribes_cov() {
             scale: Some(1.0),
             offset: Some(0.0),
         }],
+        bbmd: None,
     };
     let driver = BacnetDriver::from_config(config)
         .with_broadcast_port(mock_port)
@@ -810,6 +813,7 @@ async fn e2e_on_unwatch_sends_cancel() {
             scale: Some(1.0),
             offset: Some(0.0),
         }],
+        bbmd: None,
     };
     let driver = BacnetDriver::from_config(config)
         .with_broadcast_port(mock_port)
@@ -945,6 +949,7 @@ async fn e2e_sync_cur_uses_rpm() {
                 offset: Some(0.0),
             },
         ],
+        bbmd: None,
     };
     let driver = BacnetDriver::from_config(config)
         .with_broadcast_port(mock_port)

@@ -35,6 +35,10 @@ pub const BVLL_BACNET_IP: u8 = 0x81;
 pub const BVLL_UNICAST: u8 = 0x0A;
 /// BVLL type: Original-Broadcast-NPDU.
 pub const BVLL_BROADCAST: u8 = 0x0B;
+/// BVLL type: Register-Foreign-Device (Phase B10).
+pub const BVLL_REGISTER_FOREIGN_DEVICE: u8 = 0x05;
+/// BVLL type: Distribute-Broadcast-To-Network (Phase B10).
+pub const BVLL_DISTRIBUTE_BROADCAST: u8 = 0x09;
 /// NPDU version (always 1).
 pub const NPDU_VERSION: u8 = 0x01;
 /// NPDU control byte: local network, data (no routing).
@@ -771,6 +775,61 @@ fn encode_bacnet_value(buf: &mut Vec<u8>, val: &super::value::BacnetValue) {
         }
         _ => {} // skip unknown/unhandled types
     }
+}
+
+// ── Phase B10: BBMD / Foreign-Device encoding ─────────────
+
+/// Encode a Register-Foreign-Device request.
+///
+/// Wire format (6 bytes):
+/// ```text
+/// [0x81, 0x05, 0x00, 0x06, TTL_hi, TTL_lo]
+/// ```
+pub fn encode_register_foreign_device(ttl_seconds: u16) -> Vec<u8> {
+    let mut pkt = Vec::with_capacity(6);
+    pkt.push(BVLL_BACNET_IP);
+    pkt.push(BVLL_REGISTER_FOREIGN_DEVICE);
+    pkt.extend_from_slice(&6u16.to_be_bytes()); // total length = 6
+    pkt.extend_from_slice(&ttl_seconds.to_be_bytes());
+    pkt
+}
+
+/// Wrap raw NPDU+APDU bytes into a Distribute-Broadcast-To-Network frame.
+///
+/// Wire format:
+/// ```text
+/// [0x81, 0x09, len_hi, len_lo, <npdu_apdu>...]
+/// ```
+pub fn encode_distribute_broadcast_to_network(npdu_apdu: &[u8]) -> Vec<u8> {
+    let total_len = 4 + npdu_apdu.len();
+    let mut pkt = Vec::with_capacity(total_len);
+    pkt.push(BVLL_BACNET_IP);
+    pkt.push(BVLL_DISTRIBUTE_BROADCAST);
+    pkt.extend_from_slice(&(total_len as u16).to_be_bytes());
+    pkt.extend_from_slice(npdu_apdu);
+    pkt
+}
+
+/// Decode a BVLL-Result response (6 bytes).
+///
+/// Returns the 16-bit result code: `0x0000` = success.
+/// Returns `BacnetError::MalformedFrame` if the packet is too short or
+/// not a BVLL-Result (`type != 0x00`).
+pub fn decode_bvll_result(data: &[u8]) -> Result<u16, BacnetError> {
+    if data.len() < 6 {
+        return Err(BacnetError::MalformedFrame(format!(
+            "BVLL-Result too short: {} bytes (need 6)",
+            data.len()
+        )));
+    }
+    if data[0] != BVLL_BACNET_IP || data[1] != 0x00 {
+        return Err(BacnetError::MalformedFrame(format!(
+            "not a BVLL-Result: type=0x{:02X}",
+            data[1]
+        )));
+    }
+    let code = u16::from_be_bytes([data[4], data[5]]);
+    Ok(code)
 }
 
 // ── Decoding ───────────────────────────────────────────────
