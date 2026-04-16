@@ -96,7 +96,7 @@ Replace the `MqttDriver` stub in `crates/sandstar-server/src/drivers/mqtt.rs`:
 Unit tests: driver lifecycle with a mock event loop (no real broker).
 
 ### M2 — Value cache + `sync_cur`
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ COMPLETE (2026-04-17)
 
 - `MqttValueCache` (similar shape to `CovCache`): `HashMap<String (topic), CacheEntry { value, updated_at }>`.
 - Event loop task pushes incoming messages into the cache:
@@ -171,6 +171,6 @@ MQTT driver is "done" when:
 | Phase | Commit | Date | Version |
 |---|---|---|---|
 | M1 | (pending commit) | 2026-04-17 | 2.8.0-dev |
-| M2 | — | — | — |
+| M2 | (pending commit) | 2026-04-17 | 2.8.0-dev |
 | M3 | — | — | — |
 | M4 | — | — | — |

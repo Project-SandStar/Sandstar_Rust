@@ -1,16 +1,19 @@
-//! MQTT pub/sub driver (Phase M1 — client lifecycle).
+//! MQTT pub/sub driver (Phase M2 — value cache + sync_cur).
 //!
 //! Implements the `AsyncDriver` lifecycle for an MQTT broker connection:
 //! connecting via `rumqttc`, spawning the event-loop task, subscribing to
 //! configured topics, and cleanly disconnecting on close.
 //!
-//! **Scope:** M1 covers connect / disconnect / ping / learn only.
-//! - `sync_cur()` value flow is M2 (value cache + JSON path extraction).
+//! **Scope:**
+//! - M1 (complete): connect / disconnect / ping / learn.
+//! - M2 (this file): value cache populated by the event-loop task,
+//!   `sync_cur()` returns fresh cached values or `CommFault` on stale/absent.
 //! - `write()` is M3 (publish to configured topic).
 //! - Server wiring + E2E is M4.
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS};
@@ -101,21 +104,112 @@ fn qos_from_u8(qos: u8) -> QoS {
     }
 }
 
+/// Maximum age for a cached value before `sync_cur()` treats it as stale.
+const MQTT_CACHE_MAX_AGE: Duration = Duration::from_secs(600);
+
+// ── Value cache ────────────────────────────────────────────
+
+/// A single cached value with the timestamp of the last update.
+#[derive(Debug, Clone)]
+struct MqttCacheEntry {
+    value: f64,
+    updated_at: Instant,
+}
+
+/// Cache of latest MQTT-reported values, keyed by subscribe topic.
+///
+/// Populated as a side-effect by the event-loop task when `Publish`
+/// packets arrive. `sync_cur()` reads from here without touching the
+/// network.
+#[derive(Debug, Default)]
+struct MqttValueCache {
+    entries: HashMap<String, MqttCacheEntry>,
+}
+
+impl MqttValueCache {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn update(&mut self, topic: impl Into<String>, value: f64) {
+        self.entries.insert(
+            topic.into(),
+            MqttCacheEntry {
+                value,
+                updated_at: Instant::now(),
+            },
+        );
+    }
+
+    /// Look up a cached entry. Returns `None` if absent or older than `max_age`.
+    fn get(&self, topic: &str, max_age: Duration) -> Option<MqttCacheEntry> {
+        self.entries
+            .get(topic)
+            .filter(|e| e.updated_at.elapsed() < max_age)
+            .cloned()
+    }
+
+    /// Drop the cached entry for a topic, if any.
+    /// Exposed for unit tests and for future use by `close()` / unsubscribe.
+    #[allow(dead_code)]
+    fn remove(&mut self, topic: &str) {
+        self.entries.remove(topic);
+    }
+
+    /// Number of cached entries. Exposed for tests.
+    #[allow(dead_code)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+/// Parse a raw MQTT payload into a floating-point value.
+///
+/// - If `value_path` is `None`, the payload is parsed directly as an `f64`
+///   (leading/trailing whitespace is trimmed).
+/// - If `value_path` is `Some(pointer)`, the payload is parsed as JSON and
+///   the pointer is resolved via RFC 6901. The resulting `serde_json::Value`
+///   is coerced to `f64` (numbers, booleans, or numeric strings).
+///
+/// Extracted as a free function so it can be unit-tested independently of the
+/// event-loop task.
+fn extract_value(payload_str: &str, value_path: Option<&str>) -> Result<f64, String> {
+    match value_path {
+        None => payload_str.trim().parse::<f64>().map_err(|e| e.to_string()),
+        Some(pointer) => {
+            let v: serde_json::Value =
+                serde_json::from_str(payload_str).map_err(|e| format!("json parse: {e}"))?;
+            let target = v
+                .pointer(pointer)
+                .ok_or_else(|| format!("path {pointer} not found"))?;
+            target
+                .as_f64()
+                .or_else(|| target.as_i64().map(|i| i as f64))
+                .or_else(|| target.as_u64().map(|u| u as f64))
+                .or_else(|| target.as_bool().map(|b| if b { 1.0 } else { 0.0 }))
+                .or_else(|| target.as_str().and_then(|s| s.parse::<f64>().ok()))
+                .ok_or_else(|| format!("value at {pointer} is not numeric"))
+        }
+    }
+}
+
 // ── Driver ────────────────────────────────────────────────
 
 /// MQTT pub/sub driver.
 ///
 /// Wraps a `rumqttc::AsyncClient` plus a tokio task that drives the event
-/// loop. For M1 the event-loop task only logs incoming events at debug
-/// level; M2 will push payloads into a shared value cache.
+/// loop. The event-loop task decodes incoming publishes and pushes their
+/// values into a shared `MqttValueCache`, which `sync_cur()` reads from.
 pub struct MqttDriver {
     id: String,
     status: DriverStatus,
     config: MqttConfig,
     client: Option<AsyncClient>,
     event_loop_task: Option<JoinHandle<()>>,
-    /// Point-id-keyed lookup of MQTT object config (used by M2/M3).
+    /// Point-id-keyed lookup of MQTT object config (used by sync_cur/write).
     objects: HashMap<u32, MqttObjectConfig>,
+    /// Shared value cache populated by the event-loop task.
+    cache: Arc<Mutex<MqttValueCache>>,
 }
 
 impl MqttDriver {
@@ -153,6 +247,7 @@ impl MqttDriver {
             client: None,
             event_loop_task: None,
             objects,
+            cache: Arc::new(Mutex::new(MqttValueCache::new())),
         }
     }
 
@@ -210,8 +305,23 @@ impl AsyncDriver for MqttDriver {
         let (client, mut eventloop) = AsyncClient::new(options, 64);
         let driver_id = self.id.clone();
 
-        // Spawn the event loop task. For M1 this just logs events and
-        // breaks out on hard error (the driver is reopened on reconnect).
+        // Pre-compute the topic -> object map so the event-loop task can
+        // look up `value_path` / QoS without locking the driver itself.
+        let topic_map: Arc<HashMap<String, MqttObjectConfig>> = Arc::new(
+            self.objects
+                .values()
+                .filter_map(|obj| {
+                    obj.subscribe_topic
+                        .as_ref()
+                        .map(|t| (t.clone(), obj.clone()))
+                })
+                .collect(),
+        );
+        let cache = Arc::clone(&self.cache);
+        let task_topic_map = Arc::clone(&topic_map);
+
+        // Spawn the event loop task. Incoming publishes are parsed and
+        // pushed into the shared value cache.
         let task = tokio::spawn(async move {
             loop {
                 match eventloop.poll().await {
@@ -223,13 +333,44 @@ impl AsyncDriver for MqttDriver {
                         );
                     }
                     Ok(Event::Incoming(Incoming::Publish(p))) => {
-                        // M2 will push this into the value cache.
-                        tracing::debug!(
-                            driver = %driver_id,
-                            topic = %p.topic,
-                            payload_len = p.payload.len(),
-                            "mqtt publish received (M1: no-op)"
-                        );
+                        let payload_str = match std::str::from_utf8(&p.payload) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                tracing::warn!(
+                                    driver = %driver_id,
+                                    topic = %p.topic,
+                                    error = %e,
+                                    "MQTT payload not valid UTF-8"
+                                );
+                                continue;
+                            }
+                        };
+
+                        let value_path = task_topic_map
+                            .get(&p.topic)
+                            .and_then(|obj| obj.value_path.clone());
+
+                        match extract_value(payload_str, value_path.as_deref()) {
+                            Ok(value) => {
+                                if let Ok(mut guard) = cache.lock() {
+                                    guard.update(p.topic.clone(), value);
+                                }
+                                tracing::debug!(
+                                    driver = %driver_id,
+                                    topic = %p.topic,
+                                    value,
+                                    "mqtt cache updated"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    driver = %driver_id,
+                                    topic = %p.topic,
+                                    error = %e,
+                                    "MQTT value parse failed"
+                                );
+                            }
+                        }
                     }
                     Ok(ev) => {
                         tracing::debug!(
@@ -315,10 +456,58 @@ impl AsyncDriver for MqttDriver {
 
     async fn sync_cur(
         &mut self,
-        _points: &[DriverPointRef],
+        points: &[DriverPointRef],
     ) -> Vec<(u32, Result<f64, DriverError>)> {
-        // M2 will populate this from the value cache.
-        Vec::new()
+        let mut results = Vec::with_capacity(points.len());
+        for point in points {
+            let obj = match self.objects.get(&point.point_id) {
+                Some(o) => o,
+                None => {
+                    results.push((
+                        point.point_id,
+                        Err(DriverError::ConfigFault(format!(
+                            "no mqtt object for point {}",
+                            point.point_id
+                        ))),
+                    ));
+                    continue;
+                }
+            };
+
+            let topic = match obj.subscribe_topic.as_ref() {
+                Some(t) => t,
+                None => {
+                    results.push((
+                        point.point_id,
+                        Err(DriverError::ConfigFault("no subscribe_topic".into())),
+                    ));
+                    continue;
+                }
+            };
+
+            let cached = {
+                let guard = match self.cache.lock() {
+                    Ok(g) => g,
+                    Err(_) => {
+                        results.push((
+                            point.point_id,
+                            Err(DriverError::Internal("mqtt cache mutex poisoned".into())),
+                        ));
+                        continue;
+                    }
+                };
+                guard.get(topic, MQTT_CACHE_MAX_AGE)
+            };
+
+            match cached {
+                Some(entry) => results.push((point.point_id, Ok(entry.value))),
+                None => results.push((
+                    point.point_id,
+                    Err(DriverError::CommFault("no cached value or stale".into())),
+                )),
+            }
+        }
+        results
     }
 
     async fn write(&mut self, _writes: &[(u32, f64)]) -> Vec<(u32, Result<(), DriverError>)> {
@@ -490,10 +679,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_and_write_empty_in_m1() {
+    async fn write_empty_in_m2() {
+        let mut d = MqttDriver::new("mq", "h", 1883);
+        assert!(d.write(&[]).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sync_empty_points_returns_empty() {
         let mut d = MqttDriver::new("mq", "h", 1883);
         assert!(d.sync_cur(&[]).await.is_empty());
-        assert!(d.write(&[]).await.is_empty());
     }
 
     #[test]
@@ -506,5 +700,178 @@ mod tests {
     async fn ping_without_open_returns_err() {
         let mut d = MqttDriver::new("mq", "h", 1883);
         assert!(d.ping().await.is_err());
+    }
+
+    // ── Value cache tests ──────────────────────────────────
+
+    #[test]
+    fn value_cache_insert_and_get() {
+        let mut cache = MqttValueCache::new();
+        cache.update("a/b", 42.5);
+        let entry = cache
+            .get("a/b", Duration::from_secs(60))
+            .expect("should find entry");
+        assert_eq!(entry.value, 42.5);
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn value_cache_stale_returns_none() {
+        let mut cache = MqttValueCache::new();
+        cache.update("a/b", 1.0);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(cache.get("a/b", Duration::from_millis(1)).is_none());
+    }
+
+    #[test]
+    fn value_cache_remove_works() {
+        let mut cache = MqttValueCache::new();
+        cache.update("a/b", 1.0);
+        cache.remove("a/b");
+        assert!(cache.get("a/b", Duration::from_secs(60)).is_none());
+        assert_eq!(cache.len(), 0);
+    }
+
+    // ── extract_value tests ────────────────────────────────
+
+    #[test]
+    fn extract_value_plain_number() {
+        assert_eq!(extract_value("42.5", None).unwrap(), 42.5);
+    }
+
+    #[test]
+    fn extract_value_plain_number_with_whitespace() {
+        assert_eq!(extract_value("  42.5  \n", None).unwrap(), 42.5);
+    }
+
+    #[test]
+    fn extract_value_plain_number_invalid() {
+        assert!(extract_value("hello", None).is_err());
+    }
+
+    #[test]
+    fn extract_value_json_nested() {
+        let payload = r#"{"data":{"value":42.5}}"#;
+        assert_eq!(extract_value(payload, Some("/data/value")).unwrap(), 42.5);
+    }
+
+    #[test]
+    fn extract_value_json_missing_path() {
+        let payload = r#"{"data":{"value":42.5}}"#;
+        assert!(extract_value(payload, Some("/nope")).is_err());
+    }
+
+    #[test]
+    fn extract_value_json_non_numeric() {
+        let payload = r#"{"data":{"label":[1,2,3]}}"#;
+        assert!(extract_value(payload, Some("/data/label")).is_err());
+    }
+
+    #[test]
+    fn extract_value_json_integer_coerces_to_f64() {
+        let payload = r#"{"v":42}"#;
+        assert_eq!(extract_value(payload, Some("/v")).unwrap(), 42.0);
+    }
+
+    #[test]
+    fn extract_value_json_bool_coerces() {
+        assert_eq!(extract_value(r#"{"on":true}"#, Some("/on")).unwrap(), 1.0);
+        assert_eq!(extract_value(r#"{"on":false}"#, Some("/on")).unwrap(), 0.0);
+    }
+
+    // ── sync_cur tests ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn sync_cur_unknown_point_returns_config_fault() {
+        let mut d = MqttDriver::new("mq", "h", 1883);
+        let refs = vec![DriverPointRef {
+            point_id: 9999,
+            address: "9999".into(),
+        }];
+        let results = d.sync_cur(&refs).await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, 9999);
+        assert!(matches!(results[0].1, Err(DriverError::ConfigFault(_))));
+    }
+
+    #[tokio::test]
+    async fn sync_cur_no_subscribe_topic_returns_config_fault() {
+        let config = MqttConfig {
+            id: "mq".into(),
+            host: "h".into(),
+            port: 1883,
+            client_id: "cid".into(),
+            username: None,
+            password: None,
+            tls: false,
+            keep_alive_secs: 60,
+            objects: vec![MqttObjectConfig {
+                point_id: 10,
+                subscribe_topic: None,
+                publish_topic: Some("out/10".into()),
+                value_path: None,
+                qos: 1,
+            }],
+        };
+        let mut d = MqttDriver::from_config(config);
+        let refs = vec![DriverPointRef {
+            point_id: 10,
+            address: "10".into(),
+        }];
+        let results = d.sync_cur(&refs).await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, 10);
+        assert!(matches!(results[0].1, Err(DriverError::ConfigFault(_))));
+    }
+
+    #[tokio::test]
+    async fn sync_cur_empty_cache_returns_comm_fault() {
+        let config = MqttConfig {
+            id: "mq".into(),
+            host: "h".into(),
+            port: 1883,
+            client_id: "cid".into(),
+            username: None,
+            password: None,
+            tls: false,
+            keep_alive_secs: 60,
+            objects: vec![sample_object(11, "t/11")],
+        };
+        let mut d = MqttDriver::from_config(config);
+        let refs = vec![DriverPointRef {
+            point_id: 11,
+            address: "11".into(),
+        }];
+        let results = d.sync_cur(&refs).await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, 11);
+        assert!(matches!(results[0].1, Err(DriverError::CommFault(_))));
+    }
+
+    #[tokio::test]
+    async fn sync_cur_fresh_cache_hit() {
+        let config = MqttConfig {
+            id: "mq".into(),
+            host: "h".into(),
+            port: 1883,
+            client_id: "cid".into(),
+            username: None,
+            password: None,
+            tls: false,
+            keep_alive_secs: 60,
+            objects: vec![sample_object(12, "t/12")],
+        };
+        let mut d = MqttDriver::from_config(config);
+        // Populate the cache directly — tests can reach private fields
+        // because they live in the same module.
+        d.cache.lock().unwrap().update("t/12", 73.25);
+        let refs = vec![DriverPointRef {
+            point_id: 12,
+            address: "12".into(),
+        }];
+        let results = d.sync_cur(&refs).await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, 12);
+        assert_eq!(results[0].1.as_ref().unwrap(), &73.25);
     }
 }
