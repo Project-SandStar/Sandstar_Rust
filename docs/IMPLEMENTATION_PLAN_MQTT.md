@@ -107,7 +107,7 @@ Unit tests: driver lifecycle with a mock event loop (no real broker).
 Tests: cache population, stale expiry, JSON path extraction, plain-number parsing.
 
 ### M3 — `write()` + engine integration
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ COMPLETE (2026-04-17)
 
 - `AsyncDriver::write()` — for each `(point_id, value)`:
   - Look up `publish_topic`; if `None`, return `ConfigFault("no publish_topic")`.
@@ -172,5 +172,5 @@ MQTT driver is "done" when:
 |---|---|---|---|
 | M1 | (pending commit) | 2026-04-17 | 2.8.0-dev |
 | M2 | (pending commit) | 2026-04-17 | 2.8.0-dev |
-| M3 | — | — | — |
+| M3 | (pending commit) | 2026-04-17 | 2.8.0-dev |
 | M4 | — | — | — |

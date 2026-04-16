@@ -6,9 +6,9 @@
 //!
 //! **Scope:**
 //! - M1 (complete): connect / disconnect / ping / learn.
-//! - M2 (this file): value cache populated by the event-loop task,
+//! - M2 (complete): value cache populated by the event-loop task,
 //!   `sync_cur()` returns fresh cached values or `CommFault` on stale/absent.
-//! - `write()` is M3 (publish to configured topic).
+//! - M3 (this file): `write()` publishes to the configured `publish_topic`.
 //! - Server wiring + E2E is M4.
 
 use std::collections::HashMap;
@@ -190,6 +190,28 @@ fn extract_value(payload_str: &str, value_path: Option<&str>) -> Result<f64, Str
                 .or_else(|| target.as_str().and_then(|s| s.parse::<f64>().ok()))
                 .ok_or_else(|| format!("value at {pointer} is not numeric"))
         }
+    }
+}
+
+/// Build the payload bytes for a write.
+///
+/// If `use_json_envelope` is true, emit a compact JSON object `{"value": N}`;
+/// otherwise emit the number's `Display` form.
+///
+/// Phase M3 note: we always use the literal key `"value"` in the JSON
+/// envelope — we do NOT mirror the read-side `value_path` into a nested
+/// write shape. If downstream consumers need a different write shape
+/// (e.g. `{"data":{"value":N}}` to match a `/data/value` read path),
+/// that's an M4+ concern. The rule here is: if the read side uses any
+/// JSON pointer path, the write side also uses JSON (flat `{"value":N}`);
+/// otherwise the payload is a bare number.
+fn build_publish_payload(value: f64, use_json_envelope: bool) -> Vec<u8> {
+    if use_json_envelope {
+        serde_json::json!({ "value": value })
+            .to_string()
+            .into_bytes()
+    } else {
+        value.to_string().into_bytes()
     }
 }
 
@@ -510,9 +532,69 @@ impl AsyncDriver for MqttDriver {
         results
     }
 
-    async fn write(&mut self, _writes: &[(u32, f64)]) -> Vec<(u32, Result<(), DriverError>)> {
-        // M3 will publish to the configured publish_topic.
-        Vec::new()
+    async fn write(&mut self, writes: &[(u32, f64)]) -> Vec<(u32, Result<(), DriverError>)> {
+        let mut results = Vec::with_capacity(writes.len());
+
+        for &(point_id, value) in writes {
+            // 1. Look up per-point config.
+            let obj = match self.objects.get(&point_id).cloned() {
+                Some(o) => o,
+                None => {
+                    results.push((
+                        point_id,
+                        Err(DriverError::ConfigFault(format!(
+                            "no MQTT object configured for point {point_id}"
+                        ))),
+                    ));
+                    continue;
+                }
+            };
+
+            // 2. Require a publish_topic on this object.
+            let topic = match obj.publish_topic.as_ref() {
+                Some(t) => t.clone(),
+                None => {
+                    results.push((
+                        point_id,
+                        Err(DriverError::ConfigFault(format!(
+                            "no publish_topic for point {point_id}"
+                        ))),
+                    ));
+                    continue;
+                }
+            };
+
+            // 3. Build payload. Symmetric with the read side: if the
+            //    object uses a JSON value_path for reads, we emit a JSON
+            //    envelope for writes (flat `{"value": N}` — see
+            //    `build_publish_payload` docs for the rationale).
+            let use_json_envelope = obj.value_path.is_some();
+            let payload = build_publish_payload(value, use_json_envelope);
+
+            // 4. Map QoS.
+            let qos = qos_from_u8(obj.qos);
+
+            // 5. Require an open client.
+            let client = match self.client.as_ref() {
+                Some(c) => c,
+                None => {
+                    results.push((
+                        point_id,
+                        Err(DriverError::CommFault("mqtt: not connected".into())),
+                    ));
+                    continue;
+                }
+            };
+
+            // 6. Publish (retain=false). Map errors to CommFault.
+            let result = client
+                .publish(topic, qos, false, payload)
+                .await
+                .map_err(|e| DriverError::CommFault(format!("mqtt publish: {e}")));
+            results.push((point_id, result));
+        }
+
+        results
     }
 }
 
@@ -676,12 +758,6 @@ mod tests {
         // Must not panic — no client/task yet.
         d.close().await;
         assert_eq!(*d.status(), DriverStatus::Down);
-    }
-
-    #[tokio::test]
-    async fn write_empty_in_m2() {
-        let mut d = MqttDriver::new("mq", "h", 1883);
-        assert!(d.write(&[]).await.is_empty());
     }
 
     #[tokio::test]
@@ -873,5 +949,141 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, 12);
         assert_eq!(results[0].1.as_ref().unwrap(), &73.25);
+    }
+
+    // ── build_publish_payload tests ────────────────────────
+
+    #[test]
+    fn build_publish_payload_plain() {
+        assert_eq!(build_publish_payload(72.5, false), b"72.5".to_vec());
+    }
+
+    #[test]
+    fn build_publish_payload_plain_integer_like() {
+        // Rust's f64::Display strips the trailing zero for whole numbers,
+        // so 42.0_f64.to_string() yields "42". Asserting the actual
+        // Rust behaviour here so any regression from a future std change
+        // shows up loudly.
+        assert_eq!(build_publish_payload(42.0, false), b"42".to_vec());
+    }
+
+    #[test]
+    fn build_publish_payload_json() {
+        let bytes = build_publish_payload(72.5, true);
+        let v: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("payload must be valid JSON");
+        assert_eq!(v.get("value").and_then(|x| x.as_f64()), Some(72.5));
+    }
+
+    #[test]
+    fn build_publish_payload_negative() {
+        assert_eq!(build_publish_payload(-1.5, false), b"-1.5".to_vec());
+    }
+
+    // ── write() tests ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn write_empty_returns_empty() {
+        let mut d = MqttDriver::new("mq", "h", 1883);
+        assert!(d.write(&[]).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn write_unknown_point_returns_config_fault() {
+        let mut d = MqttDriver::new("mq", "h", 1883);
+        let results = d.write(&[(999, 1.0)]).await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, 999);
+        match &results[0].1 {
+            Err(DriverError::ConfigFault(msg)) => {
+                assert!(
+                    msg.contains("no MQTT object configured"),
+                    "unexpected config-fault message: {msg}"
+                );
+            }
+            other => panic!("expected ConfigFault, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn write_no_publish_topic_returns_config_fault() {
+        let config = MqttConfig {
+            id: "mq".into(),
+            host: "h".into(),
+            port: 1883,
+            client_id: "cid".into(),
+            username: None,
+            password: None,
+            tls: false,
+            keep_alive_secs: 60,
+            objects: vec![MqttObjectConfig {
+                point_id: 20,
+                subscribe_topic: Some("in/20".into()),
+                publish_topic: None,
+                value_path: None,
+                qos: 1,
+            }],
+        };
+        let mut d = MqttDriver::from_config(config);
+        let results = d.write(&[(20, 1.0)]).await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, 20);
+        match &results[0].1 {
+            Err(DriverError::ConfigFault(msg)) => {
+                assert!(
+                    msg.contains("no publish_topic"),
+                    "unexpected config-fault message: {msg}"
+                );
+            }
+            other => panic!("expected ConfigFault, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn write_not_connected_returns_comm_fault() {
+        let config = MqttConfig {
+            id: "mq".into(),
+            host: "h".into(),
+            port: 1883,
+            client_id: "cid".into(),
+            username: None,
+            password: None,
+            tls: false,
+            keep_alive_secs: 60,
+            objects: vec![MqttObjectConfig {
+                point_id: 30,
+                subscribe_topic: None,
+                publish_topic: Some("out/30".into()),
+                value_path: None,
+                qos: 1,
+            }],
+        };
+        let mut d = MqttDriver::from_config(config);
+        // No open() called — client should be None.
+        assert!(d.client.is_none());
+        let results = d.write(&[(30, 7.0)]).await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, 30);
+        match &results[0].1 {
+            Err(DriverError::CommFault(msg)) => {
+                assert_eq!(msg, "mqtt: not connected");
+            }
+            other => panic!("expected CommFault, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn write_three_points_preserves_order() {
+        // No objects configured — every write errors with ConfigFault —
+        // but the point_ids must appear in the returned Vec in input order.
+        let mut d = MqttDriver::new("mq", "h", 1883);
+        let results = d.write(&[(1, 1.0), (2, 2.0), (3, 3.0)]).await;
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].0, 1);
+        assert_eq!(results[1].0, 2);
+        assert_eq!(results[2].0, 3);
+        for r in &results {
+            assert!(matches!(r.1, Err(DriverError::ConfigFault(_))));
+        }
     }
 }
