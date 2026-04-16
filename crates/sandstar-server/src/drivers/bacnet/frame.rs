@@ -52,6 +52,10 @@ pub const SVC_CONFIRMED_READ_PROPERTY_MULTIPLE: u8 = 0x0E;
 pub const SVC_CONFIRMED_WRITE_PROPERTY: u8 = 0x0F;
 /// Confirmed service: SubscribeCOV (Phase B8).
 pub const SVC_CONFIRMED_SUBSCRIBE_COV: u8 = 0x05;
+/// Unconfirmed service: Unconfirmed-COV-Notification (Phase B8.1).
+pub const SVC_UNCONFIRMED_COV_NOTIFICATION: u8 = 0x02;
+/// Confirmed service: Confirmed-COV-Notification (Phase B8.1).
+pub const SVC_CONFIRMED_COV_NOTIFICATION: u8 = 0x01;
 
 // ── ReadPropertyMultiple (Phase B9) ────────────────────────
 
@@ -79,6 +83,36 @@ pub struct RpmResult {
     pub property_id: u32,
     pub array_index: Option<u32>,
     pub value: Result<super::value::BacnetValue, (u32, u32)>,
+}
+
+// ── COV Notification (Phase B8.1) ─────────────────────────
+
+/// A single property-value pair within a COV notification.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CovPropertyValue {
+    /// Property identifier (e.g. 85 = Present_Value, 111 = Status_Flags).
+    pub property_id: u32,
+    /// Optional array index.
+    pub array_index: Option<u32>,
+    /// The property value.
+    pub value: BacnetValue,
+}
+
+/// A decoded COV notification (both confirmed and unconfirmed forms).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CovNotification {
+    /// The subscriber-process-identifier we originally sent.
+    pub subscriber_process_id: u32,
+    /// The device instance that initiated the notification.
+    pub initiating_device_instance: u32,
+    /// Object type of the monitored object.
+    pub monitored_object_type: u16,
+    /// Instance of the monitored object.
+    pub monitored_object_instance: u32,
+    /// Remaining lifetime (seconds). `None` if absent.
+    pub time_remaining: Option<u32>,
+    /// List of property values that changed.
+    pub values: Vec<CovPropertyValue>,
 }
 
 // ── Header structs ─────────────────────────────────────────
@@ -166,6 +200,13 @@ pub enum Apdu {
     ReadPropertyMultipleAck {
         invoke_id: u8,
         results: Vec<RpmResult>,
+    },
+    /// Unconfirmed-COV-Notification (service 0x02, Phase B8.1).
+    UnconfirmedCovNotification { notification: CovNotification },
+    /// Confirmed-COV-Notification (service 0x01, Phase B8.1).
+    ConfirmedCovNotification {
+        invoke_id: u8,
+        notification: CovNotification,
     },
     /// Catch-all for PDU types / services not explicitly handled above.
     ///
@@ -852,6 +893,203 @@ pub fn decode_apdu(data: &[u8]) -> Result<Apdu, BacnetError> {
     }
 }
 
+// ── COV Notification decoder (Phase B8.1) ────────────────
+
+/// Decode a COV notification payload (shared between confirmed and
+/// unconfirmed forms).
+///
+/// The payload after the service-choice byte contains:
+///   - context tag 0: subscriber-process-identifier (Unsigned)
+///   - context tag 1: initiating-device-identifier (ObjectId, 4 bytes)
+///   - context tag 2: monitored-object-identifier (ObjectId, 4 bytes)
+///   - context tag 3: time-remaining (Unsigned) — optional in unconfirmed
+///   - context tag 4 open/close: list-of-values
+///     Each value entry:
+///       - context tag 0: property-identifier (Unsigned)
+///       - context tag 1: property-array-index (Unsigned) — optional
+///       - context tag 2 open: property-value (application-tagged)
+///       - context tag 2 close
+///       - context tag 3: priority (Unsigned) — optional (ignored)
+fn decode_cov_notification_payload(data: &[u8]) -> Result<CovNotification, BacnetError> {
+    let mut pos = 0;
+
+    // Helper: read context-tagged unsigned integer
+    fn read_context_unsigned(
+        data: &[u8],
+        pos: &mut usize,
+        expected_tag: u8,
+    ) -> Result<u32, BacnetError> {
+        if *pos >= data.len() {
+            return Err(BacnetError::MalformedFrame(format!(
+                "COV: truncated at context tag {expected_tag}"
+            )));
+        }
+        let tag_byte = data[*pos];
+        let tag_num = (tag_byte >> 4) & 0x0F;
+        let class = tag_byte & 0x08;
+        if class == 0 || tag_num != expected_tag {
+            return Err(BacnetError::MalformedFrame(format!(
+                "COV: expected context tag {expected_tag}, got byte 0x{tag_byte:02X}"
+            )));
+        }
+        let len = (tag_byte & 0x07) as usize;
+        *pos += 1;
+        if *pos + len > data.len() {
+            return Err(BacnetError::MalformedFrame("COV: truncated value".into()));
+        }
+        let mut val = 0u32;
+        for i in 0..len {
+            val = (val << 8) | data[*pos + i] as u32;
+        }
+        *pos += len;
+        Ok(val)
+    }
+
+    // Helper: read context-tagged object-identifier (4 bytes)
+    fn read_context_object_id(
+        data: &[u8],
+        pos: &mut usize,
+        expected_tag: u8,
+    ) -> Result<(u16, u32), BacnetError> {
+        if *pos >= data.len() {
+            return Err(BacnetError::MalformedFrame(format!(
+                "COV: truncated at object-id tag {expected_tag}"
+            )));
+        }
+        let tag_byte = data[*pos];
+        let tag_num = (tag_byte >> 4) & 0x0F;
+        let class = tag_byte & 0x08;
+        let len = (tag_byte & 0x07) as usize;
+        if class == 0 || tag_num != expected_tag || len != 4 {
+            return Err(BacnetError::MalformedFrame(format!(
+                "COV: expected context object-id tag {expected_tag}, got byte 0x{tag_byte:02X}"
+            )));
+        }
+        *pos += 1;
+        if *pos + 4 > data.len() {
+            return Err(BacnetError::MalformedFrame(
+                "COV: truncated object-id".into(),
+            ));
+        }
+        let raw = u32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
+        let obj_type = ((raw >> 22) & 0x3FF) as u16;
+        let instance = raw & 0x003F_FFFF;
+        *pos += 4;
+        Ok((obj_type, instance))
+    }
+
+    // Tag 0: subscriber-process-identifier
+    let subscriber_process_id = read_context_unsigned(data, &mut pos, 0)?;
+
+    // Tag 1: initiating-device-identifier (ObjectId)
+    let (_, initiating_device_instance) = read_context_object_id(data, &mut pos, 1)?;
+
+    // Tag 2: monitored-object-identifier (ObjectId)
+    let (monitored_object_type, monitored_object_instance) =
+        read_context_object_id(data, &mut pos, 2)?;
+
+    // Tag 3: time-remaining (optional — might not be present if tag 4 opening comes next)
+    let mut time_remaining = None;
+    if pos < data.len() {
+        let tag_byte = data[pos];
+        let tag_num = (tag_byte >> 4) & 0x0F;
+        let class = tag_byte & 0x08;
+        if class != 0 && tag_num == 3 && (tag_byte & 0x07) != 0x06 {
+            // It's a context tag 3 with value, not an opening/closing tag
+            time_remaining = Some(read_context_unsigned(data, &mut pos, 3)?);
+        }
+    }
+
+    // Tag 4 opening: list-of-values
+    let mut values = Vec::new();
+    if pos < data.len() && data[pos] == 0x4E {
+        // 0x4E = context tag 4, opening
+        pos += 1;
+
+        while pos < data.len() && data[pos] != 0x4F {
+            // 0x4F = context tag 4, closing
+
+            // Context tag 0: property-identifier
+            let property_id = read_context_unsigned(data, &mut pos, 0)?;
+
+            // Context tag 1 (optional): property-array-index
+            let mut array_index = None;
+            if pos < data.len() {
+                let tag_byte = data[pos];
+                let tag_num = (tag_byte >> 4) & 0x0F;
+                let class = tag_byte & 0x08;
+                if class != 0
+                    && tag_num == 1
+                    && (tag_byte & 0x07) != 0x06
+                    && (tag_byte & 0x07) != 0x07
+                {
+                    array_index = Some(read_context_unsigned(data, &mut pos, 1)?);
+                }
+            }
+
+            // Context tag 2 opening: property-value
+            if pos >= data.len() || data[pos] != 0x2E {
+                return Err(BacnetError::MalformedFrame(
+                    "COV: expected tag 2 opening (0x2E)".into(),
+                ));
+            }
+            pos += 1; // skip opening tag
+
+            // Decode the application-tagged value inside
+            let value = if pos < data.len() && data[pos] != 0x2F {
+                let (val, consumed) = decode_application_tag(&data[pos..])?;
+                pos += consumed;
+                val
+            } else {
+                BacnetValue::Null
+            };
+
+            // Context tag 2 closing
+            if pos >= data.len() || data[pos] != 0x2F {
+                return Err(BacnetError::MalformedFrame(
+                    "COV: expected tag 2 closing (0x2F)".into(),
+                ));
+            }
+            pos += 1;
+
+            // Context tag 3 (optional): priority — skip if present
+            if pos < data.len() {
+                let tag_byte = data[pos];
+                let tag_num = (tag_byte >> 4) & 0x0F;
+                let class = tag_byte & 0x08;
+                if class != 0
+                    && tag_num == 3
+                    && (tag_byte & 0x07) != 0x06
+                    && (tag_byte & 0x07) != 0x07
+                {
+                    let len = (tag_byte & 0x07) as usize;
+                    pos += 1 + len; // skip tag + value
+                }
+            }
+
+            values.push(CovPropertyValue {
+                property_id,
+                array_index,
+                value,
+            });
+        }
+
+        if pos < data.len() && data[pos] == 0x4F {
+            pos += 1; // consume closing tag
+        }
+    }
+    let _ = pos; // suppress unused warning
+
+    Ok(CovNotification {
+        subscriber_process_id,
+        initiating_device_instance,
+        monitored_object_type,
+        monitored_object_instance,
+        time_remaining,
+        values,
+    })
+}
+
 /// Decode a Simple-ACK PDU (PDU type 0x20).
 /// Layout: `[0x20, invoke_id, service_choice]`.
 fn decode_simple_ack(data: &[u8]) -> Result<Apdu, BacnetError> {
@@ -892,6 +1130,13 @@ fn decode_confirmed_request(data: &[u8]) -> Result<Apdu, BacnetError> {
         SVC_CONFIRMED_READ_PROPERTY_MULTIPLE => {
             decode_read_property_multiple_request(invoke_id, &data[4..])
         }
+        SVC_CONFIRMED_COV_NOTIFICATION => {
+            let notification = decode_cov_notification_payload(&data[4..])?;
+            Ok(Apdu::ConfirmedCovNotification {
+                invoke_id,
+                notification,
+            })
+        }
         _ => Ok(Apdu::Other {
             pdu_type: data[0],
             invoke_id,
@@ -911,6 +1156,10 @@ fn decode_unconfirmed_request(data: &[u8]) -> Result<Apdu, BacnetError> {
     match service {
         SVC_UNCONFIRMED_WHOIS => decode_who_is(&data[2..]),
         SVC_UNCONFIRMED_IAM => decode_i_am(&data[2..]),
+        SVC_UNCONFIRMED_COV_NOTIFICATION => {
+            let notification = decode_cov_notification_payload(&data[2..])?;
+            Ok(Apdu::UnconfirmedCovNotification { notification })
+        }
         _ => Ok(Apdu::Other {
             pdu_type: data[0],
             invoke_id: 0,

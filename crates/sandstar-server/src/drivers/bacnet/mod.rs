@@ -153,6 +153,72 @@ struct CovSubscription {
     lifetime: Option<u32>,
 }
 
+/// Cached COV (Change of Value) entry for a BACnet object (Phase B8.1).
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct CovCacheEntry {
+    /// The latest property value from a COV notification.
+    value: value::BacnetValue,
+    /// When this cache entry was last updated.
+    updated_at: std::time::Instant,
+    /// The subscriber process ID that triggered this update.
+    process_id: u32,
+}
+
+/// Cache of latest COV values, keyed by (object_type, instance).
+///
+/// Updated as a side-effect when inline recv loops encounter COV
+/// notification packets. Used by `sync_cur()` to return cached values
+/// for COV-subscribed points instead of making network reads.
+#[derive(Debug, Default)]
+struct CovCache {
+    entries: HashMap<(u16, u32), CovCacheEntry>,
+}
+
+impl CovCache {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Update the cache from a COV notification.
+    /// Stores the PresentValue (property 85) if present in the notification's value list.
+    fn update(&mut self, notification: &frame::CovNotification) {
+        for pv in &notification.values {
+            if pv.property_id == 85 {
+                // PresentValue
+                self.entries.insert(
+                    (
+                        notification.monitored_object_type,
+                        notification.monitored_object_instance,
+                    ),
+                    CovCacheEntry {
+                        value: pv.value.clone(),
+                        updated_at: std::time::Instant::now(),
+                        process_id: notification.subscriber_process_id,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Look up a cached value. Returns None if not present or older than `max_age`.
+    fn get(
+        &self,
+        object_type: u16,
+        instance: u32,
+        max_age: std::time::Duration,
+    ) -> Option<&CovCacheEntry> {
+        self.entries
+            .get(&(object_type, instance))
+            .filter(|e| e.updated_at.elapsed() < max_age)
+    }
+
+    /// Remove cache entries for a specific object.
+    fn remove(&mut self, object_type: u16, instance: u32) {
+        self.entries.remove(&(object_type, instance));
+    }
+}
+
 /// BACnet/IP driver.
 ///
 /// Manages a UDP socket bound to the BACnet port, maintains a registry of
@@ -180,6 +246,8 @@ pub struct BacnetDriver {
     cov_subscriptions: HashMap<u32, CovSubscription>,
     /// Monotonically-increasing process_id counter for new subscriptions.
     next_process_id: u32,
+    /// Cache of latest COV values (Phase B8.1).
+    cov_cache: CovCache,
 }
 
 impl BacnetDriver {
@@ -201,6 +269,7 @@ impl BacnetDriver {
             discovery_timeout: std::time::Duration::from_secs(2),
             cov_subscriptions: HashMap::new(),
             next_process_id: 1,
+            cov_cache: CovCache::new(),
         }
     }
 
@@ -271,7 +340,10 @@ fn apdu_invoke_id(apdu: &frame::Apdu) -> Option<u8> {
         frame::Apdu::Other { invoke_id, .. } => Some(*invoke_id),
         frame::Apdu::ReadPropertyMultipleRequest { invoke_id, .. } => Some(*invoke_id),
         frame::Apdu::ReadPropertyMultipleAck { invoke_id, .. } => Some(*invoke_id),
-        frame::Apdu::WhoIs { .. } | frame::Apdu::IAm { .. } => None,
+        frame::Apdu::ConfirmedCovNotification { invoke_id, .. } => Some(*invoke_id),
+        frame::Apdu::WhoIs { .. }
+        | frame::Apdu::IAm { .. }
+        | frame::Apdu::UnconfirmedCovNotification { .. } => None,
     }
 }
 
@@ -401,6 +473,15 @@ impl BacnetDriver {
                     }
                     Ok(Ok((n, _src))) => {
                         if let Ok((_npdu, apdu)) = frame::decode_packet(&buf[..n]) {
+                            // Side-effect: process COV notifications (Phase B8.1)
+                            match &apdu {
+                                frame::Apdu::UnconfirmedCovNotification { notification }
+                                | frame::Apdu::ConfirmedCovNotification { notification, .. } => {
+                                    self.cov_cache.update(notification);
+                                }
+                                _ => {}
+                            }
+                            // Dispatch to transaction waiters
                             if let Some(id) = apdu_invoke_id(&apdu) {
                                 self.transactions.dispatch(id, apdu);
                             }
@@ -495,6 +576,15 @@ impl BacnetDriver {
                     Ok(Err(e)) => return Err(BacnetError::Io(e)),
                     Ok(Ok((n, _src))) => {
                         if let Ok((_npdu, apdu)) = frame::decode_packet(&buf[..n]) {
+                            // Side-effect: process COV notifications (Phase B8.1)
+                            match &apdu {
+                                frame::Apdu::UnconfirmedCovNotification { notification }
+                                | frame::Apdu::ConfirmedCovNotification { notification, .. } => {
+                                    self.cov_cache.update(notification);
+                                }
+                                _ => {}
+                            }
+                            // Dispatch to transaction waiters
                             if let Some(id) = apdu_invoke_id(&apdu) {
                                 self.transactions.dispatch(id, apdu);
                             }
@@ -585,6 +675,15 @@ impl BacnetDriver {
                     Ok(Err(e)) => return Err(BacnetError::Io(e)),
                     Ok(Ok((n, _src))) => {
                         if let Ok((_npdu, apdu)) = frame::decode_packet(&buf[..n]) {
+                            // Side-effect: process COV notifications (Phase B8.1)
+                            match &apdu {
+                                frame::Apdu::UnconfirmedCovNotification { notification }
+                                | frame::Apdu::ConfirmedCovNotification { notification, .. } => {
+                                    self.cov_cache.update(notification);
+                                }
+                                _ => {}
+                            }
+                            // Dispatch to transaction waiters
                             if let Some(id) = apdu_invoke_id(&apdu) {
                                 self.transactions.dispatch(id, apdu);
                             }
@@ -770,6 +869,15 @@ impl BacnetDriver {
                     }
                     Ok(Ok((n, _src))) => {
                         if let Ok((_npdu, apdu)) = frame::decode_packet(&buf[..n]) {
+                            // Side-effect: process COV notifications (Phase B8.1)
+                            match &apdu {
+                                frame::Apdu::UnconfirmedCovNotification { notification }
+                                | frame::Apdu::ConfirmedCovNotification { notification, .. } => {
+                                    self.cov_cache.update(notification);
+                                }
+                                _ => {}
+                            }
+                            // Dispatch to transaction waiters
                             if let Some(id) = apdu_invoke_id(&apdu) {
                                 self.transactions.dispatch(id, apdu);
                             }
@@ -797,6 +905,24 @@ impl BacnetDriver {
 
         self.transactions.timeout(invoke_id);
         Err(DriverError::CommFault("bacnet write timeout".into()))
+    }
+
+    // ── Phase B8.1: COV notification handling ───────────────
+
+    /// Process a COV notification: update the cache.
+    /// Called from test code; recv loops call `self.cov_cache.update()` directly
+    /// to satisfy the borrow checker (socket held immutably while cache updates).
+    #[allow(dead_code)]
+    fn handle_cov_notification(&mut self, notification: &frame::CovNotification) {
+        tracing::debug!(
+            process_id = notification.subscriber_process_id,
+            device = notification.initiating_device_instance,
+            object_type = notification.monitored_object_type,
+            instance = notification.monitored_object_instance,
+            values = notification.values.len(),
+            "BACnet COV notification received"
+        );
+        self.cov_cache.update(notification);
     }
 
     // ── Phase B8: COV subscription management ──────────────
@@ -883,6 +1009,15 @@ impl BacnetDriver {
                     }
                     Ok(Ok((n, _src))) => {
                         if let Ok((_npdu, apdu)) = frame::decode_packet(&buf[..n]) {
+                            // Side-effect: process COV notifications (Phase B8.1)
+                            match &apdu {
+                                frame::Apdu::UnconfirmedCovNotification { notification }
+                                | frame::Apdu::ConfirmedCovNotification { notification, .. } => {
+                                    self.cov_cache.update(notification);
+                                }
+                                _ => {}
+                            }
+                            // Dispatch to transaction waiters
                             if let Some(id) = apdu_invoke_id(&apdu) {
                                 self.transactions.dispatch(id, apdu);
                             }
@@ -977,6 +1112,15 @@ impl BacnetDriver {
                     }
                     Ok(Ok((n, _src))) => {
                         if let Ok((_npdu, apdu)) = frame::decode_packet(&buf[..n]) {
+                            // Side-effect: process COV notifications (Phase B8.1)
+                            match &apdu {
+                                frame::Apdu::UnconfirmedCovNotification { notification }
+                                | frame::Apdu::ConfirmedCovNotification { notification, .. } => {
+                                    self.cov_cache.update(notification);
+                                }
+                                _ => {}
+                            }
+                            // Dispatch to transaction waiters
                             if let Some(id) = apdu_invoke_id(&apdu) {
                                 self.transactions.dispatch(id, apdu);
                             }
@@ -1197,6 +1341,29 @@ impl AsyncDriver for BacnetDriver {
                     continue;
                 }
             };
+
+            // Phase B8.1: check COV cache before making network reads
+            let mut uncached_group: Vec<(u32, object::BacnetObject)> = Vec::new();
+            for (pid, obj) in group {
+                if let Some(entry) = self.cov_cache.get(
+                    obj.object_type,
+                    obj.instance,
+                    std::time::Duration::from_secs(600),
+                ) {
+                    // Cache hit — use the cached value
+                    let raw = entry.value.to_f64().ok_or_else(|| {
+                        DriverError::CommFault("bacnet: non-numeric COV value".into())
+                    });
+                    let final_val = raw.map(|r| r * obj.scale + obj.offset);
+                    results.push((pid, final_val));
+                } else {
+                    uncached_group.push((pid, obj));
+                }
+            }
+            let group = uncached_group;
+            if group.is_empty() {
+                continue;
+            }
 
             if group.len() == 1 {
                 // Single point — use the simpler read_present_value path.
@@ -1419,6 +1586,7 @@ impl AsyncDriver for BacnetDriver {
                 Some(d) => d.addr,
                 None => {
                     self.cov_subscriptions.remove(&sub.process_id);
+                    self.cov_cache.remove(sub.object_type, sub.object_instance);
                     continue;
                 }
             };
@@ -1434,6 +1602,7 @@ impl AsyncDriver for BacnetDriver {
             {
                 Ok(()) => {
                     self.cov_subscriptions.remove(&sub.process_id);
+                    self.cov_cache.remove(sub.object_type, sub.object_instance);
                     tracing::info!(
                         point_id = pt.point_id,
                         process_id = sub.process_id,
@@ -1442,6 +1611,7 @@ impl AsyncDriver for BacnetDriver {
                 }
                 Err(e) => {
                     self.cov_subscriptions.remove(&sub.process_id);
+                    self.cov_cache.remove(sub.object_type, sub.object_instance);
                     tracing::warn!(
                         point_id = pt.point_id,
                         process_id = sub.process_id,
@@ -3451,5 +3621,160 @@ mod cov_tests {
         let result = driver.on_unwatch(&refs).await;
         assert!(result.is_ok());
         assert!(driver.cov_subscriptions.is_empty());
+    }
+}
+
+// ── Phase B8.1: COV cache tests ──────────────────────────
+
+#[cfg(test)]
+mod cov_cache_tests {
+    use super::*;
+
+    #[test]
+    fn cov_cache_insert_and_get() {
+        let mut cache = CovCache::new();
+        let notification = frame::CovNotification {
+            subscriber_process_id: 1,
+            initiating_device_instance: 100,
+            monitored_object_type: 0,
+            monitored_object_instance: 1,
+            time_remaining: Some(300),
+            values: vec![frame::CovPropertyValue {
+                property_id: 85,
+                array_index: None,
+                value: value::BacnetValue::Real(42.0),
+            }],
+        };
+        cache.update(&notification);
+
+        let entry = cache
+            .get(0, 1, std::time::Duration::from_secs(600))
+            .expect("cache hit");
+        assert_eq!(entry.value, value::BacnetValue::Real(42.0));
+        assert_eq!(entry.process_id, 1);
+    }
+
+    #[test]
+    fn cov_cache_expired_returns_none() {
+        let mut cache = CovCache::new();
+        // Insert an entry with a manually backdated timestamp
+        cache.entries.insert(
+            (0, 1),
+            CovCacheEntry {
+                value: value::BacnetValue::Real(42.0),
+                updated_at: std::time::Instant::now() - std::time::Duration::from_secs(601),
+                process_id: 1,
+            },
+        );
+
+        let entry = cache.get(0, 1, std::time::Duration::from_secs(600));
+        assert!(entry.is_none(), "expired entry should return None");
+    }
+
+    #[test]
+    fn cov_cache_remove_works() {
+        let mut cache = CovCache::new();
+        let notification = frame::CovNotification {
+            subscriber_process_id: 1,
+            initiating_device_instance: 100,
+            monitored_object_type: 0,
+            monitored_object_instance: 1,
+            time_remaining: Some(300),
+            values: vec![frame::CovPropertyValue {
+                property_id: 85,
+                array_index: None,
+                value: value::BacnetValue::Real(42.0),
+            }],
+        };
+        cache.update(&notification);
+        assert!(cache
+            .get(0, 1, std::time::Duration::from_secs(600))
+            .is_some());
+
+        cache.remove(0, 1);
+        assert!(cache
+            .get(0, 1, std::time::Duration::from_secs(600))
+            .is_none());
+    }
+
+    #[test]
+    fn cov_cache_update_from_notification() {
+        let mut cache = CovCache::new();
+        let notification = frame::CovNotification {
+            subscriber_process_id: 7,
+            initiating_device_instance: 200,
+            monitored_object_type: 2, // AV
+            monitored_object_instance: 10,
+            time_remaining: Some(300),
+            values: vec![
+                frame::CovPropertyValue {
+                    property_id: 111, // StatusFlags
+                    array_index: None,
+                    value: value::BacnetValue::Unsigned(0),
+                },
+                frame::CovPropertyValue {
+                    property_id: 85, // PresentValue
+                    array_index: None,
+                    value: value::BacnetValue::Real(42.0),
+                },
+            ],
+        };
+        cache.update(&notification);
+
+        let entry = cache
+            .get(2, 10, std::time::Duration::from_secs(600))
+            .expect("cache hit for AV:10");
+        assert_eq!(entry.value, value::BacnetValue::Real(42.0));
+        assert_eq!(entry.process_id, 7);
+    }
+
+    #[test]
+    fn cov_cache_ignores_non_present_value() {
+        let mut cache = CovCache::new();
+        let notification = frame::CovNotification {
+            subscriber_process_id: 1,
+            initiating_device_instance: 100,
+            monitored_object_type: 0,
+            monitored_object_instance: 5,
+            time_remaining: Some(300),
+            values: vec![frame::CovPropertyValue {
+                property_id: 77, // ObjectName
+                array_index: None,
+                value: value::BacnetValue::CharacterString("test".into()),
+            }],
+        };
+        cache.update(&notification);
+
+        assert!(
+            cache
+                .get(0, 5, std::time::Duration::from_secs(600))
+                .is_none(),
+            "non-PresentValue property should not populate cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_cov_notification_updates_cache() {
+        let mut driver = BacnetDriver::new("test-bac", "255.255.255.255", 0);
+        let notification = frame::CovNotification {
+            subscriber_process_id: 3,
+            initiating_device_instance: 100,
+            monitored_object_type: 0,
+            monitored_object_instance: 1,
+            time_remaining: Some(300),
+            values: vec![frame::CovPropertyValue {
+                property_id: 85,
+                array_index: None,
+                value: value::BacnetValue::Real(72.5),
+            }],
+        };
+        driver.handle_cov_notification(&notification);
+
+        let entry = driver
+            .cov_cache
+            .get(0, 1, std::time::Duration::from_secs(600))
+            .expect("cache hit after handle_cov_notification");
+        assert_eq!(entry.value, value::BacnetValue::Real(72.5));
+        assert_eq!(entry.process_id, 3);
     }
 }
