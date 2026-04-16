@@ -57,6 +57,7 @@ axum-server = { version = "0.8", default-features = false, features = ["tls-rust
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2"
 webpki-roots = "0.26"
+rumqttc = "0.24"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

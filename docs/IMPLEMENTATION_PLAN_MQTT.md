@@ -82,7 +82,7 @@ Env var: `SANDSTAR_MQTT_CONFIGS` — mirrors `SANDSTAR_BACNET_CONFIGS`.
 ## Phase breakdown
 
 ### M1 — Client + lifecycle
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ COMPLETE (2026-04-17)
 
 Replace the `MqttDriver` stub in `crates/sandstar-server/src/drivers/mqtt.rs`:
 
@@ -170,7 +170,7 @@ MQTT driver is "done" when:
 
 | Phase | Commit | Date | Version |
 |---|---|---|---|
-| M1 | — | — | — |
+| M1 | (pending commit) | 2026-04-17 | 2.8.0-dev |
 | M2 | — | — | — |
 | M3 | — | — | — |
 | M4 | — | — | — |

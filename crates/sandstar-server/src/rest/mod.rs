@@ -949,9 +949,7 @@ async fn load_bacnet_drivers(
                 const BACNET_WRITE_DURATION_SECS: f64 = 30.0;
 
                 let mut ticker = tokio::time::interval(Duration::from_secs(5));
-                ticker.set_missed_tick_behavior(
-                    tokio::time::MissedTickBehavior::Skip,
-                );
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 // Discard the immediate first tick so we don't race open_all.
                 ticker.tick().await;
                 loop {
