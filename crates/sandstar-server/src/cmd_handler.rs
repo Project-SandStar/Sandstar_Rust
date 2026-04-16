@@ -453,6 +453,10 @@ mod tests {
         }
     }
 
+    // Skipped on Windows: Instant::now() on Windows is close to boot and
+    // checked_sub(large) returns None. The expire_stale_watches logic itself
+    // is platform-independent; this test just can't construct the old Instant.
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_expire_stale_watches() {
         let mut watches = HashMap::new();

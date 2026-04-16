@@ -1518,7 +1518,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "sandstar-cli"
-version = "2.5.0"
+version = "2.5.1"
 dependencies = [
  "bincode",
  "clap",
@@ -1531,7 +1531,7 @@ dependencies = [
 
 [[package]]
 name = "sandstar-engine"
-version = "2.5.0"
+version = "2.5.1"
 dependencies = [
  "approx",
  "bitflags",
@@ -1542,7 +1542,7 @@ dependencies = [
 
 [[package]]
 name = "sandstar-hal"
-version = "2.5.0"
+version = "2.5.1"
 dependencies = [
  "serde",
  "thiserror",
@@ -1550,7 +1550,7 @@ dependencies = [
 
 [[package]]
 name = "sandstar-hal-linux"
-version = "2.5.0"
+version = "2.5.1"
 dependencies = [
  "libc",
  "nix",
@@ -1562,7 +1562,7 @@ dependencies = [
 
 [[package]]
 name = "sandstar-ipc"
-version = "2.5.0"
+version = "2.5.1"
 dependencies = [
  "bincode",
  "sandstar-engine",
@@ -1572,7 +1572,7 @@ dependencies = [
 
 [[package]]
 name = "sandstar-server"
-version = "2.5.0"
+version = "2.5.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -1615,7 +1615,7 @@ dependencies = [
 
 [[package]]
 name = "sandstar-svm"
-version = "2.5.0"
+version = "2.5.1"
 dependencies = [
  "chrono",
  "sandstar-engine",

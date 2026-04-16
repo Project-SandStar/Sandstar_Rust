@@ -645,6 +645,7 @@ The existing single-file `bacnet.rs` (120 lines) becomes the entry point `mod.rs
   `parse_subscribe_cov` + SubscribeCOV Simple-ACK handler. Notification receiver task for pushing
   updates to watchers is reserved for Phase B8.1 (requires I/O refactor).
 - **COV Notification Reception** — ✅ Phase B8.1 complete (2026-04-16) — CovCache + inline notification handling in all recv loops. sync_cur returns cached values for COV-subscribed points (max_age=600s). No background receiver task needed — notifications processed as side-effects of existing I/O.
+- **COV Subscription Renewal** — ✅ Phase B8.2 complete (2026-04-16) — `CovSubscription.subscribed_at` + `BacnetDriver.renewal_interval` (default 240s = 80% of 300s lifetime). `sync_cur()` calls `renew_due_subscriptions()` which re-issues SubscribeCOV for entries past the threshold. No new tokio tasks — piggybacks on the existing poll loop. Failed renewals log a warning and retry next cycle. End-to-end test `e2e_cov_renewal_sends_second_subscribe` drives the full flow through the `DriverHandle` actor with a 1ms renewal_interval and asserts at least 2 SubscribeCOV requests arrive at the mock (initial + renewal).
 - **ReadPropertyMultiple** — ✅ Phase B9 complete (2026-04-16) — `sync_cur()` now batches points
   by device into a single RPM request and falls back to individual `ReadProperty` on transport
   error or when the device replies with an Error PDU. Delivered: `frame::RpmRequestSpec` +

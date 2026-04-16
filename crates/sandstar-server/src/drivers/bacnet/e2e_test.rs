@@ -858,6 +858,127 @@ async fn e2e_on_unwatch_sends_cancel() {
     handle.close_all().await.expect("close_all should succeed");
 }
 
+// ── Phase B8.2: COV subscription renewal E2E test ─────────────────────────
+
+/// Phase B8.2: `sync_cur` re-issues SubscribeCOV requests for entries whose
+/// `subscribed_at + renewal_interval` has elapsed.
+///
+/// The mock responder handles Who-Is → I-Am, then counts ALL SubscribeCOV
+/// requests (both the initial subscribe from `on_watch` AND the renewal from
+/// `sync_cur` → `renew_due_subscriptions`). Each SubscribeCOV gets a Simple-ACK
+/// so the subscription state successfully advances.
+///
+/// The driver is built with `with_renewal_interval(1ms)` so that any sync_cur
+/// call after the first subscribe will trigger a renewal. After registering the
+/// point, adding a watch, sleeping past the threshold, and invoking `sync_all`,
+/// the mock should have observed at least 2 SubscribeCOV requests.
+#[tokio::test]
+async fn e2e_cov_renewal_sends_second_subscribe() {
+    // 1. Bind mock UDP socket.
+    let mock_port = find_free_port();
+    let sock = UdpSocket::bind(format!("127.0.0.1:{mock_port}"))
+        .await
+        .expect("mock bind failed");
+
+    let subscribe_counter = Arc::new(AtomicUsize::new(0));
+    let sc = subscribe_counter.clone();
+
+    tokio::spawn(async move {
+        let mut buf = [0u8; 1500];
+        loop {
+            let Ok((n, from)) = sock.recv_from(&mut buf).await else {
+                break;
+            };
+            // Who-Is (BVLL broadcast 0x0B, unconfirmed-req 0x10, service 0x08)
+            if n >= 8 && buf[0] == 0x81 && buf[1] == 0x0B && buf[6] == 0x10 && buf[7] == 0x08 {
+                let reply = encode_i_am(12345, 1476, 3, 999);
+                let _ = sock.send_to(&reply, from).await;
+                continue;
+            }
+            // SubscribeCOV (BVLL unicast 0x0A, confirmed-req 0x00, service 0x05)
+            if n >= 10 && buf[0] == 0x81 && buf[6] == 0x00 && buf[9] == 0x05 {
+                sc.fetch_add(1, Ordering::SeqCst);
+                let invoke_id = buf[8];
+                let ack = [
+                    0x81, 0x0A, 0x00, 0x09, // BVLL unicast, length = 9
+                    0x01, 0x00, // NPDU version=1, control=0
+                    0x20, invoke_id, 0x05, // Simple-ACK, invoke_id, SubscribeCOV
+                ];
+                let _ = sock.send_to(&ack, from).await;
+            }
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // 2. Driver with a very short renewal interval so one sync_cur call
+    //    triggers a renewal.
+    let config = BacnetConfig {
+        id: "bac-renew".into(),
+        port: Some(0),
+        broadcast: Some("127.0.0.1".into()),
+        bbmd: None,
+        objects: vec![BacnetObjectConfig {
+            point_id: 9500,
+            device_id: 12345,
+            object_type: 0, // AnalogInput
+            instance: 0,
+            unit: None,
+            scale: Some(1.0),
+            offset: Some(0.0),
+        }],
+    };
+    let driver = BacnetDriver::from_config(config)
+        .with_broadcast_port(mock_port)
+        .with_discovery_timeout(Duration::from_millis(300))
+        .with_renewal_interval(Duration::from_millis(1));
+
+    let handle = spawn_driver_actor(16);
+    handle
+        .register(AnyDriver::Async(Box::new(driver)))
+        .await
+        .expect("register should succeed");
+    handle.open_all().await.expect("open_all should succeed");
+
+    // 3. Register the point so point_driver_map has an entry for add_watch.
+    handle
+        .register_point(9500, "bac-renew")
+        .await
+        .expect("register_point should succeed");
+
+    // 4. add_watch issues the initial SubscribeCOV.
+    handle
+        .add_watch("ws-test", vec![9500])
+        .await
+        .expect("add_watch should succeed");
+
+    // 5. Wait past the 1ms renewal threshold.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // 6. Trigger sync_cur via sync_all — this should call
+    //    renew_due_subscriptions() and re-send SubscribeCOV.
+    let mut point_map = HashMap::new();
+    point_map.insert(
+        "bac-renew".to_string(),
+        vec![DriverPointRef {
+            point_id: 9500,
+            address: String::new(),
+        }],
+    );
+    let _ = handle.sync_all(point_map).await;
+
+    // 7. Allow the renewal send + ACK round-trip to complete.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // 8. Assert: at least 2 SubscribeCOV requests observed (initial + renewal).
+    let count = subscribe_counter.load(Ordering::SeqCst);
+    assert!(
+        count >= 2,
+        "expected at least 2 SubscribeCOV requests (initial + renewal), got {count}"
+    );
+
+    handle.close_all().await.expect("close_all should succeed");
+}
+
 // ── Phase B9: ReadPropertyMultiple E2E test ────────────────────────────────
 
 /// Phase B9: sync_cur batches points on the same device into a single

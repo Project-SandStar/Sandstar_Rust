@@ -141,7 +141,7 @@ pub const DEFAULT_BACNET_PORT: u16 = 47808;
 
 /// State of a single COV subscription tracked by the driver (Phase B8).
 ///
-/// The `lifetime` field is stored for future Phase B8.1 renewal logic.
+/// The `lifetime` field drives Phase B8.2 renewal logic.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct CovSubscription {
@@ -156,6 +156,8 @@ struct CovSubscription {
     device_id: u32,
     /// Lifetime seconds we requested. `None` = indefinite.
     lifetime: Option<u32>,
+    /// When the subscription was last established or renewed.
+    subscribed_at: std::time::Instant,
 }
 
 /// Cached COV (Change of Value) entry for a BACnet object (Phase B8.1).
@@ -257,6 +259,9 @@ pub struct BacnetDriver {
     bbmd_addr: Option<std::net::SocketAddr>,
     /// Whether we're registered as a foreign device.
     is_foreign_device: bool,
+    /// How long after `subscribed_at` to renew a COV subscription.
+    /// Default: 240s (80% of the default 300s lifetime).
+    renewal_interval: std::time::Duration,
 }
 
 impl BacnetDriver {
@@ -281,7 +286,16 @@ impl BacnetDriver {
             cov_cache: CovCache::new(),
             bbmd_addr: None,
             is_foreign_device: false,
+            renewal_interval: std::time::Duration::from_secs(240),
         }
+    }
+
+    /// Override the COV subscription renewal interval (useful in tests).
+    ///
+    /// Default: 240s (80% of the 300s lifetime issued by `on_watch`).
+    pub fn with_renewal_interval(mut self, interval: std::time::Duration) -> Self {
+        self.renewal_interval = interval;
+        self
     }
 
     /// Override the discovery timeout (useful in tests to speed things up).
@@ -1223,6 +1237,67 @@ impl BacnetDriver {
         self.transactions.timeout(invoke_id);
         Err(DriverError::CommFault("bacnet subscribe timeout".into()))
     }
+
+    // ── Phase B8.2: COV subscription renewal ──────────────
+
+    /// Renew any COV subscriptions whose `subscribed_at + renewal_interval`
+    /// has passed. Called at the start of each `sync_cur()`.
+    ///
+    /// Failed renewals are logged but the entry stays in the table for retry.
+    async fn renew_due_subscriptions(&mut self) {
+        let now = std::time::Instant::now();
+        // Snapshot entries that are due (drop borrow before calling subscribe_cov).
+        let mut due: Vec<(u32, std::net::SocketAddr, u16, u32, Option<u32>)> = Vec::new();
+
+        for (process_id, sub) in &self.cov_subscriptions {
+            if now.saturating_duration_since(sub.subscribed_at) < self.renewal_interval {
+                continue;
+            }
+            let Some(device) = self.device_registry.get(sub.device_id) else {
+                tracing::debug!(
+                    process_id = *process_id,
+                    device_id = sub.device_id,
+                    "COV renewal: device not in registry, skipping"
+                );
+                continue;
+            };
+            due.push((
+                *process_id,
+                device.addr,
+                sub.object_type,
+                sub.object_instance,
+                sub.lifetime,
+            ));
+        }
+
+        for (process_id, device_addr, object_type, object_instance, lifetime) in due {
+            match self
+                .subscribe_cov(
+                    device_addr,
+                    process_id,
+                    object_type,
+                    object_instance,
+                    false,
+                    lifetime,
+                )
+                .await
+            {
+                Ok(()) => {
+                    if let Some(sub) = self.cov_subscriptions.get_mut(&process_id) {
+                        sub.subscribed_at = std::time::Instant::now();
+                    }
+                    tracing::info!(process_id, "COV subscription renewed");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        process_id,
+                        error = %e,
+                        "COV renewal failed — will retry next cycle"
+                    );
+                }
+            }
+        }
+    }
 }
 
 // ── AsyncDriver impl ───────────────────────────────────────
@@ -1404,6 +1479,9 @@ impl AsyncDriver for BacnetDriver {
         points: &[DriverPointRef],
     ) -> Vec<(u32, Result<f64, DriverError>)> {
         use std::collections::HashMap;
+
+        // Renew any COV subscriptions due for refresh before reading points.
+        self.renew_due_subscriptions().await;
 
         // Group points by device_id. Points whose object isn't configured get
         // a ConfigFault immediately. Points whose device isn't in the registry
@@ -1656,6 +1734,7 @@ impl AsyncDriver for BacnetDriver {
                             object_instance: obj.instance,
                             device_id: obj.device_id,
                             lifetime,
+                            subscribed_at: std::time::Instant::now(),
                         },
                     );
                     tracing::info!(point_id = pt.point_id, process_id, "BACnet COV subscribed");
@@ -3720,6 +3799,7 @@ mod cov_tests {
                 object_instance: 1,
                 device_id: 999, // not in registry
                 lifetime: Some(300),
+                subscribed_at: std::time::Instant::now(),
             },
         );
 
@@ -4109,6 +4189,165 @@ mod bbmd_tests {
         assert!(
             meta.model.as_deref().unwrap_or("").contains("BACnet/IP"),
             "meta should mention BACnet/IP"
+        );
+    }
+}
+
+// ── Phase B8.2: COV renewal tests ───────────────────────────
+#[cfg(test)]
+mod renewal_tests {
+    use super::*;
+
+    fn make_driver() -> BacnetDriver {
+        BacnetDriver::new("b8-2-test", "127.0.0.1", 0)
+    }
+
+    // ── Test 1 ─────────────────────────────────────────────
+
+    #[test]
+    fn renewal_interval_default_is_240s() {
+        let d = BacnetDriver::new("bac", "127.0.0.1", 47808);
+        assert_eq!(d.renewal_interval, std::time::Duration::from_secs(240));
+    }
+
+    // ── Test 2 ─────────────────────────────────────────────
+
+    #[test]
+    fn with_renewal_interval_builder_works() {
+        let d = BacnetDriver::new("bac", "127.0.0.1", 47808)
+            .with_renewal_interval(std::time::Duration::from_secs(60));
+        assert_eq!(d.renewal_interval, std::time::Duration::from_secs(60));
+    }
+
+    // ── Test 3 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn renew_due_subscriptions_empty_is_noop() {
+        let mut d = make_driver();
+        d.renew_due_subscriptions().await;
+        assert!(d.cov_subscriptions.is_empty());
+    }
+
+    // ── Test 4 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn renew_due_subscriptions_skips_fresh_entries() {
+        let mut d = make_driver().with_renewal_interval(std::time::Duration::from_secs(60));
+        let original = std::time::Instant::now();
+        d.cov_subscriptions.insert(
+            1,
+            CovSubscription {
+                point_id: 8001,
+                process_id: 1,
+                object_type: 0,
+                object_instance: 1,
+                device_id: 42,
+                lifetime: Some(300),
+                subscribed_at: original,
+            },
+        );
+
+        d.renew_due_subscriptions().await;
+
+        // Entry still present, timestamp unchanged (fresh: elapsed < 60s).
+        let sub = d
+            .cov_subscriptions
+            .get(&1)
+            .expect("subscription should remain");
+        assert_eq!(sub.subscribed_at, original);
+    }
+
+    // ── Test 5 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn renew_due_subscriptions_device_not_in_registry_skipped() {
+        let mut d = make_driver().with_renewal_interval(std::time::Duration::from_millis(1));
+        // Stale subscription — use now() as baseline and sleep past 1ms interval.
+        let stale = std::time::Instant::now();
+        d.cov_subscriptions.insert(
+            1,
+            CovSubscription {
+                point_id: 8001,
+                process_id: 1,
+                object_type: 0,
+                object_instance: 1,
+                device_id: 99, // NOT in registry
+                lifetime: Some(300),
+                subscribed_at: stale,
+            },
+        );
+
+        // Give the 1ms interval a chance to lapse.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        // Should not panic, subscription should still be present.
+        d.renew_due_subscriptions().await;
+        assert!(d.cov_subscriptions.contains_key(&1));
+        // Timestamp unchanged because renewal was skipped.
+        assert_eq!(d.cov_subscriptions.get(&1).unwrap().subscribed_at, stale);
+    }
+
+    // ── Test 6 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn renew_due_subscriptions_renews_against_mock_socket() {
+        // Spawn a mock device that ACKs SubscribeCOV.
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("mock bind");
+        let mock_addr: std::net::SocketAddr = sock.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1500];
+            if let Ok((n, from)) = sock.recv_from(&mut buf).await {
+                let invoke_id = if n >= 9 { buf[8] } else { 0 };
+                let reply = frame::encode_simple_ack(invoke_id, 0x05);
+                let _ = sock.send_to(&reply, from).await;
+            }
+        });
+
+        let mut d = make_driver().with_renewal_interval(std::time::Duration::from_millis(1));
+        d.socket = Some(
+            tokio::net::UdpSocket::bind("127.0.0.1:0")
+                .await
+                .expect("bind driver socket"),
+        );
+        d.status = DriverStatus::Ok;
+        d.device_registry.insert(DeviceInfo {
+            instance: 42,
+            addr: mock_addr,
+            max_apdu: 1476,
+            vendor_id: 999,
+            segmentation: 3,
+        });
+
+        // Stale subscription — capture now() as baseline, then sleep past 1ms interval.
+        let stale = std::time::Instant::now();
+        d.cov_subscriptions.insert(
+            7,
+            CovSubscription {
+                point_id: 8001,
+                process_id: 7,
+                object_type: 0,
+                object_instance: 1,
+                device_id: 42,
+                lifetime: Some(300),
+                subscribed_at: stale,
+            },
+        );
+
+        // Let the 1ms lapse.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        d.renew_due_subscriptions().await;
+
+        let sub = d
+            .cov_subscriptions
+            .get(&7)
+            .expect("subscription should still exist after renewal");
+        assert!(
+            sub.subscribed_at > stale,
+            "subscribed_at should have advanced after successful renewal"
         );
     }
 }
