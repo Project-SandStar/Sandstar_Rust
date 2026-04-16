@@ -838,14 +838,19 @@ async fn load_bacnet_drivers(handle: &crate::drivers::actor::DriverHandle) {
     };
 
     let mut registered_any = false;
+    // Track each driver's configured points so we can wire them into the
+    // poll scheduler after open_all() succeeds.
+    let mut driver_points: Vec<(String, Vec<u32>)> = Vec::new();
     for config in configs {
         let id = config.id.clone();
+        let point_ids: Vec<u32> = config.objects.iter().map(|o| o.point_id).collect();
         let driver = crate::drivers::bacnet::BacnetDriver::from_config(config);
         let any_driver = crate::drivers::async_driver::AnyDriver::Async(Box::new(driver));
         match handle.register(any_driver).await {
             Ok(()) => {
                 tracing::info!(driver = %id, "BACnet driver registered");
                 registered_any = true;
+                driver_points.push((id, point_ids));
             }
             Err(e) => {
                 tracing::error!(driver = %id, error = %e, "failed to register BACnet driver")
@@ -856,6 +861,44 @@ async fn load_bacnet_drivers(handle: &crate::drivers::actor::DriverHandle) {
     // Open all registered drivers so they bind sockets and run Who-Is discovery.
     // Without this, drivers stay in Pending status and `learn()` returns empty.
     if registered_any {
+        // Register each configured object's point_id with its driver, and add
+        // a poll bucket so sync_cur() gets called every 5s. Without this,
+        // BACnet values never flow into Sandstar channels even though the
+        // driver is open and discovery has run.
+        for (driver_id, point_ids) in &driver_points {
+            if point_ids.is_empty() {
+                continue;
+            }
+            for pid in point_ids {
+                if let Err(e) = handle.register_point(*pid, driver_id).await {
+                    tracing::warn!(driver = %driver_id, point_id = *pid, error = %e,
+                        "BACnet register_point failed");
+                }
+            }
+            let points: Vec<crate::drivers::DriverPointRef> = point_ids
+                .iter()
+                .map(|&pid| crate::drivers::DriverPointRef {
+                    point_id: pid,
+                    address: String::new(),
+                })
+                .collect();
+            match handle
+                .add_poll_bucket(driver_id, Duration::from_secs(5), points)
+                .await
+            {
+                Ok(()) => tracing::info!(
+                    driver = %driver_id,
+                    points = point_ids.len(),
+                    "BACnet poll bucket added (5s interval)"
+                ),
+                Err(e) => tracing::warn!(
+                    driver = %driver_id,
+                    error = %e,
+                    "BACnet add_poll_bucket failed"
+                ),
+            }
+        }
+
         match handle.open_all().await {
             Ok(metas) => {
                 tracing::info!(count = metas.len(), "BACnet drivers opened");
