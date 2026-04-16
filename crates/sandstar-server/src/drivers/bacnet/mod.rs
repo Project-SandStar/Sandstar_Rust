@@ -446,6 +446,93 @@ async fn bacnet_transact(
     Err(BacnetError::Timeout(max_retries))
 }
 
+/// Shared send/recv/retry/dispatch loop used by all ReadProperty /
+/// WriteProperty / SubscribeCOV / ReadPropertyMultiple methods.
+///
+/// Allocates an invoke ID from `transactions`, asks the caller to build
+/// the request bytes with that ID, then runs the retry loop:
+/// - `max_retries + 1` send attempts, each with `per_attempt_timeout`
+/// - every incoming packet is decoded; COV notifications update `cov_cache`
+///   as a side-effect; other APDUs are dispatched to the transaction table
+/// - returns as soon as OUR response arrives (matched by invoke ID)
+///
+/// Returns the decoded Apdu on success. Caller does method-specific
+/// matching (Ack vs Error vs other) and produces the final typed result.
+async fn bacnet_transact_inner<F>(
+    socket: &UdpSocket,
+    transactions: &mut transaction::TransactionTable,
+    cov_cache: &mut CovCache,
+    device_addr: SocketAddr,
+    build_request: F,
+    per_attempt_timeout: Duration,
+    max_retries: u32,
+) -> Result<frame::Apdu, DriverError>
+where
+    F: FnOnce(u8) -> Vec<u8>,
+{
+    let (invoke_id, rx) = transactions
+        .allocate()
+        .ok_or_else(|| DriverError::CommFault("bacnet: no invoke IDs available".into()))?;
+    let request = build_request(invoke_id);
+    let mut rx = rx;
+    let mut buf = [0u8; 1500];
+
+    'retry: for attempt in 0..=max_retries {
+        if let Err(e) = socket.send_to(&request, device_addr).await {
+            return Err(DriverError::CommFault(format!("bacnet send: {e}")));
+        }
+        let deadline = tokio::time::Instant::now() + per_attempt_timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                if attempt < max_retries {
+                    continue 'retry;
+                } else {
+                    break 'retry;
+                }
+            }
+            match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
+                Err(_) => {
+                    if attempt < max_retries {
+                        continue 'retry;
+                    } else {
+                        break 'retry;
+                    }
+                }
+                Ok(Err(e)) => return Err(DriverError::CommFault(format!("bacnet recv: {e}"))),
+                Ok(Ok((n, _src))) => {
+                    if let Ok((_npdu, apdu)) = frame::decode_packet(&buf[..n]) {
+                        // Side-effect: COV notifications update the cache (Phase B8.1)
+                        match &apdu {
+                            frame::Apdu::UnconfirmedCovNotification { notification }
+                            | frame::Apdu::ConfirmedCovNotification { notification, .. } => {
+                                cov_cache.update(notification);
+                            }
+                            _ => {}
+                        }
+                        // Dispatch responses to waiters
+                        if let Some(id) = apdu_invoke_id(&apdu) {
+                            transactions.dispatch(id, apdu);
+                        }
+                    }
+                    if let Ok(result) = rx.try_recv() {
+                        return match result {
+                            Ok(apdu) => Ok(apdu),
+                            Err(e) => Err(DriverError::CommFault(e.to_string())),
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    // All retries exhausted
+    transactions.timeout(invoke_id);
+    Err(DriverError::CommFault(format!(
+        "bacnet: timeout after {max_retries} retries"
+    )))
+}
+
 // ── Per-point read helper ──────────────────────────────────
 
 impl BacnetDriver {
@@ -458,104 +545,44 @@ impl BacnetDriver {
         device_addr: SocketAddr,
         obj: &object::BacnetObject,
     ) -> Result<f64, DriverError> {
-        // Split borrows: `socket` borrows self.socket; `transactions` borrows
-        // self.transactions.  These are different fields so NLL allows both.
+        // Split borrows: `socket` borrows self.socket; `transactions` and
+        // `cov_cache` borrow other fields. Different fields => NLL allows it.
         let socket = self
             .socket
             .as_ref()
             .ok_or_else(|| DriverError::CommFault("bacnet: not connected".into()))?;
 
-        // Allocate invoke ID so we can encode the frame with it.
-        let (invoke_id, rx) = self
-            .transactions
-            .allocate()
-            .ok_or_else(|| DriverError::CommFault("bacnet: no invoke IDs available".into()))?;
+        let object_type = obj.object_type;
+        let instance = obj.instance;
+        let apdu = bacnet_transact_inner(
+            socket,
+            &mut self.transactions,
+            &mut self.cov_cache,
+            device_addr,
+            |invoke_id| frame::encode_read_property(invoke_id, object_type, instance, 85, None),
+            Duration::from_secs(3),
+            3,
+        )
+        .await?;
 
-        let request =
-            frame::encode_read_property(invoke_id, obj.object_type, obj.instance, 85, None);
-
-        // We need to send + recv inline (cannot call bacnet_transact because
-        // allocate() already consumed the slot).  Run the retry loop directly.
-        let per_attempt = Duration::from_secs(3);
-        let max_retries = 3u32;
-        let mut buf = [0u8; 1500];
-        let mut rx = rx;
-
-        'retry: for attempt in 0..=max_retries {
-            if let Err(e) = socket.send_to(&request, device_addr).await {
-                return Err(DriverError::CommFault(format!("bacnet send: {e}")));
+        match apdu {
+            frame::Apdu::ReadPropertyAck { value, .. } => {
+                let raw = value.to_f64().ok_or_else(|| {
+                    DriverError::CommFault("bacnet: non-numeric present value".into())
+                })?;
+                Ok(raw * obj.scale + obj.offset)
             }
-
-            let deadline = tokio::time::Instant::now() + per_attempt;
-            loop {
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                if remaining.is_zero() {
-                    if attempt < max_retries {
-                        continue 'retry;
-                    } else {
-                        break 'retry;
-                    }
-                }
-
-                match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
-                    Err(_) => {
-                        if attempt < max_retries {
-                            continue 'retry;
-                        } else {
-                            break 'retry;
-                        }
-                    }
-                    Ok(Err(e)) => {
-                        return Err(DriverError::CommFault(format!("bacnet recv: {e}")));
-                    }
-                    Ok(Ok((n, _src))) => {
-                        if let Ok((_npdu, apdu)) = frame::decode_packet(&buf[..n]) {
-                            // Side-effect: process COV notifications (Phase B8.1)
-                            match &apdu {
-                                frame::Apdu::UnconfirmedCovNotification { notification }
-                                | frame::Apdu::ConfirmedCovNotification { notification, .. } => {
-                                    self.cov_cache.update(notification);
-                                }
-                                _ => {}
-                            }
-                            // Dispatch to transaction waiters
-                            if let Some(id) = apdu_invoke_id(&apdu) {
-                                self.transactions.dispatch(id, apdu);
-                            }
-                        }
-                        if let Ok(result) = rx.try_recv() {
-                            return match result {
-                                Ok(frame::Apdu::ReadPropertyAck { value, .. }) => {
-                                    let raw = value.to_f64().ok_or_else(|| {
-                                        DriverError::CommFault(
-                                            "bacnet: non-numeric present value".into(),
-                                        )
-                                    })?;
-                                    Ok(raw * obj.scale + obj.offset)
-                                }
-                                Ok(frame::Apdu::Error {
-                                    error_class,
-                                    error_code,
-                                    ..
-                                }) => Err(DriverError::RemoteStatus(format!(
-                                    "BACnet error class={error_class} code={error_code}"
-                                ))),
-                                Ok(other) => Err(DriverError::CommFault(format!(
-                                    "bacnet: unexpected response: {other:?}"
-                                ))),
-                                Err(e) => Err(DriverError::CommFault(e.to_string())),
-                            };
-                        }
-                    }
-                }
-            }
+            frame::Apdu::Error {
+                error_class,
+                error_code,
+                ..
+            } => Err(DriverError::RemoteStatus(format!(
+                "BACnet error class={error_class} code={error_code}"
+            ))),
+            other => Err(DriverError::CommFault(format!(
+                "bacnet: unexpected response: {other:?}"
+            ))),
         }
-
-        // All retries exhausted — cancel the waiter.
-        self.transactions.timeout(invoke_id);
-        Err(DriverError::CommFault(format!(
-            "bacnet: timeout after {max_retries} retries"
-        )))
     }
 
     /// Send a ReadProperty request and return the decoded `BacnetValue`.
@@ -857,91 +884,40 @@ impl BacnetDriver {
             .as_ref()
             .ok_or_else(|| DriverError::CommFault("bacnet: not connected".into()))?;
 
-        let (invoke_id, rx) = self
-            .transactions
-            .allocate()
-            .ok_or_else(|| DriverError::CommFault("bacnet: no invoke IDs available".into()))?;
+        let apdu = bacnet_transact_inner(
+            socket,
+            &mut self.transactions,
+            &mut self.cov_cache,
+            device_addr,
+            |invoke_id| {
+                frame::encode_write_property(
+                    invoke_id,
+                    object_type,
+                    object_instance,
+                    property_id,
+                    &value,
+                    None, // array_index
+                    priority,
+                )
+            },
+            Duration::from_secs(3),
+            3,
+        )
+        .await?;
 
-        let request = frame::encode_write_property(
-            invoke_id,
-            object_type,
-            object_instance,
-            property_id,
-            &value,
-            None, // array_index
-            priority,
-        );
-
-        let per_attempt = Duration::from_secs(3);
-        let max_retries = 3u32;
-        let mut buf = [0u8; 1500];
-        let mut rx = rx;
-
-        'retry: for attempt in 0..=max_retries {
-            if let Err(e) = socket.send_to(&request, device_addr).await {
-                return Err(DriverError::CommFault(format!("bacnet send: {e}")));
-            }
-
-            let deadline = tokio::time::Instant::now() + per_attempt;
-            loop {
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                if remaining.is_zero() {
-                    if attempt < max_retries {
-                        continue 'retry;
-                    } else {
-                        break 'retry;
-                    }
-                }
-
-                match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
-                    Err(_) => {
-                        if attempt < max_retries {
-                            continue 'retry;
-                        } else {
-                            break 'retry;
-                        }
-                    }
-                    Ok(Err(e)) => {
-                        return Err(DriverError::CommFault(format!("bacnet recv: {e}")));
-                    }
-                    Ok(Ok((n, _src))) => {
-                        if let Ok((_npdu, apdu)) = frame::decode_packet(&buf[..n]) {
-                            // Side-effect: process COV notifications (Phase B8.1)
-                            match &apdu {
-                                frame::Apdu::UnconfirmedCovNotification { notification }
-                                | frame::Apdu::ConfirmedCovNotification { notification, .. } => {
-                                    self.cov_cache.update(notification);
-                                }
-                                _ => {}
-                            }
-                            // Dispatch to transaction waiters
-                            if let Some(id) = apdu_invoke_id(&apdu) {
-                                self.transactions.dispatch(id, apdu);
-                            }
-                        }
-                        if let Ok(result) = rx.try_recv() {
-                            return match result {
-                                Ok(frame::Apdu::SimpleAck { .. }) => Ok(()),
-                                Ok(frame::Apdu::Error {
-                                    error_class,
-                                    error_code,
-                                    ..
-                                }) => Err(DriverError::RemoteStatus(format!(
-                                    "BACnet error class={error_class} code={error_code}"
-                                ))),
-                                Ok(other) => Err(DriverError::CommFault(format!(
-                                    "bacnet: unexpected response: {other:?}"
-                                ))),
-                                Err(e) => Err(DriverError::CommFault(e.to_string())),
-                            };
-                        }
-                    }
-                }
-            }
+        match apdu {
+            frame::Apdu::SimpleAck { .. } => Ok(()),
+            frame::Apdu::Error {
+                error_class,
+                error_code,
+                ..
+            } => Err(DriverError::RemoteStatus(format!(
+                "BACnet error class={error_class} code={error_code}"
+            ))),
+            other => Err(DriverError::CommFault(format!(
+                "bacnet: unexpected response: {other:?}"
+            ))),
         }
-
-        self.transactions.timeout(invoke_id);
-        Err(DriverError::CommFault("bacnet write timeout".into()))
     }
 
     // ── Phase B8.1: COV notification handling ───────────────
@@ -1049,90 +1025,39 @@ impl BacnetDriver {
             .as_ref()
             .ok_or_else(|| DriverError::CommFault("bacnet: not connected".into()))?;
 
-        let (invoke_id, rx) = self
-            .transactions
-            .allocate()
-            .ok_or_else(|| DriverError::CommFault("bacnet: no invoke IDs available".into()))?;
+        let apdu = bacnet_transact_inner(
+            socket,
+            &mut self.transactions,
+            &mut self.cov_cache,
+            device_addr,
+            |invoke_id| {
+                frame::encode_subscribe_cov(
+                    invoke_id,
+                    process_id,
+                    object_type,
+                    object_instance,
+                    Some(issue_confirmed),
+                    lifetime,
+                )
+            },
+            Duration::from_secs(3),
+            3,
+        )
+        .await?;
 
-        let request = frame::encode_subscribe_cov(
-            invoke_id,
-            process_id,
-            object_type,
-            object_instance,
-            Some(issue_confirmed),
-            lifetime,
-        );
-
-        let per_attempt = Duration::from_secs(3);
-        let max_retries = 3u32;
-        let mut buf = [0u8; 1500];
-        let mut rx = rx;
-
-        'retry: for attempt in 0..=max_retries {
-            if let Err(e) = socket.send_to(&request, device_addr).await {
-                return Err(DriverError::CommFault(format!("bacnet send: {e}")));
-            }
-
-            let deadline = tokio::time::Instant::now() + per_attempt;
-            loop {
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                if remaining.is_zero() {
-                    if attempt < max_retries {
-                        continue 'retry;
-                    } else {
-                        break 'retry;
-                    }
-                }
-
-                match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
-                    Err(_) => {
-                        if attempt < max_retries {
-                            continue 'retry;
-                        } else {
-                            break 'retry;
-                        }
-                    }
-                    Ok(Err(e)) => {
-                        return Err(DriverError::CommFault(format!("bacnet recv: {e}")));
-                    }
-                    Ok(Ok((n, _src))) => {
-                        if let Ok((_npdu, apdu)) = frame::decode_packet(&buf[..n]) {
-                            // Side-effect: process COV notifications (Phase B8.1)
-                            match &apdu {
-                                frame::Apdu::UnconfirmedCovNotification { notification }
-                                | frame::Apdu::ConfirmedCovNotification { notification, .. } => {
-                                    self.cov_cache.update(notification);
-                                }
-                                _ => {}
-                            }
-                            // Dispatch to transaction waiters
-                            if let Some(id) = apdu_invoke_id(&apdu) {
-                                self.transactions.dispatch(id, apdu);
-                            }
-                        }
-                        if let Ok(result) = rx.try_recv() {
-                            return match result {
-                                Ok(frame::Apdu::SimpleAck { .. }) => Ok(()),
-                                Ok(frame::Apdu::Error {
-                                    error_class,
-                                    error_code,
-                                    ..
-                                }) => Err(DriverError::RemoteStatus(format!(
-                                    "BACnet SubscribeCOV error class={error_class} code={error_code}"
-                                ))),
-                                Ok(other) => Err(DriverError::CommFault(format!(
-                                    "unexpected response: {other:?}"
-                                ))),
-                                Err(e) => Err(DriverError::CommFault(e.to_string())),
-                            };
-                        }
-                    }
-                }
-            }
+        match apdu {
+            frame::Apdu::SimpleAck { .. } => Ok(()),
+            frame::Apdu::Error {
+                error_class,
+                error_code,
+                ..
+            } => Err(DriverError::RemoteStatus(format!(
+                "BACnet SubscribeCOV error class={error_class} code={error_code}"
+            ))),
+            other => Err(DriverError::CommFault(format!(
+                "unexpected response: {other:?}"
+            ))),
         }
-
-        self.transactions.timeout(invoke_id);
-        Err(DriverError::CommFault("bacnet subscribe timeout".into()))
     }
 
     /// Send a SubscribeCOV-Request in CANCEL form (no confirmed/lifetime tags).
@@ -1151,91 +1076,40 @@ impl BacnetDriver {
             .as_ref()
             .ok_or_else(|| DriverError::CommFault("bacnet: not connected".into()))?;
 
-        let (invoke_id, rx) = self
-            .transactions
-            .allocate()
-            .ok_or_else(|| DriverError::CommFault("bacnet: no invoke IDs available".into()))?;
+        let apdu = bacnet_transact_inner(
+            socket,
+            &mut self.transactions,
+            &mut self.cov_cache,
+            device_addr,
+            |invoke_id| {
+                // Cancel form: None for issue_confirmed and None for lifetime.
+                frame::encode_subscribe_cov(
+                    invoke_id,
+                    process_id,
+                    object_type,
+                    object_instance,
+                    None,
+                    None,
+                )
+            },
+            Duration::from_secs(3),
+            3,
+        )
+        .await?;
 
-        // Cancel form: None for issue_confirmed and None for lifetime.
-        let request = frame::encode_subscribe_cov(
-            invoke_id,
-            process_id,
-            object_type,
-            object_instance,
-            None,
-            None,
-        );
-
-        let per_attempt = Duration::from_secs(3);
-        let max_retries = 3u32;
-        let mut buf = [0u8; 1500];
-        let mut rx = rx;
-
-        'retry: for attempt in 0..=max_retries {
-            if let Err(e) = socket.send_to(&request, device_addr).await {
-                return Err(DriverError::CommFault(format!("bacnet send: {e}")));
-            }
-
-            let deadline = tokio::time::Instant::now() + per_attempt;
-            loop {
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                if remaining.is_zero() {
-                    if attempt < max_retries {
-                        continue 'retry;
-                    } else {
-                        break 'retry;
-                    }
-                }
-
-                match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
-                    Err(_) => {
-                        if attempt < max_retries {
-                            continue 'retry;
-                        } else {
-                            break 'retry;
-                        }
-                    }
-                    Ok(Err(e)) => {
-                        return Err(DriverError::CommFault(format!("bacnet recv: {e}")));
-                    }
-                    Ok(Ok((n, _src))) => {
-                        if let Ok((_npdu, apdu)) = frame::decode_packet(&buf[..n]) {
-                            // Side-effect: process COV notifications (Phase B8.1)
-                            match &apdu {
-                                frame::Apdu::UnconfirmedCovNotification { notification }
-                                | frame::Apdu::ConfirmedCovNotification { notification, .. } => {
-                                    self.cov_cache.update(notification);
-                                }
-                                _ => {}
-                            }
-                            // Dispatch to transaction waiters
-                            if let Some(id) = apdu_invoke_id(&apdu) {
-                                self.transactions.dispatch(id, apdu);
-                            }
-                        }
-                        if let Ok(result) = rx.try_recv() {
-                            return match result {
-                                Ok(frame::Apdu::SimpleAck { .. }) => Ok(()),
-                                Ok(frame::Apdu::Error {
-                                    error_class,
-                                    error_code,
-                                    ..
-                                }) => Err(DriverError::RemoteStatus(format!(
-                                    "BACnet SubscribeCOV error class={error_class} code={error_code}"
-                                ))),
-                                Ok(other) => Err(DriverError::CommFault(format!(
-                                    "unexpected response: {other:?}"
-                                ))),
-                                Err(e) => Err(DriverError::CommFault(e.to_string())),
-                            };
-                        }
-                    }
-                }
-            }
+        match apdu {
+            frame::Apdu::SimpleAck { .. } => Ok(()),
+            frame::Apdu::Error {
+                error_class,
+                error_code,
+                ..
+            } => Err(DriverError::RemoteStatus(format!(
+                "BACnet SubscribeCOV error class={error_class} code={error_code}"
+            ))),
+            other => Err(DriverError::CommFault(format!(
+                "unexpected response: {other:?}"
+            ))),
         }
-
-        self.transactions.timeout(invoke_id);
-        Err(DriverError::CommFault("bacnet subscribe timeout".into()))
     }
 
     // ── Phase B8.2: COV subscription renewal ──────────────
