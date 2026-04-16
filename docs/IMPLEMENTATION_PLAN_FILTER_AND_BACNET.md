@@ -635,7 +635,15 @@ The existing single-file `bacnet.rs` (120 lines) becomes the entry point `mod.rs
   or Enumerated (BI/BO/BV) values at priority 16. End-to-end tests
   `e2e_write_succeeds_with_simple_ack` and `e2e_write_error_pdu_returns_remote_status` cover both the
   SimpleAck and Error PDU paths via UDP loopback.
-- **SubscribeCOV** — Phase B8 (~1-2 weeks) — Adds true COV, maps to `on_watch`/`on_unwatch`
+- **SubscribeCOV (wire-level)** — ✅ Phase B8 complete (2026-04-16) — `BacnetDriver::subscribe_cov` +
+  `unsubscribe_cov` + `on_watch`/`on_unwatch` implementations. Frame codec: `SubscribeCovRequest`
+  encoder/decoder, `UnconfirmedCovNotification` / `ConfirmedCovNotification` decoders,
+  `CovNotification` + `CovPropertyValue` structs. Subscription state tracked in `cov_subscriptions`
+  HashMap keyed by `subscriberProcessIdentifier`. Default lifetime 300s. End-to-end tests
+  `e2e_on_watch_subscribes_cov` and `e2e_on_unwatch_sends_cancel` validate the wire-level
+  subscribe/cancel path via UDP loopback. Python simulator `tools/bacnet_sim.py` gained
+  `parse_subscribe_cov` + SubscribeCOV Simple-ACK handler. Notification receiver task for pushing
+  updates to watchers is reserved for Phase B8.1 (requires I/O refactor).
 - **ReadPropertyMultiple** — ✅ Phase B9 complete (2026-04-16) — `sync_cur()` now batches points
   by device into a single RPM request and falls back to individual `ReadProperty` on transport
   error or when the device replies with an Error PDU. Delivered: `frame::RpmRequestSpec` +
@@ -817,7 +825,8 @@ The existing `drivers/bacnet.rs` (120 lines) gets replaced by the new `drivers/b
 | **Week 6** | BACnet Phase B6 — production | Deployed to 1-11 |
 | **Week 7** | BACnet Phase B7 — WriteProperty ✅ 2026-04-15 | `encode_write_property`, `SimpleAck`, `write_property()`, `AsyncDriver::write()`, 2 E2E tests |
 | **Week 8** | BACnet Phase B9 — ReadPropertyMultiple ✅ 2026-04-16 | `RpmRequestSpec` + `RpmResult`, `encode_read_property_multiple` + ACK, `read_properties_multiple()`, batched `sync_cur()` with fallback, `e2e_sync_cur_uses_rpm` E2E test, Python sim RPM handler |
-| **Week 9+** | Optional: COV, router | Per-feature |
+| **Week 9** | BACnet Phase B8 — SubscribeCOV (wire-level) ✅ 2026-04-16 | `subscribe_cov` + `unsubscribe_cov`, `on_watch`/`on_unwatch`, `CovNotification` structs, 2 E2E tests, Python sim handler |
+| **Week 10+** | Optional: COV notification receiver (B8.1), router (B10) | Per-feature |
 
 Each phase ends with a verification gate and a git commit. No long-running branches — commit and push at every checkpoint.
 

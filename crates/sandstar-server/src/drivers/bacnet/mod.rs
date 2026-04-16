@@ -134,6 +134,25 @@ pub const DEFAULT_BACNET_PORT: u16 = 47808;
 
 // ── BacnetDriver ───────────────────────────────────────────
 
+/// State of a single COV subscription tracked by the driver (Phase B8).
+///
+/// The `lifetime` field is stored for future Phase B8.1 renewal logic.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct CovSubscription {
+    /// Sandstar point_id this subscription covers.
+    point_id: u32,
+    /// BACnet subscriber-process-identifier we issued.
+    process_id: u32,
+    /// Object we subscribed to.
+    object_type: u16,
+    object_instance: u32,
+    /// Device instance the subscription is with.
+    device_id: u32,
+    /// Lifetime seconds we requested. `None` = indefinite.
+    lifetime: Option<u32>,
+}
+
 /// BACnet/IP driver.
 ///
 /// Manages a UDP socket bound to the BACnet port, maintains a registry of
@@ -157,6 +176,10 @@ pub struct BacnetDriver {
     /// In tests, set this to the mock device's port while `port` is 0
     /// (letting the OS assign an ephemeral bind port).
     broadcast_port: u16,
+    /// Active COV subscriptions indexed by subscriber-process-identifier.
+    cov_subscriptions: HashMap<u32, CovSubscription>,
+    /// Monotonically-increasing process_id counter for new subscriptions.
+    next_process_id: u32,
 }
 
 impl BacnetDriver {
@@ -176,6 +199,8 @@ impl BacnetDriver {
             objects: HashMap::new(),
             transactions: transaction::TransactionTable::new(),
             discovery_timeout: std::time::Duration::from_secs(2),
+            cov_subscriptions: HashMap::new(),
+            next_process_id: 1,
         }
     }
 
@@ -773,6 +798,213 @@ impl BacnetDriver {
         self.transactions.timeout(invoke_id);
         Err(DriverError::CommFault("bacnet write timeout".into()))
     }
+
+    // ── Phase B8: COV subscription management ──────────────
+
+    /// Allocate a new subscriber-process-identifier for a subscription.
+    ///
+    /// Wraps on overflow and skips 0 (reserved).
+    fn allocate_process_id(&mut self) -> u32 {
+        let id = self.next_process_id;
+        self.next_process_id = self.next_process_id.wrapping_add(1);
+        if self.next_process_id == 0 {
+            self.next_process_id = 1; // 0 is reserved
+        }
+        id
+    }
+
+    /// Send a SubscribeCOV-Request and await the Simple-ACK.
+    ///
+    /// Returns `Ok(())` on Simple-ACK, [`DriverError::RemoteStatus`] on
+    /// Error PDU, and [`DriverError::CommFault`] on timeout / socket error.
+    ///
+    /// Does NOT track the subscription in `cov_subscriptions` — caller's
+    /// responsibility.
+    async fn subscribe_cov(
+        &mut self,
+        device_addr: std::net::SocketAddr,
+        process_id: u32,
+        object_type: u16,
+        object_instance: u32,
+        issue_confirmed: bool,
+        lifetime: Option<u32>,
+    ) -> Result<(), DriverError> {
+        // NLL split borrow of self.socket / self.transactions (different fields).
+        let socket = self
+            .socket
+            .as_ref()
+            .ok_or_else(|| DriverError::CommFault("bacnet: not connected".into()))?;
+
+        let (invoke_id, rx) = self
+            .transactions
+            .allocate()
+            .ok_or_else(|| DriverError::CommFault("bacnet: no invoke IDs available".into()))?;
+
+        let request = frame::encode_subscribe_cov(
+            invoke_id,
+            process_id,
+            object_type,
+            object_instance,
+            Some(issue_confirmed),
+            lifetime,
+        );
+
+        let per_attempt = Duration::from_secs(3);
+        let max_retries = 3u32;
+        let mut buf = [0u8; 1500];
+        let mut rx = rx;
+
+        'retry: for attempt in 0..=max_retries {
+            if let Err(e) = socket.send_to(&request, device_addr).await {
+                return Err(DriverError::CommFault(format!("bacnet send: {e}")));
+            }
+
+            let deadline = tokio::time::Instant::now() + per_attempt;
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    if attempt < max_retries {
+                        continue 'retry;
+                    } else {
+                        break 'retry;
+                    }
+                }
+
+                match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
+                    Err(_) => {
+                        if attempt < max_retries {
+                            continue 'retry;
+                        } else {
+                            break 'retry;
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        return Err(DriverError::CommFault(format!("bacnet recv: {e}")));
+                    }
+                    Ok(Ok((n, _src))) => {
+                        if let Ok((_npdu, apdu)) = frame::decode_packet(&buf[..n]) {
+                            if let Some(id) = apdu_invoke_id(&apdu) {
+                                self.transactions.dispatch(id, apdu);
+                            }
+                        }
+                        if let Ok(result) = rx.try_recv() {
+                            return match result {
+                                Ok(frame::Apdu::SimpleAck { .. }) => Ok(()),
+                                Ok(frame::Apdu::Error {
+                                    error_class,
+                                    error_code,
+                                    ..
+                                }) => Err(DriverError::RemoteStatus(format!(
+                                    "BACnet SubscribeCOV error class={error_class} code={error_code}"
+                                ))),
+                                Ok(other) => Err(DriverError::CommFault(format!(
+                                    "unexpected response: {other:?}"
+                                ))),
+                                Err(e) => Err(DriverError::CommFault(e.to_string())),
+                            };
+                        }
+                    }
+                }
+            }
+        }
+
+        self.transactions.timeout(invoke_id);
+        Err(DriverError::CommFault("bacnet subscribe timeout".into()))
+    }
+
+    /// Send a SubscribeCOV-Request in CANCEL form (no confirmed/lifetime tags).
+    ///
+    /// Response handling mirrors [`Self::subscribe_cov`].
+    async fn unsubscribe_cov(
+        &mut self,
+        device_addr: std::net::SocketAddr,
+        process_id: u32,
+        object_type: u16,
+        object_instance: u32,
+    ) -> Result<(), DriverError> {
+        // NLL split borrow of self.socket / self.transactions (different fields).
+        let socket = self
+            .socket
+            .as_ref()
+            .ok_or_else(|| DriverError::CommFault("bacnet: not connected".into()))?;
+
+        let (invoke_id, rx) = self
+            .transactions
+            .allocate()
+            .ok_or_else(|| DriverError::CommFault("bacnet: no invoke IDs available".into()))?;
+
+        // Cancel form: None for issue_confirmed and None for lifetime.
+        let request = frame::encode_subscribe_cov(
+            invoke_id,
+            process_id,
+            object_type,
+            object_instance,
+            None,
+            None,
+        );
+
+        let per_attempt = Duration::from_secs(3);
+        let max_retries = 3u32;
+        let mut buf = [0u8; 1500];
+        let mut rx = rx;
+
+        'retry: for attempt in 0..=max_retries {
+            if let Err(e) = socket.send_to(&request, device_addr).await {
+                return Err(DriverError::CommFault(format!("bacnet send: {e}")));
+            }
+
+            let deadline = tokio::time::Instant::now() + per_attempt;
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    if attempt < max_retries {
+                        continue 'retry;
+                    } else {
+                        break 'retry;
+                    }
+                }
+
+                match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
+                    Err(_) => {
+                        if attempt < max_retries {
+                            continue 'retry;
+                        } else {
+                            break 'retry;
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        return Err(DriverError::CommFault(format!("bacnet recv: {e}")));
+                    }
+                    Ok(Ok((n, _src))) => {
+                        if let Ok((_npdu, apdu)) = frame::decode_packet(&buf[..n]) {
+                            if let Some(id) = apdu_invoke_id(&apdu) {
+                                self.transactions.dispatch(id, apdu);
+                            }
+                        }
+                        if let Ok(result) = rx.try_recv() {
+                            return match result {
+                                Ok(frame::Apdu::SimpleAck { .. }) => Ok(()),
+                                Ok(frame::Apdu::Error {
+                                    error_class,
+                                    error_code,
+                                    ..
+                                }) => Err(DriverError::RemoteStatus(format!(
+                                    "BACnet SubscribeCOV error class={error_class} code={error_code}"
+                                ))),
+                                Ok(other) => Err(DriverError::CommFault(format!(
+                                    "unexpected response: {other:?}"
+                                ))),
+                                Err(e) => Err(DriverError::CommFault(e.to_string())),
+                            };
+                        }
+                    }
+                }
+            }
+        }
+
+        self.transactions.timeout(invoke_id);
+        Err(DriverError::CommFault("bacnet subscribe timeout".into()))
+    }
 }
 
 // ── AsyncDriver impl ───────────────────────────────────────
@@ -1088,6 +1320,138 @@ impl AsyncDriver for BacnetDriver {
 
     fn poll_mode(&self) -> PollMode {
         PollMode::Buckets
+    }
+
+    /// Subscribe to COV notifications for the given points (Phase B8).
+    async fn on_watch(&mut self, points: &[DriverPointRef]) -> Result<(), DriverError> {
+        for pt in points {
+            // Skip if already subscribed for this point.
+            if self
+                .cov_subscriptions
+                .values()
+                .any(|s| s.point_id == pt.point_id)
+            {
+                continue;
+            }
+
+            // Look up the object config.
+            let obj = match self.objects.get(&pt.point_id).cloned() {
+                Some(o) => o,
+                None => {
+                    tracing::warn!(
+                        point_id = pt.point_id,
+                        "on_watch: no BACnet object configured"
+                    );
+                    continue;
+                }
+            };
+
+            // Look up the device address.
+            let device_addr = match self.device_registry.get(obj.device_id) {
+                Some(d) => d.addr,
+                None => {
+                    tracing::warn!(
+                        point_id = pt.point_id,
+                        device_id = obj.device_id,
+                        "on_watch: BACnet device not in registry"
+                    );
+                    continue;
+                }
+            };
+
+            // Allocate process_id and subscribe.
+            let process_id = self.allocate_process_id();
+            let lifetime = Some(300u32); // 5 minutes — renewal is future Phase B8.1.
+
+            match self
+                .subscribe_cov(
+                    device_addr,
+                    process_id,
+                    obj.object_type,
+                    obj.instance,
+                    false, // unconfirmed notifications
+                    lifetime,
+                )
+                .await
+            {
+                Ok(()) => {
+                    self.cov_subscriptions.insert(
+                        process_id,
+                        CovSubscription {
+                            point_id: pt.point_id,
+                            process_id,
+                            object_type: obj.object_type,
+                            object_instance: obj.instance,
+                            device_id: obj.device_id,
+                            lifetime,
+                        },
+                    );
+                    tracing::info!(point_id = pt.point_id, process_id, "BACnet COV subscribed");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        point_id = pt.point_id,
+                        process_id,
+                        error = %e,
+                        "BACnet COV subscribe failed"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Cancel COV subscriptions for the given points (Phase B8).
+    async fn on_unwatch(&mut self, points: &[DriverPointRef]) -> Result<(), DriverError> {
+        for pt in points {
+            let sub = self
+                .cov_subscriptions
+                .values()
+                .find(|s| s.point_id == pt.point_id)
+                .cloned();
+
+            let sub = match sub {
+                Some(s) => s,
+                None => continue,
+            };
+
+            let device_addr = match self.device_registry.get(sub.device_id) {
+                Some(d) => d.addr,
+                None => {
+                    self.cov_subscriptions.remove(&sub.process_id);
+                    continue;
+                }
+            };
+
+            match self
+                .unsubscribe_cov(
+                    device_addr,
+                    sub.process_id,
+                    sub.object_type,
+                    sub.object_instance,
+                )
+                .await
+            {
+                Ok(()) => {
+                    self.cov_subscriptions.remove(&sub.process_id);
+                    tracing::info!(
+                        point_id = pt.point_id,
+                        process_id = sub.process_id,
+                        "BACnet COV unsubscribed"
+                    );
+                }
+                Err(e) => {
+                    self.cov_subscriptions.remove(&sub.process_id);
+                    tracing::warn!(
+                        point_id = pt.point_id,
+                        process_id = sub.process_id,
+                        error = %e,
+                        "BACnet COV unsubscribe request failed (local state cleared anyway)"
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -2788,5 +3152,304 @@ mod write_tests {
             }
             other => panic!("expected RemoteStatus, got {other:?}"),
         }
+    }
+}
+
+// ── Phase B8: COV subscription tests ──────────────────────
+
+#[cfg(test)]
+mod cov_tests {
+    use super::*;
+
+    fn make_driver() -> BacnetDriver {
+        BacnetDriver::new("b8-test", "127.0.0.1", 0)
+    }
+
+    /// Build a driver with an open socket and a registered device pointing
+    /// at `mock_addr` (device_id = 42).
+    async fn make_ready_driver(mock_addr: std::net::SocketAddr) -> BacnetDriver {
+        let mut d = make_driver();
+        d.socket = Some(
+            tokio::net::UdpSocket::bind("127.0.0.1:0")
+                .await
+                .expect("bind driver socket"),
+        );
+        d.status = DriverStatus::Ok;
+        d.device_registry.insert(DeviceInfo {
+            instance: 42,
+            addr: mock_addr,
+            max_apdu: 1476,
+            vendor_id: 999,
+            segmentation: 3,
+        });
+        d
+    }
+
+    // ── Test 1 ─────────────────────────────────────────────
+
+    #[test]
+    fn allocate_process_id_increments() {
+        let mut d = make_driver();
+        assert_eq!(d.allocate_process_id(), 1);
+        assert_eq!(d.allocate_process_id(), 2);
+        assert_eq!(d.allocate_process_id(), 3);
+    }
+
+    // ── Test 2 ─────────────────────────────────────────────
+
+    #[test]
+    fn allocate_process_id_skips_zero_on_wrap() {
+        let mut d = make_driver();
+        d.next_process_id = u32::MAX;
+        assert_eq!(d.allocate_process_id(), u32::MAX);
+        // Wrap: next would be 0, which is reserved — must be bumped to 1.
+        assert_eq!(d.allocate_process_id(), 1);
+    }
+
+    // ── Test 3 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn on_watch_unknown_point_is_noop() {
+        let mut d = make_driver();
+        let refs = vec![DriverPointRef {
+            point_id: 9999,
+            address: String::new(),
+        }];
+        let result = d.on_watch(&refs).await;
+        assert!(result.is_ok());
+        assert!(d.cov_subscriptions.is_empty());
+    }
+
+    // ── Test 4 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn on_watch_device_not_in_registry_is_noop() {
+        let mut d = make_driver();
+        d.add_object(
+            8001,
+            object::BacnetObject {
+                device_id: 77,
+                object_type: 0,
+                instance: 1,
+                scale: 1.0,
+                offset: 0.0,
+                unit: None,
+            },
+        );
+        let refs = vec![DriverPointRef {
+            point_id: 8001,
+            address: String::new(),
+        }];
+        let result = d.on_watch(&refs).await;
+        assert!(result.is_ok());
+        assert!(d.cov_subscriptions.is_empty());
+    }
+
+    // ── Test 5 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn on_unwatch_without_subscription_is_noop() {
+        let mut d = make_driver();
+        let refs = vec![DriverPointRef {
+            point_id: 1234,
+            address: String::new(),
+        }];
+        let result = d.on_unwatch(&refs).await;
+        assert!(result.is_ok());
+        assert!(d.cov_subscriptions.is_empty());
+    }
+
+    // ── Test 6 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn subscribe_cov_mock_socket_success() {
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("mock bind");
+        let mock_addr: std::net::SocketAddr = sock.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1500];
+            if let Ok((n, from)) = sock.recv_from(&mut buf).await {
+                let invoke_id = if n >= 9 { buf[8] } else { 0 };
+                if n >= 10 {
+                    assert_eq!(buf[9], 0x05, "service choice should be SubscribeCOV");
+                }
+                let reply = frame::encode_simple_ack(invoke_id, 0x05);
+                let _ = sock.send_to(&reply, from).await;
+            }
+        });
+
+        let mut driver = make_ready_driver(mock_addr).await;
+
+        let result = driver
+            .subscribe_cov(mock_addr, 7, 0, 1, false, Some(300))
+            .await;
+
+        assert!(result.is_ok(), "expected Ok(()), got {result:?}");
+    }
+
+    // ── Test 7 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn subscribe_cov_mock_error_pdu_returns_remote_status() {
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("mock bind");
+        let mock_addr: std::net::SocketAddr = sock.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1500];
+            if let Ok((n, from)) = sock.recv_from(&mut buf).await {
+                let invoke_id = if n >= 9 { buf[8] } else { 0 };
+                let apdu: Vec<u8> = vec![
+                    0x50, invoke_id, 0x05, // service choice = SubscribeCOV
+                    0x91, 0x02, // error class = 2
+                    0x91, 0x05, // error code = 5
+                ];
+                let total_len = (4u16 + 2 + apdu.len() as u16).to_be_bytes();
+                let mut pkt = vec![0x81, 0x0A, total_len[0], total_len[1], 0x01, 0x00];
+                pkt.extend_from_slice(&apdu);
+                let _ = sock.send_to(&pkt, from).await;
+            }
+        });
+
+        let mut driver = make_ready_driver(mock_addr).await;
+
+        let result = driver
+            .subscribe_cov(mock_addr, 7, 0, 1, false, Some(300))
+            .await;
+
+        match result {
+            Err(DriverError::RemoteStatus(msg)) => {
+                assert!(
+                    msg.contains("class=2") && msg.contains("code=5"),
+                    "error message should mention class=2 code=5, got: {msg}"
+                );
+            }
+            other => panic!("expected RemoteStatus, got {other:?}"),
+        }
+    }
+
+    // ── Test 8 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn on_watch_happy_path_tracks_subscription() {
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("mock bind");
+        let mock_addr: std::net::SocketAddr = sock.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1500];
+            if let Ok((n, from)) = sock.recv_from(&mut buf).await {
+                let invoke_id = if n >= 9 { buf[8] } else { 0 };
+                let reply = frame::encode_simple_ack(invoke_id, 0x05);
+                let _ = sock.send_to(&reply, from).await;
+            }
+        });
+
+        let mut driver = make_ready_driver(mock_addr).await;
+        driver.add_object(
+            8001,
+            object::BacnetObject {
+                device_id: 42,
+                object_type: 0,
+                instance: 1,
+                scale: 1.0,
+                offset: 0.0,
+                unit: None,
+            },
+        );
+
+        let refs = vec![DriverPointRef {
+            point_id: 8001,
+            address: String::new(),
+        }];
+        let result = driver.on_watch(&refs).await;
+        assert!(result.is_ok());
+        assert_eq!(driver.cov_subscriptions.len(), 1);
+        let sub = driver.cov_subscriptions.values().next().unwrap();
+        assert_eq!(sub.point_id, 8001);
+        assert_eq!(sub.object_type, 0);
+        assert_eq!(sub.object_instance, 1);
+        assert_ne!(sub.process_id, 0);
+    }
+
+    // ── Test 9 ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn on_watch_idempotent_for_same_point() {
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("mock bind");
+        let mock_addr: std::net::SocketAddr = sock.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1500];
+            if let Ok((n, from)) = sock.recv_from(&mut buf).await {
+                let invoke_id = if n >= 9 { buf[8] } else { 0 };
+                let reply = frame::encode_simple_ack(invoke_id, 0x05);
+                let _ = sock.send_to(&reply, from).await;
+            }
+        });
+
+        let mut driver = make_ready_driver(mock_addr).await;
+        driver.add_object(
+            8001,
+            object::BacnetObject {
+                device_id: 42,
+                object_type: 0,
+                instance: 1,
+                scale: 1.0,
+                offset: 0.0,
+                unit: None,
+            },
+        );
+
+        let refs = vec![DriverPointRef {
+            point_id: 8001,
+            address: String::new(),
+        }];
+        assert!(driver.on_watch(&refs).await.is_ok());
+        assert_eq!(driver.cov_subscriptions.len(), 1);
+
+        // Second call — idempotent.
+        assert!(driver.on_watch(&refs).await.is_ok());
+        assert_eq!(driver.cov_subscriptions.len(), 1);
+    }
+
+    // ── Test 10 ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn on_unwatch_removes_local_state_even_if_cancel_fails() {
+        let mut driver = make_driver();
+        driver.socket = Some(
+            tokio::net::UdpSocket::bind("127.0.0.1:0")
+                .await
+                .expect("bind driver socket"),
+        );
+        driver.status = DriverStatus::Ok;
+
+        // Inject a tracked subscription whose device is NOT in the registry.
+        driver.cov_subscriptions.insert(
+            42,
+            CovSubscription {
+                point_id: 8001,
+                process_id: 42,
+                object_type: 0,
+                object_instance: 1,
+                device_id: 999, // not in registry
+                lifetime: Some(300),
+            },
+        );
+
+        let refs = vec![DriverPointRef {
+            point_id: 8001,
+            address: String::new(),
+        }];
+        let result = driver.on_unwatch(&refs).await;
+        assert!(result.is_ok());
+        assert!(driver.cov_subscriptions.is_empty());
     }
 }

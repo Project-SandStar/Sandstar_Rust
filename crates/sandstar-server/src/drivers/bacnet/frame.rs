@@ -50,6 +50,8 @@ pub const SVC_CONFIRMED_READ_PROPERTY: u8 = 0x0C;
 pub const SVC_CONFIRMED_READ_PROPERTY_MULTIPLE: u8 = 0x0E;
 /// Confirmed service: WriteProperty.
 pub const SVC_CONFIRMED_WRITE_PROPERTY: u8 = 0x0F;
+/// Confirmed service: SubscribeCOV (Phase B8).
+pub const SVC_CONFIRMED_SUBSCRIBE_COV: u8 = 0x05;
 
 // ── ReadPropertyMultiple (Phase B9) ────────────────────────
 
@@ -604,6 +606,57 @@ pub fn encode_write_property(
     // Context tag 4: Priority (optional)
     if let Some(prio) = priority {
         encode_context_unsigned(&mut apdu, 4, prio as u32);
+    }
+
+    build_packet(BVLL_UNICAST, apdu)
+}
+
+/// Encode a SubscribeCOV-Request (Confirmed-Request) frame (Phase B8 stub).
+///
+/// This is a minimal encoder: the parallel frame-agent's authoritative version
+/// will replace it and should merge cleanly (same signature, same wire format).
+///
+/// # Arguments
+/// * `invoke_id` — transaction ID
+/// * `subscriber_process_id` — unique subscriber-process-identifier (0 is reserved)
+/// * `monitored_object_type` — BACnet object type
+/// * `monitored_object_instance` — object instance
+/// * `issue_confirmed` — `Some(true/false)` subscribes; `None` cancels
+/// * `lifetime` — subscription lifetime in seconds; `None` = indefinite
+pub fn encode_subscribe_cov(
+    invoke_id: u8,
+    subscriber_process_id: u32,
+    monitored_object_type: u16,
+    monitored_object_instance: u32,
+    issue_confirmed: Option<bool>,
+    lifetime: Option<u32>,
+) -> Vec<u8> {
+    let mut apdu: Vec<u8> = vec![
+        0x00, // PDU type = Confirmed-Request, no segmentation
+        0x05, // max-segments=unspecified (0), max-apdu=1476 (5)
+        invoke_id,
+        SVC_CONFIRMED_SUBSCRIBE_COV,
+    ];
+
+    // Context tag 0: subscriber-process-identifier (Unsigned)
+    encode_context_unsigned(&mut apdu, 0, subscriber_process_id);
+
+    // Context tag 1: monitored-object-identifier (ObjectIdentifier, 4 bytes)
+    let obj_id = ((monitored_object_type as u32) << 22) | (monitored_object_instance & 0x003F_FFFF);
+    apdu.push(0x1C); // tag 1, context class (0x08), length 4
+    apdu.extend_from_slice(&obj_id.to_be_bytes());
+
+    // Tags 2 and 3 are only present in the SUBSCRIBE form, not the CANCEL form.
+    if let Some(confirmed) = issue_confirmed {
+        // Context tag 2: issue-confirmed-notifications (Boolean)
+        // Tag byte 0x29 = tag 2, context class, length 1; value 0x01/0x00.
+        apdu.push(0x29);
+        apdu.push(if confirmed { 0x01 } else { 0x00 });
+
+        // Context tag 3: lifetime (Unsigned seconds) — only when Some.
+        if let Some(secs) = lifetime {
+            encode_context_unsigned(&mut apdu, 3, secs);
+        }
     }
 
     build_packet(BVLL_UNICAST, apdu)

@@ -640,6 +640,220 @@ async fn e2e_write_error_pdu_returns_remote_status() {
     handle.close_all().await.expect("close_all should succeed");
 }
 
+// ── Phase B8: SubscribeCOV E2E tests ───────────────────────────────────────
+
+/// Phase B8: `on_watch` issues exactly one SubscribeCOV-Request over the wire.
+///
+/// The mock responder:
+///   1. Handles Who-Is → I-Am for device 12345
+///   2. Handles ONE SubscribeCOV → Simple-ACK
+///
+/// The test asserts:
+///   - the driver opens successfully (device registry populated)
+///   - `handle.add_watch(subscriber, [point_id])` routes through
+///     the actor to `BacnetDriver::on_watch` which sends a SubscribeCOV
+///   - the mock observed exactly ONE service-0x05 request
+#[tokio::test]
+async fn e2e_on_watch_subscribes_cov() {
+    // 1. Bind mock UDP socket on an ephemeral port.
+    let mock_port = find_free_port();
+    let sock = UdpSocket::bind(format!("127.0.0.1:{mock_port}"))
+        .await
+        .expect("mock bind failed");
+
+    // Counter: SubscribeCOV requests the mock has seen.
+    let subscribe_counter = Arc::new(AtomicUsize::new(0));
+    let sc = subscribe_counter.clone();
+
+    tokio::spawn(async move {
+        let mut buf = [0u8; 1500];
+
+        // Exchange 1: Who-Is → I-Am
+        if let Ok((_, from)) = sock.recv_from(&mut buf).await {
+            let reply = encode_i_am(12345, 1476, 3, 999);
+            let _ = sock.send_to(&reply, from).await;
+        }
+
+        // Exchange 2: SubscribeCOV → Simple-ACK.
+        // Confirmed-Request layout (after 6-byte BVLL+NPDU header):
+        //   byte[8] = invoke_id, byte[9] = service choice (0x05 = SubscribeCOV)
+        if let Ok((n, from)) = sock.recv_from(&mut buf).await {
+            if n >= 10 && buf[0] == 0x81 && buf[6] == 0x00 && buf[9] == 0x05 {
+                sc.fetch_add(1, Ordering::SeqCst);
+                let invoke_id = buf[8];
+                let ack = [
+                    0x81, 0x0A, 0x00, 0x09, // BVLL unicast, length = 9
+                    0x01, 0x00, // NPDU version=1, control=0
+                    0x20, invoke_id, 0x05, // Simple-ACK, invoke_id, SubscribeCOV
+                ];
+                let _ = sock.send_to(&ack, from).await;
+            }
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // 2. Config: one AI-0 point on device 12345.
+    let config = BacnetConfig {
+        id: "bac-cov".into(),
+        port: Some(0), // OS-assigned ephemeral bind
+        broadcast: Some("127.0.0.1".into()),
+        objects: vec![BacnetObjectConfig {
+            point_id: 9001,
+            device_id: 12345,
+            object_type: 0, // AnalogInput
+            instance: 0,
+            unit: None,
+            scale: Some(1.0),
+            offset: Some(0.0),
+        }],
+    };
+    let driver = BacnetDriver::from_config(config)
+        .with_broadcast_port(mock_port)
+        .with_discovery_timeout(Duration::from_millis(300));
+
+    // 3. Register + open_all via DriverHandle.
+    let handle = spawn_driver_actor(16);
+    handle
+        .register(AnyDriver::Async(Box::new(driver)))
+        .await
+        .expect("register should succeed");
+
+    // Register the point with the manager so point_driver_map is populated.
+    // Without this, add_watch has no driver to dispatch on_watch to.
+    handle
+        .register_point(9001, "bac-cov")
+        .await
+        .expect("register_point should succeed");
+
+    let open_results = handle
+        .open_all()
+        .await
+        .expect("open_all channel should work");
+    assert_eq!(open_results.len(), 1);
+    open_results[0].1.as_ref().expect("open() should succeed");
+
+    // 4. Trigger on_watch via handle.add_watch — takes (subscriber, Vec<u32>).
+    handle
+        .add_watch("ws-test", vec![9001])
+        .await
+        .expect("add_watch should succeed");
+
+    // 5. Assert the mock received exactly ONE SubscribeCOV request.
+    assert_eq!(
+        subscribe_counter.load(Ordering::SeqCst),
+        1,
+        "should send exactly one SubscribeCOV request"
+    );
+
+    handle.close_all().await.expect("close_all should succeed");
+}
+
+/// Phase B8: `on_unwatch` issues a SubscribeCOV CANCEL after the initial
+/// subscribe.
+///
+/// The mock responder handles TWO service-0x05 exchanges in sequence:
+///   1. Who-Is → I-Am
+///   2. SubscribeCOV (subscribe form) → Simple-ACK
+///   3. SubscribeCOV (cancel form) → Simple-ACK
+///
+/// After calling `add_watch` then `remove_watch`, the test asserts the mock
+/// observed exactly TWO SubscribeCOV requests — one subscribe + one cancel.
+#[tokio::test]
+async fn e2e_on_unwatch_sends_cancel() {
+    // 1. Bind mock UDP socket on an ephemeral port.
+    let mock_port = find_free_port();
+    let sock = UdpSocket::bind(format!("127.0.0.1:{mock_port}"))
+        .await
+        .expect("mock bind failed");
+
+    let cov_counter = Arc::new(AtomicUsize::new(0));
+    let cc = cov_counter.clone();
+
+    tokio::spawn(async move {
+        let mut buf = [0u8; 1500];
+
+        // Exchange 1: Who-Is → I-Am
+        if let Ok((_, from)) = sock.recv_from(&mut buf).await {
+            let reply = encode_i_am(12345, 1476, 3, 999);
+            let _ = sock.send_to(&reply, from).await;
+        }
+
+        // Exchanges 2 & 3: both SubscribeCOV → Simple-ACK
+        for _ in 0..2 {
+            if let Ok((n, from)) = sock.recv_from(&mut buf).await {
+                if n >= 10 && buf[0] == 0x81 && buf[6] == 0x00 && buf[9] == 0x05 {
+                    cc.fetch_add(1, Ordering::SeqCst);
+                    let invoke_id = buf[8];
+                    let ack = [
+                        0x81, 0x0A, 0x00, 0x09, // BVLL unicast, length = 9
+                        0x01, 0x00, // NPDU version=1, control=0
+                        0x20, invoke_id, 0x05, // Simple-ACK, invoke_id, SubscribeCOV
+                    ];
+                    let _ = sock.send_to(&ack, from).await;
+                }
+            }
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // 2. Config: one AI-0 point on device 12345.
+    let config = BacnetConfig {
+        id: "bac-cov-cancel".into(),
+        port: Some(0),
+        broadcast: Some("127.0.0.1".into()),
+        objects: vec![BacnetObjectConfig {
+            point_id: 9101,
+            device_id: 12345,
+            object_type: 0, // AnalogInput
+            instance: 0,
+            unit: None,
+            scale: Some(1.0),
+            offset: Some(0.0),
+        }],
+    };
+    let driver = BacnetDriver::from_config(config)
+        .with_broadcast_port(mock_port)
+        .with_discovery_timeout(Duration::from_millis(300));
+
+    // 3. Register + open_all via DriverHandle.
+    let handle = spawn_driver_actor(16);
+    handle
+        .register(AnyDriver::Async(Box::new(driver)))
+        .await
+        .expect("register should succeed");
+    handle
+        .register_point(9101, "bac-cov-cancel")
+        .await
+        .expect("register_point should succeed");
+
+    let open_results = handle
+        .open_all()
+        .await
+        .expect("open_all channel should work");
+    assert_eq!(open_results.len(), 1);
+    open_results[0].1.as_ref().expect("open() should succeed");
+
+    // 4. Subscribe then unsubscribe.
+    handle
+        .add_watch("ws-test", vec![9101])
+        .await
+        .expect("add_watch should succeed");
+    handle
+        .remove_watch("ws-test", vec![9101])
+        .await
+        .expect("remove_watch should succeed");
+
+    // 5. Assert the mock received TWO service-0x05 requests
+    // (subscribe + cancel).
+    assert_eq!(
+        cov_counter.load(Ordering::SeqCst),
+        2,
+        "should send one SubscribeCOV subscribe + one cancel"
+    );
+
+    handle.close_all().await.expect("close_all should succeed");
+}
+
 // ── Phase B9: ReadPropertyMultiple E2E test ────────────────────────────────
 
 /// Phase B9: sync_cur batches points on the same device into a single

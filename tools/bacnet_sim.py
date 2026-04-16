@@ -181,6 +181,33 @@ def encode_rpm_ack(invoke_id, results):
         apdu += bytes([0x1F])
     return build_bvll(0x0A, apdu)
 
+def parse_subscribe_cov(apdu):
+    """Parse a SubscribeCOV-Request. Returns (invoke_id, process_id, object_type,
+    object_instance, is_cancel) or None.
+    """
+    if len(apdu) < 4 or apdu[3] != 0x05:
+        return None
+    iid = apdu[2]
+    pos = 4
+    # Context 0: subscriberProcessIdentifier (0x09 1-byte or 0x0A 2-byte)
+    tag = apdu[pos]
+    if tag & 0xF8 != 0x08:
+        return None
+    lvt = tag & 0x07
+    pos += 1
+    pid = int.from_bytes(apdu[pos:pos+lvt], "big")
+    pos += lvt
+    # Context 1: monitoredObjectIdentifier (0x1C + 4 bytes)
+    if pos + 5 > len(apdu) or apdu[pos] != 0x1C:
+        return None
+    raw = int.from_bytes(apdu[pos+1:pos+5], "big")
+    ot = (raw >> 22) & 0x3FF
+    oi = raw & 0x3F_FFFF
+    pos += 5
+    # Optional context 2 (issueConfirmedNotifications) and context 3 (lifetime)
+    is_cancel = (pos >= len(apdu))
+    return (iid, pid, ot, oi, is_cancel)
+
 def parse_rpm_request(apdu):
     """Extract the list of (obj_type, instance, property_id) tuples from an RPM request.
     Returns [(ot, inst, pid), ...] or None if parsing fails.
@@ -271,6 +298,19 @@ def main():
                     reply = encode_rpm_ack(iid, results)
                     s.sendto(reply, addr)
                     print(f"  TX RPM-ACK -> {addr}: {reply.hex()[:80]}...", flush=True)
+                continue
+            if service == 0x05:  # SubscribeCOV
+                parsed = parse_subscribe_cov(apdu)
+                if parsed is None:
+                    print("  (SubscribeCOV parse failed)", flush=True)
+                    continue
+                s_iid, s_pid, s_ot, s_oi, is_cancel = parsed
+                action = "CANCEL" if is_cancel else "SUBSCRIBE"
+                print(f"  SubscribeCOV {action} invoke={s_iid} proc={s_pid} obj={s_ot}:{s_oi}", flush=True)
+                # Simple-ACK: [0x81, 0x0A, 0x00, 0x09, 0x01, 0x00, 0x20, iid, 0x05]
+                ack = bytes([0x81, 0x0A, 0x00, 0x09, 0x01, 0x00, 0x20, s_iid, 0x05])
+                s.sendto(ack, addr)
+                print(f"  TX Simple-ACK -> {addr}: {ack.hex()}", flush=True)
                 continue
             if service == 0x0F:  # WriteProperty
                 # Simple-ACK: [0x81, 0x0A, 0x00, 0x09, 0x01, 0x00, 0x20, iid, 0x0F]
