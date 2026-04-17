@@ -355,7 +355,38 @@ impl BacnetDriver {
     pub fn objects(&self) -> &HashMap<u32, object::BacnetObject> {
         &self.objects
     }
+}
 
+// ── DriverLoader impl (Phase 12.0A) ────────────────────────
+
+/// [`DriverLoader`] specialization for BACnet.
+///
+/// Used by `rest/mod.rs` to wire `SANDSTAR_BACNET_CONFIGS` into the
+/// generic loader. See [`crate::drivers::loader::load_drivers`] for the
+/// shared flow.
+pub struct BacnetLoader;
+
+impl crate::drivers::loader::DriverLoader for BacnetLoader {
+    const ENV_VAR: &'static str = "SANDSTAR_BACNET_CONFIGS";
+    const DRIVER_TYPE: &'static str = "bacnet";
+    const LABEL: &'static str = "BACnet";
+
+    type Config = BacnetConfig;
+
+    fn config_id(config: &Self::Config) -> String {
+        config.id.clone()
+    }
+
+    fn config_point_ids(config: &Self::Config) -> Vec<u32> {
+        config.objects.iter().map(|o| o.point_id).collect()
+    }
+
+    fn build_driver(config: Self::Config) -> Box<dyn super::async_driver::AsyncDriver> {
+        Box::new(BacnetDriver::from_config(config))
+    }
+}
+
+impl BacnetDriver {
     /// Return a reference to the device registry (used in tests and Phase B2).
     pub fn device_registry(&self) -> &discovery::DeviceRegistry {
         &self.device_registry

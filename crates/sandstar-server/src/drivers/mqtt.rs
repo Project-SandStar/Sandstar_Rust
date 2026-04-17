@@ -284,6 +284,34 @@ impl MqttDriver {
     }
 }
 
+// ── DriverLoader impl (Phase 12.0A) ────────────────────────
+
+/// [`DriverLoader`] specialization for MQTT.
+///
+/// Used by `rest/mod.rs` to wire `SANDSTAR_MQTT_CONFIGS` into the generic
+/// loader. See [`crate::drivers::loader::load_drivers`] for the shared flow.
+pub struct MqttLoader;
+
+impl crate::drivers::loader::DriverLoader for MqttLoader {
+    const ENV_VAR: &'static str = "SANDSTAR_MQTT_CONFIGS";
+    const DRIVER_TYPE: &'static str = "mqtt";
+    const LABEL: &'static str = "MQTT";
+
+    type Config = MqttConfig;
+
+    fn config_id(config: &Self::Config) -> String {
+        config.id.clone()
+    }
+
+    fn config_point_ids(config: &Self::Config) -> Vec<u32> {
+        config.objects.iter().map(|o| o.point_id).collect()
+    }
+
+    fn build_driver(config: Self::Config) -> Box<dyn super::async_driver::AsyncDriver> {
+        Box::new(MqttDriver::from_config(config))
+    }
+}
+
 #[async_trait]
 impl AsyncDriver for MqttDriver {
     fn driver_type(&self) -> &'static str {

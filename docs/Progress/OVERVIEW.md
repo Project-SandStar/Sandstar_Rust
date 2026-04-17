@@ -1,7 +1,7 @@
 # Sandstar Rust — Progress Overview
 
 **Last updated:** 2026-04-17
-**Current version:** v2.8.0 (BeagleBone 1-11); v2.0.0 still on Device 1-3 (Todd Air Flow)
+**Current version:** v2.8.1 (BeagleBone 1-11); v2.0.0 still on Device 1-3 (Todd Air Flow)
 **Workspace:** 7 crates, ~40,000 LOC, **2,643 tests passing, 0 clippy warnings, 0 failures**
 **GitHub:** https://github.com/Project-SandStar/Sandstar_Rust
 
@@ -19,6 +19,7 @@ This is the single-read status tracker for the Sandstar Rust project. It consoli
   - [§2.4 BACnet/IP driver (Project B)](#24-bacnetip-driver-project-b)
   - [§2.5 MQTT driver (Project C)](#25-mqtt-driver-project-c)
   - [§2.6 Poll integration + shared tick task](#26-poll-integration--shared-tick-task)
+  - [§2.7 Driver Framework v2 — Phase 12.0A](#27-driver-framework-v2--phase-120a)
 - [§3 REST API surface](#3-rest-api-surface)
 - [§4 Deployment state](#4-deployment-state)
 - [§5 Quality gates](#5-quality-gates)
@@ -42,7 +43,7 @@ This is the single-read status tracker for the Sandstar Rust project. It consoli
 | REST API + WebSocket | ✅ Complete — 14 endpoints, auth, TLS, rate limit | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 1 |
 | Security hardening | ✅ Complete | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 5.7, §Phase 6.5 |
 | Visual DDC editor (web UI) | 🟡 14.0A in progress, 14.0B–F planned | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 14.0 |
-| Driver Framework v2 (Phase 12) | ⬜ Not started — "ripe" now that 3 drivers shipped | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 12 |
+| Driver Framework v2 (Phase 12) | 🟡 12.0A complete; 12.0B–D deferred | [IMPLEMENTATION_PLAN_DRIVER_FRAMEWORK.md](IMPLEMENTATION_PLAN_DRIVER_FRAMEWORK.md) |
 | Clustering — roxWarp (Phase 9) | ⬜ Not started — low priority | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 9 |
 | Dynamic Slots (Phase 13) | ⬜ Not started — low priority | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 13 |
 | Hardware sensor validation on 1-11 | 🟡 Deferred — no sensors physically attached | — |
@@ -157,6 +158,26 @@ Values now flow end-to-end: `peer → driver.sync_cur → engine channel → /ap
 Also in this work:
 - Version bump choreography: v2.6.0 added `register_point` + `add_poll_bucket`; v2.6.1 added the tick task; v2.7.0 wired results into engine.write_channel. Deployed incrementally with verification at each step.
 - Discovery for both drivers documented its value: the live broker validation for MQTT used this path end-to-end.
+
+### §2.7 Driver Framework v2 — Phase 12.0A
+
+**Source of truth:** [IMPLEMENTATION_PLAN_DRIVER_FRAMEWORK.md](IMPLEMENTATION_PLAN_DRIVER_FRAMEWORK.md)
+**Research:** [research/18_*.md](../research/18_SEDONA_DRIVER_FRAMEWORK_V2.md)
+
+Phase 12.0A completed 2026-04-17 (v2.8.1). Scoped refactor that collapses the ~200-line-each `load_bacnet_drivers` + `load_mqtt_drivers` functions in `rest/mod.rs` into a single generic `load_drivers<L: DriverLoader>(handle, engine_handle)` helper.
+
+| Piece | Location | Description |
+|---|---|---|
+| `DriverLoader` trait | `crates/sandstar-server/src/drivers/loader.rs` | 5 associated items (env var, driver type, label, config type, factory) capture everything that differs between drivers |
+| `load_drivers<L>` | same file | Parse env var → register drivers → register points → add poll bucket → `open_all` → spawn tick task. Single source of truth for the whole glue. |
+| `BacnetLoader` | `drivers/bacnet/mod.rs` | Impl for BACnet: `ENV_VAR="SANDSTAR_BACNET_CONFIGS"`, factory `BacnetDriver::from_config`, who prefix `"bacnet"` |
+| `MqttLoader` | `drivers/mqtt.rs` | Impl for MQTT: `ENV_VAR="SANDSTAR_MQTT_CONFIGS"`, factory `MqttDriver::from_config`, who prefix `"mqtt"` |
+
+**Net LOC impact:** `rest/mod.rs` dropped from ~1,400 to ~998 lines (-417 lines of duplication removed); `loader.rs` added 289 lines (generic + reusable); two loader impls added ~30 lines each. Net: -~130 LOC, but more importantly adding a 4th driver is now ~30 lines of glue instead of ~200.
+
+Behavior preserved identically — 2,643 tests still pass, deployed v2.8.1 to 1-11 with BACnet driver still running cleanly.
+
+Phases 12.0B (shared helpers module), 12.0C (richer trait abstractions), 12.0D (LocalIoDriver unification) are **deferred** — trigger is a concrete need (a 4th driver, or specific code smell).
 
 ---
 
@@ -281,6 +302,7 @@ One-week sprint 2026-04-10 → 2026-04-17:
 | 2026-04-16 | 2.6.1 | Tick task — `sync_cur` actually fires |
 | 2026-04-16 | 2.7.0 | Stage 2 — sync_cur results → engine channels visible in `/read` |
 | 2026-04-17 | 2.8.0 | MQTT M1-M4 complete + live broker validated |
+| 2026-04-17 | 2.8.1 | Phase 12.0A — generic `DriverLoader` trait + `load_drivers<L>`; rest/mod.rs shrunk by 417 lines |
 
 13 minor versions in 8 days. Current state: both drivers ready on 1-11, both quiescent until a real broker / device appears.
 
@@ -293,6 +315,7 @@ One-week sprint 2026-04-10 → 2026-04-17:
 | [ROADMAP_v2.md](ROADMAP_v2.md) | Master phase ledger, 860 lines — everything from Phase 0 to Phase 14. Covers SOX details, security audit, feature gaps, research summaries. |
 | [IMPLEMENTATION_PLAN_FILTER_AND_BACNET.md](IMPLEMENTATION_PLAN_FILTER_AND_BACNET.md) | Project A + B per-phase detail, 838 lines. Design rationale, byte layouts, per-phase scope + completion notes. |
 | [IMPLEMENTATION_PLAN_MQTT.md](IMPLEMENTATION_PLAN_MQTT.md) | Project C plan — scope, schema, risk table, completion criteria, progress log. |
+| [IMPLEMENTATION_PLAN_DRIVER_FRAMEWORK.md](IMPLEMENTATION_PLAN_DRIVER_FRAMEWORK.md) | Phase 12 plan. 12.0A (loader refactor) complete; 12.0B-D deferred. |
 | [PURE_RUST_PLAN.md](PURE_RUST_PLAN.md) | Historical: plan to rewrite the VM in pure Rust (complete). |
 | [PURE_RUST_VM_COMPLETION_PLAN.md](PURE_RUST_VM_COMPLETION_PLAN.md) | Historical: 5-phase plan to make pure-Rust the default (complete). |
 | [BACNET_SETUP.md](BACNET_SETUP.md) | **Operator guide** for BACnet. Enable, configure, firewall, BBMD, verify, troubleshoot. |

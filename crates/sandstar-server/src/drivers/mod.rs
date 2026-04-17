@@ -23,6 +23,7 @@
 pub mod actor;
 pub mod async_driver;
 pub mod bacnet;
+pub mod loader;
 pub mod local_io;
 pub mod modbus;
 pub mod mqtt;

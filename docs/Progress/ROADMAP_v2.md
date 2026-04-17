@@ -1,14 +1,14 @@
 # Sandstar Rust Migration -- Roadmap v2
 
 **Date:** 2026-04-17 (updated)
-**Status:** PRODUCTION DEPLOYED — Rust v2.8.0 on BeagleBone 1-11 (v2.0.0 still on 1-3 Todd Air Flow). **Pure Rust VM complete** (240 opcodes, 131 native methods, zero C). **Three drivers live-validated end-to-end against real peer speakers**: Modbus TCP (pre-existing), BACnet/IP (v2.1.0–v2.7.0, 11 phases), MQTT (v2.8.0, 4 phases). **Visual DDC programming working** — 35 executable component types with dataflow engine, values propagate through links in real-time. **20/20 SOX commands complete**. **Full DDC loop verified with real hardware** — real sensor (121F) through Tstat to heating output. **Phase 14.0A IN PROGRESS** — Web-based Visual DDC Editor REST endpoints (paused while driver work shipped).
-**Version:** 2.8.0 (7 crates, 2,643 tests, ~40,000+ lines of pure Rust)
+**Status:** PRODUCTION DEPLOYED — Rust v2.8.1 on BeagleBone 1-11 (v2.0.0 still on 1-3 Todd Air Flow). **Pure Rust VM complete** (240 opcodes, 131 native methods, zero C). **Three drivers live-validated end-to-end against real peer speakers**: Modbus TCP (pre-existing), BACnet/IP (v2.1.0–v2.7.0, 11 phases), MQTT (v2.8.0, 4 phases). **Phase 12.0A shipped** — generic `DriverLoader` trait collapses ~400 lines of driver-loader duplication (v2.8.1). **Visual DDC programming working** — 35 executable component types with dataflow engine, values propagate through links in real-time. **20/20 SOX commands complete**. **Full DDC loop verified with real hardware** — real sensor (121F) through Tstat to heating output. **Phase 14.0A IN PROGRESS** — Web-based Visual DDC Editor REST endpoints (paused while driver work shipped).
+**Version:** 2.8.1 (7 crates, 2,643 tests, ~40,000+ lines of pure Rust)
 **Feature Parity:** ~99% (80/80 features vs C system + extras)
 **Research Documents:** 20 analysis docs (00-19) — deep gap analysis completed 2026-03-20
 **Research Coverage:** ~82% weighted (100% on core docs 00-11, 90-95% on docs 12-14, deferred on future docs 16-19)
 **GitHub:** https://github.com/Project-SandStar/Sandstar_Rust
 **Codebase Audit:** 2026-03-20 — 3-agent deep research gap analysis (20 docs vs codebase)
-**Progress Report:** See [PROGRESS_REPORT.md](PROGRESS_REPORT.md) for a one-page snapshot of current status.
+**Progress Report:** See [OVERVIEW.md](OVERVIEW.md) for a one-page snapshot of current status.
 
 ---
 
