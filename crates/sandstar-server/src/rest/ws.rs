@@ -3,7 +3,7 @@
 //! Clients connect to `GET /api/ws`, optionally authenticate, subscribe
 //! to channels, and receive server-pushed value updates.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -12,11 +12,14 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast;
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
 use super::EngineHandle;
 use crate::auth::AuthState;
+use crate::drivers::actor::DriverHandle;
+use crate::drivers::CovEvent;
 
 // ── Constants ──────────────────────────────────────
 
@@ -34,6 +37,11 @@ pub struct WsState {
     pub auth_token: Option<String>,
     /// SCRAM auth state (None = legacy-only mode for backward compat).
     pub auth_state: Option<AuthState>,
+    /// Optional driver actor handle. When present, each WS session
+    /// subscribes to the driver `CovEvent` broadcast and expedites watch
+    /// polls on change-of-value for sub-second push latency. `None`
+    /// preserves legacy poll-only behavior (used by some older tests).
+    pub driver_handle: Option<DriverHandle>,
 }
 
 #[derive(Deserialize)]
@@ -168,6 +176,17 @@ enum ServerMsg<'a> {
 struct WatchMeta {
     poll_interval: Duration,
     last_poll: Instant,
+    /// Set of point/channel ids the client subscribed to on this watch.
+    /// Used by the CovEvent bridge (Phase 12.0D.WS) to decide whether a
+    /// given driver-side value change should expedite the next poll for
+    /// this watch.
+    subscribed_ids: HashSet<u32>,
+    /// Set to `true` when a relevant `CovEvent` arrives between pushes.
+    /// The next push-timer tick will poll the engine even if the interval
+    /// hasn't elapsed, then reset the flag. Provides sub-second push
+    /// latency bounded by the 200 ms push-timer resolution, while the
+    /// engine's channel write (level 16) has already settled.
+    cov_pending: bool,
 }
 
 // ── Upgrade handler ────────────────────────────────
@@ -202,6 +221,7 @@ pub async fn ws_upgrade(
             state.engine,
             state.auth_token,
             state.auth_state,
+            state.driver_handle,
             pre_authed,
         )
     })
@@ -214,6 +234,7 @@ async fn ws_connection_task(
     engine: EngineHandle,
     auth_token: Option<String>,
     auth_state: Option<AuthState>,
+    driver_handle: Option<DriverHandle>,
     pre_authed: bool,
 ) {
     let metrics = crate::metrics::metrics();
@@ -232,6 +253,13 @@ async fn ws_connection_task(
 
     let mut push_timer = tokio::time::interval(Duration::from_millis(MIN_POLL_INTERVAL_MS));
     push_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    // Phase 12.0D.WS: subscribe to the driver actor's CovEvent broadcast
+    // if we have a handle. On event, mark matching watches as `cov_pending`
+    // so the next push-timer tick polls immediately regardless of interval.
+    // Rate limiting is therefore the push timer itself (200 ms).
+    let mut cov_rx: Option<broadcast::Receiver<CovEvent>> =
+        driver_handle.as_ref().map(|h| h.subscribe_cov());
 
     loop {
         tokio::select! {
@@ -260,6 +288,35 @@ async fn ws_connection_task(
                     _ => { last_client_msg = Instant::now(); }
                 }
             }
+            // Phase 12.0D.WS: listen for CovEvents (no-op if no driver
+            // handle — inner future stays pending forever and never fires).
+            cov = async {
+                match cov_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match cov {
+                    Ok(evt) => {
+                        apply_cov_event(&mut watches, evt.point_id);
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        // Subscriber fell behind; nothing to forward for
+                        // the dropped events. Clients will still receive
+                        // the latest state on the next poll tick.
+                        debug!(
+                            dropped = n,
+                            "WS CovEvent subscriber lagged; next poll will resync"
+                        );
+                        mark_all_cov_pending(&mut watches);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        // Driver actor shut down. Drop the subscription;
+                        // fall back to poll-only until reconnect.
+                        cov_rx = None;
+                    }
+                }
+            }
             _ = push_timer.tick() => {
                 // Check client timeout
                 if last_client_msg.elapsed() > Duration::from_secs(CLIENT_TIMEOUT_SECS) {
@@ -267,15 +324,19 @@ async fn ws_connection_task(
                     break;
                 }
 
-                // Poll each watch whose interval has elapsed
+                // Poll each watch whose interval has elapsed, OR any watch
+                // with a pending CovEvent (Phase 12.0D.WS).
                 if !authenticated { continue; }
                 let now = Instant::now();
                 let ts = timestamp_now();
                 let mut disconnected = false;
                 for (watch_id, meta) in watches.iter_mut() {
-                    if now.duration_since(meta.last_poll) < meta.poll_interval {
+                    let interval_elapsed =
+                        now.duration_since(meta.last_poll) >= meta.poll_interval;
+                    if !interval_elapsed && !meta.cov_pending {
                         continue;
                     }
+                    meta.cov_pending = false;
                     meta.last_poll = now;
                     match engine.watch_poll(watch_id.clone(), false).await {
                         Ok(resp) if !resp.rows.is_empty() => {
@@ -528,6 +589,7 @@ async fn handle_client_msg(
                 .unwrap_or(DEFAULT_POLL_INTERVAL_MS)
                 .clamp(MIN_POLL_INTERVAL_MS, MAX_POLL_INTERVAL_MS);
 
+            let subscribed_ids_set: HashSet<u32> = ids.iter().copied().collect();
             match engine.watch_sub(watch_id, dis, ids).await {
                 Ok(resp) => {
                     let wid = resp.watch_id.clone();
@@ -536,6 +598,8 @@ async fn handle_client_msg(
                         WatchMeta {
                             poll_interval: Duration::from_millis(interval_ms),
                             last_poll: Instant::now(),
+                            subscribed_ids: subscribed_ids_set,
+                            cov_pending: false,
                         },
                     );
                     serde_json::to_string(&ServerMsg::Subscribed {
@@ -569,10 +633,18 @@ async fn handle_client_msg(
             watch_id,
             ids,
             close,
-        } => match engine.watch_unsub(watch_id.clone(), close, ids).await {
+        } => {
+            // Capture ids before passing them to the engine (moved there).
+            let unsub_ids: Vec<u32> = ids.clone();
+            match engine.watch_unsub(watch_id.clone(), close, ids).await {
             Ok(()) => {
                 if close {
                     watches.remove(&watch_id);
+                } else if let Some(meta) = watches.get_mut(&watch_id) {
+                    // Remove partially-unsubscribed ids from the COV filter.
+                    for pid in &unsub_ids {
+                        meta.subscribed_ids.remove(pid);
+                    }
                 }
                 serde_json::to_string(&ServerMsg::Unsubscribed {
                     id,
@@ -587,7 +659,8 @@ async fn handle_client_msg(
                 message: &e,
             })
             .ok(),
-        },
+            }
+        }
         ClientMsg::Refresh { id, watch_id } => {
             match engine.watch_poll(watch_id.clone(), true).await {
                 Ok(resp) => {
@@ -643,9 +716,77 @@ fn epoch_to_parts(secs: u64) -> (u64, u64, u64, u64, u64, u64) {
     (y, m, d, h, min, s)
 }
 
+// ── COV bridge helpers (Phase 12.0D.WS) ────────────────────
+
+/// Mark `cov_pending = true` on every watch whose `subscribed_ids`
+/// contains `point_id`. Returns the number of watches marked.
+fn apply_cov_event(watches: &mut HashMap<String, WatchMeta>, point_id: u32) -> usize {
+    let mut marked = 0;
+    for meta in watches.values_mut() {
+        if meta.subscribed_ids.contains(&point_id) {
+            meta.cov_pending = true;
+            marked += 1;
+        }
+    }
+    marked
+}
+
+/// Mark `cov_pending = true` on every watch. Used when the CovEvent
+/// broadcast subscriber falls behind — we can't know which specific
+/// points we missed, so we force a full resync on next tick.
+fn mark_all_cov_pending(watches: &mut HashMap<String, WatchMeta>) {
+    for meta in watches.values_mut() {
+        meta.cov_pending = true;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fake_watch(ids: &[u32]) -> WatchMeta {
+        WatchMeta {
+            poll_interval: Duration::from_millis(1000),
+            last_poll: Instant::now(),
+            subscribed_ids: ids.iter().copied().collect(),
+            cov_pending: false,
+        }
+    }
+
+    #[test]
+    fn apply_cov_event_marks_matching_watches() {
+        let mut watches: HashMap<String, WatchMeta> = HashMap::new();
+        watches.insert("w1".into(), fake_watch(&[100, 200]));
+        watches.insert("w2".into(), fake_watch(&[200, 300]));
+        watches.insert("w3".into(), fake_watch(&[400]));
+
+        let marked = apply_cov_event(&mut watches, 200);
+        assert_eq!(marked, 2);
+        assert!(watches["w1"].cov_pending);
+        assert!(watches["w2"].cov_pending);
+        assert!(!watches["w3"].cov_pending);
+    }
+
+    #[test]
+    fn apply_cov_event_no_match_marks_nothing() {
+        let mut watches: HashMap<String, WatchMeta> = HashMap::new();
+        watches.insert("w1".into(), fake_watch(&[100]));
+
+        let marked = apply_cov_event(&mut watches, 999);
+        assert_eq!(marked, 0);
+        assert!(!watches["w1"].cov_pending);
+    }
+
+    #[test]
+    fn mark_all_cov_pending_flips_every_watch() {
+        let mut watches: HashMap<String, WatchMeta> = HashMap::new();
+        watches.insert("w1".into(), fake_watch(&[1]));
+        watches.insert("w2".into(), fake_watch(&[2]));
+
+        mark_all_cov_pending(&mut watches);
+        assert!(watches["w1"].cov_pending);
+        assert!(watches["w2"].cov_pending);
+    }
 
     #[test]
     fn epoch_known_date() {

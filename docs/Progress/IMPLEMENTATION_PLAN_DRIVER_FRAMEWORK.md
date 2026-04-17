@@ -135,7 +135,7 @@ Generic `DriverLoader` trait + `load_drivers<L>` helper collapses ~417 lines of 
 ---
 
 ### 12.0D.WS — Bridge CovEvents into `/api/ws`
-**Status:** ⬜ DEFERRED (trigger-based)
+**Status:** ✅ COMPLETE (2026-04-17, v2.8.7)
 
 **Rationale:** see 12.0D summary above. The broadcast channel is complete; the WS bridge is a distinct piece of work with its own regression surface. Triggers that would prompt picking this up:
 - a concrete UI requirement for sub-second real-time updates (current WS poll cadence is 1s, clamped [200ms, 60s]);
@@ -218,7 +218,10 @@ Total: ~4 sessions for 12.0B + 12.0C + 12.0D + 12.0G.
 | 12.0C | (Phase 12.0C commit) | 2026-04-17 | 2.8.3 |
 | 12.0D | (Phase 12.0D commit) | 2026-04-17 | 2.8.4 |
 | 12.0G | (Phase 12.0G commit) | 2026-04-17 | 2.8.5 |
-| 12.0E | (pending commit)     | 2026-04-17 | 2.8.6 |
+| 12.0E | (Phase 12.0E commit) | 2026-04-17 | 2.8.6 |
+| 12.0D.WS | (pending commit) | 2026-04-17 | 2.8.7 |
+
+**12.0D.WS summary (2026-04-17, v2.8.7):** Wired the Phase-12.0D `CovEvent` broadcast into the Haystack WebSocket. Threaded `driver_handle: Option<DriverHandle>` into `WsState`; each WS session `subscribe_cov()`s once at connection time. `WatchMeta` gained `subscribed_ids: HashSet<u32>` (populated on `ClientMsg::Subscribe`, pruned on partial `Unsubscribe`) and a `cov_pending: bool` flag. A new `tokio::select!` arm consumes CovEvents: matching watches set `cov_pending`, and the existing push-timer arm polls immediately regardless of the client's `pollInterval` when the flag is set. This gives bounded push latency of ~200 ms (push-timer resolution) instead of waiting the full `pollInterval` (default 1000 ms, up to 60 s). `RecvError::Lagged` marks all watches pending for a full resync on next tick; `RecvError::Closed` drops the subscription and falls back to poll-only. 3 new unit tests cover `apply_cov_event` matching, non-matching, and `mark_all_cov_pending`. 2674 tests pass, lib clippy clean. End-to-end latency test deferred — requires full TestServer + driver actor integration and is more valuable once there's a concrete consumer; the unit tests cover the matching/flagging logic and the select arm compile-checks the rest.
 
 **12.0E summary (2026-04-17, v2.8.6):** Added `DriverMessage { id, payload }` type and an `on_receive(DriverMessage) -> Result<DriverMessage, DriverError>` method on both `Driver` and `AsyncDriver` traits (default impl returns `NotSupported("on_receive")`). `AnyDriver::on_receive` dispatches to sync/async. New `DriverCmd::SendMessage` variant and `DriverHandle::send_message(id, msg)`. REST endpoint `POST /api/drivers/{id}/message` behind auth — unknown driver → 404, default-impl response → 501, dispatch error → 500. 3 new unit tests cover default NotSupported, custom-impl echo, unknown-driver 404. No production drivers implement custom messages yet — they'll opt in per-id when a concrete need arises. 2671 tests pass, lib clippy clean.
 

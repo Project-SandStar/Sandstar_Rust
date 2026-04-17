@@ -715,15 +715,6 @@ pub fn router_with_auth(
         .route("/api/auth", post(auth_endpoint))
         .with_state(auth_state.clone());
 
-    // WebSocket route (handles its own auth via query param, message, or SCRAM)
-    let ws_route = Router::new()
-        .route("/api/ws", get(ws::ws_upgrade))
-        .with_state(ws::WsState {
-            engine: handle.clone(),
-            auth_token,
-            auth_state: Some(auth_state.clone()),
-        });
-
     // Protected mutating routes (auth required if token/SCRAM is configured)
     let protected = Router::new()
         .route("/api/pointWrite", post(handlers::point_write))
@@ -762,6 +753,19 @@ pub fn router_with_auth(
     // BACnet drivers (and future async drivers) are loaded from environment config
     // asynchronously in the background so they don't block router construction.
     let driver_handle = crate::drivers::actor::spawn_driver_actor(64);
+
+    // WebSocket route (handles its own auth via query param, message, or SCRAM).
+    // Threaded with the driver_handle so each WS session can subscribe to
+    // the CovEvent broadcast for sub-second value push (Phase 12.0D.WS).
+    let ws_route = Router::new()
+        .route("/api/ws", get(ws::ws_upgrade))
+        .with_state(ws::WsState {
+            engine: handle.clone(),
+            auth_token,
+            auth_state: Some(auth_state.clone()),
+            driver_handle: Some(driver_handle.clone()),
+        });
+
     {
         let driver_handle_clone = driver_handle.clone();
         let engine_handle_clone = handle.clone();
