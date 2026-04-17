@@ -1,13 +1,14 @@
 # Sandstar Rust Migration -- Roadmap v2
 
-**Date:** 2026-03-31 (updated)
-**Status:** PRODUCTION DEPLOYED — Rust v2.0.0 on BeagleBone. **Pure Rust VM complete** — Sedona VM rewritten in pure Rust (240 opcodes, 131 native methods, no C code, no FFI, no cc crate). **Visual DDC programming working** — 35 executable component types with dataflow engine, components wired in Sedona Application Editor with wire lines on canvas, values propagate through links in real-time. **20/20 SOX commands complete** — all SOX ops implemented including fileWrite/fileRename. **Component persistence** via sox_components.json with auto-save every 5s. **Channel-to-logic bridge** using "chXXXX" naming convention for sensor proxy. **Full DDC loop verified with real hardware** — real sensor (121F) through Tstat to heating output. **Cycle detection** in link graph (DFS). **Faster COV** — 200 burst on subscribe, 50/tick normal. **185 component types** loaded from manifest XML parser across all 15 kits. **Phase 14.0A IN PROGRESS** — Web-based Visual DDC Editor (REST API endpoints for component tree CRUD).
-**Version:** 2.0.0 (7 crates, 1,637 tests, ~40,000+ lines of pure Rust)
+**Date:** 2026-04-17 (updated)
+**Status:** PRODUCTION DEPLOYED — Rust v2.8.0 on BeagleBone 1-11 (v2.0.0 still on 1-3 Todd Air Flow). **Pure Rust VM complete** (240 opcodes, 131 native methods, zero C). **Three drivers live-validated end-to-end against real peer speakers**: Modbus TCP (pre-existing), BACnet/IP (v2.1.0–v2.7.0, 11 phases), MQTT (v2.8.0, 4 phases). **Visual DDC programming working** — 35 executable component types with dataflow engine, values propagate through links in real-time. **20/20 SOX commands complete**. **Full DDC loop verified with real hardware** — real sensor (121F) through Tstat to heating output. **Phase 14.0A IN PROGRESS** — Web-based Visual DDC Editor REST endpoints (paused while driver work shipped).
+**Version:** 2.8.0 (7 crates, 2,643 tests, ~40,000+ lines of pure Rust)
 **Feature Parity:** ~99% (80/80 features vs C system + extras)
 **Research Documents:** 20 analysis docs (00-19) — deep gap analysis completed 2026-03-20
 **Research Coverage:** ~82% weighted (100% on core docs 00-11, 90-95% on docs 12-14, deferred on future docs 16-19)
-**GitHub:** https://github.com/TurkerMertkan/Sandstar_Rust (private)
+**GitHub:** https://github.com/Project-SandStar/Sandstar_Rust
 **Codebase Audit:** 2026-03-20 — 3-agent deep research gap analysis (20 docs vs codebase)
+**Progress Report:** See [PROGRESS_REPORT.md](PROGRESS_REPORT.md) for a one-page snapshot of current status.
 
 ---
 
@@ -36,6 +37,10 @@
 | Phase 5.7 | Security hardening: --http-bind default 127.0.0.1, bearer auth middleware, filter depth limit (32), watch caps (64), socket perms 0660 | 3 | 2026-03-04 |
 
 | Phase 8.0A-SOX | SOX/DASP protocol: Sedona Application Editor connectivity | -- | 2026-03-22 |
+| Project A (Filter) | Haystack filter: `not` on compound expressions, `->` path dereference, Pather callback | -- | 2026-04-13 |
+| Project B (BACnet/IP) | Read+write driver, 11 phases (B1-B10 + B8.1 + B8.2), deployed to 1-11, live-validated vs `tools/bacnet_sim.py` | -- | 2026-04-10 → 2026-04-16 |
+| Project C (MQTT) | rumqttc client, 4 phases (M1-M4), deployed to 1-11, live-validated vs mosquitto 2.1.2 | -- | 2026-04-17 |
+| Post-v2.0 poll integration | `load_*_drivers` in rest/mod.rs: register_point + add_poll_bucket + tick task + engine.write_channel at priority 16 (shared by both BACnet and MQTT) | -- | 2026-04-16 |
 
 **Phase 8.0A-SOX Details (2026-03-22):**
 - Full DASP transport (UDP reliable messaging with ACK piggybacking, session management)
@@ -72,7 +77,14 @@
 - **Faster COV (2026-03-30):** 200 burst events on subscribe, 50/tick normal operation
 - **FileWrite + FileRename (2026-03-30):** Both implemented, completing Phase 8.0B
 
-**Summary:** All core phases (0 through 10.0E + SOX + Dataflow + DDC loop) are complete. 1,637 tests passing, 0 failures.
+**Summary:** All core phases (0 through 10.0E + SOX + Dataflow + DDC loop) are complete. Post-v2.0 work added three network drivers (Filter, BACnet, MQTT) plus poll integration. **2,643 tests passing, 0 failures as of 2026-04-17.**
+
+**Post-v2.0.0 sprint (2026-04-10 → 2026-04-17):** See [IMPLEMENTATION_PLAN_FILTER_AND_BACNET.md](IMPLEMENTATION_PLAN_FILTER_AND_BACNET.md) and [IMPLEMENTATION_PLAN_MQTT.md](IMPLEMENTATION_PLAN_MQTT.md) for per-phase detail. Highlights:
+- Filter: `not` on compound expressions, `->` path dereference, `Pather` callback, full test suite
+- BACnet/IP: full read+write client — discovery, ReadProperty (+ RPM batching), WriteProperty (priority array), SubscribeCOV (+ renewal + notification cache), BBMD/foreign-device registration. Validated against `tools/bacnet_sim.py`.
+- MQTT: rumqttc-based client — connect/subscribe/publish, JSON pointer value extraction, value cache, QoS 0/1. Validated against mosquitto.
+- Poll integration (v2.6.0–v2.7.0): tick task calls `sync_all()` every 5s, results flow into engine channels via `write_channel` at priority 16. Both drivers share this tick loop in `rest/mod.rs`.
+- 13 minor versions shipped (v2.0.0 → v2.8.0) in 8 days.
 
 ### Partially Complete
 

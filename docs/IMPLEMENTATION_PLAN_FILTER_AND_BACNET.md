@@ -1,8 +1,22 @@
 # Implementation Plan: Haystack Filter Improvements + BACnet/IP Driver
 
-**Date:** 2026-04-13
-**Scope:** Two projects — a small filter improvement (~1 day) followed by a multi-session BACnet/IP read-only driver (~4-6 weeks)
-**Target:** Sandstar Rust v2.0.0 running on BeagleBone at 192.168.1.11
+**Date:** 2026-04-13 (created), 2026-04-16 (final completion)
+**Scope:** Two projects — a small filter improvement (~1 day) followed by a multi-session BACnet/IP driver
+**Target:** Sandstar Rust v2.0.0 → v2.7.0 running on BeagleBone 1-11 at 192.168.1.11
+**Status:** ✅ **ALL PHASES COMPLETE** — Project A (Filter) 2026-04-13, Project B (BACnet) 2026-04-10 → 2026-04-16. Live-validated end-to-end against `tools/bacnet_sim.py`. Driver is no longer "read-only" — the original plan was read-only, but B7 (WriteProperty) was added mid-sprint and is also shipped. Full details per phase in the sections below.
+
+**Shipped versions (BACnet-related):**
+- v2.1.0 — B1 (frame codec) deployed
+- v2.1.1 — bugfix (open_all after register)
+- v2.1.2 — discovery debug logging (surfaced the firewalld issue on 1-11)
+- v2.2.0 — B7 WriteProperty
+- v2.3.0 — B9 ReadPropertyMultiple
+- v2.4.0 — B8 SubscribeCOV (wire)
+- v2.5.0 — B8.1 COV reception + B10 BBMD
+- v2.5.1 — B8.2 COV renewal (240s timer on sync_cur)
+- v2.6.0 — register_point + add_poll_bucket wiring
+- v2.6.1 — tick task making sync_cur actually fire
+- v2.7.0 — Stage 2: sync_cur results → engine.write_channel → /read visible
 
 ---
 

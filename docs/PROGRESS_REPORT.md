@@ -1,6 +1,6 @@
 # Sandstar Rust — Progress Report
 
-**Report date:** 2026-04-17
+**Report date:** 2026-04-17 (last refresh: synced ROADMAP_v2.md + IMPLEMENTATION_PLAN_FILTER_AND_BACNET.md headers)
 **Current version:** v2.8.0 (on BeagleBone 1-11)
 **Production versions:** v2.0.0 on Device 1-3 (Todd Air Flow), v2.8.0 on Device 1-11
 **Workspace:** 7 crates, ~40,000 LOC, **2,643 tests passing, 0 clippy warnings**
