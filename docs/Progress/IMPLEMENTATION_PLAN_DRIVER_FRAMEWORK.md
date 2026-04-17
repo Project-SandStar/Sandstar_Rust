@@ -154,7 +154,7 @@ Tests: mock driver emits a value change between poll ticks; assert client sees i
 ---
 
 ### 12.0E — Custom driver messages (`on_receive`)
-**Status:** ⬜ DEFERRED
+**Status:** ✅ INFRASTRUCTURE COMPLETE (2026-04-17, v2.8.6)
 
 **Rationale:** the research doc's `on_receive(DriverMessage) -> Result<DriverMessage, DriverError>` is infrastructure with no current caller. Don't build it until a concrete need appears (e.g., a driver-specific command from REST or SOX).
 
@@ -217,7 +217,10 @@ Total: ~4 sessions for 12.0B + 12.0C + 12.0D + 12.0G.
 | 12.0B | (Phase 12.0B commit) | 2026-04-17 | 2.8.2 |
 | 12.0C | (Phase 12.0C commit) | 2026-04-17 | 2.8.3 |
 | 12.0D | (Phase 12.0D commit) | 2026-04-17 | 2.8.4 |
-| 12.0G | (pending commit)     | 2026-04-17 | 2.8.5 |
+| 12.0G | (Phase 12.0G commit) | 2026-04-17 | 2.8.5 |
+| 12.0E | (pending commit)     | 2026-04-17 | 2.8.6 |
+
+**12.0E summary (2026-04-17, v2.8.6):** Added `DriverMessage { id, payload }` type and an `on_receive(DriverMessage) -> Result<DriverMessage, DriverError>` method on both `Driver` and `AsyncDriver` traits (default impl returns `NotSupported("on_receive")`). `AnyDriver::on_receive` dispatches to sync/async. New `DriverCmd::SendMessage` variant and `DriverHandle::send_message(id, msg)`. REST endpoint `POST /api/drivers/{id}/message` behind auth — unknown driver → 404, default-impl response → 501, dispatch error → 500. 3 new unit tests cover default NotSupported, custom-impl echo, unknown-driver 404. No production drivers implement custom messages yet — they'll opt in per-id when a concrete need arises. 2671 tests pass, lib clippy clean.
 
 **12.0G summary (2026-04-17, v2.8.5):** Added runtime driver-lifecycle REST endpoints, all auth-gated via the existing bearer/SCRAM `check_auth` middleware (now `pub(crate)`):
 - `POST /api/drivers` — create a driver from `{driver_type, config}` (dispatches to `BacnetDriver::from_config` or `MqttDriver::from_config`); registers it without auto-opening.

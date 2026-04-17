@@ -16,8 +16,8 @@
 use async_trait::async_trait;
 
 use super::{
-    DriverError, DriverMeta, DriverPointRef, DriverStatus, LearnGrid, PollMode, SyncContext,
-    WriteContext,
+    DriverError, DriverMessage, DriverMeta, DriverPointRef, DriverStatus, LearnGrid, PollMode,
+    SyncContext, WriteContext,
 };
 
 // ── AsyncDriver Trait ─────────────────────────────────────
@@ -86,6 +86,14 @@ pub trait AsyncDriver: Send + Sync {
     /// Unsubscribe from change-of-value notifications.
     async fn on_unwatch(&mut self, _points: &[DriverPointRef]) -> Result<(), DriverError> {
         Ok(())
+    }
+
+    /// Handle a driver-specific custom message (Phase 12.0E).
+    ///
+    /// Drivers override to accept out-of-band commands (re-discover,
+    /// reconnect, stats). Default returns [`DriverError::NotSupported`].
+    async fn on_receive(&mut self, _msg: DriverMessage) -> Result<DriverMessage, DriverError> {
+        Err(DriverError::NotSupported("on_receive"))
     }
 }
 
@@ -213,6 +221,17 @@ impl AnyDriver {
         match self {
             AnyDriver::Sync(d) => d.on_unwatch(points),
             AnyDriver::Async(d) => d.on_unwatch(points).await,
+        }
+    }
+
+    /// Handle a driver-specific custom message (Phase 12.0E).
+    pub async fn on_receive(
+        &mut self,
+        msg: DriverMessage,
+    ) -> Result<DriverMessage, DriverError> {
+        match self {
+            AnyDriver::Sync(d) => d.on_receive(msg),
+            AnyDriver::Async(d) => d.on_receive(msg).await,
         }
     }
 }

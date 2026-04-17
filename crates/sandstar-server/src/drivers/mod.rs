@@ -237,6 +237,50 @@ impl PointStatus {
     }
 }
 
+// ── Driver-specific custom messages (Phase 12.0E) ───────────
+
+/// A driver-specific custom message.
+///
+/// Used by [`Driver::on_receive`] / [`AsyncDriver::on_receive`] so consumers
+/// can send a typed command to a specific driver without having to extend
+/// the core [`DriverCmd`] enum per feature. Examples: force a BACnet
+/// Who-Is, request MQTT reconnect, set a Modbus watchdog.
+///
+/// Research doc 18 §"Custom Messages" — Haxall-inspired shape.
+///
+/// Both the request and response share the same shape: drivers return a
+/// `DriverMessage` with a matching or well-known `id` plus any response
+/// payload (e.g., `{id: "whoIsResult", payload: {"devices": [...]}}`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriverMessage {
+    /// Message-type identifier (e.g. `"whoIs"`, `"reconnect"`, `"stats"`).
+    /// Drivers decide their own vocabulary; unknown ids should return
+    /// [`DriverError::NotSupported`].
+    pub id: String,
+    /// Driver-specific payload. Empty object `{}` is valid when the id
+    /// alone is self-describing.
+    #[serde(default)]
+    pub payload: serde_json::Value,
+}
+
+impl DriverMessage {
+    /// Construct a message with an id and empty payload.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            payload: serde_json::Value::Object(serde_json::Map::new()),
+        }
+    }
+
+    /// Construct a message with an id and a payload.
+    pub fn with_payload(id: impl Into<String>, payload: serde_json::Value) -> Self {
+        Self {
+            id: id.into(),
+            payload,
+        }
+    }
+}
+
 // ── Change-of-Value (COV) event ─────────────────────────────
 
 /// Event broadcast when a point's current value changes during a sync cycle.
@@ -422,6 +466,15 @@ pub trait Driver: Send + Sync {
     /// Called when all clients have unsubscribed from these points.
     fn on_unwatch(&mut self, _points: &[DriverPointRef]) -> Result<(), DriverError> {
         Ok(()) // Default: no-op
+    }
+
+    /// Handle a driver-specific custom message (Phase 12.0E).
+    ///
+    /// Drivers that accept out-of-band commands (force re-discovery,
+    /// request stats, reconnect, etc.) can override this. The default
+    /// returns [`DriverError::NotSupported`] so drivers opt in per-id.
+    fn on_receive(&mut self, _msg: DriverMessage) -> Result<DriverMessage, DriverError> {
+        Err(DriverError::NotSupported("on_receive"))
     }
 }
 
@@ -896,6 +949,7 @@ pub fn driver_router(
         .route("/api/drivers/{id}/open", post(open_driver_async))
         .route("/api/drivers/{id}/close", post(close_driver_async))
         .route("/api/drivers/{id}/ping", post(ping_driver_async))
+        .route("/api/drivers/{id}/message", post(driver_message_async))
         .route("/api/drivers/{id}/write", post(driver_write_async))
         .route("/api/syncCur", post(sync_cur_async))
         .route_layer(middleware::from_fn_with_state(
@@ -1332,6 +1386,48 @@ async fn sync_cur_async(
                 .collect();
             Json(serde_json::json!({ "results": items })).into_response()
         }
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/drivers/{id}/message — dispatch a driver-specific custom
+/// message (Phase 12.0E).
+///
+/// Request body: a JSON `DriverMessage` — `{"id": "...", "payload": {...}}`.
+/// Drivers that don't override `on_receive` reply with HTTP 501
+/// (`NotSupported`); unknown driver ids return 404.
+async fn driver_message_async(
+    Path(driver_id): Path<String>,
+    axum::extract::State(handle): axum::extract::State<crate::drivers::actor::DriverHandle>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let msg: DriverMessage = match serde_json::from_value(body) {
+        Ok(m) => m,
+        Err(e) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("invalid DriverMessage: {e}")})),
+            )
+                .into_response();
+        }
+    };
+
+    match handle.send_message(&driver_id, msg).await {
+        Ok(resp) => Json(serde_json::json!({"ok": true, "response": resp})).into_response(),
+        Err(DriverError::ConfigFault(m)) if m.contains("not found") => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": m})),
+        )
+            .into_response(),
+        Err(DriverError::NotSupported(feat)) => (
+            axum::http::StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({"error": format!("not supported: {feat}")})),
+        )
+            .into_response(),
         Err(e) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),

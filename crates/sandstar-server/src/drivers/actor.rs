@@ -29,8 +29,8 @@ use super::async_driver::AnyDriver;
 use super::poll_scheduler::PollScheduler;
 use super::watch_manager::DriverWatchManager;
 use super::{
-    CovEvent, DriverError, DriverId, DriverMeta, DriverPointRef, DriverStatus, DriverSummary,
-    LearnGrid, PointStatus,
+    CovEvent, DriverError, DriverId, DriverMessage, DriverMeta, DriverPointRef, DriverStatus,
+    DriverSummary, LearnGrid, PointStatus,
 };
 
 /// Default capacity for the broadcast CovEvent channel.
@@ -149,6 +149,12 @@ pub enum DriverCmd {
         point_ids: Vec<u32>,
         reply: oneshot::Sender<()>,
     },
+    /// Dispatch a driver-specific custom message (Phase 12.0E).
+    SendMessage {
+        id: String,
+        msg: DriverMessage,
+        reply: oneshot::Sender<Result<DriverMessage, DriverError>>,
+    },
     /// Add a polling bucket.
     AddPollBucket {
         driver_id: String,
@@ -265,6 +271,29 @@ impl DriverHandle {
         self.tx
             .send(DriverCmd::CloseDriver {
                 id: id.to_string(),
+                reply,
+            })
+            .await
+            .map_err(|_| DriverError::Internal("actor channel closed".into()))?;
+        rx.await
+            .map_err(|_| DriverError::Internal("actor response dropped".into()))?
+    }
+
+    /// Send a driver-specific custom message (Phase 12.0E).
+    ///
+    /// Returns the driver's response `DriverMessage`, or a `DriverError`.
+    /// Drivers that don't override `on_receive` respond with
+    /// `DriverError::NotSupported("on_receive")`.
+    pub async fn send_message(
+        &self,
+        id: &str,
+        msg: DriverMessage,
+    ) -> Result<DriverMessage, DriverError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(DriverCmd::SendMessage {
+                id: id.to_string(),
+                msg,
                 reply,
             })
             .await
@@ -609,6 +638,19 @@ impl DriverManagerInner {
         }
     }
 
+    async fn send_message(
+        &mut self,
+        id: &str,
+        msg: DriverMessage,
+    ) -> Result<DriverMessage, DriverError> {
+        match self.drivers.get_mut(id) {
+            Some(d) => d.on_receive(msg).await,
+            None => Err(DriverError::ConfigFault(format!(
+                "driver '{id}' not found"
+            ))),
+        }
+    }
+
     async fn sync_all(
         &mut self,
         point_map: &HashMap<DriverId, Vec<DriverPointRef>>,
@@ -879,6 +921,10 @@ pub fn spawn_driver_actor(buffer: usize) -> DriverHandle {
                 }
                 DriverCmd::PingDriver { id, reply } => {
                     let result = inner.ping_driver(&id).await;
+                    let _ = reply.send(result);
+                }
+                DriverCmd::SendMessage { id, msg, reply } => {
+                    let result = inner.send_message(&id, msg).await;
                     let _ = reply.send(result);
                 }
                 DriverCmd::SyncAll { point_map, reply } => {
@@ -1516,6 +1562,97 @@ mod tests {
             Some(DriverStatus::Down)
         );
         assert_eq!(handle.list_ids().await.unwrap(), vec!["d1".to_string()]);
+    }
+
+    // ── Phase 12.0E on_receive tests ──────────────────────
+
+    /// Driver that accepts the custom `echo` message-id and echoes the
+    /// payload. Any other id falls back to the default (NotSupported).
+    struct EchoDriver {
+        id: String,
+        status: DriverStatus,
+    }
+    impl Driver for EchoDriver {
+        fn driver_type(&self) -> &'static str {
+            "echo"
+        }
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn status(&self) -> &DriverStatus {
+            &self.status
+        }
+        fn open(&mut self) -> Result<DriverMeta, DriverError> {
+            self.status = DriverStatus::Ok;
+            Ok(DriverMeta::default())
+        }
+        fn close(&mut self) {
+            self.status = DriverStatus::Down;
+        }
+        fn ping(&mut self) -> Result<DriverMeta, DriverError> {
+            Ok(DriverMeta::default())
+        }
+        fn sync_cur(&mut self, _: &[DriverPointRef], _: &mut SyncContext) {}
+        fn write(&mut self, _: &[(u32, f64)], _: &mut WriteContext) {}
+        fn on_receive(&mut self, msg: DriverMessage) -> Result<DriverMessage, DriverError> {
+            if msg.id == "echo" {
+                Ok(msg)
+            } else {
+                Err(DriverError::NotSupported("on_receive"))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn actor_send_message_default_not_supported() {
+        let handle = spawn_driver_actor(16);
+        handle.register(test_driver("d1")).await.unwrap();
+        handle.open_all().await.unwrap();
+
+        let err = handle
+            .send_message(
+                "d1",
+                crate::drivers::DriverMessage::new("anything"),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DriverError::NotSupported(_)));
+    }
+
+    #[tokio::test]
+    async fn actor_send_message_custom_impl_echoes() {
+        let handle = spawn_driver_actor(16);
+        handle
+            .register(AnyDriver::Sync(Box::new(EchoDriver {
+                id: "e1".into(),
+                status: DriverStatus::Pending,
+            })))
+            .await
+            .unwrap();
+        handle.open_all().await.unwrap();
+
+        let resp = handle
+            .send_message(
+                "e1",
+                crate::drivers::DriverMessage::with_payload(
+                    "echo",
+                    serde_json::json!({"n": 42}),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.id, "echo");
+        assert_eq!(resp.payload.get("n").and_then(|v| v.as_u64()), Some(42));
+    }
+
+    #[tokio::test]
+    async fn actor_send_message_unknown_driver_errors() {
+        let handle = spawn_driver_actor(16);
+        let err = handle
+            .send_message("missing", crate::drivers::DriverMessage::new("x"))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not found"));
     }
 
     #[tokio::test]
