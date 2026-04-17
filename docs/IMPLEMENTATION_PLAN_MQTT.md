@@ -172,7 +172,7 @@ MQTT driver is "done" when:
 
 | Phase | Commit | Date | Version |
 |---|---|---|---|
-| M1 | (pending commit) | 2026-04-17 | 2.8.0-dev |
-| M2 | (pending commit) | 2026-04-17 | 2.8.0-dev |
-| M3 | (pending commit) | 2026-04-17 | 2.8.0-dev |
-| M4 | (pending commit) | 2026-04-17 | 2.8.0-dev |
+| M1 | `3abd14c` | 2026-04-17 | 2.8.0-dev |
+| M2 | `a6b7049` | 2026-04-17 | 2.8.0-dev |
+| M3 | `4191fc2` | 2026-04-17 | 2.8.0-dev |
+| M4 | `763bdea` | 2026-04-17 | 2.8.0 |
