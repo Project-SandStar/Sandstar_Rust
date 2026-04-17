@@ -869,23 +869,42 @@ impl Driver for LocalIoDriver {
 
 /// Build an Axum router for driver REST endpoints backed by the async [`DriverHandle`] actor.
 ///
-/// Mount under the main router with `.merge(drivers::driver_router(handle))`.
-pub fn driver_router(handle: crate::drivers::actor::DriverHandle) -> axum::Router {
-    axum::Router::new()
-        .route("/api/drivers", axum::routing::get(list_drivers_async))
-        .route(
-            "/api/drivers/{id}/status",
-            axum::routing::get(driver_status_async),
-        )
-        .route(
-            "/api/drivers/{id}/learn",
-            axum::routing::get(driver_learn_async),
-        )
-        .route(
-            "/api/drivers/{id}/write",
-            axum::routing::post(driver_write_async),
-        )
-        .with_state(handle)
+/// The router is split into public read-only routes and auth-gated mutating
+/// routes (Phase 12.0G). The mutating routes are:
+/// `POST /api/drivers` (create), `POST /api/drivers/{id}/{open,close,ping,write}`,
+/// `DELETE /api/drivers/{id}`, and `POST /api/syncCur`. They are gated by
+/// [`crate::rest::check_auth`] — no auth is required when `auth_state`
+/// reports no authentication configured (unchanged behavior for dev).
+///
+/// Mount under the main router with `.merge(drivers::driver_router(handle, auth_state))`.
+pub fn driver_router(
+    handle: crate::drivers::actor::DriverHandle,
+    auth_state: crate::auth::AuthState,
+) -> axum::Router {
+    use axum::middleware;
+    use axum::routing::{delete, get, post};
+
+    let public = axum::Router::new()
+        .route("/api/drivers", get(list_drivers_async))
+        .route("/api/drivers/{id}/status", get(driver_status_async))
+        .route("/api/drivers/{id}/learn", get(driver_learn_async))
+        .with_state(handle.clone());
+
+    let protected = axum::Router::new()
+        .route("/api/drivers", post(create_driver_async))
+        .route("/api/drivers/{id}", delete(delete_driver_async))
+        .route("/api/drivers/{id}/open", post(open_driver_async))
+        .route("/api/drivers/{id}/close", post(close_driver_async))
+        .route("/api/drivers/{id}/ping", post(ping_driver_async))
+        .route("/api/drivers/{id}/write", post(driver_write_async))
+        .route("/api/syncCur", post(sync_cur_async))
+        .route_layer(middleware::from_fn_with_state(
+            auth_state,
+            crate::rest::check_auth,
+        ))
+        .with_state(handle);
+
+    public.merge(protected)
 }
 
 // ── Async REST handlers (DriverHandle-backed) ────────────────
@@ -1036,6 +1055,285 @@ async fn driver_write_async(
         }
         Err(e) => (
             axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+// ── Phase 12.0G: runtime driver lifecycle endpoints ─────────
+
+/// POST /api/drivers — create a new driver at runtime.
+///
+/// Request body:
+/// ```json
+/// { "driver_type": "bacnet" | "mqtt", "config": { ... } }
+/// ```
+///
+/// The `config` must match the corresponding driver's JSON schema
+/// (`BacnetConfig` or `MqttConfig`). Returns `{"ok": true, "id": "..."}`
+/// on success. The driver is registered but NOT auto-opened — call
+/// `POST /api/drivers/{id}/open` to bring it up.
+async fn create_driver_async(
+    axum::extract::State(handle): axum::extract::State<crate::drivers::actor::DriverHandle>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let driver_type = match body.get("driver_type").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(
+                    serde_json::json!({"error": "missing or non-string 'driver_type'"}),
+                ),
+            )
+                .into_response();
+        }
+    };
+    let config = match body.get("config") {
+        Some(c) => c.clone(),
+        None => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "missing 'config'"})),
+            )
+                .into_response();
+        }
+    };
+
+    let (driver_id, any_driver) = match build_driver_by_type(&driver_type, config) {
+        Ok(pair) => pair,
+        Err(msg) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": msg})),
+            )
+                .into_response();
+        }
+    };
+
+    match handle.register(any_driver).await {
+        Ok(()) => (
+            axum::http::StatusCode::CREATED,
+            Json(serde_json::json!({"ok": true, "id": driver_id})),
+        )
+            .into_response(),
+        Err(e) => (
+            axum::http::StatusCode::CONFLICT,
+            Json(serde_json::json!({"ok": false, "error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// Factory dispatch for runtime driver creation. Returns `(id, AnyDriver)`
+/// or a user-friendly error message.
+fn build_driver_by_type(
+    driver_type: &str,
+    config: serde_json::Value,
+) -> Result<(String, crate::drivers::async_driver::AnyDriver), String> {
+    match driver_type {
+        "bacnet" => {
+            let cfg: crate::drivers::bacnet::BacnetConfig = serde_json::from_value(config)
+                .map_err(|e| format!("invalid bacnet config: {e}"))?;
+            let id = cfg.id.clone();
+            let driver = crate::drivers::bacnet::BacnetDriver::from_config(cfg);
+            Ok((
+                id,
+                crate::drivers::async_driver::AnyDriver::Async(Box::new(driver)),
+            ))
+        }
+        "mqtt" => {
+            let cfg: crate::drivers::mqtt::MqttConfig =
+                serde_json::from_value(config).map_err(|e| format!("invalid mqtt config: {e}"))?;
+            let id = cfg.id.clone();
+            let driver = crate::drivers::mqtt::MqttDriver::from_config(cfg);
+            Ok((
+                id,
+                crate::drivers::async_driver::AnyDriver::Async(Box::new(driver)),
+            ))
+        }
+        other => Err(format!("unknown driver_type '{other}'")),
+    }
+}
+
+/// DELETE /api/drivers/{id} — deregister and close a driver.
+async fn delete_driver_async(
+    Path(id): Path<String>,
+    axum::extract::State(handle): axum::extract::State<crate::drivers::actor::DriverHandle>,
+) -> impl IntoResponse {
+    match handle.remove(&id).await {
+        Ok(true) => Json(serde_json::json!({"ok": true, "id": id})).into_response(),
+        Ok(false) => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("driver '{id}' not found")})),
+        )
+            .into_response(),
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/drivers/{id}/open — open (initialize) a specific driver.
+async fn open_driver_async(
+    Path(id): Path<String>,
+    axum::extract::State(handle): axum::extract::State<crate::drivers::actor::DriverHandle>,
+) -> impl IntoResponse {
+    match handle.open_driver(&id).await {
+        Ok(meta) => Json(driver_meta_json(&id, meta)).into_response(),
+        Err(DriverError::ConfigFault(msg)) if msg.contains("not found") => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": msg})),
+        )
+            .into_response(),
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/drivers/{id}/close — close a driver without removing it.
+async fn close_driver_async(
+    Path(id): Path<String>,
+    axum::extract::State(handle): axum::extract::State<crate::drivers::actor::DriverHandle>,
+) -> impl IntoResponse {
+    match handle.close_driver(&id).await {
+        Ok(()) => Json(serde_json::json!({"ok": true, "id": id})).into_response(),
+        Err(DriverError::ConfigFault(msg)) if msg.contains("not found") => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": msg})),
+        )
+            .into_response(),
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/drivers/{id}/ping — health-check a driver.
+async fn ping_driver_async(
+    Path(id): Path<String>,
+    axum::extract::State(handle): axum::extract::State<crate::drivers::actor::DriverHandle>,
+) -> impl IntoResponse {
+    match handle.ping_driver(&id).await {
+        Ok(meta) => Json(driver_meta_json(&id, meta)).into_response(),
+        Err(DriverError::ConfigFault(msg)) if msg.contains("not found") => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": msg})),
+        )
+            .into_response(),
+        Err(e) => (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+fn driver_meta_json(id: &str, meta: DriverMeta) -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "id": id,
+        "firmwareVersion": meta.firmware_version,
+        "model": meta.model,
+        "extra": meta.extra,
+    })
+}
+
+/// POST /api/syncCur — batch-read current values across drivers.
+///
+/// Request body:
+/// ```json
+/// {
+///   "driverPoints": {
+///     "bac-1": [{"pointId": 100, "address": "AI:0"}, ...],
+///     "mqtt-1": [{"pointId": 200, "address": "sensors/temp"}, ...]
+///   }
+/// }
+/// ```
+///
+/// Response: `{"results": [{"driverId": "...", "pointId": N, "value": X}
+/// | {"driverId": "...", "pointId": N, "error": "..."}, ...]}`.
+async fn sync_cur_async(
+    axum::extract::State(handle): axum::extract::State<crate::drivers::actor::DriverHandle>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let driver_points_json = match body.get("driverPoints").and_then(|v| v.as_object()) {
+        Some(m) => m,
+        None => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(
+                    serde_json::json!({"error": "missing 'driverPoints' object"}),
+                ),
+            )
+                .into_response();
+        }
+    };
+
+    let mut point_map: HashMap<DriverId, Vec<DriverPointRef>> = HashMap::new();
+    for (driver_id, pts_val) in driver_points_json {
+        let arr = match pts_val.as_array() {
+            Some(a) => a,
+            None => {
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": format!("'{driver_id}' value must be an array"),
+                    })),
+                )
+                    .into_response();
+            }
+        };
+        let mut refs: Vec<DriverPointRef> = Vec::with_capacity(arr.len());
+        for item in arr {
+            let pid = item.get("pointId").and_then(|v| v.as_u64()).map(|n| n as u32);
+            let addr = item.get("address").and_then(|v| v.as_str());
+            match (pid, addr) {
+                (Some(point_id), Some(a)) => refs.push(DriverPointRef {
+                    point_id,
+                    address: a.to_string(),
+                }),
+                _ => {
+                    return (
+                        axum::http::StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "each point entry requires pointId (u32) and address (string)",
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        point_map.insert(driver_id.clone(), refs);
+    }
+
+    match handle.sync_all(point_map).await {
+        Ok(results) => {
+            let items: Vec<serde_json::Value> = results
+                .into_iter()
+                .map(|(did, pid, r)| match r {
+                    Ok(v) => {
+                        serde_json::json!({"driverId": did, "pointId": pid, "value": v})
+                    }
+                    Err(e) => serde_json::json!({
+                        "driverId": did,
+                        "pointId": pid,
+                        "error": e.to_string(),
+                    }),
+                })
+                .collect();
+            Json(serde_json::json!({ "results": items })).into_response()
+        }
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),
         )
             .into_response(),

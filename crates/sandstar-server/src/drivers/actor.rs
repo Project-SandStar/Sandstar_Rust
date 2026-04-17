@@ -72,6 +72,21 @@ pub enum DriverCmd {
     },
     /// Close (shut down) all registered drivers.
     CloseAll { reply: oneshot::Sender<()> },
+    /// Open (initialize) a single driver by id.
+    OpenDriver {
+        id: String,
+        reply: oneshot::Sender<Result<DriverMeta, DriverError>>,
+    },
+    /// Close a single driver by id without removing it from the registry.
+    CloseDriver {
+        id: String,
+        reply: oneshot::Sender<Result<(), DriverError>>,
+    },
+    /// Ping a single driver by id.
+    PingDriver {
+        id: String,
+        reply: oneshot::Sender<Result<DriverMeta, DriverError>>,
+    },
     /// Sync (read) current values for specified driver/point pairs.
     SyncAll {
         point_map: HashMap<DriverId, Vec<DriverPointRef>>,
@@ -222,6 +237,54 @@ impl DriverHandle {
             .map_err(|_| DriverError::Internal("actor channel closed".into()))?;
         rx.await
             .map_err(|_| DriverError::Internal("actor response dropped".into()))
+    }
+
+    /// Open (initialize) a single registered driver by id.
+    ///
+    /// Returns `DriverError::ConfigFault` if no driver with that id is
+    /// registered, or whatever the driver's own `open()` returns.
+    pub async fn open_driver(&self, id: &str) -> Result<DriverMeta, DriverError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(DriverCmd::OpenDriver {
+                id: id.to_string(),
+                reply,
+            })
+            .await
+            .map_err(|_| DriverError::Internal("actor channel closed".into()))?;
+        rx.await
+            .map_err(|_| DriverError::Internal("actor response dropped".into()))?
+    }
+
+    /// Close a single registered driver by id WITHOUT removing it.
+    ///
+    /// Use [`DriverHandle::remove`] instead if you want to fully deregister
+    /// the driver (that variant also closes it first).
+    pub async fn close_driver(&self, id: &str) -> Result<(), DriverError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(DriverCmd::CloseDriver {
+                id: id.to_string(),
+                reply,
+            })
+            .await
+            .map_err(|_| DriverError::Internal("actor channel closed".into()))?;
+        rx.await
+            .map_err(|_| DriverError::Internal("actor response dropped".into()))?
+    }
+
+    /// Health-check (`ping`) a single driver by id.
+    pub async fn ping_driver(&self, id: &str) -> Result<DriverMeta, DriverError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(DriverCmd::PingDriver {
+                id: id.to_string(),
+                reply,
+            })
+            .await
+            .map_err(|_| DriverError::Internal("actor channel closed".into()))?;
+        rx.await
+            .map_err(|_| DriverError::Internal("actor response dropped".into()))?
     }
 
     /// Sync current values for all specified driver/point pairs.
@@ -516,6 +579,36 @@ impl DriverManagerInner {
         }
     }
 
+    async fn open_driver(&mut self, id: &str) -> Result<DriverMeta, DriverError> {
+        match self.drivers.get_mut(id) {
+            Some(d) => d.open().await,
+            None => Err(DriverError::ConfigFault(format!(
+                "driver '{id}' not found"
+            ))),
+        }
+    }
+
+    async fn close_driver(&mut self, id: &str) -> Result<(), DriverError> {
+        match self.drivers.get_mut(id) {
+            Some(d) => {
+                d.close().await;
+                Ok(())
+            }
+            None => Err(DriverError::ConfigFault(format!(
+                "driver '{id}' not found"
+            ))),
+        }
+    }
+
+    async fn ping_driver(&mut self, id: &str) -> Result<DriverMeta, DriverError> {
+        match self.drivers.get_mut(id) {
+            Some(d) => d.ping().await,
+            None => Err(DriverError::ConfigFault(format!(
+                "driver '{id}' not found"
+            ))),
+        }
+    }
+
     async fn sync_all(
         &mut self,
         point_map: &HashMap<DriverId, Vec<DriverPointRef>>,
@@ -775,6 +868,18 @@ pub fn spawn_driver_actor(buffer: usize) -> DriverHandle {
                 DriverCmd::CloseAll { reply } => {
                     inner.close_all().await;
                     let _ = reply.send(());
+                }
+                DriverCmd::OpenDriver { id, reply } => {
+                    let result = inner.open_driver(&id).await;
+                    let _ = reply.send(result);
+                }
+                DriverCmd::CloseDriver { id, reply } => {
+                    let result = inner.close_driver(&id).await;
+                    let _ = reply.send(result);
+                }
+                DriverCmd::PingDriver { id, reply } => {
+                    let result = inner.ping_driver(&id).await;
+                    let _ = reply.send(result);
                 }
                 DriverCmd::SyncAll { point_map, reply } => {
                     let results = inner.sync_all(&point_map).await;
@@ -1384,6 +1489,47 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!((evt.value - 4.0).abs() < f64::EPSILON);
+    }
+
+    // ── Phase 12.0G lifecycle tests ────────────────────────
+
+    #[tokio::test]
+    async fn actor_open_close_ping_single_driver() {
+        let handle = spawn_driver_actor(16);
+        handle.register(test_driver("d1")).await.unwrap();
+
+        // open_driver brings just that one up; status should be Ok.
+        let meta = handle.open_driver("d1").await.unwrap();
+        assert_eq!(meta.model.as_deref(), Some("Test"));
+        assert_eq!(
+            handle.get_driver_status("d1").await.unwrap(),
+            Some(DriverStatus::Ok)
+        );
+
+        // ping_driver after open.
+        let _ = handle.ping_driver("d1").await.unwrap();
+
+        // close_driver flips status to Down but does NOT remove the driver.
+        handle.close_driver("d1").await.unwrap();
+        assert_eq!(
+            handle.get_driver_status("d1").await.unwrap(),
+            Some(DriverStatus::Down)
+        );
+        assert_eq!(handle.list_ids().await.unwrap(), vec!["d1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn actor_lifecycle_unknown_driver_errors() {
+        let handle = spawn_driver_actor(16);
+
+        let open_err = handle.open_driver("missing").await.unwrap_err();
+        assert!(open_err.to_string().contains("not found"));
+
+        let close_err = handle.close_driver("missing").await.unwrap_err();
+        assert!(close_err.to_string().contains("not found"));
+
+        let ping_err = handle.ping_driver("missing").await.unwrap_err();
+        assert!(ping_err.to_string().contains("not found"));
     }
 
     #[tokio::test]

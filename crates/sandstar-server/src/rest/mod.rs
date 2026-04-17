@@ -353,7 +353,7 @@ async fn count_requests(request: Request, next: middleware::Next) -> Response {
 /// 1. **No auth configured** -- pass through (current behavior)
 /// 2. **Bearer token** -- `Authorization: Bearer <token>` (legacy or session token)
 /// 3. **SCRAM initiation** -- returns 401 with instructions (client should use /api/auth)
-async fn check_auth(
+pub(crate) async fn check_auth(
     axum::extract::State(auth_state): axum::extract::State<AuthState>,
     request: Request,
     next: middleware::Next,
@@ -735,7 +735,7 @@ pub fn router_with_auth(
         .route("/api/hisRead", post(handlers::his_read))
         .route("/api/nav", post(handlers::nav))
         .route("/api/invokeAction", post(handlers::invoke_action))
-        .route_layer(middleware::from_fn_with_state(auth_state, check_auth))
+        .route_layer(middleware::from_fn_with_state(auth_state.clone(), check_auth))
         .with_state(handle.clone());
 
     // CORS policy: allow any origin (embedded device accessed by various IPs)
@@ -784,7 +784,7 @@ pub fn router_with_auth(
             .await;
         });
     }
-    let driver_routes = crate::drivers::driver_router(driver_handle);
+    let driver_routes = crate::drivers::driver_router(driver_handle, auth_state.clone());
 
     // Merge and apply global middleware.
     // Layer order (axum applies bottom-up): CORS → body limit → rate limit → count.

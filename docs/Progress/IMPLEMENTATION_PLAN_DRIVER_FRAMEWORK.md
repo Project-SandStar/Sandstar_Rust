@@ -170,7 +170,7 @@ Tests: mock driver emits a value change between poll ticks; assert client sees i
 ---
 
 ### 12.0G — Extended REST endpoints
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ COMPLETE (2026-04-17, v2.8.5)
 
 **Goal:** make drivers manageable at runtime via REST — add/remove/open/close/ping without restarting the service. Matches the research doc's REST API section.
 
@@ -216,7 +216,18 @@ Total: ~4 sessions for 12.0B + 12.0C + 12.0D + 12.0G.
 | 12.0A | (Phase 12.0A commit) | 2026-04-17 | 2.8.1 |
 | 12.0B | (Phase 12.0B commit) | 2026-04-17 | 2.8.2 |
 | 12.0C | (Phase 12.0C commit) | 2026-04-17 | 2.8.3 |
-| 12.0D | (pending commit)     | 2026-04-17 | 2.8.4 |
+| 12.0D | (Phase 12.0D commit) | 2026-04-17 | 2.8.4 |
+| 12.0G | (pending commit)     | 2026-04-17 | 2.8.5 |
+
+**12.0G summary (2026-04-17, v2.8.5):** Added runtime driver-lifecycle REST endpoints, all auth-gated via the existing bearer/SCRAM `check_auth` middleware (now `pub(crate)`):
+- `POST /api/drivers` — create a driver from `{driver_type, config}` (dispatches to `BacnetDriver::from_config` or `MqttDriver::from_config`); registers it without auto-opening.
+- `POST /api/drivers/{id}/open` — call `handle.open_driver(id)`; returns driver meta.
+- `POST /api/drivers/{id}/close` — call `handle.close_driver(id)`; leaves the driver in the registry.
+- `POST /api/drivers/{id}/ping` — call `handle.ping_driver(id)`; returns meta on success, 503 on comm fault.
+- `DELETE /api/drivers/{id}` — call existing `handle.remove(id)` (closes then drops).
+- `POST /api/syncCur` — batch read with `{driverPoints: {driver_id: [{pointId, address}, ...]}}`; returns `{"results": [...]}` with per-point value/error.
+
+Internals: three new `DriverCmd` variants (`OpenDriver`/`CloseDriver`/`PingDriver`) + matching `DriverHandle` methods + `DriverManagerInner` impls. `driver_router` signature now takes `(handle, auth_state)` and splits public (GET list/status/learn) from auth-gated mutating routes. Moved `driver_write_async` under auth since it mutates (previously was mountable unprotected — closed that gap while here). Factory dispatch is centralized in `build_driver_by_type(driver_type, config_json)` — unknown types return 400. 2 new unit tests (`actor_open_close_ping_single_driver`, `actor_lifecycle_unknown_driver_errors`). 2668 tests pass, lib clippy clean.
 
 **12.0D summary (2026-04-17, v2.8.4):** Added `CovEvent { point_id, value, status, timestamp }` in `drivers/mod.rs` and a `tokio::sync::broadcast::Sender<CovEvent>` (capacity 512 via `DEFAULT_COV_CAPACITY`) owned jointly by `DriverHandle` and `DriverManagerInner`. `DriverHandle::subscribe_cov()` returns a fresh `broadcast::Receiver<CovEvent>` with no actor round-trip. `sync_all` tracks last-emitted value per point (`HashMap<u32, f64>`) and broadcasts a `CovEvent` on first read or change of value (bit-level `to_bits()` compare, so NaN retriggers). Errors don't emit. Late subscribers get no backlog (standard broadcast semantics). 6 new unit tests cover first-read emit, repeat suppression, change detection, multi-subscriber fan-out, late-subscribe no-backlog, and error-path suppression. **WS bridge deferred to 12.0D.WS** — the current Haystack WS path in `rest/ws.rs` runs off `EngineHandle` polling and driver values already propagate into engine channels via the Stage-2 tick task at level 16, so WS clients continue to see updated values. Wiring direct CovEvent push into WS requires threading `DriverHandle` into `WsState`, per-session subscribe lifecycle, and merging with the existing poll cadence — meaningful refactor with regression risk on the shipping hot path, deferred until a concrete consumer (or explicit UI requirement) justifies it. Infrastructure is ready for any subscriber (future SOX COV push, metrics exporter, replacement WS handler). 2666 tests pass, lib clippy clean.
 
