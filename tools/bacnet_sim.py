@@ -19,9 +19,25 @@ import sys
 DEVICE_INSTANCE = 12345
 VENDOR_ID = 999
 
+# Monotonically-incrementing counter used when --vary is passed on the
+# command line. Each TempSensor read returns 70.0 + (counter % 10) * 0.5,
+# cycling through 70.0 .. 74.5 and back. Useful for exercising the
+# driver actor's CovEvent emission (which requires value-on-value change
+# to fire) against a real wire path.
+_vary_counter = 0
+_vary_enabled = False
+
+def _temp_value():
+    global _vary_counter
+    if _vary_enabled:
+        v = 70.0 + (_vary_counter % 10) * 0.5
+        _vary_counter += 1
+        return encode_real(v)
+    return encode_real(72.5)
+
 # Objects we advertise: (object_type, instance, name, value_encoder)
 OBJECTS = [
-    (0, 0, "TempSensor",     lambda: encode_real(72.5)),
+    (0, 0, "TempSensor",     _temp_value),
     (0, 1, "HumiditySensor", lambda: encode_real(45.0)),
     (3, 0, "Occupancy",      lambda: encode_enum(1)),  # BI: active=1
 ]
@@ -277,7 +293,13 @@ def encode_unconfirmed_cov_notification(subscriber_process_id, device_instance, 
 
 
 def main():
-    bind_ip = sys.argv[1] if len(sys.argv) > 1 else "0.0.0.0"
+    global _vary_enabled
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    flags = [a for a in sys.argv[1:] if a.startswith("--")]
+    _vary_enabled = "--vary" in flags
+    bind_ip = args[0] if args else "0.0.0.0"
+    if _vary_enabled:
+        print("--vary: TempSensor cycles 70.0 .. 74.5 on each read", flush=True)
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
