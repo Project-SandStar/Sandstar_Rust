@@ -29,6 +29,9 @@ pub mod mqtt;
 pub mod poll_scheduler;
 pub mod watch_manager;
 
+#[cfg(test)]
+mod mqtt_e2e_test;
+
 use std::collections::HashMap;
 use std::fmt;
 

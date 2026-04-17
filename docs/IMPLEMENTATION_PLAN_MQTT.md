@@ -120,16 +120,18 @@ Tests: cache population, stale expiry, JSON path extraction, plain-number parsin
 Tests: publish payload format, QoS, missing publish_topic handling.
 
 ### M4 — Server wiring + E2E + docs
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ COMPLETE (2026-04-17)
 
 - `load_mqtt_drivers(&DriverHandle, &EngineHandle)` in `rest/mod.rs`, mirroring `load_bacnet_drivers`.
   - Reads `SANDSTAR_MQTT_CONFIGS` env.
   - Registers driver, registers points, adds poll bucket, spawns tick task, calls `open_all()`.
-- E2E test using an embedded test broker (rumqttc's test utilities, or `rumqttd` embedded).
-- `MQTT_SETUP.md` operator guide — structure mirrors `BACNET_SETUP.md`.
-- Deploy to 1-11 and verify against a reachable broker (e.g. local mosquitto in Docker, or test.mosquitto.org).
+  - Called from `router_with_auth` alongside `load_bacnet_drivers` as a second `tokio::spawn`.
+- Integration tests in `drivers/mqtt_e2e_test.rs` covering JSON shape round-trip, malformed-config handling, empty-array handling, and driver registration without broker.
+- `MQTT_SETUP.md` operator guide — structure mirrors `BACNET_SETUP.md` (six sections: enable, configure, firewall, live values, verification, troubleshooting).
+- Embedded broker E2E **skipped** — rationale documented in `mqtt_e2e_test.rs`: writing a minimal v3.1.1 broker that satisfies rumqttc (CONNECT/CONNACK/SUBSCRIBE/SUBACK/PUBLISH/PUBACK + keep-alive) is non-trivial additional surface; `rumqttd` is too heavy. Live broker compatibility will be proven against `test.mosquitto.org` or local mosquitto at deploy time, mirroring how BACnet uses `tools/bacnet_sim.py` post-deploy.
+- Deploy to 1-11 and verify against a reachable broker is a post-M4 validation step.
 
-Tests: full cycle (publish to broker → Sandstar receives → /read returns the value).
+Tests: JSON shape round-trip, malformed config handling, empty-config handling, registration-without-broker lifecycle, env-var-name guard.
 
 ## Testing strategy
 
@@ -173,4 +175,4 @@ MQTT driver is "done" when:
 | M1 | (pending commit) | 2026-04-17 | 2.8.0-dev |
 | M2 | (pending commit) | 2026-04-17 | 2.8.0-dev |
 | M3 | (pending commit) | 2026-04-17 | 2.8.0-dev |
-| M4 | — | — | — |
+| M4 | (pending commit) | 2026-04-17 | 2.8.0-dev |

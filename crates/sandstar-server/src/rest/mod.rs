@@ -769,6 +769,13 @@ pub fn router_with_auth(
             load_bacnet_drivers(&driver_handle_clone, &engine_handle_clone).await;
         });
     }
+    {
+        let driver_handle_clone = driver_handle.clone();
+        let engine_handle_clone = handle.clone();
+        tokio::spawn(async move {
+            load_mqtt_drivers(&driver_handle_clone, &engine_handle_clone).await;
+        });
+    }
     let driver_routes = crate::drivers::driver_router(driver_handle);
 
     // Merge and apply global middleware.
@@ -1018,6 +1025,213 @@ async fn load_bacnet_drivers(
                 }
             });
             tracing::info!("BACnet poll tick task spawned (5s interval)");
+        }
+    }
+}
+
+// ── MQTT driver loader ──────────────────────────────────────
+
+/// Load MQTT drivers from the `SANDSTAR_MQTT_CONFIGS` environment variable.
+///
+/// The variable should be a JSON array of `MqttConfig` objects, e.g.:
+/// ```json
+/// [{"id":"mqtt-local","host":"broker","port":1883,"client_id":"sandstar-1","objects":[]}]
+/// ```
+///
+/// Errors are logged but do not prevent server startup.
+async fn load_mqtt_drivers(
+    handle: &crate::drivers::actor::DriverHandle,
+    engine_handle: &EngineHandle,
+) {
+    let json_str = match std::env::var("SANDSTAR_MQTT_CONFIGS") {
+        Ok(s) => s,
+        Err(_) => return, // Not configured — skip silently.
+    };
+
+    let configs: Vec<crate::drivers::mqtt::MqttConfig> = match serde_json::from_str(&json_str) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "SANDSTAR_MQTT_CONFIGS: failed to parse JSON");
+            return;
+        }
+    };
+
+    let mut registered_any = false;
+    // Track each driver's configured points so we can wire them into the
+    // poll scheduler after open_all() succeeds.
+    let mut driver_points: Vec<(String, Vec<u32>)> = Vec::new();
+    for config in configs {
+        let id = config.id.clone();
+        let point_ids: Vec<u32> = config.objects.iter().map(|o| o.point_id).collect();
+        let driver = crate::drivers::mqtt::MqttDriver::from_config(config);
+        let any_driver = crate::drivers::async_driver::AnyDriver::Async(Box::new(driver));
+        match handle.register(any_driver).await {
+            Ok(()) => {
+                tracing::info!(driver = %id, "MQTT driver registered");
+                registered_any = true;
+                driver_points.push((id, point_ids));
+            }
+            Err(e) => {
+                tracing::error!(driver = %id, error = %e, "failed to register MQTT driver")
+            }
+        }
+    }
+
+    // Open all registered drivers so they connect to brokers and subscribe
+    // to configured topics. Without this, drivers stay in Pending status
+    // and `learn()` returns empty.
+    if registered_any {
+        // Register each configured object's point_id with its driver, and add
+        // a poll bucket so sync_cur() gets called every 5s. Even though MQTT
+        // is event-driven (values arrive via the event-loop task into the
+        // value cache), the periodic tick is how cached values flow into
+        // Sandstar channels via write_channel.
+        for (driver_id, point_ids) in &driver_points {
+            if point_ids.is_empty() {
+                continue;
+            }
+            for pid in point_ids {
+                if let Err(e) = handle.register_point(*pid, driver_id).await {
+                    tracing::warn!(driver = %driver_id, point_id = *pid, error = %e,
+                        "MQTT register_point failed");
+                }
+            }
+            let points: Vec<crate::drivers::DriverPointRef> = point_ids
+                .iter()
+                .map(|&pid| crate::drivers::DriverPointRef {
+                    point_id: pid,
+                    address: String::new(),
+                })
+                .collect();
+            match handle
+                .add_poll_bucket(driver_id, Duration::from_secs(5), points)
+                .await
+            {
+                Ok(()) => tracing::info!(
+                    driver = %driver_id,
+                    points = point_ids.len(),
+                    "MQTT poll bucket added (5s interval)"
+                ),
+                Err(e) => tracing::warn!(
+                    driver = %driver_id,
+                    error = %e,
+                    "MQTT add_poll_bucket failed"
+                ),
+            }
+        }
+
+        match handle.open_all().await {
+            Ok(metas) => {
+                tracing::info!(count = metas.len(), "MQTT drivers opened");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to open MQTT drivers");
+            }
+        }
+
+        // Spawn a periodic tick task that calls sync_all() every 5s with the
+        // MQTT points configured above. Without this, the poll buckets we
+        // just added sit idle — the driver actor's loop is command-driven
+        // and has no internal scheduler. This task is what actually makes
+        // cached values flow into engine channels in production.
+        let tick_points: std::collections::HashMap<
+            crate::drivers::DriverId,
+            Vec<crate::drivers::DriverPointRef>,
+        > = driver_points
+            .into_iter()
+            .filter(|(_, pids)| !pids.is_empty())
+            .map(|(id, pids)| {
+                let refs = pids
+                    .into_iter()
+                    .map(|pid| crate::drivers::DriverPointRef {
+                        point_id: pid,
+                        address: String::new(),
+                    })
+                    .collect();
+                (id, refs)
+            })
+            .collect();
+        if !tick_points.is_empty() {
+            let handle_tick = handle.clone();
+            let engine_tick = engine_handle.clone();
+            tokio::spawn(async move {
+                // MQTT driver writes are low-priority (16 of 16) so operator
+                // or manual writes at lower levels always take precedence.
+                // Duration is 30s — longer than our 5s poll so values don't gap,
+                // but short enough to expire if the driver stops reporting.
+                const MQTT_WRITE_LEVEL: u8 = 16;
+                const MQTT_WRITE_DURATION_SECS: f64 = 30.0;
+
+                let mut ticker = tokio::time::interval(Duration::from_secs(5));
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                // Discard the immediate first tick so we don't race open_all.
+                ticker.tick().await;
+                loop {
+                    ticker.tick().await;
+                    let results = match handle_tick.sync_all(tick_points.clone()).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "MQTT poll tick: sync_all failed");
+                            continue;
+                        }
+                    };
+                    let (mut ok_count, mut err_count, mut write_err_count) =
+                        (0usize, 0usize, 0usize);
+                    for (driver_id, point_id, res) in &results {
+                        match res {
+                            Ok(v) => {
+                                ok_count += 1;
+                                tracing::info!(
+                                    driver = %driver_id,
+                                    point_id,
+                                    value = v,
+                                    "MQTT sync_cur -> write_channel"
+                                );
+                                // Write the value into the engine channel so
+                                // /read?filter=channel==N returns it. Fails silently
+                                // (logged as warn) if the point_id doesn't correspond
+                                // to a configured virtual channel.
+                                let who = format!("mqtt:{driver_id}");
+                                if let Err(e) = engine_tick
+                                    .write_channel(
+                                        *point_id,
+                                        Some(*v),
+                                        MQTT_WRITE_LEVEL,
+                                        who,
+                                        MQTT_WRITE_DURATION_SECS,
+                                    )
+                                    .await
+                                {
+                                    write_err_count += 1;
+                                    tracing::warn!(
+                                        driver = %driver_id,
+                                        point_id,
+                                        error = %e,
+                                        "MQTT engine write_channel failed — \
+                                         is point_id a configured virtual channel?"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                err_count += 1;
+                                tracing::warn!(
+                                    driver = %driver_id,
+                                    point_id,
+                                    error = %e,
+                                    "MQTT sync_cur failed"
+                                );
+                            }
+                        }
+                    }
+                    tracing::info!(
+                        ok = ok_count,
+                        err = err_count,
+                        write_err = write_err_count,
+                        "MQTT poll tick complete"
+                    );
+                }
+            });
+            tracing::info!("MQTT poll tick task spawned (5s interval)");
         }
     }
 }
