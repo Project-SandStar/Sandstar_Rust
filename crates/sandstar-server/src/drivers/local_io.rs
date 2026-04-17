@@ -11,7 +11,10 @@
 use std::collections::HashMap;
 
 use super::DriverStatus;
-use super::{Driver, DriverError, DriverMeta, DriverPointRef, LearnGrid, LearnPoint, PollMode};
+use super::{
+    Driver, DriverError, DriverMeta, DriverPointRef, LearnGrid, LearnPoint, PollMode, SyncContext,
+    WriteContext,
+};
 
 // ── LocalIoChannel ─────────────────────────────────────────
 
@@ -204,52 +207,40 @@ impl Driver for LocalIoDriver {
         Ok(grid)
     }
 
-    fn sync_cur(&mut self, points: &[DriverPointRef]) -> Vec<(u32, Result<f64, DriverError>)> {
-        points
-            .iter()
-            .map(
-                |p| match self.channels.iter().find(|ch| ch.channel_id == p.point_id) {
-                    Some(ch) if ch.enabled => (p.point_id, Ok(ch.last_value)),
-                    Some(_) => (
-                        p.point_id,
-                        Err(DriverError::ConfigFault("channel disabled".into())),
-                    ),
-                    None => (
-                        p.point_id,
-                        Err(DriverError::ConfigFault(format!(
-                            "channel {} not found",
-                            p.point_id
-                        ))),
-                    ),
-                },
-            )
-            .collect()
+    fn sync_cur(&mut self, points: &[DriverPointRef], ctx: &mut SyncContext) {
+        for p in points {
+            match self.channels.iter().find(|ch| ch.channel_id == p.point_id) {
+                Some(ch) if ch.enabled => ctx.update_cur_ok(p.point_id, ch.last_value),
+                Some(_) => ctx.update_cur_err(
+                    p.point_id,
+                    DriverError::ConfigFault("channel disabled".into()),
+                ),
+                None => ctx.update_cur_err(
+                    p.point_id,
+                    DriverError::ConfigFault(format!("channel {} not found", p.point_id)),
+                ),
+            }
+        }
     }
 
-    fn write(&mut self, writes: &[(u32, f64)]) -> Vec<(u32, Result<(), DriverError>)> {
-        writes
-            .iter()
-            .map(|&(id, val)| {
-                match self.channels.iter_mut().find(|ch| ch.channel_id == id) {
-                    Some(ch) if ch.is_output() => {
-                        // Cache the written value locally.
-                        ch.last_value = val;
-                        (id, Ok(()))
-                    }
-                    Some(_) => (
-                        id,
-                        Err(DriverError::ConfigFault("not an output channel".into())),
-                    ),
-                    None => (
-                        id,
-                        Err(DriverError::ConfigFault(format!(
-                            "channel {} not found",
-                            id
-                        ))),
-                    ),
+    fn write(&mut self, writes: &[(u32, f64)], ctx: &mut WriteContext) {
+        for &(id, val) in writes {
+            match self.channels.iter_mut().find(|ch| ch.channel_id == id) {
+                Some(ch) if ch.is_output() => {
+                    // Cache the written value locally.
+                    ch.last_value = val;
+                    ctx.update_write_ok(id);
                 }
-            })
-            .collect()
+                Some(_) => ctx.update_write_err(
+                    id,
+                    DriverError::ConfigFault("not an output channel".into()),
+                ),
+                None => ctx.update_write_err(
+                    id,
+                    DriverError::ConfigFault(format!("channel {} not found", id)),
+                ),
+            }
+        }
     }
 
     fn poll_mode(&self) -> PollMode {
@@ -331,7 +322,9 @@ mod tests {
             point_id: 1100,
             address: "AIN0".into(),
         }];
-        let results = d.sync_cur(&refs);
+        let mut ctx = SyncContext::new();
+        d.sync_cur(&refs, &mut ctx);
+        let results = ctx.into_results();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, 1100);
         assert!((results[0].1.as_ref().unwrap() - 72.5).abs() < f64::EPSILON);
@@ -346,7 +339,9 @@ mod tests {
             point_id: 7000,
             address: "AIN2".into(),
         }];
-        let results = d.sync_cur(&refs);
+        let mut ctx = SyncContext::new();
+        d.sync_cur(&refs, &mut ctx);
+        let results = ctx.into_results();
         assert!(results[0].1.is_err());
         assert!(results[0]
             .1
@@ -365,7 +360,9 @@ mod tests {
             point_id: 9999,
             address: "X".into(),
         }];
-        let results = d.sync_cur(&refs);
+        let mut ctx = SyncContext::new();
+        d.sync_cur(&refs, &mut ctx);
+        let results = ctx.into_results();
         assert!(results[0].1.is_err());
         assert!(results[0]
             .1
@@ -380,7 +377,9 @@ mod tests {
         let mut d = make_driver_with_channels();
         d.open().unwrap();
 
-        let results = d.write(&[(5000, 1.0), (6000, 0.75)]);
+        let mut ctx = WriteContext::new();
+        d.write(&[(5000, 1.0), (6000, 0.75)], &mut ctx);
+        let results = ctx.into_results();
         assert_eq!(results.len(), 2);
         assert!(results[0].1.is_ok());
         assert!(results[1].1.is_ok());
@@ -395,7 +394,9 @@ mod tests {
         let mut d = make_driver_with_channels();
         d.open().unwrap();
 
-        let results = d.write(&[(1100, 50.0)]);
+        let mut ctx = WriteContext::new();
+        d.write(&[(1100, 50.0)], &mut ctx);
+        let results = ctx.into_results();
         assert!(results[0].1.is_err());
         assert!(results[0]
             .1
@@ -410,7 +411,9 @@ mod tests {
         let mut d = make_driver_with_channels();
         d.open().unwrap();
 
-        let results = d.write(&[(9999, 0.0)]);
+        let mut ctx = WriteContext::new();
+        d.write(&[(9999, 0.0)], &mut ctx);
+        let results = ctx.into_results();
         assert!(results[0].1.is_err());
     }
 

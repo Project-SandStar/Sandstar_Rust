@@ -15,7 +15,10 @@
 
 use async_trait::async_trait;
 
-use super::{DriverError, DriverMeta, DriverPointRef, DriverStatus, LearnGrid, PollMode};
+use super::{
+    DriverError, DriverMeta, DriverPointRef, DriverStatus, LearnGrid, PollMode, SyncContext,
+    WriteContext,
+};
 
 // ── AsyncDriver Trait ─────────────────────────────────────
 
@@ -59,14 +62,17 @@ pub trait AsyncDriver: Send + Sync {
 
     /// Read current values for a batch of points.
     ///
-    /// Returns `(point_id, result)` pairs. Failed reads return `DriverError`.
-    async fn sync_cur(&mut self, points: &[DriverPointRef])
-        -> Vec<(u32, Result<f64, DriverError>)>;
+    /// Drivers populate the provided [`SyncContext`] by calling
+    /// `ctx.update_cur_ok(id, value)` or `ctx.update_cur_err(id, err)` for
+    /// each point.
+    async fn sync_cur(&mut self, points: &[DriverPointRef], ctx: &mut SyncContext);
 
     /// Write values to points.
     ///
-    /// Returns `(point_id, result)` pairs. Failed writes return `DriverError`.
-    async fn write(&mut self, writes: &[(u32, f64)]) -> Vec<(u32, Result<(), DriverError>)>;
+    /// Drivers populate the provided [`WriteContext`] by calling
+    /// `ctx.update_write_ok(id)` or `ctx.update_write_err(id, err)` for
+    /// each point.
+    async fn write(&mut self, writes: &[(u32, f64)], ctx: &mut WriteContext);
 
     /// Subscribe to change-of-value notifications for these points.
     ///
@@ -164,22 +170,34 @@ impl AnyDriver {
     }
 
     /// Read current values for a batch of points.
+    ///
+    /// Internally constructs a [`SyncContext`], passes it to the underlying
+    /// driver, then drains it into the `(point_id, Result<f64, _>)` vector
+    /// that the actor and REST layer consume. Drivers never see the vector.
     pub async fn sync_cur(
         &mut self,
         points: &[DriverPointRef],
     ) -> Vec<(u32, Result<f64, DriverError>)> {
+        let mut ctx = SyncContext::with_capacity(points.len());
         match self {
-            AnyDriver::Sync(d) => d.sync_cur(points),
-            AnyDriver::Async(d) => d.sync_cur(points).await,
+            AnyDriver::Sync(d) => d.sync_cur(points, &mut ctx),
+            AnyDriver::Async(d) => d.sync_cur(points, &mut ctx).await,
         }
+        ctx.into_results()
     }
 
     /// Write values to points.
+    ///
+    /// Internally constructs a [`WriteContext`], passes it to the underlying
+    /// driver, then drains it into the `(point_id, Result<(), _>)` vector
+    /// that the actor consumes.
     pub async fn write(&mut self, writes: &[(u32, f64)]) -> Vec<(u32, Result<(), DriverError>)> {
+        let mut ctx = WriteContext::with_capacity(writes.len());
         match self {
-            AnyDriver::Sync(d) => d.write(writes),
-            AnyDriver::Async(d) => d.write(writes).await,
+            AnyDriver::Sync(d) => d.write(writes, &mut ctx),
+            AnyDriver::Async(d) => d.write(writes, &mut ctx).await,
         }
+        ctx.into_results()
     }
 
     /// Subscribe to COV notifications.
@@ -245,11 +263,15 @@ mod tests {
         fn ping(&mut self) -> Result<DriverMeta, DriverError> {
             Ok(DriverMeta::default())
         }
-        fn sync_cur(&mut self, points: &[DriverPointRef]) -> Vec<(u32, Result<f64, DriverError>)> {
-            points.iter().map(|p| (p.point_id, Ok(42.0))).collect()
+        fn sync_cur(&mut self, points: &[DriverPointRef], ctx: &mut SyncContext) {
+            for p in points {
+                ctx.update_cur_ok(p.point_id, 42.0);
+            }
         }
-        fn write(&mut self, writes: &[(u32, f64)]) -> Vec<(u32, Result<(), DriverError>)> {
-            writes.iter().map(|(id, _)| (*id, Ok(()))).collect()
+        fn write(&mut self, writes: &[(u32, f64)], ctx: &mut WriteContext) {
+            for (id, _) in writes {
+                ctx.update_write_ok(*id);
+            }
         }
     }
 
@@ -293,14 +315,15 @@ mod tests {
         async fn ping(&mut self) -> Result<DriverMeta, DriverError> {
             Ok(DriverMeta::default())
         }
-        async fn sync_cur(
-            &mut self,
-            points: &[DriverPointRef],
-        ) -> Vec<(u32, Result<f64, DriverError>)> {
-            points.iter().map(|p| (p.point_id, Ok(99.0))).collect()
+        async fn sync_cur(&mut self, points: &[DriverPointRef], ctx: &mut SyncContext) {
+            for p in points {
+                ctx.update_cur_ok(p.point_id, 99.0);
+            }
         }
-        async fn write(&mut self, writes: &[(u32, f64)]) -> Vec<(u32, Result<(), DriverError>)> {
-            writes.iter().map(|(id, _)| (*id, Ok(()))).collect()
+        async fn write(&mut self, writes: &[(u32, f64)], ctx: &mut WriteContext) {
+            for (id, _) in writes {
+                ctx.update_write_ok(*id);
+            }
         }
     }
 

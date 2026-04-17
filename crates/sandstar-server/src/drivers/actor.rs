@@ -796,7 +796,9 @@ pub fn spawn_driver_actor(buffer: usize) -> DriverHandle {
 mod tests {
     use super::*;
     use crate::drivers::async_driver::AnyDriver;
-    use crate::drivers::{Driver, DriverMeta, DriverPointRef, DriverStatus, PollMode};
+    use crate::drivers::{
+        Driver, DriverMeta, DriverPointRef, DriverStatus, SyncContext, WriteContext,
+    };
 
     // ── Minimal sync driver for testing ───────────────────
 
@@ -837,11 +839,15 @@ mod tests {
         fn ping(&mut self) -> Result<DriverMeta, DriverError> {
             Ok(DriverMeta::default())
         }
-        fn sync_cur(&mut self, points: &[DriverPointRef]) -> Vec<(u32, Result<f64, DriverError>)> {
-            points.iter().map(|p| (p.point_id, Ok(0.0))).collect()
+        fn sync_cur(&mut self, points: &[DriverPointRef], ctx: &mut SyncContext) {
+            for p in points {
+                ctx.update_cur_ok(p.point_id, 0.0);
+            }
         }
-        fn write(&mut self, writes: &[(u32, f64)]) -> Vec<(u32, Result<(), DriverError>)> {
-            writes.iter().map(|(id, _)| (*id, Ok(()))).collect()
+        fn write(&mut self, writes: &[(u32, f64)], ctx: &mut WriteContext) {
+            for (id, _) in writes {
+                ctx.update_write_ok(*id);
+            }
         }
     }
 

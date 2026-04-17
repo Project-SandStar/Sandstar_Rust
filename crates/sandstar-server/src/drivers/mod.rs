@@ -237,6 +237,100 @@ impl PointStatus {
     }
 }
 
+// ── Sync / Write contexts (callback-style results) ──────────
+
+/// Result collector passed to [`Driver::sync_cur`] / [`AsyncDriver::sync_cur`].
+///
+/// Drivers call [`SyncContext::update_cur_ok`] or
+/// [`SyncContext::update_cur_err`] per point instead of returning a `Vec`.
+/// The wrapper ([`AnyDriver::sync_cur`]) creates a fresh context per call
+/// and drains it into the `(point_id, Result<f64, DriverError>)` vector
+/// the actor and REST layer already expect — so this refactor is internal
+/// to the trait surface, with no behavior change.
+///
+/// This matches the Haxall `SyncContext` shape from research doc 18.
+#[derive(Debug, Default)]
+pub struct SyncContext {
+    results: Vec<(u32, Result<f64, DriverError>)>,
+}
+
+impl SyncContext {
+    /// Create a new, empty sync context.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Pre-size the internal buffer for a known batch size.
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            results: Vec::with_capacity(cap),
+        }
+    }
+
+    /// Record a successful read.
+    pub fn update_cur_ok(&mut self, point_id: u32, value: f64) {
+        self.results.push((point_id, Ok(value)));
+    }
+
+    /// Record a failed read.
+    pub fn update_cur_err(&mut self, point_id: u32, err: DriverError) {
+        self.results.push((point_id, Err(err)));
+    }
+
+    /// Consume the context and return the collected results.
+    pub fn into_results(self) -> Vec<(u32, Result<f64, DriverError>)> {
+        self.results
+    }
+
+    /// Borrow the collected results (mostly for tests).
+    pub fn results(&self) -> &[(u32, Result<f64, DriverError>)] {
+        &self.results
+    }
+}
+
+/// Result collector passed to [`Driver::write`] / [`AsyncDriver::write`].
+///
+/// Drivers call [`WriteContext::update_write_ok`] or
+/// [`WriteContext::update_write_err`] per point instead of returning a `Vec`.
+#[derive(Debug, Default)]
+pub struct WriteContext {
+    results: Vec<(u32, Result<(), DriverError>)>,
+}
+
+impl WriteContext {
+    /// Create a new, empty write context.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Pre-size the internal buffer for a known batch size.
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            results: Vec::with_capacity(cap),
+        }
+    }
+
+    /// Record a successful write.
+    pub fn update_write_ok(&mut self, point_id: u32) {
+        self.results.push((point_id, Ok(())));
+    }
+
+    /// Record a failed write.
+    pub fn update_write_err(&mut self, point_id: u32, err: DriverError) {
+        self.results.push((point_id, Err(err)));
+    }
+
+    /// Consume the context and return the collected results.
+    pub fn into_results(self) -> Vec<(u32, Result<(), DriverError>)> {
+        self.results
+    }
+
+    /// Borrow the collected results (mostly for tests).
+    pub fn results(&self) -> &[(u32, Result<(), DriverError>)] {
+        &self.results
+    }
+}
+
 // ── Driver Trait ────────────────────────────────────────────
 
 /// Driver lifecycle and I/O callbacks.
@@ -270,13 +364,18 @@ pub trait Driver: Send + Sync {
 
     /// Read current values for a batch of points.
     ///
-    /// Returns `(point_id, result)` pairs. Failed reads return `DriverError`.
-    fn sync_cur(&mut self, points: &[DriverPointRef]) -> Vec<(u32, Result<f64, DriverError>)>;
+    /// Drivers populate the provided [`SyncContext`] by calling
+    /// `ctx.update_cur_ok(id, value)` or `ctx.update_cur_err(id, err)` for
+    /// each point. The wrapper drains the context into the
+    /// `(point_id, Result<f64, _>)` vector the actor expects.
+    fn sync_cur(&mut self, points: &[DriverPointRef], ctx: &mut SyncContext);
 
     /// Write values to points.
     ///
-    /// Returns `(point_id, result)` pairs. Failed writes return `DriverError`.
-    fn write(&mut self, writes: &[(u32, f64)]) -> Vec<(u32, Result<(), DriverError>)>;
+    /// Drivers populate the provided [`WriteContext`] by calling
+    /// `ctx.update_write_ok(id)` or `ctx.update_write_err(id, err)` for
+    /// each point.
+    fn write(&mut self, writes: &[(u32, f64)], ctx: &mut WriteContext);
 
     /// How this driver wants to be polled.
     fn poll_mode(&self) -> PollMode {
@@ -394,7 +493,9 @@ impl DriverManager {
         let mut results = Vec::new();
         for (driver_id, points) in point_map {
             if let Some(driver) = self.drivers.get_mut(driver_id) {
-                for (point_id, result) in driver.sync_cur(points) {
+                let mut ctx = SyncContext::with_capacity(points.len());
+                driver.sync_cur(points, &mut ctx);
+                for (point_id, result) in ctx.into_results() {
                     results.push((driver_id.clone(), point_id, result));
                 }
             }
@@ -416,7 +517,9 @@ impl DriverManager {
             .drivers
             .get_mut(driver_id)
             .ok_or_else(|| DriverError::ConfigFault(format!("driver '{driver_id}' not found")))?;
-        Ok(driver.write(writes))
+        let mut ctx = WriteContext::with_capacity(writes.len());
+        driver.write(writes, &mut ctx);
+        Ok(ctx.into_results())
     }
 
     /// List all registered driver IDs.
@@ -719,17 +822,21 @@ impl Driver for LocalIoDriver {
         Ok(grid)
     }
 
-    fn sync_cur(&mut self, points: &[DriverPointRef]) -> Vec<(u32, Result<f64, DriverError>)> {
+    fn sync_cur(&mut self, points: &[DriverPointRef], ctx: &mut SyncContext) {
         // The actual hardware reads are done by the engine's HAL.
         // This returns 0.0 as a placeholder — the engine poll loop
         // is the real source of truth for local I/O values.
-        points.iter().map(|p| (p.point_id, Ok(0.0))).collect()
+        for p in points {
+            ctx.update_cur_ok(p.point_id, 0.0);
+        }
     }
 
-    fn write(&mut self, writes: &[(u32, f64)]) -> Vec<(u32, Result<(), DriverError>)> {
+    fn write(&mut self, writes: &[(u32, f64)], ctx: &mut WriteContext) {
         // Writes for local I/O go through the engine's existing write path.
         // This acknowledges the write structurally.
-        writes.iter().map(|(id, _val)| (*id, Ok(()))).collect()
+        for (id, _val) in writes {
+            ctx.update_write_ok(*id);
+        }
     }
 }
 
@@ -916,6 +1023,64 @@ async fn driver_write_async(
 mod tests {
     use super::*;
 
+    // ── SyncContext / WriteContext tests (Phase 12.0C) ────
+
+    #[test]
+    fn sync_context_collects_ok_and_err() {
+        let mut ctx = SyncContext::new();
+        ctx.update_cur_ok(1, 1.5);
+        ctx.update_cur_err(2, DriverError::CommFault("x".into()));
+        ctx.update_cur_ok(3, 3.5);
+
+        let results = ctx.into_results();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].0, 1);
+        assert!((results[0].1.as_ref().unwrap() - 1.5).abs() < f64::EPSILON);
+        assert_eq!(results[1].0, 2);
+        assert!(matches!(results[1].1, Err(DriverError::CommFault(_))));
+        assert_eq!(results[2].0, 3);
+        assert!(results[2].1.is_ok());
+    }
+
+    #[test]
+    fn sync_context_with_capacity_starts_empty() {
+        let ctx = SyncContext::with_capacity(16);
+        assert!(ctx.results().is_empty());
+    }
+
+    #[test]
+    fn write_context_collects_ok_and_err() {
+        let mut ctx = WriteContext::new();
+        ctx.update_write_ok(10);
+        ctx.update_write_err(20, DriverError::ConfigFault("bad".into()));
+
+        let results = ctx.into_results();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, 10);
+        assert!(results[0].1.is_ok());
+        assert_eq!(results[1].0, 20);
+        assert!(matches!(results[1].1, Err(DriverError::ConfigFault(_))));
+    }
+
+    #[test]
+    fn write_context_with_capacity_starts_empty() {
+        let ctx = WriteContext::with_capacity(4);
+        assert!(ctx.results().is_empty());
+    }
+
+    #[test]
+    fn sync_context_preserves_insertion_order() {
+        let mut ctx = SyncContext::new();
+        for i in (0..5u32).rev() {
+            ctx.update_cur_ok(i, f64::from(i));
+        }
+        let results = ctx.into_results();
+        assert_eq!(
+            results.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![4, 3, 2, 1, 0]
+        );
+    }
+
     // ── DriverManager tests ────────────────────────────────
 
     #[test]
@@ -1092,7 +1257,9 @@ mod tests {
             point_id: 100,
             address: "AIN0".into(),
         }];
-        let results = driver.sync_cur(&refs);
+        let mut ctx = SyncContext::new();
+        driver.sync_cur(&refs, &mut ctx);
+        let results = ctx.into_results();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, 100);
         assert!(results[0].1.is_ok());
@@ -1103,7 +1270,9 @@ mod tests {
         let mut driver = LocalIoDriver::new("write-test");
         driver.open().unwrap();
 
-        let results = driver.write(&[(100, 72.0)]);
+        let mut ctx = WriteContext::new();
+        driver.write(&[(100, 72.0)], &mut ctx);
+        let results = ctx.into_results();
         assert_eq!(results.len(), 1);
         assert!(results[0].1.is_ok());
     }

@@ -1,7 +1,7 @@
 # Implementation Plan: Driver Framework v2 (Phase 12)
 
-**Date:** 2026-04-17 (created), 2026-04-17 (expanded with 12.0B–G)
-**Baseline:** v2.8.1 (12.0A shipped)
+**Date:** 2026-04-17 (created), 2026-04-17 (expanded with 12.0B–G, 12.0C shipped)
+**Baseline:** v2.8.3 (12.0A + 12.0B + 12.0C shipped)
 **Reference:** [research/18_SEDONA_DRIVER_FRAMEWORK_V2.md](../research/18_SEDONA_DRIVER_FRAMEWORK_V2.md) — full Haxall-inspired vision
 
 ---
@@ -68,7 +68,7 @@ Generic `DriverLoader` trait + `load_drivers<L>` helper collapses ~417 lines of 
 ---
 
 ### 12.0C — `SyncContext` / `WriteContext` callback refactor
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ COMPLETE (2026-04-17, v2.8.3)
 
 **Goal:** replace the direct-return model (`sync_cur` returns `Vec<(u32, Result<f64>)>`) with the research doc's callback model where drivers call `ctx.update_cur_ok(id, value)` / `ctx.update_cur_err(id, err)`. Purely cosmetic — no behavioral change.
 
@@ -195,4 +195,7 @@ Total: ~4 sessions for 12.0B + 12.0C + 12.0D + 12.0G.
 | Phase | Commit | Date | Version |
 |---|---|---|---|
 | 12.0A | (Phase 12.0A commit) | 2026-04-17 | 2.8.1 |
-| 12.0B | (pending commit) | 2026-04-17 | 2.8.2 |
+| 12.0B | (Phase 12.0B commit) | 2026-04-17 | 2.8.2 |
+| 12.0C | (pending commit)     | 2026-04-17 | 2.8.3 |
+
+**12.0C summary (2026-04-17, v2.8.3):** Added `SyncContext` and `WriteContext` types to `drivers/mod.rs` with `update_cur_ok/err` and `update_write_ok/err` methods. Changed `Driver` and `AsyncDriver` trait `sync_cur`/`write` signatures to take `&mut SyncContext`/`&mut WriteContext` instead of returning a `Vec`. `AnyDriver::sync_cur` and `AnyDriver::write` (the call points from the actor and the REST layer) still return the `Vec<(u32, Result<_>)>` shape — they construct a fresh context per call and drain it — so callers are untouched. Four drivers migrated: `LocalIoDriver`, `ModbusDriver`, `BacnetDriver`, `MqttDriver`. All mocks in tests updated. Two `#[cfg(test)]` inherent helpers (`sync_cur_vec` / `write_vec`) added on `BacnetDriver` and `MqttDriver` to keep existing test assertions concise. Net diff: +5 unit tests covering ctx behavior (insertion order, Ok/Err capture, `with_capacity`). 2660 tests pass, 0 clippy warnings in the drivers module.

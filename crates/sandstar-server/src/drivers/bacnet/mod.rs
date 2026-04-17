@@ -29,6 +29,7 @@ use tokio::net::UdpSocket;
 use super::async_driver::AsyncDriver;
 use super::{
     DriverError, DriverMeta, DriverPointRef, DriverStatus, LearnGrid, LearnPoint, PollMode,
+    SyncContext, WriteContext,
 };
 
 // Re-export DeviceRegistry for use in tests and Phase B3.
@@ -1379,10 +1380,7 @@ impl AsyncDriver for BacnetDriver {
         Ok(grid)
     }
 
-    async fn sync_cur(
-        &mut self,
-        points: &[DriverPointRef],
-    ) -> Vec<(u32, Result<f64, DriverError>)> {
+    async fn sync_cur(&mut self, points: &[DriverPointRef], ctx: &mut SyncContext) {
         use std::collections::HashMap;
 
         // Renew any COV subscriptions due for refresh before reading points.
@@ -1500,10 +1498,15 @@ impl AsyncDriver for BacnetDriver {
             }
         }
 
-        results
+        for (pid, res) in results {
+            match res {
+                Ok(v) => ctx.update_cur_ok(pid, v),
+                Err(e) => ctx.update_cur_err(pid, e),
+            }
+        }
     }
 
-    async fn write(&mut self, writes: &[(u32, f64)]) -> Vec<(u32, Result<(), DriverError>)> {
+    async fn write(&mut self, writes: &[(u32, f64)], ctx: &mut WriteContext) {
         let mut results = Vec::with_capacity(writes.len());
 
         for &(point_id, val) in writes {
@@ -1570,7 +1573,12 @@ impl AsyncDriver for BacnetDriver {
             results.push((point_id, result));
         }
 
-        results
+        for (pid, res) in results {
+            match res {
+                Ok(()) => ctx.update_write_ok(pid),
+                Err(e) => ctx.update_write_err(pid, e),
+            }
+        }
     }
 
     fn poll_mode(&self) -> PollMode {
@@ -1714,6 +1722,32 @@ impl AsyncDriver for BacnetDriver {
     }
 }
 
+// ── Test-only helpers ──────────────────────────────────────
+
+#[cfg(test)]
+impl BacnetDriver {
+    /// Test helper: call `sync_cur` and collect results as a Vec for the
+    /// pre-Phase-12.0C return-tuple style used throughout existing tests.
+    async fn sync_cur_vec(
+        &mut self,
+        points: &[DriverPointRef],
+    ) -> Vec<(u32, Result<f64, DriverError>)> {
+        let mut ctx = SyncContext::new();
+        <Self as AsyncDriver>::sync_cur(self, points, &mut ctx).await;
+        ctx.into_results()
+    }
+
+    /// Test helper: call `write` and collect results as a Vec.
+    async fn write_vec(
+        &mut self,
+        writes: &[(u32, f64)],
+    ) -> Vec<(u32, Result<(), DriverError>)> {
+        let mut ctx = WriteContext::new();
+        <Self as AsyncDriver>::write(self, writes, &mut ctx).await;
+        ctx.into_results()
+    }
+}
+
 // ── Environment config loader ──────────────────────────────
 
 /// Parse BACnet driver configs from `SANDSTAR_BACNET_CONFIGS` env var.
@@ -1769,8 +1803,12 @@ mod tests {
     #[tokio::test]
     async fn bacnet_sync_and_write_empty() {
         let mut d = BacnetDriver::new("bac-4", "255.255.255.255", DEFAULT_BACNET_PORT);
-        assert!(d.sync_cur(&[]).await.is_empty());
-        assert!(d.write(&[]).await.is_empty());
+        let mut sctx = SyncContext::new();
+        d.sync_cur(&[], &mut sctx).await;
+        assert!(sctx.results().is_empty());
+        let mut wctx = WriteContext::new();
+        d.write(&[], &mut wctx).await;
+        assert!(wctx.results().is_empty());
     }
 
     // ── New structural tests ────────────────────────────────
@@ -1946,7 +1984,7 @@ mod sync_cur_unit_tests {
     #[tokio::test]
     async fn sync_cur_empty_points_returns_empty() {
         let mut d = make_driver();
-        let result = d.sync_cur(&[]).await;
+        let result = d.sync_cur_vec(&[]).await;
         assert!(result.is_empty(), "empty slice must produce empty result");
     }
 
@@ -1957,7 +1995,7 @@ mod sync_cur_unit_tests {
         let mut d = make_driver();
         // No objects registered — any point_id must yield ConfigFault.
         let pts = [make_point(9999)];
-        let result = d.sync_cur(&pts).await;
+        let result = d.sync_cur_vec(&pts).await;
         assert_eq!(result.len(), 1);
         let (id, err) = &result[0];
         assert_eq!(*id, 9999);
@@ -1975,7 +2013,7 @@ mod sync_cur_unit_tests {
         // Object is registered but its device is NOT in the registry.
         insert_object(&mut d, 100, 42);
         let pts = [make_point(100)];
-        let result = d.sync_cur(&pts).await;
+        let result = d.sync_cur_vec(&pts).await;
         assert_eq!(result.len(), 1);
         let (id, err) = &result[0];
         assert_eq!(*id, 100);
@@ -2114,7 +2152,7 @@ mod sync_cur_unit_tests {
             point_id: 200,
             address: String::new(),
         }];
-        let results = driver.sync_cur(&pts).await;
+        let results = driver.sync_cur_vec(&pts).await;
         assert_eq!(results.len(), 1);
         let (id, val) = &results[0];
         assert_eq!(*id, 200);
@@ -2203,7 +2241,7 @@ mod rpm_sync_tests {
         let mut d = make_driver();
         insert_object(&mut d, 500, 42, 1);
         let pts = [make_point(500)];
-        let result = d.sync_cur(&pts).await;
+        let result = d.sync_cur_vec(&pts).await;
         assert_eq!(result.len(), 1);
         let (id, err) = &result[0];
         assert_eq!(*id, 500);
@@ -2226,7 +2264,7 @@ mod rpm_sync_tests {
         insert_object(&mut d, 603, 20, 5);
 
         let pts = [make_point(601), make_point(602), make_point(603)];
-        let result = d.sync_cur(&pts).await;
+        let result = d.sync_cur_vec(&pts).await;
         assert_eq!(result.len(), 3);
         let ids: Vec<u32> = result.iter().map(|(id, _)| *id).collect();
         assert!(ids.contains(&601));
@@ -2246,7 +2284,7 @@ mod rpm_sync_tests {
     async fn sync_cur_unknown_point_still_returns_config_fault() {
         let mut d = make_driver();
         let pts = [make_point(9001)];
-        let result = d.sync_cur(&pts).await;
+        let result = d.sync_cur_vec(&pts).await;
         assert_eq!(result.len(), 1);
         let (id, err) = &result[0];
         assert_eq!(*id, 9001);
@@ -2266,7 +2304,7 @@ mod rpm_sync_tests {
         insert_object(&mut d, 702, 42, 2);
 
         let pts = [make_point(701), make_point(702)];
-        let result = d.sync_cur(&pts).await;
+        let result = d.sync_cur_vec(&pts).await;
         assert_eq!(result.len(), 2);
         for (_, r) in &result {
             assert!(
@@ -2478,7 +2516,7 @@ mod rpm_sync_tests {
         insert_object(&mut driver, 802, 42, 1);
 
         let pts = [make_point(801), make_point(802)];
-        let results = driver.sync_cur(&pts).await;
+        let results = driver.sync_cur_vec(&pts).await;
         assert_eq!(results.len(), 2);
         // Build a map so we don't depend on iteration order (HashMap).
         let map: std::collections::HashMap<u32, &Result<f64, DriverError>> =
@@ -3232,7 +3270,7 @@ mod write_tests {
     #[tokio::test]
     async fn write_empty_returns_empty() {
         let mut d = make_driver();
-        let result = d.write(&[]).await;
+        let result = d.write_vec(&[]).await;
         assert!(result.is_empty());
     }
 
@@ -3241,7 +3279,7 @@ mod write_tests {
     #[tokio::test]
     async fn write_unknown_point_returns_config_fault() {
         let mut d = make_driver();
-        let result = d.write(&[(999, 1.0)]).await;
+        let result = d.write_vec(&[(999, 1.0)]).await;
         assert_eq!(result.len(), 1);
         let (id, err) = &result[0];
         assert_eq!(*id, 999);
@@ -3268,7 +3306,7 @@ mod write_tests {
             },
         );
         // Note: registry is empty — device 42 is unknown.
-        let result = d.write(&[(100, 50.0)]).await;
+        let result = d.write_vec(&[(100, 50.0)]).await;
         assert_eq!(result.len(), 1);
         let (id, err) = &result[0];
         assert_eq!(*id, 100);
@@ -3301,7 +3339,7 @@ mod write_tests {
             vendor_id: 8,
             segmentation: 3,
         });
-        let result = d.write(&[(200, 1.0)]).await;
+        let result = d.write_vec(&[(200, 1.0)]).await;
         assert_eq!(result.len(), 1);
         let (_id, err) = &result[0];
         match err {

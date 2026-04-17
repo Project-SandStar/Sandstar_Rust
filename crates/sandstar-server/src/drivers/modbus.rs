@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use super::async_driver::AsyncDriver;
 use super::{
     DriverError, DriverMeta, DriverPointRef, DriverStatus, LearnGrid, LearnPoint, PollMode,
+    SyncContext, WriteContext,
 };
 
 // ── Modbus TCP Frame ───────────────────────────────────────
@@ -680,35 +681,26 @@ impl AsyncDriver for ModbusDriver {
         Ok(points)
     }
 
-    async fn sync_cur(
-        &mut self,
-        points: &[DriverPointRef],
-    ) -> Vec<(u32, Result<f64, DriverError>)> {
+    async fn sync_cur(&mut self, points: &[DriverPointRef], ctx: &mut SyncContext) {
         if !self.connected {
             // All reads fail when not connected.
-            return points
-                .iter()
-                .map(|p| {
-                    (
-                        p.point_id,
-                        Err(DriverError::CommFault("not connected".into())),
-                    )
-                })
-                .collect();
+            for p in points {
+                ctx.update_cur_err(p.point_id, DriverError::CommFault("not connected".into()));
+            }
+            return;
         }
 
-        let mut results = Vec::with_capacity(points.len());
         for pt in points {
             let reg = match self.register_map.get(&pt.point_id) {
                 Some(r) => r.clone(),
                 None => {
-                    results.push((
+                    ctx.update_cur_err(
                         pt.point_id,
-                        Err(DriverError::ConfigFault(format!(
+                        DriverError::ConfigFault(format!(
                             "no register mapping for point {}",
                             pt.point_id
-                        ))),
-                    ));
+                        )),
+                    );
                     continue;
                 }
             };
@@ -730,49 +722,47 @@ impl AsyncDriver for ModbusDriver {
                             .parse_register_response()
                             .map(|regs| reg.raw_to_eng(regs.first().copied().unwrap_or(0) as f64)),
                     };
-                    results.push((pt.point_id, value));
+                    match value {
+                        Ok(v) => ctx.update_cur_ok(pt.point_id, v),
+                        Err(e) => ctx.update_cur_err(pt.point_id, e),
+                    }
                 }
-                Err(e) => {
-                    results.push((pt.point_id, Err(e)));
-                }
+                Err(e) => ctx.update_cur_err(pt.point_id, e),
             }
         }
-        results
     }
 
-    async fn write(&mut self, writes: &[(u32, f64)]) -> Vec<(u32, Result<(), DriverError>)> {
+    async fn write(&mut self, writes: &[(u32, f64)], ctx: &mut WriteContext) {
         if !self.connected {
-            return writes
-                .iter()
-                .map(|(id, _)| (*id, Err(DriverError::CommFault("not connected".into()))))
-                .collect();
+            for (id, _) in writes {
+                ctx.update_write_err(*id, DriverError::CommFault("not connected".into()));
+            }
+            return;
         }
 
-        let mut results = Vec::with_capacity(writes.len());
         for &(point_id, value) in writes {
             let reg = match self.register_map.get(&point_id) {
                 Some(r) => r.clone(),
                 None => {
-                    results.push((
+                    ctx.update_write_err(
                         point_id,
-                        Err(DriverError::ConfigFault(format!(
+                        DriverError::ConfigFault(format!(
                             "no register mapping for point {}",
                             point_id
-                        ))),
-                    ));
+                        )),
+                    );
                     continue;
                 }
             };
 
             match self.build_write_frame(&reg, value) {
                 Ok(frame) => match self.transact(&frame) {
-                    Ok(_resp) => results.push((point_id, Ok(()))),
-                    Err(e) => results.push((point_id, Err(e))),
+                    Ok(_resp) => ctx.update_write_ok(point_id),
+                    Err(e) => ctx.update_write_err(point_id, e),
                 },
-                Err(e) => results.push((point_id, Err(e))),
+                Err(e) => ctx.update_write_err(point_id, e),
             }
         }
-        results
     }
 
     fn poll_mode(&self) -> PollMode {
@@ -1149,7 +1139,9 @@ mod tests {
             point_id: 100,
             address: "HR:0".into(),
         }];
-        let results = d.sync_cur(&refs).await;
+        let mut ctx = SyncContext::new();
+        d.sync_cur(&refs, &mut ctx).await;
+        let results = ctx.into_results();
         assert_eq!(results.len(), 1);
         assert!(results[0].1.is_err());
         assert!(results[0]
@@ -1169,7 +1161,9 @@ mod tests {
             point_id: 999,
             address: "HR:0".into(),
         }];
-        let results = d.sync_cur(&refs).await;
+        let mut ctx = SyncContext::new();
+        d.sync_cur(&refs, &mut ctx).await;
+        let results = ctx.into_results();
         assert_eq!(results.len(), 1);
         assert!(results[0].1.is_err());
         assert!(results[0]
@@ -1185,7 +1179,9 @@ mod tests {
         let mut d = ModbusDriver::new("mb-8", "x", 502, 1);
         d.add_register(100, ModbusRegister::new(0, RegisterType::HoldingRegister));
 
-        let results = d.write(&[(100, 42.0)]).await;
+        let mut ctx = WriteContext::new();
+        d.write(&[(100, 42.0)], &mut ctx).await;
+        let results = ctx.into_results();
         assert_eq!(results.len(), 1);
         assert!(results[0].1.is_err());
         assert!(results[0]
@@ -1275,14 +1271,16 @@ mod tests {
     #[tokio::test]
     async fn modbus_sync_cur_empty() {
         let mut d = ModbusDriver::new("mb-15", "x", 502, 1);
-        let results = d.sync_cur(&[]).await;
-        assert!(results.is_empty());
+        let mut ctx = SyncContext::new();
+        d.sync_cur(&[], &mut ctx).await;
+        assert!(ctx.results().is_empty());
     }
 
     #[tokio::test]
     async fn modbus_write_empty() {
         let mut d = ModbusDriver::new("mb-16", "x", 502, 1);
-        let results = d.write(&[]).await;
-        assert!(results.is_empty());
+        let mut ctx = WriteContext::new();
+        d.write(&[], &mut ctx).await;
+        assert!(ctx.results().is_empty());
     }
 }

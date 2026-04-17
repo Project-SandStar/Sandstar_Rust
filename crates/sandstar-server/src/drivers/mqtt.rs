@@ -23,6 +23,7 @@ use tokio::task::JoinHandle;
 use super::async_driver::AsyncDriver;
 use super::{
     DriverError, DriverMeta, DriverPointRef, DriverStatus, LearnGrid, LearnPoint, PollMode,
+    SyncContext, WriteContext,
 };
 
 // ── Config ─────────────────────────────────────────────────
@@ -504,22 +505,18 @@ impl AsyncDriver for MqttDriver {
         Ok(grid)
     }
 
-    async fn sync_cur(
-        &mut self,
-        points: &[DriverPointRef],
-    ) -> Vec<(u32, Result<f64, DriverError>)> {
-        let mut results = Vec::with_capacity(points.len());
+    async fn sync_cur(&mut self, points: &[DriverPointRef], ctx: &mut SyncContext) {
         for point in points {
             let obj = match self.objects.get(&point.point_id) {
                 Some(o) => o,
                 None => {
-                    results.push((
+                    ctx.update_cur_err(
                         point.point_id,
-                        Err(DriverError::ConfigFault(format!(
+                        DriverError::ConfigFault(format!(
                             "no mqtt object for point {}",
                             point.point_id
-                        ))),
-                    ));
+                        )),
+                    );
                     continue;
                 }
             };
@@ -527,10 +524,10 @@ impl AsyncDriver for MqttDriver {
             let topic = match obj.subscribe_topic.as_ref() {
                 Some(t) => t,
                 None => {
-                    results.push((
+                    ctx.update_cur_err(
                         point.point_id,
-                        Err(DriverError::ConfigFault("no subscribe_topic".into())),
-                    ));
+                        DriverError::ConfigFault("no subscribe_topic".into()),
+                    );
                     continue;
                 }
             };
@@ -539,10 +536,10 @@ impl AsyncDriver for MqttDriver {
                 let guard = match self.cache.lock() {
                     Ok(g) => g,
                     Err(_) => {
-                        results.push((
+                        ctx.update_cur_err(
                             point.point_id,
-                            Err(DriverError::Internal("mqtt cache mutex poisoned".into())),
-                        ));
+                            DriverError::Internal("mqtt cache mutex poisoned".into()),
+                        );
                         continue;
                     }
                 };
@@ -550,30 +547,27 @@ impl AsyncDriver for MqttDriver {
             };
 
             match cached {
-                Some(entry) => results.push((point.point_id, Ok(entry.value))),
-                None => results.push((
+                Some(entry) => ctx.update_cur_ok(point.point_id, entry.value),
+                None => ctx.update_cur_err(
                     point.point_id,
-                    Err(DriverError::CommFault("no cached value or stale".into())),
-                )),
+                    DriverError::CommFault("no cached value or stale".into()),
+                ),
             }
         }
-        results
     }
 
-    async fn write(&mut self, writes: &[(u32, f64)]) -> Vec<(u32, Result<(), DriverError>)> {
-        let mut results = Vec::with_capacity(writes.len());
-
+    async fn write(&mut self, writes: &[(u32, f64)], ctx: &mut WriteContext) {
         for &(point_id, value) in writes {
             // 1. Look up per-point config.
             let obj = match self.objects.get(&point_id).cloned() {
                 Some(o) => o,
                 None => {
-                    results.push((
+                    ctx.update_write_err(
                         point_id,
-                        Err(DriverError::ConfigFault(format!(
+                        DriverError::ConfigFault(format!(
                             "no MQTT object configured for point {point_id}"
-                        ))),
-                    ));
+                        )),
+                    );
                     continue;
                 }
             };
@@ -582,12 +576,12 @@ impl AsyncDriver for MqttDriver {
             let topic = match obj.publish_topic.as_ref() {
                 Some(t) => t.clone(),
                 None => {
-                    results.push((
+                    ctx.update_write_err(
                         point_id,
-                        Err(DriverError::ConfigFault(format!(
+                        DriverError::ConfigFault(format!(
                             "no publish_topic for point {point_id}"
-                        ))),
-                    ));
+                        )),
+                    );
                     continue;
                 }
             };
@@ -606,23 +600,49 @@ impl AsyncDriver for MqttDriver {
             let client = match self.client.as_ref() {
                 Some(c) => c,
                 None => {
-                    results.push((
+                    ctx.update_write_err(
                         point_id,
-                        Err(DriverError::CommFault("mqtt: not connected".into())),
-                    ));
+                        DriverError::CommFault("mqtt: not connected".into()),
+                    );
                     continue;
                 }
             };
 
             // 6. Publish (retain=false). Map errors to CommFault.
-            let result = client
+            match client
                 .publish(topic, qos, false, payload)
                 .await
-                .map_err(|e| DriverError::CommFault(format!("mqtt publish: {e}")));
-            results.push((point_id, result));
+                .map_err(|e| DriverError::CommFault(format!("mqtt publish: {e}")))
+            {
+                Ok(()) => ctx.update_write_ok(point_id),
+                Err(e) => ctx.update_write_err(point_id, e),
+            }
         }
+    }
+}
 
-        results
+// ── Test-only helpers ──────────────────────────────────────
+
+#[cfg(test)]
+impl MqttDriver {
+    /// Test helper: call `sync_cur` and collect results as a Vec.
+    async fn sync_cur_vec(
+        &mut self,
+        points: &[DriverPointRef],
+    ) -> Vec<(u32, Result<f64, DriverError>)> {
+        let mut ctx = SyncContext::new();
+        <Self as AsyncDriver>::sync_cur(self, points, &mut ctx).await;
+        ctx.into_results()
+    }
+
+    /// Test helper: call `write` and collect results as a Vec.
+    async fn write_vec(
+        &mut self,
+        writes: &[(u32, f64)],
+    ) -> Vec<(u32, Result<(), DriverError>)> {
+        let mut ctx = WriteContext::new();
+        <Self as AsyncDriver>::write(self, writes, &mut ctx).await;
+        ctx.into_results()
     }
 }
 
@@ -791,7 +811,7 @@ mod tests {
     #[tokio::test]
     async fn sync_empty_points_returns_empty() {
         let mut d = MqttDriver::new("mq", "h", 1883);
-        assert!(d.sync_cur(&[]).await.is_empty());
+        assert!(d.sync_cur_vec(&[]).await.is_empty());
     }
 
     #[test]
@@ -892,7 +912,7 @@ mod tests {
             point_id: 9999,
             address: "9999".into(),
         }];
-        let results = d.sync_cur(&refs).await;
+        let results = d.sync_cur_vec(&refs).await;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, 9999);
         assert!(matches!(results[0].1, Err(DriverError::ConfigFault(_))));
@@ -922,7 +942,7 @@ mod tests {
             point_id: 10,
             address: "10".into(),
         }];
-        let results = d.sync_cur(&refs).await;
+        let results = d.sync_cur_vec(&refs).await;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, 10);
         assert!(matches!(results[0].1, Err(DriverError::ConfigFault(_))));
@@ -946,7 +966,7 @@ mod tests {
             point_id: 11,
             address: "11".into(),
         }];
-        let results = d.sync_cur(&refs).await;
+        let results = d.sync_cur_vec(&refs).await;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, 11);
         assert!(matches!(results[0].1, Err(DriverError::CommFault(_))));
@@ -973,7 +993,7 @@ mod tests {
             point_id: 12,
             address: "12".into(),
         }];
-        let results = d.sync_cur(&refs).await;
+        let results = d.sync_cur_vec(&refs).await;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, 12);
         assert_eq!(results[0].1.as_ref().unwrap(), &73.25);
@@ -1013,13 +1033,13 @@ mod tests {
     #[tokio::test]
     async fn write_empty_returns_empty() {
         let mut d = MqttDriver::new("mq", "h", 1883);
-        assert!(d.write(&[]).await.is_empty());
+        assert!(d.write_vec(&[]).await.is_empty());
     }
 
     #[tokio::test]
     async fn write_unknown_point_returns_config_fault() {
         let mut d = MqttDriver::new("mq", "h", 1883);
-        let results = d.write(&[(999, 1.0)]).await;
+        let results = d.write_vec(&[(999, 1.0)]).await;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, 999);
         match &results[0].1 {
@@ -1053,7 +1073,7 @@ mod tests {
             }],
         };
         let mut d = MqttDriver::from_config(config);
-        let results = d.write(&[(20, 1.0)]).await;
+        let results = d.write_vec(&[(20, 1.0)]).await;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, 20);
         match &results[0].1 {
@@ -1089,7 +1109,7 @@ mod tests {
         let mut d = MqttDriver::from_config(config);
         // No open() called — client should be None.
         assert!(d.client.is_none());
-        let results = d.write(&[(30, 7.0)]).await;
+        let results = d.write_vec(&[(30, 7.0)]).await;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, 30);
         match &results[0].1 {
@@ -1105,7 +1125,7 @@ mod tests {
         // No objects configured — every write errors with ConfigFault —
         // but the point_ids must appear in the returned Vec in input order.
         let mut d = MqttDriver::new("mq", "h", 1883);
-        let results = d.write(&[(1, 1.0), (2, 2.0), (3, 3.0)]).await;
+        let results = d.write_vec(&[(1, 1.0), (2, 2.0), (3, 3.0)]).await;
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].0, 1);
         assert_eq!(results[1].0, 2);
