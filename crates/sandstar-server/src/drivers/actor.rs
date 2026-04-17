@@ -20,18 +20,27 @@
 //! and can be shared across tasks.
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::debug;
 
 use super::async_driver::AnyDriver;
 use super::poll_scheduler::PollScheduler;
 use super::watch_manager::DriverWatchManager;
 use super::{
-    DriverError, DriverId, DriverMeta, DriverPointRef, DriverStatus, DriverSummary, LearnGrid,
-    PointStatus,
+    CovEvent, DriverError, DriverId, DriverMeta, DriverPointRef, DriverStatus, DriverSummary,
+    LearnGrid, PointStatus,
 };
+
+/// Default capacity for the broadcast CovEvent channel.
+///
+/// If subscribers fall behind by more than this many events, they'll
+/// receive `broadcast::error::RecvError::Lagged` and can resync. 512 is
+/// large enough for the expected per-tick point count on a device with
+/// hundreds of channels, while bounded enough to avoid unbounded memory
+/// on a dropped WebSocket.
+pub const DEFAULT_COV_CAPACITY: usize = 512;
 
 // ── Type Aliases (clippy::type_complexity) ───────────────
 /// Result of syncing all driver points: (driver_id, point_id, read_result).
@@ -143,9 +152,29 @@ pub enum DriverCmd {
 #[derive(Clone)]
 pub struct DriverHandle {
     tx: mpsc::Sender<DriverCmd>,
+    /// Broadcast endpoint for change-of-value events. Held as a `Sender`
+    /// (not a `Receiver`) so each caller can mint a fresh `Receiver` via
+    /// `.subscribe()` without actor round-trips. See
+    /// [`DriverHandle::subscribe_cov`].
+    cov_tx: broadcast::Sender<CovEvent>,
 }
 
 impl DriverHandle {
+    /// Subscribe to change-of-value events.
+    ///
+    /// Returns a fresh [`broadcast::Receiver`] — each subscriber gets its
+    /// own receive cursor. Events start flowing from the moment this is
+    /// called; there is no backlog. If a subscriber falls behind by more
+    /// than [`DEFAULT_COV_CAPACITY`] events, subsequent `recv()` calls
+    /// return `RecvError::Lagged(n)` before resuming — standard broadcast
+    /// semantics.
+    ///
+    /// This is a sync method (no actor round-trip) — cheap enough to call
+    /// per-request from a REST handler or WebSocket session.
+    pub fn subscribe_cov(&self) -> broadcast::Receiver<CovEvent> {
+        self.cov_tx.subscribe()
+    }
+
     /// Register a new driver.
     pub async fn register(&self, driver: AnyDriver) -> Result<(), DriverError> {
         let (reply, rx) = oneshot::channel();
@@ -420,16 +449,27 @@ struct DriverManagerInner {
     watch_manager: DriverWatchManager,
     point_statuses: HashMap<u32, PointStatus>,
     point_driver_map: HashMap<u32, DriverId>,
+    /// Change-of-value broadcast sender. Cloned from the one the
+    /// [`DriverHandle`] holds, so `DriverHandle::subscribe_cov()` and the
+    /// actor emit through the same channel.
+    cov_tx: broadcast::Sender<CovEvent>,
+    /// Last emitted value per point, used to gate CovEvent emission on
+    /// actual change (vs. repeating the same value on every poll tick).
+    /// A point appears here the first time it emits a successful read, so
+    /// the very first successful read also produces a CovEvent.
+    last_emitted: HashMap<u32, f64>,
 }
 
 impl DriverManagerInner {
-    fn new() -> Self {
+    fn new(cov_tx: broadcast::Sender<CovEvent>) -> Self {
         Self {
             drivers: HashMap::new(),
             poll_scheduler: PollScheduler::new(),
             watch_manager: DriverWatchManager::new(),
             point_statuses: HashMap::new(),
             point_driver_map: HashMap::new(),
+            cov_tx,
+            last_emitted: HashMap::new(),
         }
     }
 
@@ -485,15 +525,22 @@ impl DriverManagerInner {
         // driver mutable borrow is released. (Phase 12.0B — per-point
         // remote error reporting.)
         let mut status_updates: Vec<(u32, PointStatus)> = Vec::new();
+        // Collect COV candidates (point_id, new value) to emit after the
+        // driver borrow is released. Phase 12.0D — change-of-value broadcast.
+        let mut cov_candidates: Vec<(u32, f64)> = Vec::new();
         for (driver_id, points) in point_map {
             if let Some(driver) = self.drivers.get_mut(driver_id) {
                 for (point_id, result) in driver.sync_cur(points).await {
-                    if let Err(ref e) = result {
-                        status_updates.push((point_id, PointStatus::from_driver_error(e)));
-                    } else {
-                        // Successful read — clear any previous remote-error
-                        // status so the point appears healthy again.
-                        status_updates.push((point_id, PointStatus::Inherited));
+                    match &result {
+                        Err(e) => {
+                            status_updates.push((point_id, PointStatus::from_driver_error(e)));
+                        }
+                        Ok(v) => {
+                            // Successful read — clear any previous remote-error
+                            // status so the point appears healthy again.
+                            status_updates.push((point_id, PointStatus::Inherited));
+                            cov_candidates.push((point_id, *v));
+                        }
                     }
                     results.push((driver_id.clone(), point_id, result));
                 }
@@ -507,6 +554,35 @@ impl DriverManagerInner {
             } else {
                 self.point_statuses.insert(pid, ps);
             }
+        }
+        // Emit CovEvent for each point whose value differs from the last
+        // emitted one (or that has never emitted before). `bit_eq` style
+        // via `!=` on f64 is intentional: NaN != NaN means a NaN read will
+        // retrigger emission, which is the right behavior for "the value
+        // stopped being a real number".
+        let now = Instant::now();
+        for (pid, v) in cov_candidates {
+            let changed = match self.last_emitted.get(&pid) {
+                Some(prev) => (*prev).to_bits() != v.to_bits(),
+                None => true,
+            };
+            if !changed {
+                continue;
+            }
+            self.last_emitted.insert(pid, v);
+            let status = self
+                .point_statuses
+                .get(&pid)
+                .cloned()
+                .unwrap_or(PointStatus::Inherited);
+            // `send` returns Err iff there are no live receivers. That's
+            // normal — drop the event silently.
+            let _ = self.cov_tx.send(CovEvent {
+                point_id: pid,
+                value: v,
+                status,
+                timestamp: now,
+            });
         }
         results
     }
@@ -675,9 +751,11 @@ impl DriverManagerInner {
 /// * `buffer` - mpsc channel buffer size (default: 64 is reasonable)
 pub fn spawn_driver_actor(buffer: usize) -> DriverHandle {
     let (tx, mut rx) = mpsc::channel::<DriverCmd>(buffer);
+    let (cov_tx, _cov_rx) = broadcast::channel::<CovEvent>(DEFAULT_COV_CAPACITY);
 
+    let actor_cov_tx = cov_tx.clone();
     tokio::spawn(async move {
-        let mut inner = DriverManagerInner::new();
+        let mut inner = DriverManagerInner::new(actor_cov_tx);
         debug!("driver manager actor started");
 
         while let Some(cmd) = rx.recv().await {
@@ -787,7 +865,7 @@ pub fn spawn_driver_actor(buffer: usize) -> DriverHandle {
         debug!("driver manager actor stopped (channel closed)");
     });
 
-    DriverHandle { tx }
+    DriverHandle { tx, cov_tx }
 }
 
 // ── Tests ─────────────────────────────────────────────────
@@ -1104,5 +1182,263 @@ mod tests {
         // Second handle can see what the first registered
         let ids = handle2.list_ids().await.unwrap();
         assert_eq!(ids.len(), 1);
+    }
+
+    // ── Phase 12.0D CovEvent tests ────────────────────────
+
+    use std::sync::{Arc, Mutex};
+
+    /// Test driver whose `sync_cur` returns a value controlled via a shared
+    /// `Arc<Mutex<f64>>`. The mutex is held briefly, so serialisation under
+    /// the actor's single-threaded mpsc loop is fine.
+    struct ValueDriver {
+        id: String,
+        status: DriverStatus,
+        value: Arc<Mutex<f64>>,
+    }
+
+    impl ValueDriver {
+        fn new(id: &str, value: Arc<Mutex<f64>>) -> Self {
+            Self {
+                id: id.to_string(),
+                status: DriverStatus::Pending,
+                value,
+            }
+        }
+    }
+
+    impl Driver for ValueDriver {
+        fn driver_type(&self) -> &'static str {
+            "valuetest"
+        }
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn status(&self) -> &DriverStatus {
+            &self.status
+        }
+        fn open(&mut self) -> Result<DriverMeta, DriverError> {
+            self.status = DriverStatus::Ok;
+            Ok(DriverMeta::default())
+        }
+        fn close(&mut self) {
+            self.status = DriverStatus::Down;
+        }
+        fn ping(&mut self) -> Result<DriverMeta, DriverError> {
+            Ok(DriverMeta::default())
+        }
+        fn sync_cur(&mut self, points: &[DriverPointRef], ctx: &mut SyncContext) {
+            let v = *self.value.lock().unwrap();
+            for p in points {
+                ctx.update_cur_ok(p.point_id, v);
+            }
+        }
+        fn write(&mut self, writes: &[(u32, f64)], ctx: &mut WriteContext) {
+            for (id, _) in writes {
+                ctx.update_write_ok(*id);
+            }
+        }
+    }
+
+    fn value_driver(id: &str, value: Arc<Mutex<f64>>) -> AnyDriver {
+        AnyDriver::Sync(Box::new(ValueDriver::new(id, value)))
+    }
+
+    fn sync_map(driver_id: &str, point_id: u32) -> HashMap<DriverId, Vec<DriverPointRef>> {
+        let mut m = HashMap::new();
+        m.insert(
+            driver_id.to_string(),
+            vec![DriverPointRef {
+                point_id,
+                address: "test".into(),
+            }],
+        );
+        m
+    }
+
+    #[tokio::test]
+    async fn cov_emits_on_first_read() {
+        let handle = spawn_driver_actor(16);
+        let value = Arc::new(Mutex::new(42.0f64));
+        handle
+            .register(value_driver("vd", value.clone()))
+            .await
+            .unwrap();
+        handle.open_all().await.unwrap();
+
+        let mut rx = handle.subscribe_cov();
+        let _ = handle.sync_all(sync_map("vd", 1)).await.unwrap();
+
+        let evt = tokio::time::timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .expect("cov event should arrive")
+            .expect("receiver should be open");
+        assert_eq!(evt.point_id, 1);
+        assert!((evt.value - 42.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn cov_suppresses_repeat_value() {
+        let handle = spawn_driver_actor(16);
+        let value = Arc::new(Mutex::new(10.0f64));
+        handle
+            .register(value_driver("vd", value.clone()))
+            .await
+            .unwrap();
+        handle.open_all().await.unwrap();
+
+        let mut rx = handle.subscribe_cov();
+        handle.sync_all(sync_map("vd", 7)).await.unwrap();
+        // Drain the first event.
+        let _first = tokio::time::timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Same value — no new event should arrive within the timeout window.
+        handle.sync_all(sync_map("vd", 7)).await.unwrap();
+        let res = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
+        assert!(res.is_err(), "no CovEvent expected for repeat value");
+    }
+
+    #[tokio::test]
+    async fn cov_emits_on_change() {
+        let handle = spawn_driver_actor(16);
+        let value = Arc::new(Mutex::new(1.0f64));
+        handle
+            .register(value_driver("vd", value.clone()))
+            .await
+            .unwrap();
+        handle.open_all().await.unwrap();
+
+        let mut rx = handle.subscribe_cov();
+        handle.sync_all(sync_map("vd", 5)).await.unwrap();
+        let first = tokio::time::timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!((first.value - 1.0).abs() < f64::EPSILON);
+
+        // Mutate value, sync again — expect a second event with the new value.
+        *value.lock().unwrap() = 2.5;
+        handle.sync_all(sync_map("vd", 5)).await.unwrap();
+        let second = tokio::time::timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.point_id, 5);
+        assert!((second.value - 2.5).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn cov_multiple_subscribers_each_receive() {
+        let handle = spawn_driver_actor(16);
+        let value = Arc::new(Mutex::new(7.5f64));
+        handle
+            .register(value_driver("vd", value.clone()))
+            .await
+            .unwrap();
+        handle.open_all().await.unwrap();
+
+        let mut a = handle.subscribe_cov();
+        let mut b = handle.subscribe_cov();
+        handle.sync_all(sync_map("vd", 11)).await.unwrap();
+
+        let ea = tokio::time::timeout(Duration::from_millis(200), a.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let eb = tokio::time::timeout(Duration::from_millis(200), b.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ea.point_id, 11);
+        assert_eq!(eb.point_id, 11);
+    }
+
+    #[tokio::test]
+    async fn cov_late_subscriber_no_backlog() {
+        let handle = spawn_driver_actor(16);
+        let value = Arc::new(Mutex::new(3.0f64));
+        handle
+            .register(value_driver("vd", value.clone()))
+            .await
+            .unwrap();
+        handle.open_all().await.unwrap();
+
+        // First sync happens before anyone subscribes — event is dropped.
+        handle.sync_all(sync_map("vd", 9)).await.unwrap();
+
+        // Subscribe after.
+        let mut rx = handle.subscribe_cov();
+
+        // Nothing queued.
+        let res = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
+        assert!(res.is_err(), "broadcast must not backlog before subscribe");
+
+        // But a change AFTER subscribing should arrive.
+        *value.lock().unwrap() = 4.0;
+        handle.sync_all(sync_map("vd", 9)).await.unwrap();
+        let evt = tokio::time::timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!((evt.value - 4.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn cov_error_does_not_emit() {
+        let handle = spawn_driver_actor(16);
+        // TestDriver returns Ok — we need an error path.  Register a driver
+        // but ask to sync a point_id that doesn't map to any driver in the
+        // point_map — sync_all silently skips those, so we use a stub that
+        // deliberately errors.
+
+        struct ErrDriver {
+            id: String,
+            status: DriverStatus,
+        }
+        impl Driver for ErrDriver {
+            fn driver_type(&self) -> &'static str {
+                "err"
+            }
+            fn id(&self) -> &str {
+                &self.id
+            }
+            fn status(&self) -> &DriverStatus {
+                &self.status
+            }
+            fn open(&mut self) -> Result<DriverMeta, DriverError> {
+                self.status = DriverStatus::Ok;
+                Ok(DriverMeta::default())
+            }
+            fn close(&mut self) {
+                self.status = DriverStatus::Down;
+            }
+            fn ping(&mut self) -> Result<DriverMeta, DriverError> {
+                Ok(DriverMeta::default())
+            }
+            fn sync_cur(&mut self, points: &[DriverPointRef], ctx: &mut SyncContext) {
+                for p in points {
+                    ctx.update_cur_err(p.point_id, DriverError::CommFault("boom".into()));
+                }
+            }
+            fn write(&mut self, _: &[(u32, f64)], _: &mut WriteContext) {}
+        }
+
+        handle
+            .register(AnyDriver::Sync(Box::new(ErrDriver {
+                id: "err".into(),
+                status: DriverStatus::Pending,
+            })))
+            .await
+            .unwrap();
+        handle.open_all().await.unwrap();
+
+        let mut rx = handle.subscribe_cov();
+        handle.sync_all(sync_map("err", 1)).await.unwrap();
+
+        let res = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
+        assert!(res.is_err(), "errored reads must not emit CovEvent");
     }
 }

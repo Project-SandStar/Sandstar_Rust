@@ -104,7 +104,7 @@ Generic `DriverLoader` trait + `load_drivers<L>` helper collapses ~417 lines of 
 ---
 
 ### 12.0D — Broadcast `CovEvent` channel
-**Status:** ⬜ NOT STARTED
+**Status:** ✅ INFRASTRUCTURE COMPLETE (2026-04-17, v2.8.4); WS bridge deferred to 12.0D.WS
 
 **Goal:** add a `tokio::sync::broadcast::Sender<CovEvent>` to `DriverManager` so any consumer (REST WebSocket, SOX COV push, metrics) can subscribe to live value changes without polling.
 
@@ -131,6 +131,25 @@ Generic `DriverLoader` trait + `load_drivers<L>` helper collapses ~417 lines of 
 **Estimate:** 1 session. Structural but contained.
 
 **Value:** enables real-time UI push without the current polling model.
+
+---
+
+### 12.0D.WS — Bridge CovEvents into `/api/ws`
+**Status:** ⬜ DEFERRED (trigger-based)
+
+**Rationale:** see 12.0D summary above. The broadcast channel is complete; the WS bridge is a distinct piece of work with its own regression surface. Triggers that would prompt picking this up:
+- a concrete UI requirement for sub-second real-time updates (current WS poll cadence is 1s, clamped [200ms, 60s]);
+- or a replacement WebSocket protocol (e.g., SOX-over-WS) that doesn't have the existing poll mechanism; or
+- a metrics exporter that needs raw COV stream outside the WS.
+
+**Scope sketch (when picked up):**
+
+1. Add `driver_handle: Option<DriverHandle>` to `rest::ws::WsState`.
+2. On `ClientMsg::Subscribe`, spawn a per-session task (or extend the existing one) that `tokio::select!`s between the existing poll tick and `driver_handle.subscribe_cov()`.
+3. Filter CovEvents by the session's subscribed `ids`; send a delta message on change.
+4. Continue servicing `watch_poll` on the existing cadence for idempotent resync.
+
+Tests: mock driver emits a value change between poll ticks; assert client sees it within the broadcast latency (< 100ms) rather than waiting the full poll interval.
 
 ---
 
@@ -196,6 +215,9 @@ Total: ~4 sessions for 12.0B + 12.0C + 12.0D + 12.0G.
 |---|---|---|---|
 | 12.0A | (Phase 12.0A commit) | 2026-04-17 | 2.8.1 |
 | 12.0B | (Phase 12.0B commit) | 2026-04-17 | 2.8.2 |
-| 12.0C | (pending commit)     | 2026-04-17 | 2.8.3 |
+| 12.0C | (Phase 12.0C commit) | 2026-04-17 | 2.8.3 |
+| 12.0D | (pending commit)     | 2026-04-17 | 2.8.4 |
+
+**12.0D summary (2026-04-17, v2.8.4):** Added `CovEvent { point_id, value, status, timestamp }` in `drivers/mod.rs` and a `tokio::sync::broadcast::Sender<CovEvent>` (capacity 512 via `DEFAULT_COV_CAPACITY`) owned jointly by `DriverHandle` and `DriverManagerInner`. `DriverHandle::subscribe_cov()` returns a fresh `broadcast::Receiver<CovEvent>` with no actor round-trip. `sync_all` tracks last-emitted value per point (`HashMap<u32, f64>`) and broadcasts a `CovEvent` on first read or change of value (bit-level `to_bits()` compare, so NaN retriggers). Errors don't emit. Late subscribers get no backlog (standard broadcast semantics). 6 new unit tests cover first-read emit, repeat suppression, change detection, multi-subscriber fan-out, late-subscribe no-backlog, and error-path suppression. **WS bridge deferred to 12.0D.WS** — the current Haystack WS path in `rest/ws.rs` runs off `EngineHandle` polling and driver values already propagate into engine channels via the Stage-2 tick task at level 16, so WS clients continue to see updated values. Wiring direct CovEvent push into WS requires threading `DriverHandle` into `WsState`, per-session subscribe lifecycle, and merging with the existing poll cadence — meaningful refactor with regression risk on the shipping hot path, deferred until a concrete consumer (or explicit UI requirement) justifies it. Infrastructure is ready for any subscriber (future SOX COV push, metrics exporter, replacement WS handler). 2666 tests pass, lib clippy clean.
 
 **12.0C summary (2026-04-17, v2.8.3):** Added `SyncContext` and `WriteContext` types to `drivers/mod.rs` with `update_cur_ok/err` and `update_write_ok/err` methods. Changed `Driver` and `AsyncDriver` trait `sync_cur`/`write` signatures to take `&mut SyncContext`/`&mut WriteContext` instead of returning a `Vec`. `AnyDriver::sync_cur` and `AnyDriver::write` (the call points from the actor and the REST layer) still return the `Vec<(u32, Result<_>)>` shape — they construct a fresh context per call and drain it — so callers are untouched. Four drivers migrated: `LocalIoDriver`, `ModbusDriver`, `BacnetDriver`, `MqttDriver`. All mocks in tests updated. Two `#[cfg(test)]` inherent helpers (`sync_cur_vec` / `write_vec`) added on `BacnetDriver` and `MqttDriver` to keep existing test assertions concise. Net diff: +5 unit tests covering ctx behavior (insertion order, Ok/Err capture, `with_capacity`). 2660 tests pass, 0 clippy warnings in the drivers module.

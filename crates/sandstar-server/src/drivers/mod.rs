@@ -38,7 +38,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-pub use actor::{spawn_driver_actor, DriverCmd, DriverHandle};
+pub use actor::{spawn_driver_actor, DriverCmd, DriverHandle, DEFAULT_COV_CAPACITY};
 pub use async_driver::{AnyDriver, AsyncDriver};
 pub use poll_scheduler::PollScheduler;
 pub use watch_manager::DriverWatchManager;
@@ -235,6 +235,31 @@ impl PointStatus {
             PointStatus::RemoteDisabled | PointStatus::RemoteDown | PointStatus::RemoteFault(_)
         )
     }
+}
+
+// ── Change-of-Value (COV) event ─────────────────────────────
+
+/// Event broadcast when a point's current value changes during a sync cycle.
+///
+/// Emitted by the driver actor on successful `sync_cur` reads whose value
+/// differs from the last emitted value for that point. Consumers (REST
+/// WebSocket bridges, SOX COV push, metrics exporters) subscribe via
+/// [`crate::drivers::actor::DriverHandle::subscribe_cov`].
+///
+/// The `status` field is included so subscribers can see the currently
+/// effective per-point status (resolved or inherited) — change-of-status
+/// is NOT what gates emission; value change is. See research doc 18
+/// §"Broadcast CovEvent".
+#[derive(Debug, Clone)]
+pub struct CovEvent {
+    /// Channel/point ID whose value changed.
+    pub point_id: u32,
+    /// The new value (the one that differed from the last emitted).
+    pub value: f64,
+    /// Snapshot of the point's current effective [`PointStatus`] at emit time.
+    pub status: PointStatus,
+    /// Wall-clock-ish timestamp; use `Instant::elapsed()` for a duration.
+    pub timestamp: std::time::Instant,
 }
 
 // ── Sync / Write contexts (callback-style results) ──────────
