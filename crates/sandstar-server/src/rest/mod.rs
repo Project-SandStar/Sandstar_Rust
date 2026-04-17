@@ -754,6 +754,28 @@ pub fn router_with_auth(
     // asynchronously in the background so they don't block router construction.
     let driver_handle = crate::drivers::actor::spawn_driver_actor(64);
 
+    // Phase 12.0F: register a single LocalIoDriver that façades the engine's
+    // channel layer. The engine's own poll loop continues to own hardware
+    // I/O — this driver just exposes those channels through /api/drivers
+    // consistently with BACnet / MQTT. Registration happens in a spawned
+    // task so it doesn't block router construction or block on startup.
+    {
+        let dh = driver_handle.clone();
+        let eh = handle.clone();
+        tokio::spawn(async move {
+            let driver = crate::drivers::local_io::LocalIoDriver::with_engine(
+                "localIo",
+                eh,
+            );
+            let any = crate::drivers::async_driver::AnyDriver::Async(Box::new(driver));
+            if let Err(e) = dh.register(any).await {
+                tracing::warn!(error = %e, "failed to register LocalIoDriver");
+            } else if let Err(e) = dh.open_driver("localIo").await {
+                tracing::warn!(error = %e, "failed to open LocalIoDriver");
+            }
+        });
+    }
+
     // WebSocket route (handles its own auth via query param, message, or SCRAM).
     // Threaded with the driver_handle so each WS session can subscribe to
     // the CovEvent broadcast for sub-second value push (Phase 12.0D.WS).

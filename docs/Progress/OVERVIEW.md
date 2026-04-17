@@ -1,8 +1,8 @@
 # Sandstar Rust — Progress Overview
 
 **Last updated:** 2026-04-17
-**Current version:** v2.8.7 (BeagleBone 1-11); v2.0.0 still on Device 1-3 (Todd Air Flow)
-**Workspace:** 7 crates, ~40,000 LOC, **2,674 tests passing, 0 clippy warnings, 0 failures**
+**Current version:** v2.8.8 (BeagleBone 1-11); v2.0.0 still on Device 1-3 (Todd Air Flow)
+**Workspace:** 7 crates, ~40,000 LOC, **2,677 tests passing, 0 clippy warnings, 0 failures**
 **GitHub:** https://github.com/Project-SandStar/Sandstar_Rust
 
 This is the single-read status tracker for the Sandstar Rust project. It consolidates everything in `docs/Progress/` into one scan. For per-phase rationale, design decisions, or operator instructions, follow the links into the detailed documents — they remain the **source of truth**.
@@ -43,7 +43,7 @@ This is the single-read status tracker for the Sandstar Rust project. It consoli
 | REST API + WebSocket | ✅ Complete — 14 endpoints, auth, TLS, rate limit | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 1 |
 | Security hardening | ✅ Complete | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 5.7, §Phase 6.5 |
 | Visual DDC editor (web UI) | 🟡 14.0A in progress, 14.0B–F planned | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 14.0 |
-| Driver Framework v2 (Phase 12) | 🟡 12.0A–E + 12.0D.WS + 12.0G complete; 12.0F deferred (production-risk) | [IMPLEMENTATION_PLAN_DRIVER_FRAMEWORK.md](IMPLEMENTATION_PLAN_DRIVER_FRAMEWORK.md) |
+| Driver Framework v2 (Phase 12) | ✅ All sub-phases complete (12.0A–G + 12.0D.WS) | [IMPLEMENTATION_PLAN_DRIVER_FRAMEWORK.md](IMPLEMENTATION_PLAN_DRIVER_FRAMEWORK.md) |
 | Clustering — roxWarp (Phase 9) | ⬜ Not started — low priority | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 9 |
 | Dynamic Slots (Phase 13) | ⬜ Not started — low priority | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 13 |
 | Hardware sensor validation on 1-11 | 🟡 Deferred — no sensors physically attached | — |
@@ -309,6 +309,7 @@ One-week sprint 2026-04-10 → 2026-04-17:
 | 2026-04-17 | 2.8.5 | Phase 12.0G — runtime driver-lifecycle REST: `POST /api/drivers` (create), `POST /api/drivers/{id}/{open,close,ping}`, `DELETE /api/drivers/{id}`, `POST /api/syncCur`. All behind bearer/SCRAM auth. Factory dispatches bacnet/mqtt by `driver_type` string. |
 | 2026-04-17 | 2.8.6 | Phase 12.0E — custom driver messages: `DriverMessage{id, payload}` + `on_receive` trait method + `DriverHandle::send_message` + `POST /api/drivers/{id}/message`. Default impl returns NotSupported; drivers opt in per-id. |
 | 2026-04-17 | 2.8.7 | Phase 12.0D.WS — WebSocket COV push. Each WS session subscribes to the CovEvent broadcast; matching watches are force-polled on next push-timer tick (~200 ms latency bound). `RecvError::Lagged`/`Closed` handled defensively. |
+| 2026-04-17 | 2.8.8 | Phase 12.0F — `LocalIoDriver` migrated to `AsyncDriver` with optional engine-backed delegation. One instance registered in production via `rest/mod.rs`. Engine's own poll loop untouched; driver is a façade that exposes local channels through `/api/drivers`. |
 
 13 minor versions in 8 days. Current state: both drivers ready on 1-11, both quiescent until a real broker / device appears.
 

@@ -161,7 +161,7 @@ Tests: mock driver emits a value change between poll ticks; assert client sees i
 ---
 
 ### 12.0F — LocalIoDriver unification
-**Status:** ⬜ DEFERRED (risk-based)
+**Status:** ✅ COMPLETE (2026-04-17, v2.8.8)
 
 **Rationale:** unifying the local hardware I/O (GPIO / ADC / I2C / PWM) under the `AsyncDriver` trait would rewrite the path that Device 1-3's production HVAC uses. The existing engine-channel layer works; replacing it risks regressing live sensors. Defer until:
 - A concrete 4th network driver needs to coexist with local I/O under `/api/drivers`
@@ -219,7 +219,10 @@ Total: ~4 sessions for 12.0B + 12.0C + 12.0D + 12.0G.
 | 12.0D | (Phase 12.0D commit) | 2026-04-17 | 2.8.4 |
 | 12.0G | (Phase 12.0G commit) | 2026-04-17 | 2.8.5 |
 | 12.0E | (Phase 12.0E commit) | 2026-04-17 | 2.8.6 |
-| 12.0D.WS | (pending commit) | 2026-04-17 | 2.8.7 |
+| 12.0D.WS | (Phase 12.0D.WS commit) | 2026-04-17 | 2.8.7 |
+| 12.0F | (pending commit) | 2026-04-17 | 2.8.8 |
+
+**12.0F summary (2026-04-17, v2.8.8):** Migrated `crates/.../drivers/local_io.rs::LocalIoDriver` from the sync `Driver` trait to the async `AsyncDriver` trait and added optional engine-backed delegation. New constructor `LocalIoDriver::with_engine(id, EngineHandle)` stores the handle; `sync_cur` then delegates to `engine.read_channel(id)` per point, and `write` delegates to `engine.write_channel(id, value, level=16, who="localIo:<id>", duration=30s)`. When no engine is supplied (`::new(id)`, unit tests), the driver falls back to its existing in-memory channels list — so every prior test still passes, now as `#[tokio::test]` with `await`. One production instance is now registered in `rest/mod.rs` as `AnyDriver::Async(Box::new(LocalIoDriver::with_engine("localIo", engine)))` via a spawned task, and opened via `handle.open_driver("localIo")`. **Device 1-3's engine hot path is NOT touched** — the engine keeps owning hardware polling; this driver is a pure façade that exposes local channels through `/api/drivers/{id}/{learn,status,write,sync}` consistently with BACnet / MQTT. 3 new tests cover the engine-backed path via a mock `EngineCmd` responder: `is_engine_backed` accessor, `sync_cur_engine_backed_uses_read_channel`, `write_engine_backed_uses_write_channel`. Stub `drivers::LocalIoDriver` in `mod.rs` and the sync `DriverManager` remain as test fixtures (separate types from `local_io::LocalIoDriver` — distinct module paths). 2677 tests pass, lib clippy clean. Phase 12 is now structurally complete.
 
 **12.0D.WS summary (2026-04-17, v2.8.7):** Wired the Phase-12.0D `CovEvent` broadcast into the Haystack WebSocket. Threaded `driver_handle: Option<DriverHandle>` into `WsState`; each WS session `subscribe_cov()`s once at connection time. `WatchMeta` gained `subscribed_ids: HashSet<u32>` (populated on `ClientMsg::Subscribe`, pruned on partial `Unsubscribe`) and a `cov_pending: bool` flag. A new `tokio::select!` arm consumes CovEvents: matching watches set `cov_pending`, and the existing push-timer arm polls immediately regardless of the client's `pollInterval` when the flag is set. This gives bounded push latency of ~200 ms (push-timer resolution) instead of waiting the full `pollInterval` (default 1000 ms, up to 60 s). `RecvError::Lagged` marks all watches pending for a full resync on next tick; `RecvError::Closed` drops the subscription and falls back to poll-only. 3 new unit tests cover `apply_cov_event` matching, non-matching, and `mark_all_cov_pending`. 2674 tests pass, lib clippy clean. End-to-end latency test deferred — requires full TestServer + driver actor integration and is more valuable once there's a concrete consumer; the unit tests cover the matching/flagging logic and the select arm compile-checks the rest.
 

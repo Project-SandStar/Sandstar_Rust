@@ -1,20 +1,47 @@
-//! Local I/O driver for BeagleBone hardware.
+//! Local I/O driver for BeagleBone hardware (Phase 12.0F).
 //!
-//! Reads ADC inputs, digital inputs, and writes to digital/PWM outputs
-//! via the existing sandstar-hal abstraction. This bridges the Driver
-//! Framework v2 with the existing HAL layer.
+//! This driver unifies local hardware I/O (GPIO / ADC / I2C / PWM) under
+//! the [`AsyncDriver`] trait so it can be registered and managed through
+//! the same `DriverHandle` actor as the network drivers (BACnet, MQTT).
 //!
-//! The engine's existing HAL does the real hardware I/O — this driver
-//! provides the [`Driver`] trait interface for management, discovery,
-//! status tracking, and future integration with the DriverManager.
+//! ## Engine delegation
+//!
+//! The engine's existing poll loop — which is what Device 1-3's production
+//! HVAC runs on — is **not** touched. Instead, this driver optionally
+//! holds an [`EngineHandle`] and delegates:
+//!
+//! - `sync_cur` → `engine.read_channel(id)` for each point
+//! - `write`    → `engine.write_channel(id, value, level=16, …)`
+//!
+//! When no engine handle is supplied (unit tests), the driver keeps a
+//! cached value per channel that callers can seed via `update_value` and
+//! `configure_channels`, matching the legacy behavior so existing tests
+//! continue to pass.
+//!
+//! The engine's own poll loop remains authoritative for hardware reads.
+//! This driver is a façade — it lets operators list, inspect, and drive
+//! local-I/O channels through `/api/drivers/{id}/…` consistently with
+//! other drivers.
 
 use std::collections::HashMap;
 
+use async_trait::async_trait;
+
+use super::async_driver::AsyncDriver;
 use super::DriverStatus;
 use super::{
-    Driver, DriverError, DriverMeta, DriverPointRef, LearnGrid, LearnPoint, PollMode, SyncContext,
+    DriverError, DriverMeta, DriverPointRef, LearnGrid, LearnPoint, PollMode, SyncContext,
     WriteContext,
 };
+
+use crate::rest::EngineHandle;
+
+/// Write level used by `LocalIoDriver::write` when delegating to the
+/// engine. Level 16 is the lowest-priority driver write (same as BACnet
+/// and MQTT), so higher-priority SOX / manual writes override cleanly.
+const LOCAL_IO_WRITE_LEVEL: u8 = 16;
+/// Duration of engine writes from `LocalIoDriver::write`, in seconds.
+const LOCAL_IO_WRITE_DURATION_SECS: f64 = 30.0;
 
 // ── LocalIoChannel ─────────────────────────────────────────
 
@@ -84,15 +111,34 @@ pub struct LocalIoDriver {
     status: DriverStatus,
     /// Channel configuration from the engine.
     channels: Vec<LocalIoChannel>,
+    /// Optional engine handle. When present, `sync_cur` and `write`
+    /// delegate to the engine. When `None`, the driver falls back to
+    /// reading / caching values on its internal `channels` list (keeps
+    /// existing unit tests functional without an engine).
+    engine: Option<EngineHandle>,
 }
 
 impl LocalIoDriver {
-    /// Create a new local I/O driver with the given instance ID.
+    /// Create a new local I/O driver with the given instance ID and no
+    /// engine backing (test-style: values come from `configure_channels`
+    /// / `update_value`).
     pub fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             status: DriverStatus::Pending,
             channels: Vec::new(),
+            engine: None,
+        }
+    }
+
+    /// Create a new local I/O driver backed by the engine (production
+    /// usage: `sync_cur` and `write` delegate through `EngineHandle`).
+    pub fn with_engine(id: impl Into<String>, engine: EngineHandle) -> Self {
+        Self {
+            id: id.into(),
+            status: DriverStatus::Pending,
+            channels: Vec::new(),
+            engine: Some(engine),
         }
     }
 
@@ -138,6 +184,12 @@ impl LocalIoDriver {
         &self.channels
     }
 
+    /// Returns `true` iff this driver was constructed with an engine
+    /// handle (i.e. `sync_cur` / `write` will delegate to the engine).
+    pub fn is_engine_backed(&self) -> bool {
+        self.engine.is_some()
+    }
+
     /// Update the cached value for a channel (called by the engine poll loop).
     pub fn update_value(&mut self, channel_id: u32, value: f64, status: &str) {
         if let Some(ch) = self
@@ -151,7 +203,8 @@ impl LocalIoDriver {
     }
 }
 
-impl Driver for LocalIoDriver {
+#[async_trait]
+impl AsyncDriver for LocalIoDriver {
     fn driver_type(&self) -> &'static str {
         "localIo"
     }
@@ -164,7 +217,11 @@ impl Driver for LocalIoDriver {
         &self.status
     }
 
-    fn open(&mut self) -> Result<DriverMeta, DriverError> {
+    fn poll_mode(&self) -> PollMode {
+        PollMode::Buckets
+    }
+
+    async fn open(&mut self) -> Result<DriverMeta, DriverError> {
         self.status = DriverStatus::Ok;
         Ok(DriverMeta {
             firmware_version: Some("1.6.0".into()),
@@ -173,19 +230,21 @@ impl Driver for LocalIoDriver {
         })
     }
 
-    fn close(&mut self) {
+    async fn close(&mut self) {
         self.status = DriverStatus::Down;
     }
 
-    fn ping(&mut self) -> Result<DriverMeta, DriverError> {
-        // Local I/O is always healthy if open succeeded.
+    async fn ping(&mut self) -> Result<DriverMeta, DriverError> {
+        // Local I/O is always healthy if open succeeded. When we have an
+        // engine handle, a cheap round-trip would catch a dropped actor,
+        // but the engine's own supervisor handles that — keep ping free.
         Ok(DriverMeta {
             model: Some("BeagleBone Black".into()),
             ..Default::default()
         })
     }
 
-    fn learn(&mut self, _path: Option<&str>) -> Result<LearnGrid, DriverError> {
+    async fn learn(&mut self, _path: Option<&str>) -> Result<LearnGrid, DriverError> {
         let grid = self
             .channels
             .iter()
@@ -207,7 +266,24 @@ impl Driver for LocalIoDriver {
         Ok(grid)
     }
 
-    fn sync_cur(&mut self, points: &[DriverPointRef], ctx: &mut SyncContext) {
+    async fn sync_cur(&mut self, points: &[DriverPointRef], ctx: &mut SyncContext) {
+        // Engine-backed path: delegate to engine.read_channel per point.
+        if let Some(engine) = self.engine.clone() {
+            for p in points {
+                match engine.read_channel(p.point_id).await {
+                    Ok(cv) => ctx.update_cur_ok(p.point_id, cv.cur),
+                    Err(msg) => ctx.update_cur_err(
+                        p.point_id,
+                        // Engine returns "channel N not found" or similar;
+                        // ConfigFault surfaces that up to the caller.
+                        DriverError::ConfigFault(msg),
+                    ),
+                }
+            }
+            return;
+        }
+
+        // Cache-only path (tests / engineless): read from in-memory list.
         for p in points {
             match self.channels.iter().find(|ch| ch.channel_id == p.point_id) {
                 Some(ch) if ch.enabled => ctx.update_cur_ok(p.point_id, ch.last_value),
@@ -223,11 +299,32 @@ impl Driver for LocalIoDriver {
         }
     }
 
-    fn write(&mut self, writes: &[(u32, f64)], ctx: &mut WriteContext) {
+    async fn write(&mut self, writes: &[(u32, f64)], ctx: &mut WriteContext) {
+        // Engine-backed path: write through `EngineHandle` at level 16.
+        if let Some(engine) = self.engine.clone() {
+            let who = format!("localIo:{}", self.id);
+            for &(id, val) in writes {
+                match engine
+                    .write_channel(
+                        id,
+                        Some(val),
+                        LOCAL_IO_WRITE_LEVEL,
+                        who.clone(),
+                        LOCAL_IO_WRITE_DURATION_SECS,
+                    )
+                    .await
+                {
+                    Ok(()) => ctx.update_write_ok(id),
+                    Err(msg) => ctx.update_write_err(id, DriverError::ConfigFault(msg)),
+                }
+            }
+            return;
+        }
+
+        // Cache-only path: validate and update the internal channel list.
         for &(id, val) in writes {
             match self.channels.iter_mut().find(|ch| ch.channel_id == id) {
                 Some(ch) if ch.is_output() => {
-                    // Cache the written value locally.
                     ch.last_value = val;
                     ctx.update_write_ok(id);
                 }
@@ -241,10 +338,6 @@ impl Driver for LocalIoDriver {
                 ),
             }
         }
-    }
-
-    fn poll_mode(&self) -> PollMode {
-        PollMode::Buckets
     }
 }
 
@@ -270,25 +363,25 @@ mod tests {
         d
     }
 
-    #[test]
-    fn open_close_lifecycle() {
+    #[tokio::test]
+    async fn open_close_lifecycle() {
         let mut d = LocalIoDriver::new("lc");
         assert_eq!(*d.status(), DriverStatus::Pending);
 
-        let meta = d.open().unwrap();
+        let meta = d.open().await.unwrap();
         assert_eq!(meta.firmware_version, Some("1.6.0".into()));
         assert_eq!(meta.model, Some("BeagleBone Black".into()));
         assert_eq!(*d.status(), DriverStatus::Ok);
 
-        d.close();
+        d.close().await;
         assert_eq!(*d.status(), DriverStatus::Down);
     }
 
-    #[test]
-    fn ping_returns_model() {
+    #[tokio::test]
+    async fn ping_returns_model() {
         let mut d = LocalIoDriver::new("ping");
-        d.open().unwrap();
-        let meta = d.ping().unwrap();
+        d.open().await.unwrap();
+        let meta = d.ping().await.unwrap();
         assert_eq!(meta.model, Some("BeagleBone Black".into()));
     }
 
@@ -298,10 +391,10 @@ mod tests {
         assert_eq!(d.driver_type(), "localIo");
     }
 
-    #[test]
-    fn learn_returns_all_channels() {
+    #[tokio::test]
+    async fn learn_returns_all_channels() {
         let mut d = make_driver_with_channels();
-        let grid = d.learn(None).unwrap();
+        let grid = d.learn(None).await.unwrap();
         assert_eq!(grid.len(), 5);
         assert_eq!(grid[0].name, "AI1 RTD");
         assert_eq!(grid[0].address, "AIN0");
@@ -312,10 +405,10 @@ mod tests {
         assert_eq!(grid[4].tags.get("disabled").unwrap(), "true");
     }
 
-    #[test]
-    fn sync_cur_enabled_channel() {
+    #[tokio::test]
+    async fn sync_cur_enabled_channel() {
         let mut d = make_driver_with_channels();
-        d.open().unwrap();
+        d.open().await.unwrap();
         d.update_value(1100, 72.5, "ok");
 
         let refs = vec![DriverPointRef {
@@ -323,24 +416,24 @@ mod tests {
             address: "AIN0".into(),
         }];
         let mut ctx = SyncContext::new();
-        d.sync_cur(&refs, &mut ctx);
+        d.sync_cur(&refs, &mut ctx).await;
         let results = ctx.into_results();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, 1100);
         assert!((results[0].1.as_ref().unwrap() - 72.5).abs() < f64::EPSILON);
     }
 
-    #[test]
-    fn sync_cur_disabled_channel() {
+    #[tokio::test]
+    async fn sync_cur_disabled_channel() {
         let mut d = make_driver_with_channels();
-        d.open().unwrap();
+        d.open().await.unwrap();
 
         let refs = vec![DriverPointRef {
             point_id: 7000,
             address: "AIN2".into(),
         }];
         let mut ctx = SyncContext::new();
-        d.sync_cur(&refs, &mut ctx);
+        d.sync_cur(&refs, &mut ctx).await;
         let results = ctx.into_results();
         assert!(results[0].1.is_err());
         assert!(results[0]
@@ -351,17 +444,17 @@ mod tests {
             .contains("disabled"));
     }
 
-    #[test]
-    fn sync_cur_unknown_channel() {
+    #[tokio::test]
+    async fn sync_cur_unknown_channel() {
         let mut d = make_driver_with_channels();
-        d.open().unwrap();
+        d.open().await.unwrap();
 
         let refs = vec![DriverPointRef {
             point_id: 9999,
             address: "X".into(),
         }];
         let mut ctx = SyncContext::new();
-        d.sync_cur(&refs, &mut ctx);
+        d.sync_cur(&refs, &mut ctx).await;
         let results = ctx.into_results();
         assert!(results[0].1.is_err());
         assert!(results[0]
@@ -372,13 +465,13 @@ mod tests {
             .contains("not found"));
     }
 
-    #[test]
-    fn write_output_channel() {
+    #[tokio::test]
+    async fn write_output_channel() {
         let mut d = make_driver_with_channels();
-        d.open().unwrap();
+        d.open().await.unwrap();
 
         let mut ctx = WriteContext::new();
-        d.write(&[(5000, 1.0), (6000, 0.75)], &mut ctx);
+        d.write(&[(5000, 1.0), (6000, 0.75)], &mut ctx).await;
         let results = ctx.into_results();
         assert_eq!(results.len(), 2);
         assert!(results[0].1.is_ok());
@@ -389,13 +482,13 @@ mod tests {
         assert!((ch.last_value - 1.0).abs() < f64::EPSILON);
     }
 
-    #[test]
-    fn write_input_channel_fails() {
+    #[tokio::test]
+    async fn write_input_channel_fails() {
         let mut d = make_driver_with_channels();
-        d.open().unwrap();
+        d.open().await.unwrap();
 
         let mut ctx = WriteContext::new();
-        d.write(&[(1100, 50.0)], &mut ctx);
+        d.write(&[(1100, 50.0)], &mut ctx).await;
         let results = ctx.into_results();
         assert!(results[0].1.is_err());
         assert!(results[0]
@@ -406,13 +499,13 @@ mod tests {
             .contains("not an output"));
     }
 
-    #[test]
-    fn write_unknown_channel_fails() {
+    #[tokio::test]
+    async fn write_unknown_channel_fails() {
         let mut d = make_driver_with_channels();
-        d.open().unwrap();
+        d.open().await.unwrap();
 
         let mut ctx = WriteContext::new();
-        d.write(&[(9999, 0.0)], &mut ctx);
+        d.write(&[(9999, 0.0)], &mut ctx).await;
         let results = ctx.into_results();
         assert!(results[0].1.is_err());
     }
@@ -460,5 +553,92 @@ mod tests {
         assert!(LocalIoChannel::new(3, "x", "PWM", "pwm", "P").is_output());
         assert!(!LocalIoChannel::new(4, "x", "AI", "analog", "A").is_output());
         assert!(!LocalIoChannel::new(5, "x", "DI", "digital", "G").is_output());
+    }
+
+    // ── Engine-backed delegation tests (Phase 12.0F) ──────
+
+    /// Spawn a mock engine-cmd responder that answers `ReadChannel` with
+    /// the channel id cast to f64 and `WriteChannel` with `Ok(())`, so
+    /// the test can validate delegation without a full engine.
+    fn spawn_mock_engine() -> EngineHandle {
+        use crate::rest::{ChannelValue, EngineCmd};
+        use tokio::sync::mpsc;
+
+        let (tx, mut rx) = mpsc::channel::<EngineCmd>(16);
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    EngineCmd::ReadChannel { channel, reply } => {
+                        let _ = reply.send(Ok(ChannelValue {
+                            channel,
+                            status: "ok".into(),
+                            raw: f64::from(channel),
+                            cur: f64::from(channel) + 0.5,
+                        }));
+                    }
+                    EngineCmd::WriteChannel { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    _ => {} // ignore others
+                }
+            }
+        });
+        EngineHandle::new(tx)
+    }
+
+    #[test]
+    fn is_engine_backed_reports_constructor_choice() {
+        let d1 = LocalIoDriver::new("no-eng");
+        assert!(!d1.is_engine_backed());
+
+        // Spawn on a runtime so we can build an EngineHandle.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let d2 = rt.block_on(async {
+            let eh = spawn_mock_engine();
+            LocalIoDriver::with_engine("with-eng", eh)
+        });
+        assert!(d2.is_engine_backed());
+    }
+
+    #[tokio::test]
+    async fn sync_cur_engine_backed_uses_read_channel() {
+        let eh = spawn_mock_engine();
+        let mut d = LocalIoDriver::with_engine("eng-sync", eh);
+        d.open().await.unwrap();
+
+        let refs = vec![
+            DriverPointRef {
+                point_id: 100,
+                address: "AIN0".into(),
+            },
+            DriverPointRef {
+                point_id: 42,
+                address: "AIN1".into(),
+            },
+        ];
+        let mut ctx = SyncContext::new();
+        d.sync_cur(&refs, &mut ctx).await;
+        let results = ctx.into_results();
+
+        // Mock returns cur = point_id + 0.5
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, 100);
+        assert!((results[0].1.as_ref().unwrap() - 100.5).abs() < f64::EPSILON);
+        assert_eq!(results[1].0, 42);
+        assert!((results[1].1.as_ref().unwrap() - 42.5).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn write_engine_backed_uses_write_channel() {
+        let eh = spawn_mock_engine();
+        let mut d = LocalIoDriver::with_engine("eng-write", eh);
+        d.open().await.unwrap();
+
+        let mut ctx = WriteContext::new();
+        d.write(&[(500, 72.5), (600, 1.0)], &mut ctx).await;
+        let results = ctx.into_results();
+        assert_eq!(results.len(), 2);
+        assert!(results[0].1.is_ok());
+        assert!(results[1].1.is_ok());
     }
 }
