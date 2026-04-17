@@ -1,7 +1,7 @@
 # Sandstar Rust — Progress Overview
 
 **Last updated:** 2026-04-17
-**Current version:** v2.8.8 (BeagleBone 1-11); v2.0.0 still on Device 1-3 (Todd Air Flow)
+**Current version:** v2.8.8 deployed and live on the one production BeagleBone (DHCP — "1-3" / "1-11" are historical labels for the same device; currently 192.168.1.11). Smoke-tested 2026-04-17: HVAC channel 1713 reads 121.1°F unchanged; `/api/drivers` lists `bacnet-local` + `localIo` both Ok; `POST /api/syncCur` against `localIo` ch 1713 returns live engine value, proving Phase 12.0F engine-façade delegation works end-to-end.
 **Workspace:** 7 crates, ~40,000 LOC, **2,677 tests passing, 0 clippy warnings, 0 failures**
 **GitHub:** https://github.com/Project-SandStar/Sandstar_Rust
 
