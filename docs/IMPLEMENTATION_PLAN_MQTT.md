@@ -158,15 +158,27 @@ Tests: JSON shape round-trip, malformed config handling, empty-config handling, 
 ## Completion criteria
 
 MQTT driver is "done" when:
-- `SANDSTAR_MQTT_CONFIGS` env var is read at startup
-- Configured broker is connected, topics subscribed
-- Incoming messages update cached values
-- `sync_cur` returns fresh values, stale-check honored
-- `AsyncDriver::write()` publishes to broker
-- `/api/read?id=<point_id>` returns current broker-reported value
-- All tests pass, clippy clean
-- Deployed to 1-11 and validated against a live broker
-- `MQTT_SETUP.md` documents the full setup + troubleshooting
+- ✅ `SANDSTAR_MQTT_CONFIGS` env var is read at startup
+- ✅ Configured broker is connected, topics subscribed
+- ✅ Incoming messages update cached values
+- ✅ `sync_cur` returns fresh values, stale-check honored
+- ✅ `AsyncDriver::write()` publishes to broker
+- ✅ `/api/read?id=<point_id>` returns current broker-reported value
+- ✅ All tests pass, clippy clean
+- ✅ Deployed to 1-11 and validated against a live broker
+- ✅ `MQTT_SETUP.md` documents the full setup + troubleshooting
+
+**All criteria met. Live validation (2026-04-17) against mosquitto 2.1.2 on Windows dev box `192.168.1.9:1884`:**
+```
+mosquitto_pub -t sandstar/test/humidity -m "55.5" -q 1
+  → rumqttc receives PUBLISH on 1-11
+  → MqttValueCache["sandstar/test/humidity"] = 55.5
+  → sync_cur returns Ok(55.5) for point_id=103
+  → engine.write_channel writes to channel 103 at priority 16
+  → GET /api/read?id=103 → {"channel":103,"cur":55.5,"raw":55.5,"status":"Ok"}
+```
+
+Minor observation during validation: mosquitto logs showed brief initial reconnect (`connection closed by client ... new connection`) — rumqttc's reconnect logic fires once during startup. Doesn't affect data flow. Worth investigating if it persists in longer runs.
 
 ## Progress log
 
