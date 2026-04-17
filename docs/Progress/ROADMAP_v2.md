@@ -644,7 +644,7 @@ The security audit identified issues across four severity levels. These MUST be 
 
 **Goal:** Pure Rust driver architecture inspired by Haxall's connector framework. Replaces C/C++ driver layer with structured lifecycle, auto-discovery, and polling buckets.
 
-**Research doc:** [18_SEDONA_DRIVER_FRAMEWORK_V2.md](research/18_SEDONA_DRIVER_FRAMEWORK_V2.md)
+**Research doc:** [18_SEDONA_DRIVER_FRAMEWORK_V2.md](../research/18_SEDONA_DRIVER_FRAMEWORK_V2.md)
 
 | Task | Description | Effort | Status |
 |------|-------------|--------|--------|
@@ -665,7 +665,7 @@ The security audit identified issues across four severity levels. These MUST be 
 
 **Goal:** Hybrid static+dynamic slot model for runtime point discovery. Overcome Sedona's compile-time-frozen slot limitation.
 
-**Research doc:** [19_DYNAMIC_SLOTS.md](research/19_DYNAMIC_SLOTS.md)
+**Research doc:** [19_DYNAMIC_SLOTS.md](../research/19_DYNAMIC_SLOTS.md)
 
 | Task | Description | Effort | Status |
 |------|-------------|--------|--------|

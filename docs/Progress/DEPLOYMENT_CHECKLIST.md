@@ -197,7 +197,7 @@ journalctl -u sandstar-rust-validate --since "1 hour ago" | grep -ciE 'panic|fat
 | Table count | 16/16 matches C engine | [ ] |
 
 **If any criterion fails:** Do NOT proceed to cutover. Investigate using the
-[Troubleshooting section of the validation runbook](../tools/validation-runbook.md#6-troubleshooting).
+[Troubleshooting section of the validation runbook](../../tools/validation-runbook.md#6-troubleshooting).
 
 ---
 
@@ -444,5 +444,5 @@ rm -rf /tmp/sandstar_validate/
 
 ## Related Documentation
 
-- [Validation Runbook](../tools/validation-runbook.md) — detailed manual test procedures
+- [Validation Runbook](../../tools/validation-runbook.md) — detailed manual test procedures
 - [Roadmap v2](ROADMAP_v2.md) — full feature roadmap and phase status
