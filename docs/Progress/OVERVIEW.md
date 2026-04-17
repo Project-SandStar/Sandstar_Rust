@@ -1,8 +1,8 @@
 # Sandstar Rust — Progress Overview
 
 **Last updated:** 2026-04-17
-**Current version:** v2.8.1 (BeagleBone 1-11); v2.0.0 still on Device 1-3 (Todd Air Flow)
-**Workspace:** 7 crates, ~40,000 LOC, **2,643 tests passing, 0 clippy warnings, 0 failures**
+**Current version:** v2.8.2 (BeagleBone 1-11); v2.0.0 still on Device 1-3 (Todd Air Flow)
+**Workspace:** 7 crates, ~40,000 LOC, **2,655 tests passing, 0 clippy warnings, 0 failures**
 **GitHub:** https://github.com/Project-SandStar/Sandstar_Rust
 
 This is the single-read status tracker for the Sandstar Rust project. It consolidates everything in `docs/Progress/` into one scan. For per-phase rationale, design decisions, or operator instructions, follow the links into the detailed documents — they remain the **source of truth**.
@@ -43,7 +43,7 @@ This is the single-read status tracker for the Sandstar Rust project. It consoli
 | REST API + WebSocket | ✅ Complete — 14 endpoints, auth, TLS, rate limit | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 1 |
 | Security hardening | ✅ Complete | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 5.7, §Phase 6.5 |
 | Visual DDC editor (web UI) | 🟡 14.0A in progress, 14.0B–F planned | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 14.0 |
-| Driver Framework v2 (Phase 12) | 🟡 12.0A complete; 12.0B–D deferred | [IMPLEMENTATION_PLAN_DRIVER_FRAMEWORK.md](IMPLEMENTATION_PLAN_DRIVER_FRAMEWORK.md) |
+| Driver Framework v2 (Phase 12) | 🟡 12.0A–B complete; 12.0C/D/G planned; 12.0E/F deferred | [IMPLEMENTATION_PLAN_DRIVER_FRAMEWORK.md](IMPLEMENTATION_PLAN_DRIVER_FRAMEWORK.md) |
 | Clustering — roxWarp (Phase 9) | ⬜ Not started — low priority | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 9 |
 | Dynamic Slots (Phase 13) | ⬜ Not started — low priority | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 13 |
 | Hardware sensor validation on 1-11 | 🟡 Deferred — no sensors physically attached | — |
@@ -303,6 +303,7 @@ One-week sprint 2026-04-10 → 2026-04-17:
 | 2026-04-16 | 2.7.0 | Stage 2 — sync_cur results → engine channels visible in `/read` |
 | 2026-04-17 | 2.8.0 | MQTT M1-M4 complete + live broker validated |
 | 2026-04-17 | 2.8.1 | Phase 12.0A — generic `DriverLoader` trait + `load_drivers<L>`; rest/mod.rs shrunk by 417 lines |
+| 2026-04-17 | 2.8.2 | Phase 12.0B — `PointStatus::Remote{Disabled,Down,Fault}` + `from_driver_error`; sync_cur errors now set per-point status in the actor |
 
 13 minor versions in 8 days. Current state: both drivers ready on 1-11, both quiescent until a real broker / device appears.
 

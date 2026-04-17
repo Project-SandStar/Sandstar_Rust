@@ -162,30 +162,78 @@ pub enum PollMode {
 
 // ── Point Status (with inheritance) ────────────────────────
 
-/// Point-level status that can inherit from its parent driver.
+/// Point-level status that can inherit from its parent driver OR carry
+/// a remote-reported per-point status distinct from the driver's status.
 ///
-/// By default, points inherit their driver's status. A point can
-/// override this with its own status (e.g., when a remote device
-/// reports a point-specific fault).
+/// By default, points inherit their driver's status. A point can:
+/// - override with [`PointStatus::Own`] (local explicit status)
+/// - or carry a `Remote*` variant when the remote device reports a
+///   point-specific error state (see Phase 12.0B of the Driver Framework
+///   plan, and research doc 18 §"Status Model").
+///
+/// The `Remote*` variants are **terminal** — they do NOT fall back to the
+/// driver's status. This lets callers distinguish "device is up but this
+/// point is faulted" from "driver is down so everything looks down".
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub enum PointStatus {
-    /// Point has its own explicit status.
-    Own(DriverStatus),
     /// Point inherits status from its parent driver (default).
     #[default]
     Inherited,
+    /// Point has its own explicit status (local override).
+    Own(DriverStatus),
+    /// Remote reports this specific point is disabled.
+    RemoteDisabled,
+    /// Remote reports this specific point is down / unreachable.
+    RemoteDown,
+    /// Remote reports this specific point has a fault, with a descriptive reason.
+    RemoteFault(String),
 }
 
 impl PointStatus {
     /// Resolve the effective status given the parent driver status.
     ///
     /// If the point has its own status, that takes precedence.
-    /// Otherwise, the driver status is used.
+    /// For `Remote*` variants, a synthetic [`DriverStatus`] is returned that
+    /// reflects the remote-reported state (terminal — does NOT fall back to
+    /// the driver's status).
     pub fn resolve(&self, driver_status: &DriverStatus) -> DriverStatus {
         match self {
             PointStatus::Own(s) => s.clone(),
             PointStatus::Inherited => driver_status.clone(),
+            PointStatus::RemoteDisabled => DriverStatus::Disabled,
+            PointStatus::RemoteDown => DriverStatus::Down,
+            PointStatus::RemoteFault(msg) => DriverStatus::Fault(msg.clone()),
         }
+    }
+
+    /// Map a [`DriverError`] to the most appropriate [`PointStatus`] for
+    /// per-point error reporting. Called by the actor when `sync_cur`
+    /// returns `(point_id, Err(driver_err))`.
+    ///
+    /// - `RemoteStatus` → `RemoteFault(msg)` — remote device explicitly
+    ///   reported an error status for this point
+    /// - `CommFault` / `Timeout` → `RemoteDown` — can't reach the remote
+    /// - `ConfigFault` / `HardwareNotFound` / `Internal` / `NotSupported`
+    ///   → `Own(DriverStatus::Fault(msg))` — local config / logic fault
+    pub fn from_driver_error(err: &DriverError) -> Self {
+        match err {
+            DriverError::RemoteStatus(msg) => PointStatus::RemoteFault(msg.clone()),
+            DriverError::CommFault(_) | DriverError::Timeout(_) => PointStatus::RemoteDown,
+            DriverError::ConfigFault(msg)
+            | DriverError::HardwareNotFound(msg)
+            | DriverError::Internal(msg) => PointStatus::Own(DriverStatus::Fault(msg.clone())),
+            DriverError::NotSupported(feat) => {
+                PointStatus::Own(DriverStatus::Fault(format!("not supported: {feat}")))
+            }
+        }
+    }
+
+    /// `true` if this status represents a remote-reported per-point state.
+    pub fn is_remote(&self) -> bool {
+        matches!(
+            self,
+            PointStatus::RemoteDisabled | PointStatus::RemoteDown | PointStatus::RemoteFault(_)
+        )
     }
 }
 
@@ -1213,6 +1261,117 @@ mod tests {
 
         let json = serde_json::to_string(&PointStatus::Own(DriverStatus::Ok)).unwrap();
         assert!(json.contains("Own"));
+    }
+
+    // ── PointStatus Remote* variants (Phase 12.0B) ─────────
+
+    #[test]
+    fn point_status_remote_disabled_is_terminal() {
+        let ps = PointStatus::RemoteDisabled;
+        // Terminal — does NOT fall back to driver status even when driver is Ok.
+        assert_eq!(ps.resolve(&DriverStatus::Ok), DriverStatus::Disabled);
+        assert_eq!(ps.resolve(&DriverStatus::Down), DriverStatus::Disabled);
+    }
+
+    #[test]
+    fn point_status_remote_down_is_terminal() {
+        let ps = PointStatus::RemoteDown;
+        assert_eq!(ps.resolve(&DriverStatus::Ok), DriverStatus::Down);
+        assert_eq!(ps.resolve(&DriverStatus::Stale), DriverStatus::Down);
+    }
+
+    #[test]
+    fn point_status_remote_fault_carries_reason() {
+        let ps = PointStatus::RemoteFault("write-access-denied".into());
+        let resolved = ps.resolve(&DriverStatus::Ok);
+        assert_eq!(resolved, DriverStatus::Fault("write-access-denied".into()));
+    }
+
+    #[test]
+    fn point_status_is_remote_classifier() {
+        assert!(!PointStatus::Inherited.is_remote());
+        assert!(!PointStatus::Own(DriverStatus::Ok).is_remote());
+        assert!(PointStatus::RemoteDisabled.is_remote());
+        assert!(PointStatus::RemoteDown.is_remote());
+        assert!(PointStatus::RemoteFault("x".into()).is_remote());
+    }
+
+    #[test]
+    fn point_status_from_driver_error_remote_status() {
+        let err = DriverError::RemoteStatus("class=2 code=31".into());
+        let ps = PointStatus::from_driver_error(&err);
+        assert_eq!(
+            ps,
+            PointStatus::RemoteFault("class=2 code=31".into())
+        );
+    }
+
+    #[test]
+    fn point_status_from_driver_error_comm_fault_is_remote_down() {
+        let err = DriverError::CommFault("socket closed".into());
+        let ps = PointStatus::from_driver_error(&err);
+        assert_eq!(ps, PointStatus::RemoteDown);
+    }
+
+    #[test]
+    fn point_status_from_driver_error_timeout_is_remote_down() {
+        let err = DriverError::Timeout("5s".into());
+        let ps = PointStatus::from_driver_error(&err);
+        assert_eq!(ps, PointStatus::RemoteDown);
+    }
+
+    #[test]
+    fn point_status_from_driver_error_config_fault_is_own() {
+        let err = DriverError::ConfigFault("bad address".into());
+        let ps = PointStatus::from_driver_error(&err);
+        match ps {
+            PointStatus::Own(DriverStatus::Fault(msg)) => assert_eq!(msg, "bad address"),
+            other => panic!("expected Own(Fault), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn point_status_from_driver_error_hardware_not_found_is_own() {
+        let err = DriverError::HardwareNotFound("/dev/gpiochip9".into());
+        let ps = PointStatus::from_driver_error(&err);
+        match ps {
+            PointStatus::Own(DriverStatus::Fault(msg)) => assert_eq!(msg, "/dev/gpiochip9"),
+            other => panic!("expected Own(Fault), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn point_status_from_driver_error_not_supported_is_own() {
+        let err = DriverError::NotSupported("write");
+        let ps = PointStatus::from_driver_error(&err);
+        match ps {
+            PointStatus::Own(DriverStatus::Fault(msg)) => {
+                assert!(msg.contains("not supported"));
+                assert!(msg.contains("write"));
+            }
+            other => panic!("expected Own(Fault), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn point_status_remote_variants_serialize() {
+        let json = serde_json::to_string(&PointStatus::RemoteDisabled).unwrap();
+        assert!(json.contains("RemoteDisabled"));
+
+        let json = serde_json::to_string(&PointStatus::RemoteDown).unwrap();
+        assert!(json.contains("RemoteDown"));
+
+        let json = serde_json::to_string(&PointStatus::RemoteFault("why".into())).unwrap();
+        assert!(json.contains("RemoteFault"));
+        assert!(json.contains("why"));
+    }
+
+    #[test]
+    fn point_status_remote_variants_round_trip() {
+        let original = PointStatus::RemoteFault("access denied".into());
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: PointStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, original);
     }
 
     // ── Status inheritance via DriverManager ───────────────

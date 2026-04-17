@@ -481,11 +481,31 @@ impl DriverManagerInner {
         point_map: &HashMap<DriverId, Vec<DriverPointRef>>,
     ) -> Vec<(DriverId, u32, Result<f64, DriverError>)> {
         let mut results = Vec::new();
+        // Collect per-point status updates so we can apply them after the
+        // driver mutable borrow is released. (Phase 12.0B — per-point
+        // remote error reporting.)
+        let mut status_updates: Vec<(u32, PointStatus)> = Vec::new();
         for (driver_id, points) in point_map {
             if let Some(driver) = self.drivers.get_mut(driver_id) {
                 for (point_id, result) in driver.sync_cur(points).await {
+                    if let Err(ref e) = result {
+                        status_updates.push((point_id, PointStatus::from_driver_error(e)));
+                    } else {
+                        // Successful read — clear any previous remote-error
+                        // status so the point appears healthy again.
+                        status_updates.push((point_id, PointStatus::Inherited));
+                    }
                     results.push((driver_id.clone(), point_id, result));
                 }
+            }
+        }
+        for (pid, ps) in status_updates {
+            // Inherited is the default — don't clutter the map with entries
+            // that match the default.
+            if matches!(ps, PointStatus::Inherited) {
+                self.point_statuses.remove(&pid);
+            } else {
+                self.point_statuses.insert(pid, ps);
             }
         }
         results
