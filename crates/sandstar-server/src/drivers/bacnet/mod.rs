@@ -2550,12 +2550,21 @@ mod discovery_integration {
 
     // ── Helpers ────────────────────────────────────────────
 
-    /// Bind TCP to port 0 to obtain an OS-assigned free port, then release it.
-    /// (Tiny TOCTOU race is acceptable for tests.)
-    fn find_free_port() -> u16 {
-        use std::net::TcpListener;
-        let l = TcpListener::bind("127.0.0.1:0").unwrap();
-        l.local_addr().unwrap().port()
+    /// Bind a UDP socket on an OS-assigned free port (127.0.0.1). Returns
+    /// both the bound socket AND the port number it got, so callers don't
+    /// race with other tests.
+    ///
+    /// This replaces an earlier `find_free_port() -> u16` helper that
+    /// bound TCP-0, dropped it, then asked tests to re-bind UDP. Under
+    /// parallel workspace load that opened a TOCTOU window where a
+    /// competing test could grab the same port before this test's UDP
+    /// bind — the fix keeps the socket alive through the test lifetime.
+    async fn bind_mock_udp() -> (tokio::net::UdpSocket, u16) {
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind UDP 127.0.0.1:0");
+        let port = sock.local_addr().expect("local_addr").port();
+        (sock, port)
     }
 
     /// Encode a minimal BACnet I-Am frame.
@@ -2603,19 +2612,20 @@ mod discovery_integration {
         frame
     }
 
-    /// Spawn a UDP task on `port` that waits for ONE packet (the Who-Is),
-    /// then replies with an I-Am from `device_instance`.
-    async fn spawn_mock_device(port: u16, device_instance: u32) -> tokio::task::JoinHandle<()> {
-        let sock = tokio::net::UdpSocket::bind(format!("127.0.0.1:{port}"))
-            .await
-            .expect("mock bind failed");
-        tokio::spawn(async move {
+    /// Spawn a UDP task on an OS-assigned free port that waits for ONE
+    /// packet (the Who-Is), then replies with an I-Am from
+    /// `device_instance`. Returns the bound port so the caller can point
+    /// the driver's `with_broadcast_port` at it.
+    async fn spawn_mock_device(device_instance: u32) -> (tokio::task::JoinHandle<()>, u16) {
+        let (sock, port) = bind_mock_udp().await;
+        let handle = tokio::spawn(async move {
             let mut buf = [0u8; 1500];
             if let Ok((_, from)) = sock.recv_from(&mut buf).await {
                 let reply = encode_i_am(device_instance, 1476, 3, 8);
                 let _ = sock.send_to(&reply, from).await;
             }
-        })
+        });
+        (handle, port)
     }
 
     // ── Tests ──────────────────────────────────────────────
@@ -2623,10 +2633,7 @@ mod discovery_integration {
     #[tokio::test]
     async fn test_open_with_no_response_succeeds_but_registry_empty() {
         // Listen on a mock port but never respond — driver should still return Ok.
-        let mock_port = find_free_port();
-        let _sock = tokio::net::UdpSocket::bind(format!("127.0.0.1:{mock_port}"))
-            .await
-            .unwrap();
+        let (_sock, mock_port) = bind_mock_udp().await;
 
         let mut driver = BacnetDriver::new("no-resp", "127.0.0.1", 0)
             .with_broadcast_port(mock_port)
@@ -2648,12 +2655,8 @@ mod discovery_integration {
 
     #[tokio::test]
     async fn test_open_discovers_single_device() {
-        let mock_port = find_free_port();
         let device_instance = 12345u32;
-
-        let _handle = spawn_mock_device(mock_port, device_instance).await;
-        // Give the mock task time to bind before the driver sends Who-Is.
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let (_handle, mock_port) = spawn_mock_device(device_instance).await;
 
         let mut driver = BacnetDriver::new("single-dev", "127.0.0.1", 0)
             .with_broadcast_port(mock_port)
@@ -2681,11 +2684,7 @@ mod discovery_integration {
     #[tokio::test]
     async fn test_open_discovers_multiple_devices() {
         // One mock socket sends 3 I-Am replies in response to a single Who-Is.
-        let mock_port = find_free_port();
-
-        let sock = tokio::net::UdpSocket::bind(format!("127.0.0.1:{mock_port}"))
-            .await
-            .unwrap();
+        let (sock, mock_port) = bind_mock_udp().await;
 
         let _handle = tokio::spawn(async move {
             let mut buf = [0u8; 1500];
@@ -2697,8 +2696,6 @@ mod discovery_integration {
                 }
             }
         });
-
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         let mut driver = BacnetDriver::new("multi-dev", "127.0.0.1", 0)
             .with_broadcast_port(mock_port)
@@ -2721,10 +2718,7 @@ mod discovery_integration {
 
     #[tokio::test]
     async fn test_close_releases_socket_and_sets_status_down() {
-        let mock_port = find_free_port();
-        let _sock = tokio::net::UdpSocket::bind(format!("127.0.0.1:{mock_port}"))
-            .await
-            .unwrap();
+        let (_sock, mock_port) = bind_mock_udp().await;
 
         let mut driver = BacnetDriver::new("close-test", "127.0.0.1", 0)
             .with_broadcast_port(mock_port)
@@ -2743,9 +2737,7 @@ mod discovery_integration {
     #[tokio::test]
     async fn test_device_registry_accessor_get_and_len() {
         // Verify that device_registry() returns &DeviceRegistry with working get/len.
-        let mock_port = find_free_port();
-        let _handle = spawn_mock_device(mock_port, 9999).await;
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let (_handle, mock_port) = spawn_mock_device(9999).await;
 
         let mut driver = BacnetDriver::new("registry-acc", "127.0.0.1", 0)
             .with_broadcast_port(mock_port)
