@@ -40,7 +40,7 @@ This is the single-read status tracker for the Sandstar Rust project. It consoli
 | BACnet/IP driver (read + write + COV + RPM + BBMD) | ✅ Complete — Project B, 11 phases, live-validated | [IMPLEMENTATION_PLAN_FILTER_AND_BACNET.md](IMPLEMENTATION_PLAN_FILTER_AND_BACNET.md), [BACNET_SETUP.md](BACNET_SETUP.md) |
 | MQTT driver | ✅ Complete — Project C, 4 phases, live-validated | [IMPLEMENTATION_PLAN_MQTT.md](IMPLEMENTATION_PLAN_MQTT.md), [MQTT_SETUP.md](MQTT_SETUP.md) |
 | Poll integration (driver → engine channels) | ✅ Complete — shared tick task in rest/mod.rs | [IMPLEMENTATION_PLAN_FILTER_AND_BACNET.md](IMPLEMENTATION_PLAN_FILTER_AND_BACNET.md) Stage 1/2 |
-| REST API + WebSocket | ✅ Complete — 14 endpoints, auth, TLS, rate limit | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 1 |
+| REST API + WebSocket | ✅ Complete — 14 core + 7 driver endpoints, auth, TLS, rate limit, sub-second WS push | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 1, [DRIVER_REST_API.md](DRIVER_REST_API.md) |
 | Security hardening | ✅ Complete | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 5.7, §Phase 6.5 |
 | Visual DDC editor (web UI) | 🟡 14.0A in progress, 14.0B–F planned | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 14.0 |
 | Driver Framework v2 (Phase 12) | ✅ All sub-phases complete (12.0A–G + 12.0D.WS) | [IMPLEMENTATION_PLAN_DRIVER_FRAMEWORK.md](IMPLEMENTATION_PLAN_DRIVER_FRAMEWORK.md) |
@@ -234,6 +234,7 @@ Defined in `crates/sandstar-server/src/rest/handlers.rs`. 14 endpoints:
 **Operator documents:**
 - [BACNET_SETUP.md](BACNET_SETUP.md) — enable, configure, firewall, BBMD, verify, troubleshoot
 - [MQTT_SETUP.md](MQTT_SETUP.md) — same six sections for MQTT
+- [DRIVER_REST_API.md](DRIVER_REST_API.md) — REST surface for driver lifecycle (list/create/open/close/ping/write/delete/syncCur/message) + WS push behavior, with copy-pasteable curl recipes
 - [DEPLOYMENT_CHECKLIST.md](DEPLOYMENT_CHECKLIST.md) — hardware install verification runbook
 - [HARDCODED_LIMITS.md](HARDCODED_LIMITS.md) — audit of ~90 tuning constants
 
@@ -327,6 +328,7 @@ One-week sprint 2026-04-10 → 2026-04-17:
 | [PURE_RUST_VM_COMPLETION_PLAN.md](PURE_RUST_VM_COMPLETION_PLAN.md) | Historical: 5-phase plan to make pure-Rust the default (complete). |
 | [BACNET_SETUP.md](BACNET_SETUP.md) | **Operator guide** for BACnet. Enable, configure, firewall, BBMD, verify, troubleshoot. |
 | [MQTT_SETUP.md](MQTT_SETUP.md) | **Operator guide** for MQTT. Same six-section structure. |
+| [DRIVER_REST_API.md](DRIVER_REST_API.md) | **Operator/integrator guide** for the driver REST surface (Phase 12 endpoints). Auth model, per-endpoint curl recipes, WS push behavior, error codes, troubleshooting. |
 | [DEPLOYMENT_CHECKLIST.md](DEPLOYMENT_CHECKLIST.md) | Hardware install verification runbook. |
 | [HARDCODED_LIMITS.md](HARDCODED_LIMITS.md) | Audit of ~90 tuning constants across REST/WS/engine/sensors/HAL/IPC/SVM. |
 | [PROGRESS_REPORT.md](PROGRESS_REPORT.md) | Previous (shorter) snapshot. Superseded by this OVERVIEW.md. |
