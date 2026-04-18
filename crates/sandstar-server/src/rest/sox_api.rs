@@ -143,6 +143,12 @@ pub struct PosRequest {
     y: u8,
 }
 
+#[derive(Deserialize)]
+pub struct ReorderRequest {
+    /// New child order. Must equal (as a set) the component's current children.
+    children: Vec<u16>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PaletteEntry {
@@ -714,6 +720,34 @@ pub async fn delete_link(
     }
 }
 
+/// PUT /api/sox/comp/{id}/reorder — reorder a parent's children (Phase 14.0Aj).
+///
+/// Request body: `{"children": [child_id, child_id, ...]}`.
+///
+/// The new order must contain **exactly** the current set of children —
+/// no additions, no removals. Returns 204 on success, 404 if the parent
+/// doesn't exist, 400 if the set of child IDs doesn't match the current
+/// children.
+pub async fn reorder_children(
+    State(state): State<SoxApiState>,
+    Path(id): Path<u16>,
+    Json(req): Json<ReorderRequest>,
+) -> Response {
+    let mut tree = state.tree.write().unwrap();
+    if tree.get(id).is_none() {
+        return (StatusCode::NOT_FOUND, format!("component {id} not found")).into_response();
+    }
+    if !tree.reorder_children(id, &req.children) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "new order must contain the exact set of current children",
+        )
+            .into_response();
+    }
+    tree.mark_dirty();
+    StatusCode::NO_CONTENT.into_response()
+}
+
 /// PUT /api/sox/comp/{id}/pos — update component position.
 pub async fn update_pos(
     State(state): State<SoxApiState>,
@@ -825,5 +859,6 @@ pub fn protected_router(state: SoxApiState) -> axum::Router {
         .route("/api/sox/comp/{id}/invoke/{slot}", post(invoke_action))
         .route("/api/sox/link", post(add_link).delete(delete_link))
         .route("/api/sox/comp/{id}/pos", put(update_pos))
+        .route("/api/sox/comp/{id}/reorder", put(reorder_children))
         .with_state(state)
 }
