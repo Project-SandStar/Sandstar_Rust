@@ -15,9 +15,9 @@
 //!                                                      └── DriverWatchManager
 //! ```
 //!
-//! The actor owns all mutable driver state, eliminating the need for
-//! `Arc<Mutex<DriverManager>>`. The [`DriverHandle`] is cheaply cloneable
-//! and can be shared across tasks.
+//! The actor owns all mutable driver state, eliminating the need for an
+//! `Arc<Mutex<...>>` shared-manager. The [`DriverHandle`] is cheaply
+//! cloneable and can be shared across tasks.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};

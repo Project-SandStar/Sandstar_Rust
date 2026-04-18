@@ -3,7 +3,7 @@
 //! Organizes points into buckets with configurable intervals and
 //! automatic staggering to avoid thundering herd effects. The
 //! [`PollScheduler`] tracks which buckets are due for polling and
-//! provides timing information to the [`DriverManager`].
+//! provides timing information to the driver actor.
 
 use std::time::{Duration, Instant};
 

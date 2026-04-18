@@ -2,8 +2,8 @@
 //!
 //! Tracks which subscribers are watching which points, enabling
 //! efficient fan-out of value change notifications. Used by the
-//! [`DriverManager`] to call [`Driver::on_watch`] and
-//! [`Driver::on_unwatch`] when subscription sets change.
+//! driver actor to call [`Driver::on_watch`] and [`Driver::on_unwatch`]
+//! when subscription sets change.
 
 use std::collections::{HashMap, HashSet};
 

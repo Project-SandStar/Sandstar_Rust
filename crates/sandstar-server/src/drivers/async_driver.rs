@@ -10,8 +10,9 @@
 //!
 //! Rather than converting the existing `Driver` trait (which would break all
 //! implementations), we introduce a parallel `AsyncDriver` trait. The
-//! [`AnyDriver`] enum bridges the two so the actor-based [`DriverManager`](super::actor)
-//! can manage both kinds uniformly.
+//! [`AnyDriver`] enum bridges the two so the actor-based
+//! [`DriverHandle`](super::actor::DriverHandle) can manage both kinds
+//! uniformly.
 
 use async_trait::async_trait;
 
@@ -102,7 +103,7 @@ pub trait AsyncDriver: Send + Sync {
 /// Wrapper that unifies sync [`Driver`](super::Driver) and [`AsyncDriver`] into
 /// one dispatchable type.
 ///
-/// The actor-based [`DriverManagerActor`](super::actor::DriverManagerActor) stores
+/// The actor-based [`DriverHandle`](super::actor::DriverHandle) stores
 /// drivers as `AnyDriver` instances and calls methods through this wrapper,
 /// which `.await`s async drivers and calls sync drivers directly.
 pub enum AnyDriver {
