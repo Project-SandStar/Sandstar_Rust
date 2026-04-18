@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-04-17
 **Current version:** v2.8.8 deployed and live on the one production BeagleBone (DHCP — "1-3" / "1-11" are historical labels for the same device; currently 192.168.1.11). Smoke-tested 2026-04-17: HVAC channel 1713 reads 121.1°F unchanged; `/api/drivers` lists `bacnet-local` + `localIo` both Ok; `POST /api/syncCur` against `localIo` ch 1713 returns live engine value, proving Phase 12.0F engine-façade delegation works end-to-end.
-**Workspace:** 7 crates, ~40,000 LOC, **2,677 tests passing, 0 clippy warnings, 0 failures**
+**Workspace:** 7 crates, ~40,000 LOC, **2,652 tests passing, 0 clippy warnings, 0 failures**
 **GitHub:** https://github.com/Project-SandStar/Sandstar_Rust
 
 This is the single-read status tracker for the Sandstar Rust project. It consolidates everything in `docs/Progress/` into one scan. For per-phase rationale, design decisions, or operator instructions, follow the links into the detailed documents — they remain the **source of truth**.
@@ -44,7 +44,7 @@ This is the single-read status tracker for the Sandstar Rust project. It consoli
 | Security hardening | ✅ Complete | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 5.7, §Phase 6.5 |
 | Visual DDC editor (web UI) | 🟡 14.0A in progress, 14.0B–F planned | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 14.0 |
 | Driver Framework v2 (Phase 12) | ✅ All sub-phases complete (12.0A–G + 12.0D.WS) | [IMPLEMENTATION_PLAN_DRIVER_FRAMEWORK.md](IMPLEMENTATION_PLAN_DRIVER_FRAMEWORK.md) |
-| Clustering — roxWarp (Phase 9) | ⬜ Not started — low priority | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 9 |
+| Clustering — roxWarp (Phase 9) | 🟡 9.0a protocol + delta engine shipped (~5000 LOC, 126 unit tests, 3 integration tests); 9.0b mDNS discovery + 9.0d SkySpark Fantom pod pending | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 9 |
 | Dynamic Slots (Phase 13) | ⬜ Not started — low priority | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 13 |
 | Hardware sensor validation on 1-11 | 🟡 Deferred — no sensors physically attached | — |
 | Real BACnet vendor device validation | 🟡 Pending — no hardware available | — |
@@ -277,7 +277,7 @@ Ranked by value, not effort. "Ripe" items have the highest leverage because the 
 7. **MQTT reconnect quirk.** mosquitto logged a brief reconnect during first connect; data flow unaffected but worth a longer-run look.
 
 ### 🔴 Deferred / low priority
-8. **Phase 9 — roxWarp clustering.** Peer gossip + distributed queries. Large scope, no immediate user.
+8. **Phase 9 — roxWarp clustering.** Protocol + delta engine + peer gossip + distributed queries are implemented (`crates/sandstar-server/src/roxwarp/`, ~5000 LOC, 126 unit tests, 3 integration tests proving two-node convergence 2026-04-18). Remaining: 9.0b mDNS/UDP peer discovery (currently static peer list), 9.0d SkySpark Fantom pod (external, different stack).
 9. **Phase 13 — Dynamic slots.** Runtime component type modification. Niche. Research: [research/19_*](../research/19_DYNAMIC_SLOTS.md).
 10. **Phase 5.8a–e — Hardware soak test.** Awaiting hardware access.
 

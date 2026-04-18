@@ -104,7 +104,7 @@
 | Phase 14.0D | Web-Based Visual DDC Editor: Interactions | L | -- | PLANNED |
 | Phase 14.0E | Web-Based Visual DDC Editor: Component Palette & CRUD | M | -- | PLANNED |
 | Phase 14.0F | Web-Based Visual DDC Editor: Live Data & WebSocket | M | -- | PLANNED |
-| Phase 9.0 | Northbound clustering (roxWarp) | XL | 16 | Low |
+| Phase 9.0 | Northbound clustering (roxWarp) | XL | 16 | **9.0a COMPLETE** (2026-04-18); 9.0b/d pending |
 | Phase 11.0 | Sedona VM Rust port (bytecode interpreter, name interning) | XL | 12, 13, 14, 17 | **COMPLETE** (2026-04-10) |
 | Phase 12.0 | Driver Framework v2 (Haxall-inspired, pure Rust) | XL | 18 | Very Low |
 | Phase 13.0 | Dynamic Slots (hybrid static+dynamic slot model) | L | 19 | Very Low |
@@ -572,10 +572,10 @@ The security audit identified issues across four severity levels. These MUST be 
 
 | Task | Description | Effort |
 |------|-------------|--------|
-| 9.0a | **Binary Trio diff protocol**: Delta encoding of grid changes between cluster peers. | [L] |
-| 9.0b | **Gossip discovery**: mDNS or UDP broadcast for peer discovery on same subnet. | [M] |
-| 9.0c | **State reconciliation**: Conflict resolution for concurrent writes from different peers. | [L] |
-| 9.0d | **Fantom pod for SkySpark**: Package as SkySpark extension for centralized monitoring. | [L] |
+| 9.0a | **Binary Trio diff protocol**: Delta encoding of grid changes between cluster peers. **COMPLETE** (~5000 LOC in `src/roxwarp/`, 126 unit tests, 3 integration tests proving two-node convergence 2026-04-18). | [L] |
+| 9.0b | **Gossip discovery**: mDNS or UDP broadcast for peer discovery on same subnet. Currently static peer list from `ClusterConfig.peers`. | [M] |
+| 9.0c | **State reconciliation**: Conflict resolution for concurrent writes from different peers. **COMPLETE** via LWW + version vectors in `DeltaEngine`. | [L] |
+| 9.0d | **Fantom pod for SkySpark**: Package as SkySpark extension for centralized monitoring. External — different language + needs SkySpark install. | [L] |
 
 **Total effort:** 1-2 weeks
 **Blocked by:** Phase 8.0
@@ -750,7 +750,7 @@ Remaining future tracks (post-production):
 | 14.0D | Web DDC Editor: Interactions | Medium | [L] | PLANNED | -- |
 | 14.0E | Web DDC Editor: Palette & CRUD | Medium | [M] | PLANNED | -- |
 | 14.0F | Web DDC Editor: Live Data & WS | Medium | [M] | PLANNED | -- |
-| 9.0 | roxWarp clustering | Low | [XL] | Not started | 16 |
+| 9.0 | roxWarp clustering | Low | [XL] | 9.0a+c DONE (2026-04-18); 9.0b+d pending | 16 |
 | 10.0A-D | Config-driven control engine | Medium | [M] | COMPLETE | -- |
 | 10.0E | Additional components library | Low | [M] | COMPLETE (20 + converter) | -- |
 | 11.0 | Sedona VM Rust port | Very Low | [XL] | **COMPLETE** (2026-04-10, 650+ tests, pure Rust, no C/FFI) | 12, 13, 14, 17 |
