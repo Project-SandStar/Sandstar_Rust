@@ -107,7 +107,7 @@
 | Phase 9.0 | Northbound clustering (roxWarp) | XL | 16 | **9.0a COMPLETE** (2026-04-18); 9.0b/d pending |
 | Phase 11.0 | Sedona VM Rust port (bytecode interpreter, name interning) | XL | 12, 13, 14, 17 | **COMPLETE** (2026-04-10) |
 | Phase 12.0 | Driver Framework v2 (Haxall-inspired, pure Rust) | XL | 18 | Very Low |
-| Phase 13.0 | Dynamic Slots (hybrid static+dynamic slot model) | L | 19 | Very Low |
+| Phase 13.0 | Dynamic Slots (hybrid static+dynamic slot model) | L | 19 | **COMPLETE** (all 7 sub-phases 13.0a-g, 2026-04-18) |
 
 ---
 
@@ -674,8 +674,8 @@ The security audit identified issues across four severity levels. These MUST be 
 | 13.0c | **Persistence**: Atomic JSON save (write .tmp then rename), load on startup, corrupt file recovery, version tag, auto-save every 5s. | [M] | COMPLETE |
 | 13.0d | **Component cleanup**: Tags auto-deleted when SOX component is deleted. | [S] | COMPLETE |
 | 13.0e | **Protocol metadata**: Store Modbus register address, BACnet object ID, MQTT topic, LoRaWAN devEUI as dynamic slots. | [M] | COMPLETE (via REST API) |
-| 13.0f | **SOX/ROX protocol extension**: Serialize/deserialize dynamic slots over network (readTags, setTags, deleteTag). | [M] | Not started |
-| 13.0g | **Haystack tag integration**: Dynamic slots participate in Haystack filter queries. | [M] | Not started |
+| 13.0f | **SOX/ROX protocol extension**: Serialize/deserialize dynamic slots over network (readTags, setTags, deleteTag). **COMPLETE** — ROX via `rest/rows.rs:526-548` explicit ops, SOX via extended `readComp` response in `sox_handlers.rs` (smarter than adding new cmd codes the Sedona Editor wouldn't understand). 35 unit tests in rows.rs + 3 WS integration tests proving setTags→readTags→deleteTag round-trip 2026-04-18. | [M] | **COMPLETE** |
+| 13.0g | **Haystack tag integration**: Dynamic slots participate in Haystack filter queries. **COMPLETE** — `filter::matches_with_tags` checks static→dynamic for Has/Missing/Cmp; `/api/read` at `handlers.rs:128` passes per-channel dyn-tags into the filter; 77 unit tests in filter.rs + 1 composition cross-check 2026-04-18. Only `->` ref-path navigation over dyn-refs remains un-wired into `/api/read` (baseline `myDynTag==42` matching works). | [M] | **COMPLETE** |
 
 **Total effort:** 1-2 weeks
 **Blocked by:** Phase 12.0 (discovery creates the need for dynamic slots)
@@ -755,7 +755,7 @@ Remaining future tracks (post-production):
 | 10.0E | Additional components library | Low | [M] | COMPLETE (20 + converter) | -- |
 | 11.0 | Sedona VM Rust port | Very Low | [XL] | **COMPLETE** (2026-04-10, 650+ tests, pure Rust, no C/FFI) | 12, 13, 14, 17 |
 | **12.0** | **Driver Framework v2** | **Very Low** | **[XL]** | **In progress (12.0a,d complete; stubs for e)** | **18** |
-| **13.0** | **Dynamic Slots** | **Very Low** | **[L]** | **In progress (13.0a-e complete; SOX/ROX + Haystack pending)** | **19** |
+| **13.0** | **Dynamic Slots** | **Very Low** | **[L]** | **COMPLETE (13.0a-g all shipped, 2026-04-18)** | **19** |
 
 ---
 
@@ -819,7 +819,7 @@ Deep gap analysis completed 2026-03-20 (3-agent, 20 documents vs full codebase).
 | 16 | roxWarp Protocol | 9.0 | 0% | Entirely unimplemented (future Phase 9.0) |
 | 17 | Name Length Analysis | 11.0c | 60% | Unlimited names via String; interning unnecessary at scale. **31-char Sedona-compat name validation enforced across all entry points** (REST, RoWS, SOX add/rename, editor JS) as of 2026-04-04. |
 | 18 | Driver Framework v2 | 12.0 | 55% | Driver trait + DriverManager + LocalIoDriver + REST endpoints done. Modbus/BACnet/MQTT stubs created. PollScheduler/WatchManager/async actor pending |
-| 19 | Dynamic Slots | 13.0 | 60% | DynSlotStore with REST API, persistence (atomic save/load on startup), auto-save 5s, component cleanup, memory limits. SOX/ROX protocol extension and Haystack filter integration pending |
+| 19 | Dynamic Slots | 13.0 | 100% | DynSlotStore (1559 LOC, 59 tests), REST API (`/api/tags/{id}`), persistence (atomic save/load, auto-save 5s), component cleanup, memory limits. ROX `readTags`/`setTags`/`deleteTag` wire ops (35 tests + 3 WS integration tests), SOX `readComp`-with-dyn-tags encoding, filter engine integration (77 tests in `filter.rs`) all live. 2026-04-18. |
 
 **Key architectural divergence:** Custom Zinc/filter implementation instead of libhaystack dependency (docs 03/05); in-process bridge instead of 29-function C FFI (doc 06); channel-centric model instead of component-centric (docs 18/19). All are defensible engineering decisions that reduced complexity and external dependencies.
 
