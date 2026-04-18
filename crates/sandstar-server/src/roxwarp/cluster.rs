@@ -64,6 +64,12 @@ pub struct ClusterConfig {
     /// Path to CA certificate (PEM) for mTLS peer verification.
     #[serde(default)]
     pub ca_path: Option<String>,
+    /// Phase 9.0b: enable mDNS peer discovery. When `true`, this node
+    /// advertises itself and browses for peers on the local subnet,
+    /// augmenting the static `peers` list. When `false` (default),
+    /// only the static list is used — no multicast traffic.
+    #[serde(default)]
+    pub enable_mdns: bool,
 }
 
 fn default_cluster_port() -> u16 {
@@ -91,6 +97,7 @@ impl Default for ClusterConfig {
             cert_path: None,
             key_path: None,
             ca_path: None,
+            enable_mdns: false,
         }
     }
 }
@@ -374,7 +381,7 @@ impl ClusterManager {
             channel_feed_loop(feed_engine, feed_handle, feed_interval).await;
         });
 
-        // Spawn outbound peer connections
+        // Spawn outbound peer connections for the static peer list.
         for peer_config in &self.config.peers {
             if !peer_config.enabled {
                 continue;
@@ -389,6 +396,58 @@ impl ClusterManager {
             tokio::spawn(async move {
                 super::peer::connect_to_peer(&pc, de, ps, hb_secs, ae_secs, tls, false).await;
             });
+        }
+
+        // Phase 9.0b: spawn mDNS responder + browser when enabled.
+        // Discovered peers are merged into peer_states alongside the
+        // static list, and each new one gets its own connect_to_peer
+        // task. Leaked handle is OK — dropping MdnsHandle stops the
+        // daemon, and we want it alive for the cluster's lifetime.
+        if self.config.enable_mdns {
+            let de = self.delta_engine.clone();
+            let ps = self.peer_states.clone();
+            let hb_secs = self.config.heartbeat_interval_secs;
+            let ae_secs = self.config.anti_entropy_interval_secs;
+            let tls = mtls_client.clone();
+            let my_id = self.config.node_id.clone();
+            let port = self.config.port;
+
+            let on_discover = move |peer: super::mdns::DiscoveredPeer| {
+                let pc = super::cluster::PeerConfig {
+                    node_id: peer.node_id.clone(),
+                    address: peer.address,
+                    enabled: true,
+                };
+                let de = de.clone();
+                let ps = ps.clone();
+                let tls = tls.clone();
+                // Dedup: if this peer is already in peer_states, skip.
+                let ps_check = ps.clone();
+                let pc_node_id = pc.node_id.clone();
+                tokio::spawn(async move {
+                    {
+                        let guard = ps_check.read().await;
+                        if guard.contains_key(&pc_node_id) {
+                            return; // already known from static list or prior discovery
+                        }
+                    }
+                    super::peer::connect_to_peer(&pc, de, ps, hb_secs, ae_secs, tls, false)
+                        .await;
+                });
+            };
+
+            match super::mdns::start_mdns(&my_id, port, on_discover) {
+                Ok(handle) => {
+                    info!(node_id = %my_id, port, "roxWarp: mDNS discovery enabled");
+                    // Keep the handle alive for the cluster's lifetime by
+                    // leaking it into a static-lifetime Box. The daemon
+                    // gracefully stops when the process ends.
+                    std::mem::forget(handle);
+                }
+                Err(e) => {
+                    warn!(error = %e, "roxWarp: failed to start mDNS; continuing with static peers only");
+                }
+            }
         }
 
         info!("roxWarp cluster manager started");

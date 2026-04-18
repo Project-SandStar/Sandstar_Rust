@@ -29,6 +29,7 @@ pub mod binary_trio;
 pub mod cluster;
 pub mod delta;
 pub mod handler;
+pub mod mdns;
 pub mod mtls;
 pub mod peer;
 pub mod protocol;

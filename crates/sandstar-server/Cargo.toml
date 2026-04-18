@@ -58,6 +58,10 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-pemfile = "2"
 webpki-roots = "0.26"
 rumqttc = "0.24"
+# Phase 9.0b: mDNS peer discovery for roxWarp (opt-in via
+# ClusterConfig.enable_mdns). Pure Rust, works cross-platform and
+# cross-compiles cleanly under Zig CC.
+mdns-sd = { version = "0.13", default-features = false, features = ["async"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

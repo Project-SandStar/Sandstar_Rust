@@ -21,8 +21,10 @@ use std::time::Duration;
 use sandstar_server::roxwarp::{
     cluster::{ClusterConfig, DeltaEngine, PeerConfig, PeerState},
     handler::roxwarp_upgrade,
+    mdns::{start_mdns, DiscoveredPeer},
     RoxWarpState,
 };
+use std::sync::Mutex;
 use tokio::sync::RwLock;
 
 // ── Helpers ────────────────────────────────────────────────
@@ -46,6 +48,7 @@ fn test_config(node_id: &str, port: u16) -> ClusterConfig {
         cert_path: None,
         key_path: None,
         ca_path: None,
+        enable_mdns: false,
     }
 }
 
@@ -228,4 +231,57 @@ async fn new_peer_receives_backlog_on_handshake() {
         .expect("backlog: channel 501 missing on B");
     assert!((p500.value - 99.9).abs() < f64::EPSILON);
     assert!((p501.value - 42.0).abs() < f64::EPSILON);
+}
+
+// ── Phase 9.0b: mDNS peer discovery ────────────────────────
+
+/// Two nodes, both advertising + browsing via mDNS on the loopback
+/// interface, should discover each other within ~5 seconds. Each side's
+/// `on_discover` callback records the peer's node id; the test verifies
+/// both callbacks fired with the expected peer id.
+///
+/// `#[ignore]` by default because mDNS uses UDP multicast (5353), which
+/// is unavailable on some CI / sandboxed environments. Run manually on
+/// a multicast-capable host with `cargo test -- --ignored`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires UDP multicast; run with --ignored on multicast-capable host"]
+async fn mdns_two_nodes_discover_each_other() {
+    let found_by_a: Arc<Mutex<Vec<DiscoveredPeer>>> = Arc::new(Mutex::new(Vec::new()));
+    let found_by_b: Arc<Mutex<Vec<DiscoveredPeer>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let fa = found_by_a.clone();
+    let _h_a = start_mdns("node-a-mdns", 47801, move |p| {
+        fa.lock().unwrap().push(p);
+    })
+    .expect("node A mDNS start");
+
+    let fb = found_by_b.clone();
+    let _h_b = start_mdns("node-b-mdns", 47802, move |p| {
+        fb.lock().unwrap().push(p);
+    })
+    .expect("node B mDNS start");
+
+    // mDNS advertisement + discovery typically converges in 1-3 s.
+    // Allow 8 s under load.
+    for _ in 0..80 {
+        let a_has_b = found_by_a
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.node_id == "node-b-mdns");
+        let b_has_a = found_by_b
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.node_id == "node-a-mdns");
+        if a_has_b && b_has_a {
+            return; // success
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!(
+        "mDNS did not converge within 8 s; A saw {:?}, B saw {:?}",
+        found_by_a.lock().unwrap(),
+        found_by_b.lock().unwrap()
+    );
 }

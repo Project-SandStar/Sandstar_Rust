@@ -104,7 +104,7 @@
 | Phase 14.0D | Web-Based Visual DDC Editor: Interactions | L | -- | PLANNED |
 | Phase 14.0E | Web-Based Visual DDC Editor: Component Palette & CRUD | M | -- | PLANNED |
 | Phase 14.0F | Web-Based Visual DDC Editor: Live Data & WebSocket | M | -- | PLANNED |
-| Phase 9.0 | Northbound clustering (roxWarp) | XL | 16 | **9.0a COMPLETE** (2026-04-18); 9.0b/d pending |
+| Phase 9.0 | Northbound clustering (roxWarp) | XL | 16 | **9.0a+b+c COMPLETE** (2026-04-18); only 9.0d (external Fantom pod) remaining |
 | Phase 11.0 | Sedona VM Rust port (bytecode interpreter, name interning) | XL | 12, 13, 14, 17 | **COMPLETE** (2026-04-10) |
 | Phase 12.0 | Driver Framework v2 (Haxall-inspired, pure Rust) | XL | 18 | Very Low |
 | Phase 13.0 | Dynamic Slots (hybrid static+dynamic slot model) | L | 19 | **COMPLETE** (all 7 sub-phases 13.0a-g, 2026-04-18) |
@@ -471,8 +471,8 @@ The security audit identified issues across four severity levels. These MUST be 
 | 14.0Ag | **POST /api/sox/link**: Add/remove link (from_comp, from_slot, to_comp, to_slot). | [S] | DONE (`POST /api/sox/link` + `DELETE /api/sox/link`) |
 | 14.0Ah | **GET /api/sox/palette**: Return available component types from manifest (kit/type/slots). | [S] | DONE — also added `/api/sox/names` and `/api/sox/comp/{id}` |
 | 14.0Ai | **POST /api/sox/position**: Update component x,y position for editor layout persistence. | [S] | DONE (as `PUT /api/sox/comp/{id}/pos`) |
-| 14.0Aj | **POST /api/sox/reorder**: Reorder children of a parent component. | [S] | Pending — no reorder endpoint in `sox_api.rs` routes (reorder is available via SOX/ROX protocol but not REST) |
-| 14.0Ak | **Integration tests**: REST round-trip tests for all 11 endpoints. | [M] | Pending — 0 integration tests in `tests/*.rs` reference `/api/sox/*` as of 2026-04-18 |
+| 14.0Aj | **POST /api/sox/reorder**: Reorder children of a parent component. | [S] | DONE (as `PUT /api/sox/comp/{id}/reorder`, 2026-04-18) — thin REST wrapper over `ComponentTree::reorder_children`; 204 on success, 404/400 on invalid input |
+| 14.0Ak | **Integration tests**: REST round-trip tests for all 11 endpoints. | [M] | DONE (2026-04-18) — `tests/sox_api_integration.rs`, 13 HTTP round-trip tests covering tree / palette / names / add / get / rename / write-slot / pos / delete / reorder (happy + 400 + 404) / link (add + delete + redelete-404) / invalid name |
 
 **Total effort:** 3-5 days
 **Blocks:** Phase 14.0B
@@ -573,7 +573,7 @@ The security audit identified issues across four severity levels. These MUST be 
 | Task | Description | Effort |
 |------|-------------|--------|
 | 9.0a | **Binary Trio diff protocol**: Delta encoding of grid changes between cluster peers. **COMPLETE** (~5000 LOC in `src/roxwarp/`, 126 unit tests, 3 integration tests proving two-node convergence 2026-04-18). | [L] |
-| 9.0b | **Gossip discovery**: mDNS or UDP broadcast for peer discovery on same subnet. Currently static peer list from `ClusterConfig.peers`. | [M] |
+| 9.0b | **Gossip discovery**: mDNS or UDP broadcast for peer discovery on same subnet. **COMPLETE** (2026-04-18) — `roxwarp/mdns.rs` advertises `_sandstar-roxwarp._tcp.local.` with node_id + cluster port, browses for peers, merges into `peer_states`. Opt-in via `ClusterConfig.enable_mdns` (default false for back-compat). Static `peers` list still works; both can coexist. 2 unit tests + 1 live integration test gated `#[ignore]` (requires real multicast). | [M] |
 | 9.0c | **State reconciliation**: Conflict resolution for concurrent writes from different peers. **COMPLETE** via LWW + version vectors in `DeltaEngine`. | [L] |
 | 9.0d | **Fantom pod for SkySpark**: Package as SkySpark extension for centralized monitoring. External — different language + needs SkySpark install. | [L] |
 
@@ -744,13 +744,13 @@ Remaining future tracks (post-production):
 | 8.0A | Haystack-over-WebSocket | Medium | [M] | COMPLETE (ws.rs + 31 tests) | 15 |
 | 8.0A-SOX | SOX/DASP protocol (pure Rust) | Medium | [L] | COMPLETE (DASP + 20/20 commands, 185 manifest types, dataflow engine) | 15 |
 | 8.0B | Full ROX Protocol (all SOX ops) | Low | [S] | **COMPLETE** (20/20 SOX commands, fileWrite+fileRename done) | 15 |
-| **14.0A** | **Web DDC Editor: REST API** | **Medium** | **[M]** | **NEARLY COMPLETE (9/11 sub-tasks DONE — reorder endpoint + integration tests pending as of 2026-04-18)** | -- |
+| **14.0A** | **Web DDC Editor: REST API** | **Medium** | **[M]** | **COMPLETE (11/11 sub-tasks, 2026-04-18) — reorder endpoint added + 13 HTTP integration tests cover every endpoint** | -- |
 | 14.0B | Web DDC Editor: HTML Scaffold | Medium | [M] | PLANNED | -- |
 | 14.0C | Web DDC Editor: Canvas Rendering | Medium | [L] | PLANNED | -- |
 | 14.0D | Web DDC Editor: Interactions | Medium | [L] | PLANNED | -- |
 | 14.0E | Web DDC Editor: Palette & CRUD | Medium | [M] | PLANNED | -- |
 | 14.0F | Web DDC Editor: Live Data & WS | Medium | [M] | PLANNED | -- |
-| 9.0 | roxWarp clustering | Low | [XL] | 9.0a+c DONE (2026-04-18); 9.0b+d pending | 16 |
+| 9.0 | roxWarp clustering | Low | [XL] | 9.0a+b+c DONE (2026-04-18); only 9.0d (external Fantom pod for SkySpark) remaining | 16 |
 | 10.0A-D | Config-driven control engine | Medium | [M] | COMPLETE | -- |
 | 10.0E | Additional components library | Low | [M] | COMPLETE (20 + converter) | -- |
 | 11.0 | Sedona VM Rust port | Very Low | [XL] | **COMPLETE** (2026-04-10, 650+ tests, pure Rust, no C/FFI) | 12, 13, 14, 17 |
@@ -816,7 +816,7 @@ Deep gap analysis completed 2026-03-20 (3-agent, 20 documents vs full codebase).
 | 13 | SVM Porting Strategy | 11.0 | 100% | All recommended phases implemented: Cell type (i32 stack), opcode dispatch (match), stack (bounds-checked Vec), memory segments, native method system, scode loader. Kit 0/2/4/9 natives ported. C code removed, pure Rust VM complete |
 | 14 | Scalability Limits | 11.0, 5.6, 7.0c | 95% | ComponentStore (free-list, u32 IDs, iterative tree walk), VmConfig (configurable limits: 64KB stack, 4096 components, 4MB scode, Byte32 addressing). All scalability fixes from doc 14 implemented |
 | 15 | SOX/WebSocket | 8.0A, 8.0A-SOX, 8.0B | 100% | WS + SCRAM + full SOX/DASP done (20/20 commands, pure Rust, 185 manifest types, dataflow engine, component persistence) |
-| 16 | roxWarp Protocol | 9.0 | ~70% | 9.0a (Binary Trio diff) + 9.0c (state reconciliation via LWW + version vectors) COMPLETE. ~5000 LOC in `src/roxwarp/`, 126 unit tests, 3 integration tests proving two-node convergence (2026-04-18). 9.0b mDNS/UDP discovery + 9.0d SkySpark Fantom pod still pending. |
+| 16 | roxWarp Protocol | 9.0 | ~85% | 9.0a (Binary Trio diff) + 9.0b (mDNS discovery) + 9.0c (state reconciliation via LWW + version vectors) COMPLETE. ~5000 LOC in `src/roxwarp/` + 200 LOC mDNS, 128+ unit tests, 3 integration tests proving two-node convergence (2026-04-18). Only 9.0d SkySpark Fantom pod remains (external, different language). |
 | 17 | Name Length Analysis | 11.0c | 60% | Unlimited names via String; interning unnecessary at scale. **31-char Sedona-compat name validation enforced across all entry points** (REST, RoWS, SOX add/rename, editor JS) as of 2026-04-04. |
 | 18 | Driver Framework v2 | 12.0 | 100% | All 8 sub-phases shipped v2.8.1→v2.8.8 (2026-04-17–18): generic `DriverLoader` + `load_drivers<L>` (12.0A), `PointStatus::Remote*` + `from_driver_error` (12.0B), `SyncContext`/`WriteContext` callback API (12.0C), `CovEvent` broadcast channel (12.0D), WS push bridge (12.0D.WS, validated via `ws_latency_test.py`), `DriverMessage` + `on_receive` (12.0E), `LocalIoDriver` async + engine façade (12.0F, legacy sync `DriverManager` deleted), runtime REST lifecycle endpoints (12.0G). Drivers live: BACnet/IP full (read/write/COV/RPM/BBMD, wire-validated), MQTT v3.1.1, LocalIoDriver, Modbus. Hardware-validated: /api/syncCur against localIo ch 1713 returns engine value; BACnet point 102 `Down`→`Ok` transition observed. |
 | 19 | Dynamic Slots | 13.0 | 100% | DynSlotStore (1559 LOC, 59 tests), REST API (`/api/tags/{id}`), persistence (atomic save/load, auto-save 5s), component cleanup, memory limits. ROX `readTags`/`setTags`/`deleteTag` wire ops (35 tests + 3 WS integration tests), SOX `readComp`-with-dyn-tags encoding, filter engine integration (77 tests in `filter.rs`) all live. 2026-04-18. |
