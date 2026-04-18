@@ -442,7 +442,7 @@ The security audit identified issues across four severity levels. These MUST be 
 | 8.0Bd-1 | **readProp(r)**: Single-property reads. | [S] | DONE |
 | 8.0Bd-2 | **link(l)**: Add/delete links, readComp what='l' for link data. | [S] | DONE |
 | 8.0Be | **fileWrite(h) / fileRename(x)**: Write files to device, rename files. | [S] | DONE |
-| 8.0Bf | **Trio encoder/decoder**: Binary Haystack encoding per Project Haystack spec (more efficient than Zinc). | [M] | Not started (optional) |
+| 8.0Bf | **Trio encoder/decoder**: Binary Haystack encoding per Project Haystack spec (more efficient than Zinc). | [M] | DONE (via Phase 9.0a reuse) — `src/roxwarp/binary_trio.rs` (607 LOC + 11 tests) implements MessagePack-based binary Trio for cluster gossip; same encoder covers the 8.0Bf requirement. |
 | 8.0Bg | **reorder(o)**: Reorder component children. | [S] | DONE |
 
 **Completed:** 2026-03-30 (all SOX commands done, only Trio encoding remains as optional enhancement)
@@ -462,17 +462,17 @@ The security audit identified issues across four severity levels. These MUST be 
 
 | Task | Description | Effort | Status |
 |------|-------------|--------|--------|
-| 14.0Aa | **Share ComponentTree via Arc<RwLock>**: Make the SOX component tree accessible from REST handlers alongside the existing DASP/SOX path. | [M] | IN PROGRESS |
-| 14.0Ab | **GET /api/sox/tree**: Return full component tree as JSON (id, name, type, children, slots, links, position). | [S] | |
-| 14.0Ac | **POST /api/sox/add**: Add component to tree (parent_id, kit_id, type_id, name). | [S] | |
-| 14.0Ad | **POST /api/sox/delete**: Delete component by id (with subtree). | [S] | |
-| 14.0Ae | **POST /api/sox/rename**: Rename component (id, new_name). | [S] | |
-| 14.0Af | **POST /api/sox/write**: Write slot value (comp_id, slot_name, value). | [S] | |
-| 14.0Ag | **POST /api/sox/link**: Add/remove link (from_comp, from_slot, to_comp, to_slot). | [S] | |
-| 14.0Ah | **GET /api/sox/palette**: Return available component types from manifest (kit/type/slots). | [S] | |
-| 14.0Ai | **POST /api/sox/position**: Update component x,y position for editor layout persistence. | [S] | |
-| 14.0Aj | **POST /api/sox/reorder**: Reorder children of a parent component. | [S] | |
-| 14.0Ak | **Integration tests**: REST round-trip tests for all 11 endpoints. | [M] | |
+| 14.0Aa | **Share ComponentTree via Arc<RwLock>**: Make the SOX component tree accessible from REST handlers alongside the existing DASP/SOX path. | [M] | DONE (see `rest/mod.rs` `sox_state` + `rest/sox_api.rs::SoxApiState`) |
+| 14.0Ab | **GET /api/sox/tree**: Return full component tree as JSON (id, name, type, children, slots, links, position). | [S] | DONE |
+| 14.0Ac | **POST /api/sox/add**: Add component to tree (parent_id, kit_id, type_id, name). | [S] | DONE (as `POST /api/sox/comp`) |
+| 14.0Ad | **POST /api/sox/delete**: Delete component by id (with subtree). | [S] | DONE (as `DELETE /api/sox/comp/{id}`) |
+| 14.0Ae | **POST /api/sox/rename**: Rename component (id, new_name). | [S] | DONE (as `PUT /api/sox/comp/{id}/name`) |
+| 14.0Af | **POST /api/sox/write**: Write slot value (comp_id, slot_name, value). | [S] | DONE (as `PUT /api/sox/comp/{id}/slot/{idx}`) + `POST /api/sox/comp/{id}/invoke/{slot}` for actions |
+| 14.0Ag | **POST /api/sox/link**: Add/remove link (from_comp, from_slot, to_comp, to_slot). | [S] | DONE (`POST /api/sox/link` + `DELETE /api/sox/link`) |
+| 14.0Ah | **GET /api/sox/palette**: Return available component types from manifest (kit/type/slots). | [S] | DONE — also added `/api/sox/names` and `/api/sox/comp/{id}` |
+| 14.0Ai | **POST /api/sox/position**: Update component x,y position for editor layout persistence. | [S] | DONE (as `PUT /api/sox/comp/{id}/pos`) |
+| 14.0Aj | **POST /api/sox/reorder**: Reorder children of a parent component. | [S] | Pending — no reorder endpoint in `sox_api.rs` routes (reorder is available via SOX/ROX protocol but not REST) |
+| 14.0Ak | **Integration tests**: REST round-trip tests for all 11 endpoints. | [M] | Pending — 0 integration tests in `tests/*.rs` reference `/api/sox/*` as of 2026-04-18 |
 
 **Total effort:** 3-5 days
 **Blocks:** Phase 14.0B
@@ -738,13 +738,13 @@ Remaining future tracks (post-production):
 | 5.8j | Hardware readiness assessment | High | [S] | COMPLETE (project declared hardware-ready, soak reduced 48h→4-8h) | -- |
 | **5.9** | **Production cutover** | **Critical** | **[S]** | **COMPLETE** (2026-03-18, C removed, Rust v1.0.0 live) | -- |
 | **5.10** | **Post-deployment fixes** | **High** | **[S]** | **COMPLETE** (I2C protocol fix, ADC fault detection, backoff, health CLI) | 02 |
-| 6.0 | Sedona VM integration | High | [L] | MOSTLY COMPLETE (4/5) | 06 |
+| 6.0 | Sedona VM integration | High | [L] | COMPLETE (5/5; 6.0c marked N/A per sub-task table — SOX HTTP client replaced by in-process bridge) | 06 |
 | 6.5 | TLS + advanced security | Medium | [M] | COMPLETE (5/5 tasks) | -- |
 | 7.0 | Engine core polish | Medium | [M] | COMPLETE (4/4 tasks) | 01, 02 |
 | 8.0A | Haystack-over-WebSocket | Medium | [M] | COMPLETE (ws.rs + 31 tests) | 15 |
 | 8.0A-SOX | SOX/DASP protocol (pure Rust) | Medium | [L] | COMPLETE (DASP + 20/20 commands, 185 manifest types, dataflow engine) | 15 |
 | 8.0B | Full ROX Protocol (all SOX ops) | Low | [S] | **COMPLETE** (20/20 SOX commands, fileWrite+fileRename done) | 15 |
-| **14.0A** | **Web DDC Editor: REST API** | **Medium** | **[M]** | **IN PROGRESS** | -- |
+| **14.0A** | **Web DDC Editor: REST API** | **Medium** | **[M]** | **NEARLY COMPLETE (9/11 sub-tasks DONE — reorder endpoint + integration tests pending as of 2026-04-18)** | -- |
 | 14.0B | Web DDC Editor: HTML Scaffold | Medium | [M] | PLANNED | -- |
 | 14.0C | Web DDC Editor: Canvas Rendering | Medium | [L] | PLANNED | -- |
 | 14.0D | Web DDC Editor: Interactions | Medium | [L] | PLANNED | -- |
@@ -754,7 +754,7 @@ Remaining future tracks (post-production):
 | 10.0A-D | Config-driven control engine | Medium | [M] | COMPLETE | -- |
 | 10.0E | Additional components library | Low | [M] | COMPLETE (20 + converter) | -- |
 | 11.0 | Sedona VM Rust port | Very Low | [XL] | **COMPLETE** (2026-04-10, 650+ tests, pure Rust, no C/FFI) | 12, 13, 14, 17 |
-| **12.0** | **Driver Framework v2** | **Very Low** | **[XL]** | **In progress (12.0a,d complete; stubs for e)** | **18** |
+| **12.0** | **Driver Framework v2** | **Very Low** | **[XL]** | **COMPLETE (all 8 sub-phases 12.0A–G + 12.0D.WS shipped, hardware-validated v2.8.8, 2026-04-17–18)** | **18** |
 | **13.0** | **Dynamic Slots** | **Very Low** | **[L]** | **COMPLETE (13.0a-g all shipped, 2026-04-18)** | **19** |
 
 ---
@@ -766,7 +766,7 @@ Remaining future tracks (post-production):
 | Rust source lines | ~39,000 (~7,700 new VM + native methods) |
 | C/C++ replaced | ~27,000 lines engine + 6,839 lines SVM (all eliminated, pure Rust) |
 | POCO eliminated | ~500,000 lines |
-| Test count | 1,637 passing, 0 failures |
+| Test count | 2,656 passing, 0 failures (as of 2026-04-18) |
 | Pure Rust VM | 240 opcodes, 131 native methods (5 kits), 650+ tests, VmConfig, ComponentStore, RustSvmRunner |
 | Crates | 7 (engine, hal, hal-linux, ipc, server, cli, svm) |
 | REST endpoints | 25 (14 Haystack + health + metrics + zinc + WebSocket + rate-limit + auth + 4 simulator) |
@@ -774,7 +774,7 @@ Remaining future tracks (post-production):
 | IPC commands | 13 |
 | CLI commands | 12 (status, channels, polls, tables, read, write, shutdown, reload, history, convert-sax, health, diagnostics) |
 | Feature parity | ~99% (80/80 features + extras) |
-| Production deployment | BeagleBone (Todd Air Flow, 192.168.1.3), 3.4MB RAM, 0.28% CPU |
+| Production deployment | BeagleBone (Todd Air Flow, DHCP-leased — currently 192.168.1.11) running v2.8.8 as of 2026-04-17. Phase 12 Driver Framework v2 validated end-to-end on hardware; BACnet-backed channel 102 and live Solidyne sensor channel 1713 both flowing. |
 | Live sensors | 1 — Solidyne 00-WTS-A (10K NTC, channel 1713, 78°F validated) |
 | CI/CD | GitHub Actions: fmt + clippy + test on push/PR, ARM cross-compile on master |
 | Monitoring | health-monitor.sh cron (5min), /api/diagnostics endpoint, CLI health + diagnostics |
@@ -789,7 +789,7 @@ Remaining future tracks (post-production):
 | Features surpassing C | 12 (WebSocket, SimulatorHal, data logging, ADC fault detect, I2C backoff, CLI health/diagnostics, poll overrun detect, CI/CD, pure Rust SOX, visual DDC programming, component persistence, channel-to-logic bridge) |
 | Clippy warnings | 0 |
 | Test coverage (est.) | ~80% public API |
-| Project health score | 9.5/10 (production validated, full DDC loop verified, 2026-03-30) |
+| Project health score | 9.7/10 (production validated, full DDC loop verified, Phase 12 + 13 shipped, Phase 9.0a+c validated, 2026-04-18) |
 | GitHub | https://github.com/TurkerMertkan/Sandstar_Rust (private) |
 
 ---
@@ -816,12 +816,14 @@ Deep gap analysis completed 2026-03-20 (3-agent, 20 documents vs full codebase).
 | 13 | SVM Porting Strategy | 11.0 | 100% | All recommended phases implemented: Cell type (i32 stack), opcode dispatch (match), stack (bounds-checked Vec), memory segments, native method system, scode loader. Kit 0/2/4/9 natives ported. C code removed, pure Rust VM complete |
 | 14 | Scalability Limits | 11.0, 5.6, 7.0c | 95% | ComponentStore (free-list, u32 IDs, iterative tree walk), VmConfig (configurable limits: 64KB stack, 4096 components, 4MB scode, Byte32 addressing). All scalability fixes from doc 14 implemented |
 | 15 | SOX/WebSocket | 8.0A, 8.0A-SOX, 8.0B | 100% | WS + SCRAM + full SOX/DASP done (20/20 commands, pure Rust, 185 manifest types, dataflow engine, component persistence) |
-| 16 | roxWarp Protocol | 9.0 | 0% | Entirely unimplemented (future Phase 9.0) |
+| 16 | roxWarp Protocol | 9.0 | ~70% | 9.0a (Binary Trio diff) + 9.0c (state reconciliation via LWW + version vectors) COMPLETE. ~5000 LOC in `src/roxwarp/`, 126 unit tests, 3 integration tests proving two-node convergence (2026-04-18). 9.0b mDNS/UDP discovery + 9.0d SkySpark Fantom pod still pending. |
 | 17 | Name Length Analysis | 11.0c | 60% | Unlimited names via String; interning unnecessary at scale. **31-char Sedona-compat name validation enforced across all entry points** (REST, RoWS, SOX add/rename, editor JS) as of 2026-04-04. |
-| 18 | Driver Framework v2 | 12.0 | 55% | Driver trait + DriverManager + LocalIoDriver + REST endpoints done. Modbus/BACnet/MQTT stubs created. PollScheduler/WatchManager/async actor pending |
+| 18 | Driver Framework v2 | 12.0 | 100% | All 8 sub-phases shipped v2.8.1→v2.8.8 (2026-04-17–18): generic `DriverLoader` + `load_drivers<L>` (12.0A), `PointStatus::Remote*` + `from_driver_error` (12.0B), `SyncContext`/`WriteContext` callback API (12.0C), `CovEvent` broadcast channel (12.0D), WS push bridge (12.0D.WS, validated via `ws_latency_test.py`), `DriverMessage` + `on_receive` (12.0E), `LocalIoDriver` async + engine façade (12.0F, legacy sync `DriverManager` deleted), runtime REST lifecycle endpoints (12.0G). Drivers live: BACnet/IP full (read/write/COV/RPM/BBMD, wire-validated), MQTT v3.1.1, LocalIoDriver, Modbus. Hardware-validated: /api/syncCur against localIo ch 1713 returns engine value; BACnet point 102 `Down`→`Ok` transition observed. |
 | 19 | Dynamic Slots | 13.0 | 100% | DynSlotStore (1559 LOC, 59 tests), REST API (`/api/tags/{id}`), persistence (atomic save/load, auto-save 5s), component cleanup, memory limits. ROX `readTags`/`setTags`/`deleteTag` wire ops (35 tests + 3 WS integration tests), SOX `readComp`-with-dyn-tags encoding, filter engine integration (77 tests in `filter.rs`) all live. 2026-04-18. |
 
 **Key architectural divergence:** Custom Zinc/filter implementation instead of libhaystack dependency (docs 03/05); in-process bridge instead of 29-function C FFI (doc 06); channel-centric model instead of component-centric (docs 18/19). All are defensible engineering decisions that reduced complexity and external dependencies.
+
+**Roadmap audit 2026-04-18:** Prompted by two accidental findings that week (Phase 9.0a had ~5000 LOC hiding behind a "Not started" label; Phase 13 was 5/7 labeled not-started but actually 7/7 shipped). A systematic pass through every row in this document flipped six stale labels — Phase 12.0 master row, docs 16 + 18 coverage %, Phase 8.0Bf, Phase 6.0 master row, Phase 14.0A sub-task rows — and refreshed the Metrics Snapshot. No code changes were made; the audit only reconciled documentation with the shipping code. If a future reader finds another "Not started" claim that contradicts reality, the right fix is the same: grep the codebase, measure tests, update the label, commit.
 
 ---
 
