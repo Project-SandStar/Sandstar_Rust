@@ -1,7 +1,7 @@
 # Sandstar Rust — Progress Overview
 
 **Last updated:** 2026-04-17
-**Current version:** v2.8.8 deployed and live on the one production BeagleBone (DHCP — "1-3" / "1-11" are historical labels for the same device; currently 192.168.1.11). Smoke-tested 2026-04-17: HVAC channel 1713 reads 121.1°F unchanged; `/api/drivers` lists `bacnet-local` + `localIo` both Ok; `POST /api/syncCur` against `localIo` ch 1713 returns live engine value, proving Phase 12.0F engine-façade delegation works end-to-end.
+**Current version:** v2.8.9 deployed and live on the one production BeagleBone (DHCP — "1-3" / "1-11" / "1-4" are historical labels for the same device; currently 192.168.1.4). Smoke-tested 2026-04-18: HVAC channel 1713 reads 121.1°F unchanged across the v2.8.8→v2.8.9 upgrade; `/api/drivers` lists `bacnet-local` + `localIo` both Ok; `PUT /api/sox/comp/0/reorder` returns 204 (Phase 14.0Aj live); no new journal errors. v2.8.9 adds the Phase 14.0Aj reorder endpoint + Phase 9.0b mDNS peer discovery (opt-in via `ClusterConfig.enable_mdns`, default off so no behavior change for existing deployments).
 **Workspace:** 7 crates, ~40,000 LOC, **2,671 tests passing (+2 ignored: mDNS live discovery + Windows-only), 0 clippy warnings, 0 failures**
 **GitHub:** https://github.com/Project-SandStar/Sandstar_Rust
 
