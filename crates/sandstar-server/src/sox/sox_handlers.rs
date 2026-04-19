@@ -9454,7 +9454,7 @@ mod tests {
             req_id: 3,
             payload,
         };
-        let resp = handle_file_open(&req);
+        let _resp = handle_file_open(&req);
         // The null byte in the URI means read_str will stop at the \0,
         // so the uri will be "/tmp/test" — but the path itself is fine.
         // However the payload after the first \0 would be parsed as the next field.
