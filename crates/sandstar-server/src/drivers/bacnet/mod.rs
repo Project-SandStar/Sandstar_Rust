@@ -2072,12 +2072,19 @@ mod sync_cur_unit_tests {
 
     #[tokio::test]
     async fn read_present_value_applies_scale_and_offset() {
-        use std::net::TcpListener;
-
-        // Find a free port via TCP probe.
+        // Find a free UDP port with retry on Windows PermissionDenied
+        // (WSAEACCES when the OS hands us a port inside Hyper-V / WinNAT
+        // excluded ranges).
         fn find_free_port() -> u16 {
-            let l = TcpListener::bind("127.0.0.1:0").unwrap();
-            l.local_addr().unwrap().port()
+            use std::net::UdpSocket;
+            for _ in 0..8 {
+                match UdpSocket::bind("127.0.0.1:0") {
+                    Ok(s) => return s.local_addr().unwrap().port(),
+                    Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => continue,
+                    Err(e) => panic!("UDP probe failed: {e}"),
+                }
+            }
+            panic!("could not find a free UDP port after 8 retries");
         }
 
         let mock_port = find_free_port();
@@ -2171,7 +2178,6 @@ mod sync_cur_unit_tests {
 #[cfg(test)]
 mod rpm_sync_tests {
     use super::*;
-    use std::net::TcpListener;
 
     fn make_driver() -> BacnetDriver {
         BacnetDriver::new("b9-test", "127.0.0.1", 0)
@@ -2209,8 +2215,15 @@ mod rpm_sync_tests {
     }
 
     fn find_free_port() -> u16 {
-        let l = TcpListener::bind("127.0.0.1:0").unwrap();
-        l.local_addr().unwrap().port()
+        use std::net::UdpSocket;
+        for _ in 0..8 {
+            match UdpSocket::bind("127.0.0.1:0") {
+                Ok(s) => return s.local_addr().unwrap().port(),
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => continue,
+                Err(e) => panic!("UDP probe failed: {e}"),
+            }
+        }
+        panic!("could not find a free UDP port after 8 retries");
     }
 
     /// Parse invoke_id from an APDU byte slice that starts at BVLL byte 0.
@@ -2816,11 +2829,16 @@ mod learn_tests {
     ///   5. ReadProperty(BI 0, ObjectName=77) → "MotionSensor"
     #[tokio::test]
     async fn learn_integration_with_mock_device() {
-        use std::net::TcpListener;
-
         fn find_free_port() -> u16 {
-            let l = TcpListener::bind("127.0.0.1:0").unwrap();
-            l.local_addr().unwrap().port()
+            use std::net::UdpSocket;
+            for _ in 0..8 {
+                match UdpSocket::bind("127.0.0.1:0") {
+                    Ok(s) => return s.local_addr().unwrap().port(),
+                    Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => continue,
+                    Err(e) => panic!("UDP probe failed: {e}"),
+                }
+            }
+            panic!("could not find a free UDP port after 8 retries");
         }
 
         let mock_port = find_free_port();

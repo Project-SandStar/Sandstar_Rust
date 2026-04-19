@@ -24,11 +24,32 @@ use crate::drivers::{
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-/// Obtain an OS-assigned free port by binding TCP briefly.
+/// Obtain an OS-assigned free **UDP** port on the loopback interface.
+///
+/// Binds UDP 0 briefly, reads the assigned port, drops the socket so the
+/// caller can re-bind. Retries up to 8 times on Windows `PermissionDenied`
+/// (WSAEACCES, os error 10013) — Hyper-V / WinNAT / HNS reserve several
+/// ranges within the Windows ephemeral UDP space, and an unlucky draw
+/// from those ranges produces a spurious bind failure. UDP-based probing
+/// guarantees the port is actually UDP-available (a prior TCP-based
+/// `find_free_port` didn't catch UDP-exclusion cases).
 fn find_free_port() -> u16 {
-    use std::net::TcpListener;
-    let l = TcpListener::bind("127.0.0.1:0").unwrap();
-    l.local_addr().unwrap().port()
+    use std::net::UdpSocket;
+    let mut last_err: Option<std::io::Error> = None;
+    for _ in 0..8 {
+        match UdpSocket::bind("127.0.0.1:0") {
+            Ok(s) => return s.local_addr().expect("local_addr").port(),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                last_err = Some(e);
+                continue;
+            }
+            Err(e) => panic!("unexpected UDP bind error: {e}"),
+        }
+    }
+    panic!(
+        "could not find a free UDP port after 8 retries; last error: {:?}",
+        last_err.map(|e| e.to_string())
+    );
 }
 
 /// Encode a minimal I-Am frame (unicast BVLL wrapper).
