@@ -655,6 +655,11 @@ impl DriverManagerInner {
         &mut self,
         point_map: &HashMap<DriverId, Vec<DriverPointRef>>,
     ) -> Vec<(DriverId, u32, Result<f64, DriverError>)> {
+        // Metric: every sync_all invocation counts as one sync cycle.
+        crate::metrics::metrics()
+            .driver_sync_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         let mut results = Vec::new();
         // Collect per-point status updates so we can apply them after the
         // driver mutable borrow is released. (Phase 12.0B — per-point
@@ -668,6 +673,10 @@ impl DriverManagerInner {
                 for (point_id, result) in driver.sync_cur(points).await {
                     match &result {
                         Err(e) => {
+                            // Metric: count each per-point error.
+                            crate::metrics::metrics()
+                                .driver_sync_errors_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             status_updates.push((point_id, PointStatus::from_driver_error(e)));
                         }
                         Ok(v) => {
@@ -718,6 +727,11 @@ impl DriverManagerInner {
                 status,
                 timestamp: now,
             });
+            // Metric: count each CovEvent broadcast (whether or not a
+            // subscriber was listening; the broadcast itself happened).
+            crate::metrics::metrics()
+                .driver_cov_events_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         results
     }

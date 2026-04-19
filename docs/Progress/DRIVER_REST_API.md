@@ -10,9 +10,10 @@ This guide covers:
 4. [I/O endpoints (auth-gated)](#4-io-endpoints-auth-gated)
 5. [Custom messages (`on_receive`)](#5-custom-messages-on_receive)
 6. [Real-time push over WebSocket (`/api/ws`)](#6-real-time-push-over-websocket-apiws)
-7. [Error codes](#7-error-codes)
-8. [End-to-end recipes](#8-end-to-end-recipes)
-9. [Troubleshooting](#9-troubleshooting)
+7. [Prometheus metrics (`GET /metrics`)](#7-prometheus-metrics-get-metrics)
+8. [Error codes](#8-error-codes)
+9. [End-to-end recipes](#9-end-to-end-recipes)
+10. [Troubleshooting](#10-troubleshooting)
 
 ---
 
@@ -285,7 +286,65 @@ Expected against `bacnet_sim.py --vary`:
 
 ---
 
-## 7. Error codes
+## 7. Prometheus metrics (`GET /metrics`)
+
+Sandstar v2.8.10+ exposes internal counters and gauges in the Prometheus text exposition format (version 0.0.4) at `GET /metrics` — **no auth** (intended for internal scrape; gate with a reverse proxy if external exposure is a concern).
+
+```bash
+curl -s http://192.168.1.4:8085/metrics | head -30
+```
+
+Sample output:
+
+```
+# HELP sandstar_build_info Build metadata (version + git hash) as labels; value is always 1.
+# TYPE sandstar_build_info gauge
+sandstar_build_info{version="2.8.10",git_hash="abc1234"} 1
+# HELP sandstar_poll_count Total number of poll-cycle iterations the engine has executed.
+# TYPE sandstar_poll_count counter
+sandstar_poll_count 4823
+...
+# HELP sandstar_driver_cov_events_total Phase 12.0D: total CovEvents broadcast from the driver actor.
+# TYPE sandstar_driver_cov_events_total counter
+sandstar_driver_cov_events_total 1217
+```
+
+### Exposed metrics
+
+Counters (monotonic):
+- `sandstar_poll_count`, `sandstar_poll_overrun_count`
+- `sandstar_hal_errors_total`
+- `sandstar_rest_requests_total`, `sandstar_ipc_requests_total`
+- `sandstar_history_points_total`
+- `sandstar_ws_total`, `sandstar_ws_messages_in_total`, `sandstar_ws_messages_out_total`
+- `sandstar_rows_total`, `sandstar_rows_messages_in_total`, `sandstar_rows_messages_out_total`
+- `sandstar_driver_sync_total` (Phase 12.0D sync-cycle count)
+- `sandstar_driver_sync_errors_total` (Phase 12.0B per-point errors)
+- `sandstar_driver_cov_events_total` (Phase 12.0D change-of-value broadcasts)
+
+Gauges (instantaneous):
+- `sandstar_poll_duration_microseconds_last`, `sandstar_poll_duration_microseconds_max`
+- `sandstar_watch_active`
+- `sandstar_ws_active`, `sandstar_rows_active`
+- `sandstar_build_info{version,git_hash}` — value always `1`, labels identify the build
+
+### Minimal Prometheus scrape config
+
+```yaml
+scrape_configs:
+  - job_name: sandstar
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["192.168.1.4:8085"]
+```
+
+### Legacy JSON format
+
+The older `GET /api/metrics` endpoint continues to return the same counters in JSON form (camelCase keys) — useful for UI dashboards that don't speak the Prometheus format.
+
+---
+
+## 8. Error codes
 
 | Status | Meaning |
 |---|---|
@@ -302,7 +361,7 @@ Error responses are always `{"error": "<message>"}` with a human-readable reason
 
 ---
 
-## 8. End-to-end recipes
+## 9. End-to-end recipes
 
 ### Recreate a BACnet driver at runtime
 
@@ -350,7 +409,7 @@ The write goes to `engine.write_channel(5000, Some(1.0), level=16, who="localIo:
 
 ---
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|

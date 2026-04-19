@@ -1,8 +1,8 @@
 # Sandstar Rust — Progress Overview
 
 **Last updated:** 2026-04-17
-**Current version:** v2.8.9 deployed and live on the one production BeagleBone (DHCP — "1-3" / "1-11" / "1-4" are historical labels for the same device; currently 192.168.1.4). Smoke-tested 2026-04-18: HVAC channel 1713 reads 121.1°F unchanged across the v2.8.8→v2.8.9 upgrade; `/api/drivers` lists `bacnet-local` + `localIo` both Ok; `PUT /api/sox/comp/0/reorder` returns 204 (Phase 14.0Aj live); no new journal errors. v2.8.9 adds the Phase 14.0Aj reorder endpoint + Phase 9.0b mDNS peer discovery (opt-in via `ClusterConfig.enable_mdns`, default off so no behavior change for existing deployments).
-**Workspace:** 7 crates, ~40,000 LOC, **2,671 tests passing (+2 ignored: mDNS live discovery + Windows-only), 0 clippy warnings, 0 failures**
+**Current version:** v2.8.10 deployed and live on the one production BeagleBone (DHCP — "1-3" / "1-11" / "1-4" are historical labels for the same device; currently 192.168.1.4). Smoke-tested 2026-04-20: HVAC channel 1713 reads 121.1°F unchanged across the v2.8.9→v2.8.10 upgrade; `/metrics` returns Prometheus-format exposition with `text/plain; version=0.0.4`; `sandstar_build_info{version="2.8.10",git_hash="9b1925b"} 1` verified; driver-framework counters (`sync_total`, `sync_errors_total`, `cov_events_total`) live. v2.8.10 adds a Prometheus-compatible `GET /metrics` endpoint (18 counters + 5 gauges) wired into the driver actor's sync / CovEvent paths — observability pass to enable external scrape + alerting without schema changes to the existing `/api/metrics` JSON endpoint.
+**Workspace:** 7 crates, ~40,000 LOC, **2,677 tests passing (+2 ignored: mDNS live discovery + Windows-only), 0 clippy warnings, 0 failures**
 **GitHub:** https://github.com/Project-SandStar/Sandstar_Rust
 
 This is the single-read status tracker for the Sandstar Rust project. It consolidates everything in `docs/Progress/` into one scan. For per-phase rationale, design decisions, or operator instructions, follow the links into the detailed documents — they remain the **source of truth**.

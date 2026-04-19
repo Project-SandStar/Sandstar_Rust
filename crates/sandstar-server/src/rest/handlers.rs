@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path, Query, State};
 use axum::http::header::CONTENT_TYPE;
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 
@@ -379,9 +379,34 @@ pub async fn health(State(handle): State<EngineHandle>) -> Json<serde_json::Valu
     }
 }
 
-/// GET /api/metrics — internal server metrics.
+/// GET /api/metrics — internal server metrics as JSON (legacy).
 pub async fn metrics_endpoint() -> Json<serde_json::Value> {
     Json(crate::metrics::metrics().to_json())
+}
+
+/// GET /metrics — Prometheus exposition format (scraper-friendly).
+///
+/// Returns `text/plain; version=0.0.4; charset=utf-8` body with counters
+/// and gauges for poll timing, HAL errors, WebSocket activity, driver
+/// framework sync / CovEvent activity, plus a `sandstar_build_info`
+/// gauge carrying version + git hash labels.
+///
+/// No auth by design — intended for internal Prometheus scrape. Gate
+/// with a reverse proxy if external exposure is a concern.
+pub async fn prometheus_metrics() -> Response {
+    let body = crate::metrics::metrics().to_prometheus(
+        env!("CARGO_PKG_VERSION"),
+        option_env!("BUILD_GIT_HASH").unwrap_or("unknown"),
+    );
+    (
+        StatusCode::OK,
+        [(
+            CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
+        .into_response()
 }
 
 /// GET /api/diagnostics — engine diagnostics (poll timing, channel health, I2C backoff).

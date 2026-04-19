@@ -702,6 +702,7 @@ pub fn router_with_auth(
         .route("/api/status", get(handlers::status))
         .route("/health", get(handlers::health))
         .route("/api/metrics", get(handlers::metrics_endpoint))
+        .route("/metrics", get(handlers::prometheus_metrics))
         .route("/api/diagnostics", get(handlers::diagnostics))
         .route("/api/channels", get(handlers::channels))
         .route("/api/polls", get(handlers::polls))
