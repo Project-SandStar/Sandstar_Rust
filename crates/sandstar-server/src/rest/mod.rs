@@ -12,6 +12,7 @@ pub mod filter;
 pub mod handlers;
 pub mod live;
 pub mod rows;
+pub mod sedona_state;
 #[cfg(feature = "simulator-hal")]
 pub mod sim;
 pub mod sox_api;
@@ -835,8 +836,14 @@ pub fn router_with_auth(
         // Phase 14.0G-2c: Fantom-dialect SOX over WebSocket for the
         // Vue web editor. Shares state with /api/rows; both endpoints
         // dispatch through crate::sox::sox_ops.
+        // Phase 14.0G-3: `/live/sedonaState` bulk loader mounted on the
+        // same Router so the state flows through a single `.with_state`.
         let live_route = Router::new()
             .route("/live", get(live::live_ws_handler))
+            .route(
+                "/live/sedonaState",
+                get(sedona_state::sedona_state_handler),
+            )
             .with_state(live::LiveState {
                 tree: sox.tree.clone(),
                 manifest_db: sox.manifest_db.clone(),

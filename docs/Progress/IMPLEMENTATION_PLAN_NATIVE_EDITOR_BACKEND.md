@@ -4,7 +4,7 @@
 
 **Started:** 2026-04-23
 **Target release:** v2.9.0
-**Estimated total:** 21–25 engineering days (SAB parser confirmed needed — see G-0)
+**Estimated total:** ~18–20 engineering days (G-3 re-scoped: native tree serializer, no SAB parser)
 
 ---
 
@@ -148,8 +148,53 @@ count up from 1385 to 1397. Ready for end-to-end editor validation.
 
 ---
 
-### G-3 · `/live/sedonaState` bulk loader ⬜
-**Status:** ⬜
+### G-3 · `/live/sedonaState` bulk loader ✅
+**Status:** ✅ complete (MVP) 2026-04-23
+
+**Scope revision (critical).** Original plan assumed we had to parse `.sab`
+like the Fantom pod does. Wrong framing: the pod reverse-engineers SAB
+because it is an external proxy that can only see the file on disk. Sandstar
+**is** the engine — the entire component tree is live in `ComponentTree` +
+`ManifestDb` already. The bulk loader just serialises the in-memory state
+into the `SedonaStateResponse` JSON shape the editor expects. No binary
+parser, no reverse engineering, no risk on the file-format axis.
+
+**G-3a · `ComponentTree → SedonaStateResponse` serializer** ✅ —
+`crates/sandstar-server/src/rest/sedona_state.rs::build_snapshot`. Walks
+the shared `ComponentTree`, serialises each component with per-slot
+base64-encoded values keyed by slot name, `meta` int + decoded
+`{x, y, groups}` position, parent/children IDs and fully-qualified kit
+`type` name. Links emitted once per pair (from-side only). Reuses
+`encode_slot_value_raw` so `/live`, per-slot reads, event frames, and
+bulk load all round-trip through the same binary encoder.
+
+**G-3b · HTTP handler + router wiring** ✅ — `GET /live/sedonaState`
+registered in `rest::mod::build_app` on the same `Router` as `/live`,
+sharing `LiveState`. Query params parsed with serde: `h`, `p`, `u`,
+`pw`, `saveFirst` (last four accepted for Fantom parity; `saveFirst` is
+a no-op on native because there is nothing to flush — RAM *is* the live
+state).
+
+**G-3c · Unit + protocol tests** ✅ — 6 unit tests in
+`rest::sedona_state::tests` covering schema shape, component keying,
+per-slot `props` dict, base64-encoded `value` lengths, position
+decoding (verifies the `0x20` byte == x = 32 packing), single-emission
+links, host/port echo. Live protocol test with `curl` against the dev
+server (8085) round-tripped a valid `SedonaStateResponse` including
+all 15 kits with checksums. `cargo test -p sandstar-server --lib`:
+1 403 passed (was 1 397 before G-3; +6).
+
+**G-3d · Cross-check against the editor** `⬜` on user return — open
+the Vue editor pointed at local Sandstar, verify it renders from a
+single `/live/sedonaState` call without falling back to per-component
+`c` reads. Not blocking further work; if the editor rejects anything
+we tweak the shape in-place.
+
+**SAB parser status:** explicitly dropped. No SAB-aware Rust code
+needed in Sandstar. Phase G-6 (`convertSabToSax`) likewise no longer
+needs a SAB parser — it can regenerate SAX from the live tree directly
+or be deferred until a real caller proves it's needed.
+
 **Scope (4–5 days, biggest performance win):** New file `crates/sandstar-server/src/rest/sedona_state.rs`. HTTP GET handler that:
 - If `saveFirst=true`, sends a SOX `App.save()` to the device first
 - Reads `app.sab` via DASP file-get (or via in-process SVM if the device is local)
@@ -230,7 +275,7 @@ Critical path: **G-2 → G-7 → G-8** on one track, **G-3 → G-7** on a parall
 
 ## Risks
 
-1. **SAB wire format is undocumented.** ~~The Fantom pod relies on the closed-source `OfflineApp` Java class. If `sandstar-svm` does not already parse SAB (see G-0), G-3 gains a parser sub-task worth ~3 days of reverse-engineering.~~ **Resolved 2026-04-23:** G-0 confirmed no parser exists; G-3 carries the ~3-day parser task, offset by available building blocks (`image_loader.rs`, `ComponentStore`, `native_table.rs`, and the byte-scanning template in `sab_validator.rs`). Net impact: plan lands at 21–25 days (upper end of original band), no slip.
+1. **SAB wire format is undocumented.** ~~The Fantom pod relies on the closed-source `OfflineApp` Java class.~~ **Retired 2026-04-23.** G-3 re-scoped to serialise the live `ComponentTree` directly instead of parsing `.sab`. No binary reverse engineering in the plan at all. Net impact: G-3 dropped from 4–5 days to ~1.5 days; total phase from 21–25 down to ~18–20 days.
 2. **Subtle msgType semantics.** In particular `x` (close watch), `b` (file rename), and `q` (query) have behavioural edge cases that aren't fully covered by the existing RoWS handlers. The Python round-trip tests in G-2 need to exercise these specifically.
 3. **Bundle size on the `.deb`.** 5 MB of JS/CSS is small relative to the 1.8 MB current binary, but large enough to double the package. Worth confirming the BeagleBone `/home` partition has headroom. Observed at last deploy: ample.
 4. **Editor depends on SkySpark-URL patterns.** `coordinator.ts:1241` extracts `projectId` from `/api/{project}/...`. After G-7 the URL will be `/editor/...` with no project slug. Need a small patch so the editor gracefully handles "no SkySpark" mode.
@@ -295,3 +340,4 @@ From `C:\Coding\swe\bassgSoxWebSocket\`:
 - **2026-04-23** — G-2b protocol spec locked in `NOTES_FANTOM_MSGTYPE_SEMANTICS.md`. Deep dive into Fantom `SoxSession.fan` / `WatchManager.fan` produced request/response shapes and side-effect semantics for `v`, `y`, `o`, `q`, `x`. Final scope: 5 ops (`version`, `versionExt`, `reorder`, `query`, `closeWatch`). `query` v1 uses type-match; `closeWatch` v1 uses implicit-subscription; both defer fidelity upgrades to future minor releases if real callers surface. Open question: does `ManifestDb` store kit checksums? — to resolve inside G-2a. Proceeding to G-2a.
 - **2026-04-23** — G-2a + G-2b landed together (single logical refactor). New module `crates/sandstar-server/src/sox/sox_ops.rs` (~750 lines) holds `SoxState`, `SoxOp` (24 variants), `SoxResponse`, `SessionState`, and `apply_op`. `rest/rows.rs` shrank from 2 087 → ~1 720 lines after handler extraction; dispatcher now `parse_rows_op(op, msg) → SoxOp → apply_op → envelope`. 7 new unit tests cover the G-2b ops. Open question "does `ManifestDb` carry checksums?" resolved: yes — `sox_handlers::DEFAULT_KITS` has been storing `KitInfo { name, checksum: u32, version }` all along. `cargo test -p sandstar-server --lib`: 1 385 passed, 0 failed. `cargo clippy`: no new warnings. Next: G-2c, the `/live` envelope handler.
 - **2026-04-23** — G-2c MVP complete. New module `crates/sandstar-server/src/rest/live.rs` (~650 lines) — Fantom-dialect WebSocket handler at `/live`. All 19 msgTypes dispatched; ReadComp + event push use `encode_slot_value_raw` + base64 to produce bit-compatible `compProps.propValues` payloads; file ops cleanly reject with `!` pointing to G-4. 12 unit tests added in `rest::live::tests`. `cargo test -p sandstar-server --lib`: 1 397 passed (was 1 385; +12). Four follow-up items documented in the G-2c section (typed write decoding, AddComp configProps, split config+runtime event frames, whatMask honouring) — none block editor bring-up. Phase 14.0G-2 closed. Next: end-to-end editor validation (user-driven), then G-3 bulk loader once hotspots in the editor surface.
+- **2026-04-23** — G-3 re-scoped then landed. Critical insight: the Fantom pod parses `.sab` because it's an external proxy; Sandstar **is** the engine and already has the live `ComponentTree`. No SAB parser needed. New module `crates/sandstar-server/src/rest/sedona_state.rs` (~430 lines) walks the tree + manifest + dyn tags and emits the editor's `SedonaStateResponse` shape directly. Handler at `GET /live/sedonaState` merged into the `/live` router. 6 unit tests + live `curl` check against the dev server (15 kits returned with checksums). `cargo test -p sandstar-server --lib`: 1 403 passed (was 1 397; +6). Risk #1 retired. Total phase estimate down from 21–25 days to ~18–20. Next: G-4 (file ops) or user-return editor bring-up, whichever comes first.
