@@ -7,9 +7,12 @@
 //! `EngineHandle` is `Clone + Send + Sync`, so it works as Axum `State`
 //! without requiring `Rc<RefCell<>>` or `Arc<Mutex<>>`.
 
+pub mod editor_assets;
 mod error;
+pub mod file_ops;
 pub mod filter;
 pub mod handlers;
+pub mod library;
 pub mod live;
 pub mod rows;
 pub mod sedona_state;
@@ -645,9 +648,6 @@ async fn rate_limit_middleware(
 /// Embedded web dashboard served at GET /.
 const DASHBOARD_HTML: &str = include_str!("dashboard.html");
 
-/// Embedded DDC editor placeholder served at GET /editor.
-const EDITOR_HTML: &str = include_str!("editor.html");
-
 async fn dashboard() -> Response {
     (
         StatusCode::OK,
@@ -657,14 +657,7 @@ async fn dashboard() -> Response {
         .into_response()
 }
 
-async fn editor() -> Response {
-    (
-        StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        EDITOR_HTML,
-    )
-        .into_response()
-}
+// `/editor` is served by `editor_assets::router()` — see Phase 14.0G-7.
 
 /// Build the Axum router for the Haystack REST API.
 ///
@@ -696,7 +689,6 @@ pub fn router_with_auth(
     // Public read-only routes (no auth required)
     let public = Router::new()
         .route("/", get(dashboard))
-        .route("/editor", get(editor))
         .route("/api/about", get(handlers::about))
         .route("/api/ops", get(handlers::ops))
         .route("/api/formats", get(handlers::formats))
@@ -854,12 +846,30 @@ pub fn router_with_auth(
         if let Some(ref ds) = sox.dyn_store {
             app = app.layer(axum::Extension(ds.clone()));
         }
+        // Phase 14.0G-4: file transfer (GET/PUT /file/*path).
+        let file_route = file_ops::router(live::LiveState {
+            tree: sox.tree.clone(),
+            manifest_db: sox.manifest_db.clone(),
+            dyn_store: sox.dyn_store.clone(),
+        });
+        // Phase 14.0G-5: editor `/library/` + `/tags` compatibility stubs.
+        let library_route = library::router(live::LiveState {
+            tree: sox.tree.clone(),
+            manifest_db: sox.manifest_db.clone(),
+            dyn_store: sox.dyn_store.clone(),
+        });
         app = app
             .merge(sox_api::public_router(sox.clone()))
             .merge(sox_api::protected_router(sox))
             .merge(rows_route)
-            .merge(live_route);
+            .merge(live_route)
+            .merge(file_route)
+            .merge(library_route);
     }
+    // Phase 14.0G-7 skeleton: `/editor` is served by `editor_assets::router()`.
+    // Returns the placeholder HTML when `SANDSTAR_WEB_DIR` is unset, or
+    // mounts the built Vue SPA from that directory when set.
+    app = app.merge(editor_assets::router());
 
     let mut app = app.layer(middleware::from_fn(count_requests));
 
