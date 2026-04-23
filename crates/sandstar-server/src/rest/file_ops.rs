@@ -188,6 +188,17 @@ fn guess_content_type(path: &Path) -> &'static str {
     }
 }
 
+// ── Test utilities ─────────────────────────────────
+
+/// Serialises env-var-mutating tests across this module and
+/// `editor_assets::tests`. Exposed `pub(crate)` so sibling test modules
+/// can acquire the same lock.
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 // ── Tests ──────────────────────────────────────────
 
 #[cfg(test)]
@@ -261,8 +272,13 @@ mod tests {
         assert_eq!(guess_content_type(Path::new("a.unknown")), "application/octet-stream");
     }
 
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        super::test_env_lock()
+    }
+
     #[tokio::test]
     async fn get_file_returns_503_without_root() {
+        let _g = env_lock().lock().unwrap();
         std::env::remove_var(FILE_ROOT_ENV);
         std::env::remove_var(super::super::editor_assets::WEB_DIR_ENV);
         let tree = std::sync::Arc::new(std::sync::RwLock::new(
@@ -285,6 +301,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_then_get_roundtrip() {
+        let _g = env_lock().lock().unwrap();
         let tmp = tempfile::TempDir::new().unwrap();
         std::env::set_var(FILE_ROOT_ENV, tmp.path());
         let state = SoxState {

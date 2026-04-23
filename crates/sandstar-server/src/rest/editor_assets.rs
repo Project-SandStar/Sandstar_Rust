@@ -124,14 +124,24 @@ fn spa_router(dir: &Path) -> Router {
 mod tests {
     use super::*;
 
+    /// Serialises env-var-mutating tests across this module AND
+    /// `file_ops::tests`, which also inspects `WEB_DIR_ENV` as a
+    /// fallback. A single process-wide lock keeps parallel test
+    /// threads from corrupting each other's env-var assumptions.
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        super::super::file_ops::test_env_lock()
+    }
+
     #[test]
     fn unset_env_returns_none() {
+        let _g = env_lock().lock().unwrap();
         std::env::remove_var(WEB_DIR_ENV);
         assert!(resolve_web_dir().is_none());
     }
 
     #[test]
     fn nonexistent_path_returns_none() {
+        let _g = env_lock().lock().unwrap();
         std::env::set_var(WEB_DIR_ENV, "/definitely/not/a/real/path/xyz123");
         assert!(resolve_web_dir().is_none());
         std::env::remove_var(WEB_DIR_ENV);
@@ -139,6 +149,7 @@ mod tests {
 
     #[test]
     fn empty_env_returns_none() {
+        let _g = env_lock().lock().unwrap();
         std::env::set_var(WEB_DIR_ENV, "   ");
         assert!(resolve_web_dir().is_none());
         std::env::remove_var(WEB_DIR_ENV);

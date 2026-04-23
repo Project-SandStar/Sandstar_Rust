@@ -149,6 +149,15 @@ impl TestServer {
     }
 }
 
+/// Public helper to spawn a default (non-read-only) command loop —
+/// used by integration tests that build their own router directly.
+pub fn spawn_cmd_loop(
+    engine: Engine<MockHal>,
+    cmd_rx: mpsc::Receiver<EngineCmd>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(cmd_loop(engine, cmd_rx, false))
+}
+
 /// Engine command loop — processes REST commands against the engine.
 async fn cmd_loop(
     mut engine: Engine<MockHal>,
