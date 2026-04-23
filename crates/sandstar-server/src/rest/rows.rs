@@ -3,12 +3,12 @@
 //!
 //! Clients connect to `GET /api/rows`, send JSON commands to read/mutate the
 //! virtual component tree, and receive server-pushed COV updates for
-//! subscribed components. This is the WebSocket equivalent of the SOX REST
-//! API (`/api/sox/*`) combined with live COV streaming.
+//! subscribed components. The command dispatcher lives in
+//! [`crate::sox::sox_ops`]; this file owns only the RoWS-specific JSON
+//! envelope and the COV push loop.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -20,32 +20,22 @@ use serde_json::Value as JsonValue;
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{debug, info};
 
-use crate::sox::dyn_slots::DynValue;
-use crate::sox::sox_handlers::{
-    ComponentTree, ManifestDb, SlotValue, VirtualComponent, VirtualSlot, DEFAULT_KITS,
-    SLOT_FLAG_ACTION, SLOT_FLAG_CONFIG,
-};
-use crate::sox::sox_protocol::SoxValueType;
+use crate::sox::sox_ops::{apply_op, SessionState, SoxOp, SoxResponse};
 use crate::sox::{DynSlotStoreHandle, SharedComponentTree};
 
-use super::sox_api::{
-    category_for_type, decode_position, encode_position, is_system_comp, json_to_slot_value,
-    slot_direction, slot_value_to_json, sox_type_name,
-};
+use super::sox_api::slot_value_to_json;
+
+// ── State ──────────────────────────────────────────
+
+/// Alias preserved for existing call sites (router in `main.rs`, tests).
+/// The canonical definition lives in [`crate::sox::sox_ops::SoxState`].
+pub use crate::sox::sox_ops::SoxState as RowsState;
 
 // ── Constants ──────────────────────────────────────
 
 const MAX_ROWS_CONNECTIONS: i64 = 16;
 const COV_INTERVAL_MS: u64 = 1000;
 const CLIENT_TIMEOUT_SECS: u64 = 120;
-// ── State ──────────────────────────────────────────
-
-#[derive(Clone)]
-pub struct RowsState {
-    pub tree: SharedComponentTree,
-    pub manifest_db: Arc<ManifestDb>,
-    pub dyn_store: Option<DynSlotStoreHandle>,
-}
 
 // ── Upgrade handler ────────────────────────────────
 
@@ -329,732 +319,207 @@ fn handle_client_msg(
     };
 
     let id = msg.get("id").and_then(|v| v.as_str()).map(String::from);
-    let op = match msg.get("op").and_then(|v| v.as_str()) {
+    let op_name = match msg.get("op").and_then(|v| v.as_str()) {
         Some(o) => o,
         None => {
             return make_error(id.as_deref(), "INVALID_MESSAGE", "missing 'op' field");
         }
     };
 
+    // Ping has its own envelope ({"op":"pong",...}) distinct from a normal
+    // result — bypass apply_op to preserve that wire shape.
+    if op_name == "ping" {
+        return make_pong(id.as_deref());
+    }
+
+    let op = match parse_rows_op(op_name, &msg) {
+        Ok(o) => o,
+        Err((code, message)) => return make_error(id.as_deref(), code, &message),
+    };
+
+    let mut session = SessionState {
+        subscribed,
+        cov_cache,
+        tree_cache,
+        compact_cov,
+    };
+    match apply_op(state, op, &mut session) {
+        SoxResponse::Ok(data) => make_result(id.as_deref(), data),
+        SoxResponse::Error { code, message } => make_error(id.as_deref(), code, &message),
+    }
+}
+
+/// Translate a RoWS JSON command into a typed [`SoxOp`].
+///
+/// Returns `Err((code, message))` for malformed requests; the caller wraps
+/// these in RoWS's `{"op":"error",...}` envelope.
+fn parse_rows_op(op: &str, msg: &JsonValue) -> Result<SoxOp, (&'static str, String)> {
+    let u16_of = |k: &str| msg.get(k).and_then(|v| v.as_u64()).map(|v| v as u16);
+    let u8_of = |k: &str| msg.get(k).and_then(|v| v.as_u64()).map(|v| v as u8);
+    let usize_of = |k: &str| msg.get(k).and_then(|v| v.as_u64()).map(|v| v as usize);
+    let str_of = |k: &str| msg.get(k).and_then(|v| v.as_str()).map(String::from);
+    let vec_u16 = |k: &str| {
+        msg.get(k)
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_u64().map(|n| n as u16))
+                    .collect::<Vec<u16>>()
+            })
+            .unwrap_or_default()
+    };
+
     match op {
-        "ping" => make_pong(id.as_deref()),
-        "readTree" => handle_read_tree(state, id.as_deref()),
-        "readComp" => {
-            let comp_id = msg.get("compId").and_then(|v| v.as_u64()).map(|v| v as u16);
-            match comp_id {
-                Some(cid) => handle_read_comp(state, cid, id.as_deref()),
-                None => make_error(id.as_deref(), "BAD_REQUEST", "missing or invalid 'compId'"),
-            }
-        }
+        "readTree" => Ok(SoxOp::ReadTree),
+        "readComp" => u16_of("compId")
+            .map(|comp_id| SoxOp::ReadComp { comp_id })
+            .ok_or(("BAD_REQUEST", "missing or invalid 'compId'".into())),
         "writeSlot" => {
-            let comp_id = msg.get("compId").and_then(|v| v.as_u64()).map(|v| v as u16);
-            let slot_idx = msg
-                .get("slotIdx")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as usize);
-            let value = msg.get("value");
-            match (comp_id, slot_idx, value) {
-                (Some(cid), Some(idx), Some(val)) => {
-                    handle_write_slot(state, cid, idx, val, id.as_deref())
-                }
-                _ => make_error(
-                    id.as_deref(),
-                    "BAD_REQUEST",
-                    "missing compId, slotIdx, or value",
-                ),
-            }
+            let comp_id = u16_of("compId")
+                .ok_or(("BAD_REQUEST", "missing compId".into()))?;
+            let slot_idx = usize_of("slotIdx")
+                .ok_or(("BAD_REQUEST", "missing slotIdx".into()))?;
+            let value = msg
+                .get("value")
+                .cloned()
+                .ok_or(("BAD_REQUEST", "missing value".into()))?;
+            Ok(SoxOp::WriteSlot {
+                comp_id,
+                slot_idx,
+                value,
+            })
         }
         "addComp" => {
-            let parent_id = msg
-                .get("parentId")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as u16);
-            let kit_id = msg.get("kitId").and_then(|v| v.as_u64()).map(|v| v as u8);
-            let type_id = msg.get("typeId").and_then(|v| v.as_u64()).map(|v| v as u8);
-            let name = msg.get("name").and_then(|v| v.as_str());
-            match (parent_id, kit_id, type_id, name) {
-                (Some(pid), Some(kid), Some(tid), Some(n)) => {
-                    handle_add_comp(state, pid, kid, tid, n, id.as_deref())
-                }
-                _ => make_error(
-                    id.as_deref(),
-                    "BAD_REQUEST",
-                    "missing parentId, kitId, typeId, or name",
-                ),
-            }
+            let parent_id = u16_of("parentId")
+                .ok_or(("BAD_REQUEST", "missing parentId".into()))?;
+            let kit_id = u8_of("kitId")
+                .ok_or(("BAD_REQUEST", "missing kitId".into()))?;
+            let type_id = u8_of("typeId")
+                .ok_or(("BAD_REQUEST", "missing typeId".into()))?;
+            let name = str_of("name")
+                .ok_or(("BAD_REQUEST", "missing name".into()))?;
+            Ok(SoxOp::AddComp {
+                parent_id,
+                kit_id,
+                type_id,
+                name,
+            })
         }
-        "deleteComp" => {
-            let comp_id = msg.get("compId").and_then(|v| v.as_u64()).map(|v| v as u16);
-            match comp_id {
-                Some(cid) => handle_delete_comp(state, cid, id.as_deref()),
-                None => make_error(id.as_deref(), "BAD_REQUEST", "missing or invalid 'compId'"),
-            }
-        }
+        "deleteComp" => u16_of("compId")
+            .map(|comp_id| SoxOp::DeleteComp { comp_id })
+            .ok_or(("BAD_REQUEST", "missing or invalid 'compId'".into())),
         "rename" => {
-            let comp_id = msg.get("compId").and_then(|v| v.as_u64()).map(|v| v as u16);
-            let name = msg.get("name").and_then(|v| v.as_str());
-            match (comp_id, name) {
-                (Some(cid), Some(n)) => handle_rename(state, cid, n, id.as_deref()),
-                _ => make_error(id.as_deref(), "BAD_REQUEST", "missing compId or name"),
-            }
+            let comp_id = u16_of("compId")
+                .ok_or(("BAD_REQUEST", "missing compId".into()))?;
+            let name = str_of("name")
+                .ok_or(("BAD_REQUEST", "missing name".into()))?;
+            Ok(SoxOp::Rename { comp_id, name })
         }
         "addLink" => {
-            let fc = msg
-                .get("fromComp")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as u16);
-            let fs = msg
-                .get("fromSlot")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as u8);
-            let tc = msg.get("toComp").and_then(|v| v.as_u64()).map(|v| v as u16);
-            let ts = msg.get("toSlot").and_then(|v| v.as_u64()).map(|v| v as u8);
-            match (fc, fs, tc, ts) {
-                (Some(fc), Some(fs), Some(tc), Some(ts)) => {
-                    handle_add_link(state, fc, fs, tc, ts, id.as_deref())
-                }
-                _ => make_error(
-                    id.as_deref(),
-                    "BAD_REQUEST",
-                    "missing fromComp/fromSlot/toComp/toSlot",
-                ),
-            }
+            let from_comp = u16_of("fromComp")
+                .ok_or(("BAD_REQUEST", "missing fromComp".into()))?;
+            let from_slot = u8_of("fromSlot")
+                .ok_or(("BAD_REQUEST", "missing fromSlot".into()))?;
+            let to_comp = u16_of("toComp")
+                .ok_or(("BAD_REQUEST", "missing toComp".into()))?;
+            let to_slot = u8_of("toSlot")
+                .ok_or(("BAD_REQUEST", "missing toSlot".into()))?;
+            Ok(SoxOp::AddLink {
+                from_comp,
+                from_slot,
+                to_comp,
+                to_slot,
+            })
         }
         "deleteLink" => {
-            let fc = msg
-                .get("fromComp")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as u16);
-            let fs = msg
-                .get("fromSlot")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as u8);
-            let tc = msg.get("toComp").and_then(|v| v.as_u64()).map(|v| v as u16);
-            let ts = msg.get("toSlot").and_then(|v| v.as_u64()).map(|v| v as u8);
-            match (fc, fs, tc, ts) {
-                (Some(fc), Some(fs), Some(tc), Some(ts)) => {
-                    handle_delete_link(state, fc, fs, tc, ts, id.as_deref())
-                }
-                _ => make_error(
-                    id.as_deref(),
-                    "BAD_REQUEST",
-                    "missing fromComp/fromSlot/toComp/toSlot",
-                ),
-            }
+            let from_comp = u16_of("fromComp")
+                .ok_or(("BAD_REQUEST", "missing fromComp".into()))?;
+            let from_slot = u8_of("fromSlot")
+                .ok_or(("BAD_REQUEST", "missing fromSlot".into()))?;
+            let to_comp = u16_of("toComp")
+                .ok_or(("BAD_REQUEST", "missing toComp".into()))?;
+            let to_slot = u8_of("toSlot")
+                .ok_or(("BAD_REQUEST", "missing toSlot".into()))?;
+            Ok(SoxOp::DeleteLink {
+                from_comp,
+                from_slot,
+                to_comp,
+                to_slot,
+            })
         }
         "updatePos" => {
-            let comp_id = msg.get("compId").and_then(|v| v.as_u64()).map(|v| v as u16);
-            let x = msg.get("x").and_then(|v| v.as_u64()).map(|v| v as u8);
-            let y = msg.get("y").and_then(|v| v.as_u64()).map(|v| v as u8);
-            match (comp_id, x, y) {
-                (Some(cid), Some(x), Some(y)) => handle_update_pos(state, cid, x, y, id.as_deref()),
-                _ => make_error(id.as_deref(), "BAD_REQUEST", "missing compId, x, or y"),
-            }
+            let comp_id = u16_of("compId")
+                .ok_or(("BAD_REQUEST", "missing compId".into()))?;
+            let x = u8_of("x").ok_or(("BAD_REQUEST", "missing x".into()))?;
+            let y = u8_of("y").ok_or(("BAD_REQUEST", "missing y".into()))?;
+            Ok(SoxOp::UpdatePos { comp_id, x, y })
         }
         "invoke" => {
-            let comp_id = msg.get("compId").and_then(|v| v.as_u64()).map(|v| v as u16);
-            let slot_idx = msg
-                .get("slotIdx")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as usize);
-            match (comp_id, slot_idx) {
-                (Some(cid), Some(idx)) => handle_invoke(state, cid, idx, id.as_deref()),
-                _ => make_error(id.as_deref(), "BAD_REQUEST", "missing compId or slotIdx"),
-            }
+            let comp_id = u16_of("compId")
+                .ok_or(("BAD_REQUEST", "missing compId".into()))?;
+            let slot_idx = usize_of("slotIdx")
+                .ok_or(("BAD_REQUEST", "missing slotIdx".into()))?;
+            Ok(SoxOp::Invoke { comp_id, slot_idx })
         }
-        "nameTable" => handle_name_table(state, id.as_deref(), compact_cov),
-        "palette" => handle_palette(state, id.as_deref()),
-        "subscribe" => {
-            let comp_ids = msg
-                .get("compIds")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_u64().map(|n| n as u16))
-                        .collect::<Vec<u16>>()
-                })
-                .unwrap_or_default();
-            for cid in &comp_ids {
-                subscribed.insert(*cid);
-            }
-            // Prime the cache for newly subscribed components
-            {
-                let tree = state.tree.read().unwrap();
-                for &cid in &comp_ids {
-                    if let Some(comp) = tree.get(cid) {
-                        let vals: Vec<JsonValue> = comp
-                            .slots
-                            .iter()
-                            .map(|s| slot_value_to_json(&s.value))
-                            .collect();
-                        cov_cache.insert(cid, vals);
-                        tree_cache.insert(cid, comp.children.clone());
-                    }
-                }
-            }
-            make_result(
-                id.as_deref(),
-                serde_json::json!({
-                    "subscribed": comp_ids,
-                    "count": subscribed.len(),
-                }),
-            )
-        }
-        "unsubscribe" => {
-            let comp_ids = msg
-                .get("compIds")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_u64().map(|n| n as u16))
-                        .collect::<Vec<u16>>()
-                })
-                .unwrap_or_default();
-            for cid in &comp_ids {
-                subscribed.remove(cid);
-                cov_cache.remove(cid);
-                tree_cache.remove(cid);
-            }
-            make_result(
-                id.as_deref(),
-                serde_json::json!({
-                    "unsubscribed": comp_ids,
-                    "count": subscribed.len(),
-                }),
-            )
-        }
-        "readTags" => {
-            let comp_id = msg.get("compId").and_then(|v| v.as_u64()).map(|v| v as u16);
-            match comp_id {
-                Some(cid) => handle_read_tags(state, cid, id.as_deref()),
-                None => make_error(id.as_deref(), "BAD_REQUEST", "missing or invalid 'compId'"),
-            }
-        }
+        "nameTable" => Ok(SoxOp::NameTable),
+        "palette" => Ok(SoxOp::Palette),
+        "subscribe" => Ok(SoxOp::Subscribe {
+            comp_ids: vec_u16("compIds"),
+        }),
+        "unsubscribe" => Ok(SoxOp::Unsubscribe {
+            comp_ids: vec_u16("compIds"),
+        }),
+        "readTags" => u16_of("compId")
+            .map(|comp_id| SoxOp::ReadTags { comp_id })
+            .ok_or(("BAD_REQUEST", "missing or invalid 'compId'".into())),
         "setTags" => {
-            let comp_id = msg.get("compId").and_then(|v| v.as_u64()).map(|v| v as u16);
-            let tags = msg.get("tags");
-            match (comp_id, tags) {
-                (Some(cid), Some(t)) => handle_set_tags(state, cid, t, id.as_deref()),
-                _ => make_error(id.as_deref(), "BAD_REQUEST", "missing compId or tags"),
-            }
+            let comp_id = u16_of("compId")
+                .ok_or(("BAD_REQUEST", "missing compId".into()))?;
+            let tags = msg
+                .get("tags")
+                .cloned()
+                .ok_or(("BAD_REQUEST", "missing tags".into()))?;
+            Ok(SoxOp::SetTags { comp_id, tags })
         }
         "deleteTag" => {
-            let comp_id = msg.get("compId").and_then(|v| v.as_u64()).map(|v| v as u16);
-            let key = msg.get("key").and_then(|v| v.as_str());
-            match (comp_id, key) {
-                (Some(cid), Some(k)) => handle_delete_tag(state, cid, k, id.as_deref()),
-                _ => make_error(id.as_deref(), "BAD_REQUEST", "missing compId or key"),
-            }
+            let comp_id = u16_of("compId")
+                .ok_or(("BAD_REQUEST", "missing compId".into()))?;
+            let key = str_of("key")
+                .ok_or(("BAD_REQUEST", "missing key".into()))?;
+            Ok(SoxOp::DeleteTag { comp_id, key })
         }
-        "setFormat" => {
-            // setFormat allows the client to request Trio text encoding for responses.
-            // Currently accepted for forward-compatibility but JSON remains the default.
-            let format = msg.get("format").and_then(|v| v.as_str()).unwrap_or("json");
-            match format {
-                "json" | "trio" => make_result(
-                    id.as_deref(),
-                    serde_json::json!({
-                        "format": format,
-                        "status": "ok",
-                    }),
-                ),
-                _ => make_error(
-                    id.as_deref(),
-                    "BAD_REQUEST",
-                    &format!("unsupported format: {format}"),
-                ),
-            }
+        "setFormat" => Ok(SoxOp::SetFormat {
+            format: str_of("format").unwrap_or_else(|| "json".into()),
+        }),
+        // G-2b editor-parity ops
+        "version" => Ok(SoxOp::Version),
+        "versionExt" => Ok(SoxOp::VersionExt),
+        "reorder" => {
+            let comp_id = u16_of("compId")
+                .ok_or(("BAD_REQUEST", "missing compId".into()))?;
+            let children = vec_u16("children");
+            Ok(SoxOp::Reorder { comp_id, children })
         }
-        _ => make_error(id.as_deref(), "UNKNOWN_OP", &format!("unknown op: {op}")),
-    }
-}
-
-// ── Command handlers ───────────────────────────────
-
-fn handle_read_tree(state: &RowsState, id: Option<&str>) -> Option<String> {
-    let tree = state.tree.read().unwrap();
-    let mut comps: Vec<JsonValue> = tree
-        .comp_ids()
-        .into_iter()
-        .filter_map(|cid| tree.get(cid).map(|c| comp_to_tree_json(c, &tree)))
-        .collect();
-    comps.sort_by(|a, b| {
-        let a_id = a.get("compId").and_then(|v| v.as_u64()).unwrap_or(0);
-        let b_id = b.get("compId").and_then(|v| v.as_u64()).unwrap_or(0);
-        a_id.cmp(&b_id)
-    });
-    make_result(id, serde_json::json!({ "components": comps }))
-}
-
-fn handle_read_comp(state: &RowsState, comp_id: u16, id: Option<&str>) -> Option<String> {
-    let tree = state.tree.read().unwrap();
-    match tree.get(comp_id) {
-        Some(comp) => {
-            let mut detail = comp_to_detail_json(comp, &tree);
-            // Append dynamic tags if any exist for this component.
-            if let Some(ref dyn_store) = state.dyn_store {
-                if let Ok(store) = dyn_store.read() {
-                    if let Some(tags) = store.get_all(comp_id) {
-                        if !tags.is_empty() {
-                            detail["tags"] = serde_json::to_value(tags).unwrap_or_default();
-                        }
-                    }
-                }
-            }
-            make_result(id, detail)
-        }
-        None => make_error(id, "NOT_FOUND", &format!("component {comp_id} not found")),
-    }
-}
-
-fn handle_write_slot(
-    state: &RowsState,
-    comp_id: u16,
-    slot_idx: usize,
-    value: &JsonValue,
-    id: Option<&str>,
-) -> Option<String> {
-    let mut tree = state.tree.write().unwrap();
-    let slot_type_id = {
-        let comp = match tree.get(comp_id) {
-            Some(c) => c,
-            None => return make_error(id, "NOT_FOUND", &format!("component {comp_id} not found")),
-        };
-        match comp.slots.get(slot_idx) {
-            Some(slot) => slot.type_id,
-            None => {
-                return make_error(
-                    id,
-                    "BAD_REQUEST",
-                    &format!("slot index {slot_idx} out of range"),
-                )
-            }
-        }
-    };
-    let new_value = match json_to_slot_value(value, slot_type_id) {
-        Some(v) => v,
-        None => {
-            return make_error(
-                id,
-                "BAD_REQUEST",
-                &format!("cannot coerce value to type_id {slot_type_id}"),
-            )
-        }
-    };
-    if let Some(comp) = tree.get_mut(comp_id) {
-        if let Some(slot) = comp.slots.get_mut(slot_idx) {
-            slot.value = new_value;
-        }
-    }
-    tree.mark_dirty();
-    make_result(id, serde_json::json!({ "ok": true }))
-}
-
-fn handle_add_comp(
-    state: &RowsState,
-    parent_id: u16,
-    kit_id: u8,
-    type_id: u8,
-    name: &str,
-    id: Option<&str>,
-) -> Option<String> {
-    // Validate name
-    if let Some(err) = validate_name(name) {
-        return make_error(id, "BAD_REQUEST", err);
-    }
-
-    let mut tree = state.tree.write().unwrap();
-
-    if tree.get(parent_id).is_none() {
-        return make_error(id, "NOT_FOUND", &format!("parent {parent_id} not found"));
-    }
-
-    let slots = match state.manifest_db.get_slots(kit_id, type_id) {
-        Some(manifest_slots) => ManifestDb::slots_to_virtual(manifest_slots),
-        None => {
-            vec![VirtualSlot {
-                name: "meta".into(),
-                type_id: SoxValueType::Int as u8,
-                flags: SLOT_FLAG_CONFIG,
-                value: SlotValue::Int(1),
-            }]
-        }
-    };
-
-    let type_name = state
-        .manifest_db
-        .type_name(kit_id, type_id)
-        .unwrap_or_else(|| format!("Type_{}_{}", kit_id, type_id));
-
-    let comp_id = tree.next_comp_id();
-    let comp = VirtualComponent {
-        comp_id,
-        parent_id,
-        name: name.to_string(),
-        type_name,
-        kit_id,
-        type_id,
-        children: Vec::new(),
-        slots,
-        links: Vec::new(),
-    };
-
-    tree.add(comp);
-    tree.mark_user_added(comp_id);
-    tree.mark_dirty();
-
-    make_result(id, serde_json::json!({ "compId": comp_id }))
-}
-
-fn handle_delete_comp(state: &RowsState, comp_id: u16, id: Option<&str>) -> Option<String> {
-    if comp_id < 7 {
-        return make_error(id, "FORBIDDEN", "cannot delete system components (id < 7)");
-    }
-
-    let mut tree = state.tree.write().unwrap();
-
-    // Remove all links involving this component
-    let link_peers: Vec<(u16, u8, u16, u8)> = tree
-        .get(comp_id)
-        .map(|c| {
-            c.links
-                .iter()
-                .map(|l| (l.from_comp, l.from_slot, l.to_comp, l.to_slot))
-                .collect()
-        })
-        .unwrap_or_default();
-    for (fc, fs, tc, ts) in &link_peers {
-        tree.remove_link(*fc, *fs, *tc, *ts);
-    }
-
-    match tree.remove(comp_id) {
-        Some(_) => {
-            tree.mark_dirty();
-            make_result(id, serde_json::json!({ "ok": true }))
-        }
-        None => make_error(id, "NOT_FOUND", &format!("component {comp_id} not found")),
-    }
-}
-
-fn handle_rename(state: &RowsState, comp_id: u16, name: &str, id: Option<&str>) -> Option<String> {
-    if let Some(err) = validate_name(name) {
-        return make_error(id, "BAD_REQUEST", err);
-    }
-
-    let mut tree = state.tree.write().unwrap();
-    if tree.rename(comp_id, name.to_string()) {
-        tree.mark_dirty();
-        make_result(id, serde_json::json!({ "ok": true }))
-    } else {
-        make_error(id, "NOT_FOUND", &format!("component {comp_id} not found"))
-    }
-}
-
-fn handle_add_link(
-    state: &RowsState,
-    from_comp: u16,
-    from_slot: u8,
-    to_comp: u16,
-    to_slot: u8,
-    id: Option<&str>,
-) -> Option<String> {
-    let mut tree = state.tree.write().unwrap();
-    if tree.add_link(from_comp, from_slot, to_comp, to_slot) {
-        tree.mark_dirty();
-        make_result(id, serde_json::json!({ "ok": true }))
-    } else {
-        make_error(
-            id,
-            "CONFLICT",
-            "link already exists or would create a cycle",
-        )
-    }
-}
-
-fn handle_delete_link(
-    state: &RowsState,
-    from_comp: u16,
-    from_slot: u8,
-    to_comp: u16,
-    to_slot: u8,
-    id: Option<&str>,
-) -> Option<String> {
-    let mut tree = state.tree.write().unwrap();
-    if tree.remove_link(from_comp, from_slot, to_comp, to_slot) {
-        tree.mark_dirty();
-        make_result(id, serde_json::json!({ "ok": true }))
-    } else {
-        make_error(id, "NOT_FOUND", "link not found")
-    }
-}
-
-fn handle_update_pos(
-    state: &RowsState,
-    comp_id: u16,
-    x: u8,
-    y: u8,
-    id: Option<&str>,
-) -> Option<String> {
-    let mut tree = state.tree.write().unwrap();
-    let comp = match tree.get_mut(comp_id) {
-        Some(c) => c,
-        None => return make_error(id, "NOT_FOUND", &format!("component {comp_id} not found")),
-    };
-    if comp.slots.is_empty() {
-        return make_error(id, "BAD_REQUEST", "component has no meta slot");
-    }
-    comp.slots[0].value = encode_position(x, y);
-    tree.mark_dirty();
-    make_result(id, serde_json::json!({ "ok": true }))
-}
-
-fn handle_invoke(
-    state: &RowsState,
-    comp_id: u16,
-    slot_idx: usize,
-    id: Option<&str>,
-) -> Option<String> {
-    let mut tree = state.tree.write().unwrap();
-    let comp = match tree.get_mut(comp_id) {
-        Some(c) => c,
-        None => return make_error(id, "NOT_FOUND", &format!("component {comp_id} not found")),
-    };
-    let slot = match comp.slots.get(slot_idx) {
-        Some(s) => s,
-        None => {
-            return make_error(
-                id,
-                "BAD_REQUEST",
-                &format!("slot index {slot_idx} out of range"),
-            )
-        }
-    };
-    if slot.flags & SLOT_FLAG_ACTION == 0 {
-        return make_error(id, "BAD_REQUEST", "slot is not an action slot");
-    }
-    // Execute the action based on its name
-    let slot_name = slot.name.clone();
-    match slot_name.as_str() {
-        "setTrue" => {
-            for slot in &mut comp.slots {
-                if slot.type_id == SoxValueType::Bool as u8 && slot.flags & SLOT_FLAG_ACTION == 0 {
-                    slot.value = SlotValue::Bool(true);
-                    break;
-                }
-            }
-        }
-        "setFalse" => {
-            for slot in &mut comp.slots {
-                if slot.type_id == SoxValueType::Bool as u8 && slot.flags & SLOT_FLAG_ACTION == 0 {
-                    slot.value = SlotValue::Bool(false);
-                    break;
-                }
-            }
-        }
-        _ => {
-            // Generic invoke — no-op for now (side effects happen server-side)
-        }
-    }
-    tree.mark_dirty();
-    make_result(id, serde_json::json!({ "ok": true }))
-}
-
-fn handle_name_table(
-    state: &RowsState,
-    id: Option<&str>,
-    compact_cov: &mut bool,
-) -> Option<String> {
-    let tree = state.tree.read().unwrap();
-    let names: Vec<JsonValue> = tree
-        .name_table
-        .all_names()
-        .into_iter()
-        .map(|(name_id, name)| {
-            serde_json::json!({
-                "id": name_id.0,
-                "name": name,
+        "query" => {
+            let query_type = str_of("queryType")
+                .and_then(|s| s.chars().next())
+                .ok_or(("BAD_REQUEST", "missing queryType".into()))?;
+            let kit_id = u8_of("kitId")
+                .ok_or(("BAD_REQUEST", "missing kitId".into()))?;
+            let type_id = u8_of("typeId")
+                .ok_or(("BAD_REQUEST", "missing typeId".into()))?;
+            Ok(SoxOp::Query {
+                query_type,
+                kit_id,
+                type_id,
             })
-        })
-        .collect();
-    // Enable compact COV mode for this session — the client now has the name table.
-    *compact_cov = true;
-    make_result(id, serde_json::json!({ "names": names }))
-}
-
-fn handle_palette(state: &RowsState, id: Option<&str>) -> Option<String> {
-    let mut entries: Vec<JsonValue> = state
-        .manifest_db
-        .all_types()
-        .map(|(&(kit_id, type_id), slots)| {
-            let kit_name = DEFAULT_KITS
-                .get(kit_id as usize)
-                .map(|k| k.name.to_string())
-                .unwrap_or_else(|| format!("kit{}", kit_id));
-            let type_name = state
-                .manifest_db
-                .type_name(kit_id, type_id)
-                .unwrap_or_else(|| format!("Type{}", type_id));
-            let category = category_for_type(kit_id, type_id);
-            let slot_list: Vec<JsonValue> = slots
-                .iter()
-                .map(|s| {
-                    serde_json::json!({
-                        "name": s.name,
-                        "typeId": s.type_id,
-                        "typeName": sox_type_name(s.type_id),
-                        "flags": s.flags,
-                        "direction": slot_direction(s.flags, &s.name),
-                    })
-                })
-                .collect();
-            serde_json::json!({
-                "kitId": kit_id,
-                "typeId": type_id,
-                "kitName": kit_name,
-                "typeName": type_name,
-                "category": category,
-                "slots": slot_list,
-            })
-        })
-        .collect();
-    entries.sort_by(|a, b| {
-        let ak = a.get("kitId").and_then(|v| v.as_u64()).unwrap_or(0);
-        let at = a.get("typeId").and_then(|v| v.as_u64()).unwrap_or(0);
-        let bk = b.get("kitId").and_then(|v| v.as_u64()).unwrap_or(0);
-        let bt = b.get("typeId").and_then(|v| v.as_u64()).unwrap_or(0);
-        (ak, at).cmp(&(bk, bt))
-    });
-    make_result(id, serde_json::json!(entries))
-}
-
-// ── Dynamic tag handlers ──────────────────────────
-
-fn handle_read_tags(state: &RowsState, comp_id: u16, id: Option<&str>) -> Option<String> {
-    let dyn_store = match &state.dyn_store {
-        Some(ds) => ds,
-        None => return make_error(id, "NOT_SUPPORTED", "dynamic tags not available"),
-    };
-    let store = dyn_store.read().expect("dyn_slots lock poisoned");
-    let tags = store
-        .get_all(comp_id)
-        .map(|t| serde_json::to_value(t).unwrap_or_default())
-        .unwrap_or_else(|| serde_json::json!({}));
-    make_result(id, serde_json::json!({ "tags": tags }))
-}
-
-fn handle_set_tags(
-    state: &RowsState,
-    comp_id: u16,
-    tags_val: &JsonValue,
-    id: Option<&str>,
-) -> Option<String> {
-    let dyn_store = match &state.dyn_store {
-        Some(ds) => ds,
-        None => return make_error(id, "NOT_SUPPORTED", "dynamic tags not available"),
-    };
-    let obj = match tags_val.as_object() {
-        Some(o) => o,
-        None => return make_error(id, "BAD_REQUEST", "'tags' must be a JSON object"),
-    };
-
-    let mut store = dyn_store.write().expect("dyn_slots lock poisoned");
-    for (key, val) in obj {
-        let dv = serde_json::from_value::<DynValue>(val.clone())
-            .unwrap_or_else(|_| super::tags::json_to_dynvalue(val));
-        if let Err(e) = store.set(comp_id, key.clone(), dv) {
-            return make_error(id, "LIMIT_EXCEEDED", &e);
         }
+        "closeWatch" => Ok(SoxOp::CloseWatch {
+            watch_id: str_of("watchId").unwrap_or_default(),
+        }),
+        unknown => Err(("UNKNOWN_OP", format!("unknown op: {unknown}"))),
     }
-    make_result(id, serde_json::json!({ "ok": true }))
 }
-
-fn handle_delete_tag(
-    state: &RowsState,
-    comp_id: u16,
-    key: &str,
-    id: Option<&str>,
-) -> Option<String> {
-    let dyn_store = match &state.dyn_store {
-        Some(ds) => ds,
-        None => return make_error(id, "NOT_SUPPORTED", "dynamic tags not available"),
-    };
-    let mut store = dyn_store.write().expect("dyn_slots lock poisoned");
-    let removed = store.remove(comp_id, key).is_some();
-    make_result(id, serde_json::json!({ "ok": true, "removed": removed }))
-}
-
-// ── JSON builders ──────────────────────────────────
-
-fn comp_to_tree_json(comp: &VirtualComponent, tree: &ComponentTree) -> JsonValue {
-    let position = if let Some(meta_slot) = comp.slots.first() {
-        decode_position(&meta_slot.value)
-    } else {
-        (0, 0)
-    };
-    serde_json::json!({
-        "compId": comp.comp_id,
-        "parentId": comp.parent_id,
-        "name": comp.name,
-        "typeName": comp.type_name,
-        "kitId": comp.kit_id,
-        "typeId": comp.type_id,
-        "children": comp.children,
-        "position": [position.0, position.1],
-        "isChannel": tree.is_channel_comp(comp.comp_id),
-        "isSystem": is_system_comp(comp.comp_id),
-    })
-}
-
-fn comp_to_detail_json(comp: &VirtualComponent, tree: &ComponentTree) -> JsonValue {
-    let position = if let Some(meta_slot) = comp.slots.first() {
-        decode_position(&meta_slot.value)
-    } else {
-        (0, 0)
-    };
-    let slots: Vec<JsonValue> = comp
-        .slots
-        .iter()
-        .enumerate()
-        .map(|(idx, slot)| {
-            serde_json::json!({
-                "index": idx,
-                "name": slot.name,
-                "typeId": slot.type_id,
-                "typeName": sox_type_name(slot.type_id),
-                "flags": slot.flags,
-                "direction": slot_direction(slot.flags, &slot.name),
-                "value": slot_value_to_json(&slot.value),
-            })
-        })
-        .collect();
-    let links: Vec<JsonValue> = comp
-        .links
-        .iter()
-        .map(|l| {
-            serde_json::json!({
-                "fromComp": l.from_comp,
-                "fromSlot": l.from_slot,
-                "toComp": l.to_comp,
-                "toSlot": l.to_slot,
-            })
-        })
-        .collect();
-    serde_json::json!({
-        "compId": comp.comp_id,
-        "parentId": comp.parent_id,
-        "name": comp.name,
-        "typeName": comp.type_name,
-        "kitId": comp.kit_id,
-        "typeId": comp.type_id,
-        "children": comp.children,
-        "position": [position.0, position.1],
-        "isChannel": tree.is_channel_comp(comp.comp_id),
-        "isSystem": is_system_comp(comp.comp_id),
-        "slots": slots,
-        "links": links,
-    })
-}
-
 // ── Response helpers ───────────────────────────────
 
 fn make_result(id: Option<&str>, data: JsonValue) -> Option<String> {
@@ -1092,6 +557,8 @@ fn make_pong(id: Option<&str>) -> Option<String> {
 // ── Name validation ────────────────────────────────
 
 /// Validate a component name using the centralised Sedona-compatible rules.
+/// Only used by tests — the live dispatcher validates via `sox_ops`.
+#[cfg(test)]
 fn validate_name(name: &str) -> Option<&'static str> {
     crate::sox::name_intern::NameInternTable::validate_name(name)
 }
@@ -1101,6 +568,8 @@ fn validate_name(name: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sox::sox_handlers::ManifestDb;
+    use std::sync::Arc;
 
     #[test]
     fn validate_name_valid() {
@@ -2078,6 +1547,161 @@ mod tests {
         let v: JsonValue = serde_json::from_str(reply.as_deref().unwrap()).unwrap();
         assert_eq!(v["op"], "error");
         assert_eq!(v["code"], "NOT_SUPPORTED");
+    }
+
+    // ── G-2b editor-parity op tests ────────────
+
+    #[test]
+    fn handle_version_returns_kit_list() {
+        let state = make_test_state();
+        let mut subscribed = HashSet::new();
+        let mut cov_cache = HashMap::new();
+        let mut tree_cache = HashMap::new();
+        let mut compact_cov = false;
+        let reply = handle_client_msg(
+            r#"{"op":"version","id":"v1"}"#,
+            &state,
+            &mut subscribed,
+            &mut cov_cache,
+            &mut tree_cache,
+            &mut compact_cov,
+        );
+        let v: JsonValue = serde_json::from_str(reply.as_deref().unwrap()).unwrap();
+        assert_eq!(v["op"], "result");
+        assert_eq!(v["id"], "v1");
+        assert!(v["data"]["kits"].is_array());
+        assert!(v["data"]["kitCount"].as_u64().unwrap() > 0);
+        // Each kit entry must carry name + checksum.
+        let first_kit = &v["data"]["kits"][0];
+        assert!(first_kit["name"].is_string());
+        assert!(first_kit["checksum"].is_number());
+    }
+
+    #[test]
+    fn handle_version_ext_returns_extended_fields() {
+        let state = make_test_state();
+        let mut subscribed = HashSet::new();
+        let mut cov_cache = HashMap::new();
+        let mut tree_cache = HashMap::new();
+        let mut compact_cov = false;
+        let reply = handle_client_msg(
+            r#"{"op":"versionExt","id":"y1"}"#,
+            &state,
+            &mut subscribed,
+            &mut cov_cache,
+            &mut tree_cache,
+            &mut compact_cov,
+        );
+        let v: JsonValue = serde_json::from_str(reply.as_deref().unwrap()).unwrap();
+        assert_eq!(v["op"], "result");
+        // Matches Fantom pod placeholders: empty platformId, zero scodeFlags, empty pairs.
+        assert_eq!(v["data"]["platformId"], "");
+        assert_eq!(v["data"]["scodeFlags"], 0);
+        assert!(v["data"]["kitVersions"].is_array());
+        assert_eq!(v["data"]["pairs"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn handle_reorder_missing_comp_id_errors() {
+        let state = make_test_state();
+        let mut subscribed = HashSet::new();
+        let mut cov_cache = HashMap::new();
+        let mut tree_cache = HashMap::new();
+        let mut compact_cov = false;
+        let reply = handle_client_msg(
+            r#"{"op":"reorder","children":[1,2]}"#,
+            &state,
+            &mut subscribed,
+            &mut cov_cache,
+            &mut tree_cache,
+            &mut compact_cov,
+        );
+        let v: JsonValue = serde_json::from_str(reply.as_deref().unwrap()).unwrap();
+        assert_eq!(v["op"], "error");
+        assert_eq!(v["code"], "BAD_REQUEST");
+    }
+
+    #[test]
+    fn handle_reorder_unknown_comp_not_found() {
+        let state = make_test_state();
+        let mut subscribed = HashSet::new();
+        let mut cov_cache = HashMap::new();
+        let mut tree_cache = HashMap::new();
+        let mut compact_cov = false;
+        let reply = handle_client_msg(
+            r#"{"op":"reorder","compId":9999,"children":[]}"#,
+            &state,
+            &mut subscribed,
+            &mut cov_cache,
+            &mut tree_cache,
+            &mut compact_cov,
+        );
+        let v: JsonValue = serde_json::from_str(reply.as_deref().unwrap()).unwrap();
+        assert_eq!(v["op"], "error");
+        assert_eq!(v["code"], "NOT_FOUND");
+    }
+
+    #[test]
+    fn handle_query_rejects_unknown_type() {
+        let state = make_test_state();
+        let mut subscribed = HashSet::new();
+        let mut cov_cache = HashMap::new();
+        let mut tree_cache = HashMap::new();
+        let mut compact_cov = false;
+        let reply = handle_client_msg(
+            r#"{"op":"query","queryType":"z","kitId":0,"typeId":0}"#,
+            &state,
+            &mut subscribed,
+            &mut cov_cache,
+            &mut tree_cache,
+            &mut compact_cov,
+        );
+        let v: JsonValue = serde_json::from_str(reply.as_deref().unwrap()).unwrap();
+        assert_eq!(v["op"], "error");
+        assert_eq!(v["code"], "BAD_REQUEST");
+        assert!(v["message"].as_str().unwrap().contains("unknown query type"));
+    }
+
+    #[test]
+    fn handle_query_type_not_found() {
+        let state = make_test_state();
+        let mut subscribed = HashSet::new();
+        let mut cov_cache = HashMap::new();
+        let mut tree_cache = HashMap::new();
+        let mut compact_cov = false;
+        let reply = handle_client_msg(
+            r#"{"op":"query","queryType":"s","kitId":255,"typeId":255}"#,
+            &state,
+            &mut subscribed,
+            &mut cov_cache,
+            &mut tree_cache,
+            &mut compact_cov,
+        );
+        let v: JsonValue = serde_json::from_str(reply.as_deref().unwrap()).unwrap();
+        assert_eq!(v["op"], "error");
+        assert_eq!(v["code"], "NOT_FOUND");
+    }
+
+    #[test]
+    fn handle_close_watch_clears_subscriptions() {
+        let state = make_test_state();
+        let mut subscribed: HashSet<u16> = [7u16, 8, 9].into_iter().collect();
+        let mut cov_cache = HashMap::new();
+        let mut tree_cache = HashMap::new();
+        let mut compact_cov = false;
+        let reply = handle_client_msg(
+            r#"{"op":"closeWatch","watchId":"w1","id":"x1"}"#,
+            &state,
+            &mut subscribed,
+            &mut cov_cache,
+            &mut tree_cache,
+            &mut compact_cov,
+        );
+        let v: JsonValue = serde_json::from_str(reply.as_deref().unwrap()).unwrap();
+        assert_eq!(v["op"], "result");
+        assert_eq!(v["data"]["watchId"], "w1");
+        assert_eq!(v["data"]["unsubscribed"], 3);
+        assert!(subscribed.is_empty());
     }
 
     // ── Test helpers ───────────────────────────

@@ -13,6 +13,7 @@ pub mod dasp;
 pub mod dyn_slots;
 pub mod name_intern;
 pub mod sox_handlers;
+pub mod sox_ops;
 pub mod sox_protocol;
 
 pub use sox_protocol::*;
