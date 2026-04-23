@@ -568,7 +568,6 @@ fn validate_name(name: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sox::sox_handlers::ManifestDb;
     use std::sync::Arc;
 
     #[test]

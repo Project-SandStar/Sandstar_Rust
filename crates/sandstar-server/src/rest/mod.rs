@@ -10,6 +10,7 @@
 mod error;
 pub mod filter;
 pub mod handlers;
+pub mod live;
 pub mod rows;
 #[cfg(feature = "simulator-hal")]
 pub mod sim;
@@ -831,6 +832,16 @@ pub fn router_with_auth(
                 manifest_db: sox.manifest_db.clone(),
                 dyn_store: sox.dyn_store.clone(),
             });
+        // Phase 14.0G-2c: Fantom-dialect SOX over WebSocket for the
+        // Vue web editor. Shares state with /api/rows; both endpoints
+        // dispatch through crate::sox::sox_ops.
+        let live_route = Router::new()
+            .route("/live", get(live::live_ws_handler))
+            .with_state(live::LiveState {
+                tree: sox.tree.clone(),
+                manifest_db: sox.manifest_db.clone(),
+                dyn_store: sox.dyn_store.clone(),
+            });
         // Make the DynSlotStore available as an Extension so that the
         // Haystack filter evaluator in /api/read can check dynamic tags.
         if let Some(ref ds) = sox.dyn_store {
@@ -839,7 +850,8 @@ pub fn router_with_auth(
         app = app
             .merge(sox_api::public_router(sox.clone()))
             .merge(sox_api::protected_router(sox))
-            .merge(rows_route);
+            .merge(rows_route)
+            .merge(live_route);
     }
 
     let mut app = app.layer(middleware::from_fn(count_requests));

