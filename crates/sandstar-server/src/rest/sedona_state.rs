@@ -31,14 +31,12 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Json};
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{json, Value as JsonValue};
 use tracing::debug;
 
 use crate::sox::sox_handlers::{
-    encode_slot_value_raw, ComponentTree, SlotValue, VirtualComponent, DEFAULT_KITS,
+    ComponentTree, SlotValue, VirtualComponent, DEFAULT_KITS,
 };
 use crate::sox::sox_ops::SoxState;
 
@@ -182,21 +180,34 @@ fn component_to_json(comp: &VirtualComponent) -> JsonValue {
         .get(comp.kit_id as usize)
         .map(|k| k.name.to_string())
         .unwrap_or_else(|| format!("kit{}", comp.kit_id));
-    let qname = format!("{}::{}", kit_name, comp.type_name);
+    // `comp.type_name` from the manifest is sometimes already namespaced
+    // (e.g. "sys::App"). Don't prefix twice — only prepend the kit if the
+    // stored type name is a bare identifier.
+    let qname = if comp.type_name.contains("::") {
+        comp.type_name.clone()
+    } else {
+        format!("{}::{}", kit_name, comp.type_name)
+    };
 
     // Build per-slot props dictionary. Each entry carries the slot's
-    // position index (`id`), a base64 blob of its encoded bytes
-    // (`value`), and the Sedona type id (`typeId`) — matching the
-    // shape Fantom pod's OfflineApp emits per slot.
+    // position index (`id`), a text-encoded value (`value`), and the
+    // Sedona type id (`typeId`) — matching the shape Fantom pod's
+    // OfflineApp emits per slot (`val.encodeString` → plain text like
+    // `"42"`, `"hello"`, `"true"`; NOT base64 binary).
+    //
+    // The editor consumes this via `ValueUtils.makeSome(typeId, value)`
+    // which calls `Int.make(val)` etc. — those expect native JS primitives
+    // coerced from the text form. Emitting base64 binary breaks the decode
+    // and makes the editor fall back to readComp (which then crashes on
+    // concatenated-buffer misalignment). See Phase 14.0G end-to-end bring-up
+    // notes 2026-04-24.
     let mut props_map = serde_json::Map::with_capacity(comp.slots.len());
     for (idx, slot) in comp.slots.iter().enumerate() {
-        let mut buf = Vec::with_capacity(8);
-        encode_slot_value_raw(&mut buf, &slot.value);
         props_map.insert(
             slot.name.clone(),
             json!({
                 "id": idx,
-                "value": BASE64.encode(&buf),
+                "value": slot_value_to_text(&slot.value),
                 "typeId": slot.type_id,
             }),
         );
@@ -237,6 +248,34 @@ fn component_to_json(comp: &VirtualComponent) -> JsonValue {
             "groups": groups,
         },
     })
+}
+
+/// Render a slot value as the text form the editor's `ValueUtils.makeSome`
+/// expects (matches Fantom pod's `SedonaValue.encodeString`):
+/// - Bool → `"true"` / `"false"`
+/// - Int/Long → decimal integer string
+/// - Float/Double → decimal float string
+/// - Str/Buf → raw text (Str as UTF-8 string; Buf as lossy UTF-8 or hex if not text)
+/// - Null → empty string
+fn slot_value_to_text(value: &SlotValue) -> String {
+    match value {
+        SlotValue::Bool(b) => if *b { "true".into() } else { "false".into() },
+        SlotValue::Int(v) => v.to_string(),
+        SlotValue::Long(v) => v.to_string(),
+        SlotValue::Float(v) => v.to_string(),
+        SlotValue::Double(v) => v.to_string(),
+        SlotValue::Str(s) => s.clone(),
+        SlotValue::Buf(bytes) => {
+            // Sedona Buf is almost always printable text (used like a string).
+            // Try UTF-8 first; fall back to lossy (replacement char) so we
+            // never panic on odd bytes.
+            match std::str::from_utf8(bytes) {
+                Ok(s) => s.trim_end_matches('\0').to_string(),
+                Err(_) => String::from_utf8_lossy(bytes).trim_end_matches('\0').to_string(),
+            }
+        }
+        SlotValue::Null => String::new(),
+    }
 }
 
 // ── Tests ──────────────────────────────────────────
@@ -392,11 +431,11 @@ mod tests {
         assert!(props.contains_key("out"));
         let out = &props["out"];
         assert_eq!(out["id"], 1);
-        // value is base64 of 4 bytes (Float)
-        let decoded = BASE64
-            .decode(out["value"].as_str().unwrap())
-            .expect("base64 decode");
-        assert_eq!(decoded.len(), 4);
+        // Post-2026-04-24: value is text-encoded (Fantom `encodeString`
+        // convention consumed by the editor's `ValueUtils.makeSome`).
+        // Float 42.0 → "42".
+        let v = out["value"].as_str().unwrap();
+        assert_eq!(v, "42");
     }
 
     #[test]

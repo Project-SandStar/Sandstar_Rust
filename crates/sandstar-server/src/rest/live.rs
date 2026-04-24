@@ -94,6 +94,13 @@ async fn handle_live_session(ws: WebSocket, state: LiveState) {
                     Some(Ok(Message::Text(text))) => {
                         last_client_msg = Instant::now();
                         metrics.rows_messages_in.fetch_add(1, Ordering::Relaxed);
+                        // Debug-diagnostics: log every inbound frame (truncated) to
+                        // make it possible to trace editor↔server contract mismatches
+                        // without attaching a browser. Remove or demote to debug!
+                        // once the editor bring-up is stable.
+                        let t: &str = text.as_str();
+                        let preview = if t.len() > 240 { &t[..240] } else { t };
+                        info!(inbound = %preview, "/live RX");
                         let reply = handle_live_msg(
                             &text,
                             &state,
@@ -104,9 +111,14 @@ async fn handle_live_session(ws: WebSocket, state: LiveState) {
                         );
                         if let Some(reply_json) = reply {
                             metrics.rows_messages_out.fetch_add(1, Ordering::Relaxed);
+                            let r: &str = reply_json.as_str();
+                            let rpreview = if r.len() > 240 { &r[..240] } else { r };
+                            info!(outbound = %rpreview, "/live TX");
                             if ws_tx.send(Message::Text(reply_json.into())).await.is_err() {
                                 break;
                             }
+                        } else {
+                            info!("/live handler returned None (no reply queued)");
                         }
                     }
                     Some(Ok(Message::Ping(data))) => {
@@ -174,15 +186,27 @@ fn handle_live_msg(
     };
 
     // Ping is a keep-alive with its own envelope (`p` replyNum 255).
-    // Response shape Fantom uses: same msgType/replyNum echoed.
+    // Fantom pod responds with UPPERCASE `P` per sox.worker.ts:607
+    // (`if (data.msgType === 'P')` — editor silently drops lowercase
+    // replies, which triggers a 15 s pong timeout → reconnect → new
+    // `v` → reconnect loop. Caught in browser console log 2026-04-24.
     if msg_type == 'p' {
-        return Some(json!({"msgType": "p", "replyNum": reply_num}).to_string());
+        return Some(json!({"msgType": "P", "replyNum": reply_num}).to_string());
     }
 
     // Component reads need binary-encoded slot payloads; handle them
     // here rather than via the generic apply_op path.
     if msg_type == 'c' {
         return handle_read_comp_live(state, reply_num, &msg);
+    }
+
+    // Writes come in as base64-encoded raw SOX slot bytes. The generic
+    // apply_op path treats `value` as a JSON-friendly primitive, which
+    // silently fails for typed binary payloads (e.g. a meta Int becomes
+    // a 4-byte UTF-8 blob → Int coerce rejects it). Handle writes here
+    // with a tree-aware decoder that uses the slot's declared type_id.
+    if msg_type == 'w' {
+        return handle_write_slot_live(state, reply_num, &msg);
     }
 
     // Everything else routes through apply_op.
@@ -512,6 +536,68 @@ fn handle_read_comp_live(state: &LiveState, reply_num: u8, msg: &JsonValue) -> O
     }
 
     Some(JsonValue::Object(out).to_string())
+}
+
+/// Handle Fantom-dialect `w` (write slot). The editor sends
+/// `value` as base64-encoded raw SOX slot bytes: for an Int, 4 BE
+/// bytes; for a Str, u2 length + chars + NUL; etc. Decode with the
+/// slot's declared `type_id` via `decode_slot_value` (same routine
+/// the DASP SOX path uses) and mutate the tree in place.
+///
+/// `slotId` in the editor's envelope maps directly to slot index.
+fn handle_write_slot_live(state: &LiveState, reply_num: u8, msg: &JsonValue) -> Option<String> {
+    use crate::sox::sox_handlers::decode_slot_value;
+    use crate::sox::sox_protocol::SoxReader;
+
+    let comp_id = match msg.get("compId").and_then(|v| v.as_u64()).map(|v| v as u16) {
+        Some(id) => id,
+        None => return render_error(reply_num, "missing compId"),
+    };
+    let slot_idx = match msg.get("slotId").and_then(|v| v.as_u64()).map(|v| v as usize) {
+        Some(idx) => idx,
+        None => return render_error(reply_num, "missing slotId"),
+    };
+    let b64 = match msg.get("value").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return render_error(reply_num, "missing value"),
+    };
+    let raw = match BASE64.decode(b64) {
+        Ok(b) => b,
+        Err(e) => return render_error(reply_num, &format!("bad base64 value: {e}")),
+    };
+
+    let mut tree = state.tree.write().unwrap();
+    let slot_type_id = {
+        let comp = match tree.get(comp_id) {
+            Some(c) => c,
+            None => return render_error(reply_num, &format!("component {comp_id} not found")),
+        };
+        match comp.slots.get(slot_idx) {
+            Some(s) => s.type_id,
+            None => return render_error(reply_num, &format!("slot index {slot_idx} out of range")),
+        }
+    };
+
+    let mut reader = SoxReader::new(&raw);
+    let new_value = match decode_slot_value(&mut reader, slot_type_id) {
+        Some(v) => v,
+        None => {
+            return render_error(
+                reply_num,
+                &format!("cannot decode {} bytes as type_id {}", raw.len(), slot_type_id),
+            );
+        }
+    };
+
+    if let Some(comp) = tree.get_mut(comp_id) {
+        if let Some(slot) = comp.slots.get_mut(slot_idx) {
+            slot.value = new_value;
+        }
+    }
+    tree.mark_dirty();
+
+    // Fantom response shape: `W` with msgType + replyNum only.
+    Some(json!({ "msgType": "W", "replyNum": reply_num }).to_string())
 }
 
 fn build_comp_tree_payload(comp: &VirtualComponent) -> JsonValue {
