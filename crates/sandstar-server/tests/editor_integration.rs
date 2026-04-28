@@ -234,7 +234,9 @@ async fn live_websocket_ping_pong() {
         }
     };
     let json: JsonValue = serde_json::from_str(&reply).unwrap();
-    assert_eq!(json["msgType"], "p");
+    // Pong MUST be uppercase `P` per Phase 14.0G fix — the editor's
+    // sox.worker.ts does a strict `=== 'P'` check.
+    assert_eq!(json["msgType"], "P");
     assert_eq!(json["replyNum"], 255);
 }
 

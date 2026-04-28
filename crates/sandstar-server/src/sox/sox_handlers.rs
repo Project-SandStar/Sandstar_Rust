@@ -386,6 +386,35 @@ impl ComponentTree {
             );
             return false;
         }
+
+        // DDC semantics: a single input slot has at most one incoming link.
+        // If the editor wires a new source onto a target slot that already
+        // has an incoming link from a different source, replace the old
+        // link rather than letting both linger and have execute_links
+        // pick a winner by insertion order. The editor's drag-drop UX
+        // expects the latest wire to be authoritative.
+        let preexisting: Option<(u16, u8)> = self
+            .components
+            .get(&to_comp)
+            .and_then(|c| {
+                c.links
+                    .iter()
+                    .find(|l| l.to_comp == to_comp && l.to_slot == to_slot)
+                    .map(|l| (l.from_comp, l.from_slot))
+            });
+        if let Some((old_from_comp, old_from_slot)) = preexisting {
+            tracing::info!(
+                old_from = old_from_comp,
+                old_slot = old_from_slot,
+                new_from = from_comp,
+                new_slot = from_slot,
+                to_comp,
+                to_slot,
+                "SOX: replacing pre-existing incoming link on target slot"
+            );
+            self.remove_link(old_from_comp, old_from_slot, to_comp, to_slot);
+        }
+
         if let Some(comp) = self.components.get_mut(&to_comp) {
             comp.links.push(link.clone());
         }
@@ -1184,24 +1213,34 @@ impl ComponentTree {
 
                     // --- WriteFloat passthrough ---
                     57 => {
-                        // WriteFloat: out = in (runtime passthrough)
-                        // slots: meta=0, out=1, in=2 (+ override slots)
-                        let inv = get_float(&comp.slots, 2);
-                        slot_updates.push((1, SlotValue::Float(inv)));
+                        // WriteFloat: out = in (runtime passthrough).
+                        // Look slots up by name — manifest order varies (the
+                        // editor's manifest emits `meta=0, in=1, out=2`, the
+                        // Sedona "stock" slot order is `meta=0, out=1, in=2`).
+                        // Hardcoded indexes used to silently swap reads/writes
+                        // and cancel link propagation in a per-tick loop.
+                        let in_idx = slot_index_by_name(&comp.slots, "in").unwrap_or(2);
+                        let out_idx = slot_index_by_name(&comp.slots, "out").unwrap_or(1);
+                        let inv = get_float(&comp.slots, in_idx);
+                        slot_updates.push((out_idx, SlotValue::Float(inv)));
                     }
 
                     // --- WriteBool passthrough ---
                     56 => {
-                        // WriteBool: out = in
-                        let inv = get_bool(&comp.slots, 2);
-                        slot_updates.push((1, SlotValue::Bool(inv)));
+                        // WriteBool: out = in (see WriteFloat note above).
+                        let in_idx = slot_index_by_name(&comp.slots, "in").unwrap_or(2);
+                        let out_idx = slot_index_by_name(&comp.slots, "out").unwrap_or(1);
+                        let inv = get_bool(&comp.slots, in_idx);
+                        slot_updates.push((out_idx, SlotValue::Bool(inv)));
                     }
 
                     // --- WriteInt passthrough ---
                     58 => {
-                        // WriteInt: out = in
-                        let inv = get_int(&comp.slots, 2);
-                        slot_updates.push((1, SlotValue::Int(inv)));
+                        // WriteInt: out = in (see WriteFloat note above).
+                        let in_idx = slot_index_by_name(&comp.slots, "in").unwrap_or(2);
+                        let out_idx = slot_index_by_name(&comp.slots, "out").unwrap_or(1);
+                        let inv = get_int(&comp.slots, in_idx);
+                        slot_updates.push((out_idx, SlotValue::Int(inv)));
                     }
 
                     // --- ChannelRead (kit 1, type 100): reads sensor value from channel ---
@@ -1573,6 +1612,15 @@ impl ComponentTree {
 }
 
 /// Extract a float value from a slot, coercing Int to f32 if needed.
+/// Find a slot's index by its name. Use this instead of hardcoded
+/// indexes for components whose `executable` Rust handler talks to
+/// slots by semantic role (`in`, `out`, `in1`, ...). The manifest the
+/// editor consumes can emit slots in a different order than the
+/// historical Sedona "stock" ordering, so an integer index is unsafe.
+fn slot_index_by_name(slots: &[VirtualSlot], name: &str) -> Option<usize> {
+    slots.iter().position(|s| s.name == name)
+}
+
 fn get_float(slots: &[VirtualSlot], idx: usize) -> f32 {
     slots
         .get(idx)
@@ -7064,6 +7112,53 @@ mod tests {
         assert_eq!(resp.cmd, b'!'); // error
     }
 
+    /// Regression: when a target slot already has an incoming link, a new
+    /// link from a different source onto the same slot should REPLACE the
+    /// old one (DDC single-source semantics). Previously both links
+    /// stayed in the tree and the last-inserted source won via insertion
+    /// order; deleting it would let the older link's value resurface
+    /// in a way that surprised editor users.
+    #[test]
+    fn add_link_replaces_existing_link_on_same_target_slot() {
+        let mut tree = ComponentTree::new();
+        // Three components, parents=NO_PARENT for simplicity.
+        tree.add(make_source_comp(200, NO_PARENT, "srcA", 70.0));
+        tree.add(make_source_comp(201, NO_PARENT, "srcB", 50.0));
+        tree.add(make_math_comp(202, NO_PARENT, "tgt", 2, 3));
+
+        // First link: A.out (slot 1) → tgt.in1 (slot 2).
+        assert!(tree.add_link(200, 1, 202, 2));
+        assert_eq!(tree.get(202).unwrap().links.len(), 1);
+        assert_eq!(tree.get(200).unwrap().links.len(), 1);
+
+        // Second link to the SAME target slot from a different source
+        // should replace the first link, not coexist.
+        assert!(tree.add_link(201, 1, 202, 2));
+
+        let tgt = tree.get(202).unwrap();
+        assert_eq!(tgt.links.len(), 1, "target should have exactly one incoming link");
+        assert_eq!(tgt.links[0].from_comp, 201, "new link should win");
+
+        // The old source must no longer carry a stale outgoing link
+        // record either (links live on both endpoints).
+        let old_src = tree.get(200).unwrap();
+        assert_eq!(old_src.links.len(), 0, "old source's outgoing link must be cleaned");
+    }
+
+    /// Adding a link from the SAME source twice (truly duplicate) is
+    /// still rejected — it's a no-op idempotency guard, not a replace.
+    #[test]
+    fn add_link_idempotent_when_exact_same_link_exists() {
+        let mut tree = ComponentTree::new();
+        tree.add(make_source_comp(200, NO_PARENT, "src", 10.0));
+        tree.add(make_math_comp(201, NO_PARENT, "tgt", 2, 3));
+
+        assert!(tree.add_link(200, 1, 201, 2));
+        // Same exact link → false (no-op).
+        assert!(!tree.add_link(200, 1, 201, 2));
+        assert_eq!(tree.get(201).unwrap().links.len(), 1);
+    }
+
     #[test]
     fn handle_link_delete_nonexistent_fails() {
         let mut tree = ComponentTree::from_channels(&sample_channels());
@@ -7459,6 +7554,68 @@ mod tests {
         match &comp.slots[4].value {
             SlotValue::Bool(v) => assert!(v, "div0 flag should be true"),
             other => panic!("expected Bool(true), got {:?}", other),
+        }
+    }
+
+    /// Regression: production tree had WriteFloat slot order
+    /// `meta=0, in=1, out=2` (from the editor's manifest), while the
+    /// hardcoded handler expected `meta=0, out=1, in=2`. The handler
+    /// would read from index 2 (interpreting it as `in`, but it was
+    /// actually `out=0`) and write that 0 back to index 1 (`in`).
+    /// Combined with `execute_links` setting index 1 from a linked
+    /// source on every tick, this collapsed into a per-tick reset
+    /// loop where the linked input never landed at the target.
+    /// Now slots are looked up by name.
+    #[test]
+    fn write_float_passthrough_works_with_inverted_slot_order() {
+        let mut tree = ComponentTree::new();
+        // Slot order matching production manifest: meta=0, in=1, out=2.
+        let comp = VirtualComponent {
+            comp_id: 200,
+            parent_id: NO_PARENT,
+            name: "wf".into(),
+            type_name: "control::WriteFloat".into(),
+            kit_id: 2,
+            type_id: 57,
+            children: vec![],
+            slots: vec![
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: SoxValueType::Int as u8,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "in".into(),
+                    type_id: SoxValueType::Float as u8,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Float(17.5),
+                },
+                VirtualSlot {
+                    name: "out".into(),
+                    type_id: SoxValueType::Float as u8,
+                    flags: 4,
+                    value: SlotValue::Float(0.0),
+                },
+            ],
+            links: vec![],
+        };
+        tree.add(comp);
+
+        let changed = tree.execute_components();
+        assert!(changed.contains(&200), "WriteFloat passthrough must mark out as changed");
+
+        let comp = tree.get(200).unwrap();
+        // out (slot 2 in this layout) should now equal in (17.5).
+        match &comp.slots[2].value {
+            SlotValue::Float(v) => assert_eq!(*v, 17.5, "out should pick up in"),
+            other => panic!("expected Float, got {:?}", other),
+        }
+        // in (slot 1) must NOT be clobbered by the handler reading the
+        // wrong index and writing 0 back. This was the production bug.
+        match &comp.slots[1].value {
+            SlotValue::Float(v) => assert_eq!(*v, 17.5, "in must not be reset"),
+            other => panic!("expected Float, got {:?}", other),
         }
     }
 

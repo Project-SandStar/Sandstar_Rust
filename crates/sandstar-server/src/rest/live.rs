@@ -222,6 +222,19 @@ fn handle_live_msg(
         compact_cov,
     };
     let response = apply_op(state, op, &mut session);
+
+    // Drive dataflow synchronously after a tree-mutating op so editor
+    // clients observe link-propagated values on the very next COV tick.
+    // The DASP UDP loop also calls these every second, but it can stall
+    // on the engine list_channels await — relying on the WS path here
+    // keeps the editor responsive regardless.
+    if matches!(msg_type, 'l' | 'a' | 'd' | 'n' | 'o') {
+        if let Ok(mut tree) = state.tree.write() {
+            let _ = tree.execute_links();
+            let _ = tree.execute_components();
+        }
+    }
+
     Some(render_live_response(msg_type, reply_num, response))
 }
 
@@ -596,6 +609,14 @@ fn handle_write_slot_live(state: &LiveState, reply_num: u8, msg: &JsonValue) -> 
     }
     tree.mark_dirty();
 
+    // Drive dataflow synchronously after a write so the editor sees
+    // link-propagated + component-recomputed values on the very next
+    // COV tick (avoids up-to-1s lag while waiting on the DASP refresh
+    // loop). The DASP loop also runs these every second; calling them
+    // here is idempotent.
+    let _ = tree.execute_links();
+    let _ = tree.execute_components();
+
     // Fantom response shape: `W` with msgType + replyNum only.
     Some(json!({ "msgType": "W", "replyNum": reply_num }).to_string())
 }
@@ -785,9 +806,12 @@ mod tests {
 
     #[test]
     fn ping_is_echoed() {
+        // Pong MUST be uppercase `P` — sox.worker.ts:607 strictly checks
+        // `data.msgType === 'P'`; lowercase replies cause the editor to
+        // hit a 15s pong timeout and reconnect in a loop. Phase 14.0G fix.
         let state = make_test_state();
         let v = dispatch(&state, r#"{"msgType":"p","replyNum":255}"#);
-        assert_eq!(v["msgType"], "p");
+        assert_eq!(v["msgType"], "P");
         assert_eq!(v["replyNum"], 255);
     }
 
@@ -921,5 +945,102 @@ mod tests {
         let anything_bytes = encode_slots_for_what(&comp, 'r');
         assert!(!anything_bytes.is_empty());
         assert_eq!(anything_bytes.len(), 4); // no action bool appended
+    }
+
+    /// Regression for the editor bring-up bug where link propagation
+    /// was only ever driven by the DASP UDP loop. If that loop stalls
+    /// (or is disabled), `addLink` over `/live` would silently leave
+    /// the target slot stale until something else triggered a tick.
+    /// Verify that a `link add` over /live updates the target slot
+    /// in the same call.
+    #[test]
+    fn add_link_propagates_immediately() {
+        use crate::sox::sox_handlers::{
+            VirtualComponent, VirtualSlot, NO_PARENT,
+        };
+        use crate::sox::sox_protocol::SoxValueType;
+
+        let state = make_test_state();
+        // Build a tiny tree: source.out=42.0, target.in=0.0, no link yet.
+        {
+            let mut tree = state.tree.write().unwrap();
+            tree.add(VirtualComponent {
+                comp_id: 200,
+                parent_id: NO_PARENT,
+                name: "src".into(),
+                type_name: "ConstFloat".into(),
+                kit_id: 2,
+                type_id: 14,
+                children: vec![],
+                slots: vec![
+                    VirtualSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        value: SlotValue::Int(0),
+                    },
+                    VirtualSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        value: SlotValue::Float(42.0),
+                    },
+                ],
+                links: vec![],
+            });
+            tree.add(VirtualComponent {
+                comp_id: 201,
+                parent_id: NO_PARENT,
+                name: "dst".into(),
+                type_name: "WriteFloat".into(),
+                kit_id: 2,
+                type_id: 57,
+                children: vec![],
+                slots: vec![
+                    VirtualSlot {
+                        name: "meta".into(),
+                        type_id: SoxValueType::Int as u8,
+                        flags: SLOT_FLAG_CONFIG,
+                        value: SlotValue::Int(0),
+                    },
+                    VirtualSlot {
+                        name: "out".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: 0,
+                        value: SlotValue::Float(0.0),
+                    },
+                    VirtualSlot {
+                        name: "in".into(),
+                        type_id: SoxValueType::Float as u8,
+                        flags: 0,
+                        value: SlotValue::Float(0.0),
+                    },
+                ],
+                links: vec![],
+            });
+        }
+
+        // Issue an `l` op with subcommand `a` (add link) over /live.
+        let v = dispatch(
+            &state,
+            r#"{"msgType":"l","replyNum":9,"op":"a",
+                "fromCompId":200,"fromSlotId":1,
+                "toCompId":201,"toSlotId":2}"#,
+        );
+        assert_eq!(v["msgType"], "L");
+
+        // Without our synchronous tick the target's `in` slot would
+        // still be 0.0; with the fix it picks up 42.0 immediately, and
+        // the WriteFloat passthrough also propagates `in` → `out`.
+        let tree = state.tree.read().unwrap();
+        let dst = tree.get(201).unwrap();
+        match &dst.slots[2].value {
+            SlotValue::Float(v) => assert_eq!(*v, 42.0, "in should reflect linked source"),
+            other => panic!("expected Float, got {other:?}"),
+        }
+        match &dst.slots[1].value {
+            SlotValue::Float(v) => assert_eq!(*v, 42.0, "WriteFloat passthrough should set out=in"),
+            other => panic!("expected Float, got {other:?}"),
+        }
     }
 }
