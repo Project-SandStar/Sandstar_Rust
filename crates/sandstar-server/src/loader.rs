@@ -92,12 +92,26 @@ pub fn load_points<H: HalRead + HalWrite + HalDiagnostics>(
     Ok(count)
 }
 
+/// Find a table data file: `table_dir/<file name>` first (unchanged
+/// behavior for every table found there), then the `tables.csv` path as
+/// written. Returns `None` when neither exists.
+fn resolve_table_path(table_dir: &Path, csv_path: &str) -> Option<std::path::PathBuf> {
+    let csv_path = Path::new(csv_path);
+    let by_name = csv_path
+        .file_name()
+        .map(|name| table_dir.join(name))
+        .filter(|p| p.is_file());
+    by_name.or_else(|| Some(csv_path.to_path_buf()).filter(|p| p.is_file()))
+}
+
 /// Load lookup tables from tables.csv and their data files.
 ///
 /// CSV format: `name,description,path,unit_type,range_F_min,range_F_max,...,tag`
 ///
 /// The `path` column points to the table data file on the target system.
-/// We search for the file locally using `table_dir` as the base directory.
+/// We search for the file by name in `table_dir` first; if it is not there,
+/// the `path` column itself is tried (SAHA-9: on the device a table that
+/// only exists at its `tables.csv` path was reported as missing).
 pub fn load_tables(
     tables: &mut TableStore,
     csv_path: &Path,
@@ -136,11 +150,15 @@ pub fn load_tables(
             .and_then(|f| f.to_str())
             .unwrap_or("");
 
-        let local_path = table_dir.join(filename);
-        if !local_path.exists() {
-            warn!(table = %name, path = %local_path.display(), "table data file not found");
+        let Some(local_path) = resolve_table_path(table_dir, remote_path) else {
+            warn!(
+                table = %name,
+                path = %table_dir.join(filename).display(),
+                csv_path = remote_path,
+                "table data file not found"
+            );
             continue;
-        }
+        };
 
         // Load table values (one f64 per line)
         let values = load_table_values(&local_path)?;
@@ -864,6 +882,93 @@ mod tests {
     use sandstar_hal::mock::MockHal;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    const TABLES_HEADER: &str =
+        "name,description,path,unit_type,range_F_min,range_F_max,range_C_min,range_C_max,range_K_min,range_K_max,tag";
+
+    fn table_row(name: &str, path: &Path, tag: &str) -> String {
+        format!(
+            "{name},desc,{},temp,-40,257,-40,125,233.15,398.15,{tag}",
+            path.display()
+        )
+    }
+
+    #[test]
+    fn load_tables_prefers_table_dir_then_csv_path() {
+        let root = tempfile::tempdir().unwrap();
+        let table_dir = root.path().join("EacIo");
+        let csv_dir = root.path().join("config");
+        std::fs::create_dir_all(&table_dir).unwrap();
+        std::fs::create_dir_all(&csv_dir).unwrap();
+
+        // "a": present in both places with different content -> table_dir wins.
+        std::fs::write(
+            table_dir.join("a.txt"),
+            "1
+2
+",
+        )
+        .unwrap();
+        std::fs::write(
+            csv_dir.join("a.txt"),
+            "9
+9
+",
+        )
+        .unwrap();
+        // "wts": only at the csv path (the device case) -> now loaded.
+        std::fs::write(
+            csv_dir.join("wts.txt"),
+            "5
+6
+",
+        )
+        .unwrap();
+
+        let csv = root.path().join("tables.csv");
+        let body = [
+            TABLES_HEADER.to_string(),
+            table_row("A", &csv_dir.join("a.txt"), "a"),
+            table_row("WTS", &csv_dir.join("wts.txt"), "wts"),
+            table_row("Missing", &csv_dir.join("none.txt"), "none"),
+        ]
+        .join(
+            "
+",
+        );
+        std::fs::write(&csv, body).unwrap();
+
+        let mut tables = TableStore::new();
+        let n = load_tables(&mut tables, &csv, &table_dir).unwrap();
+        assert_eq!(n, 2);
+
+        let a = tables.get(tables.find_by_tag("a").unwrap()).unwrap();
+        assert_eq!(a.values, vec![1.0, 2.0]);
+        let wts = tables.get(tables.find_by_tag("wts").unwrap()).unwrap();
+        assert_eq!(wts.values, vec![5.0, 6.0]);
+        assert!(tables.find_by_tag("none").is_none());
+        // Order is unchanged: earlier tables keep their index.
+        assert_eq!(tables.find_by_tag("a"), Some(0));
+    }
+
+    #[test]
+    fn resolve_table_path_edge_cases() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(resolve_table_path(root.path(), "").is_none());
+        assert!(resolve_table_path(root.path(), "/").is_none());
+        // A directory is not a table file.
+        assert!(resolve_table_path(root.path(), root.path().to_str().unwrap()).is_none());
+        let utf8 = root.path().join("çğü_tablo.txt");
+        std::fs::write(
+            &utf8, "1
+",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_table_path(root.path(), "/x/çğü_tablo.txt"),
+            Some(utf8)
+        );
+    }
 
     #[test]
     fn test_load_table_values() {
