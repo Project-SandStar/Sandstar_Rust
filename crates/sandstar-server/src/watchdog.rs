@@ -11,20 +11,30 @@
 //!
 //! Both are best-effort: if a device is unavailable (Windows, dev machine),
 //! the corresponding fd is `None` and `kick()` is a no-op.
+//!
+//! On the device GPIO60 is exported by `initialize.sh` (ExecStartPre), but
+//! on some starts it is missing when the engine opens it (R-42). On Linux a
+//! missing GPIO60 is therefore retried from `kick()` for a few minutes.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
 const DEV_WATCHDOG_PATH: &str = "/dev/watchdog";
 const GPIO60_VALUE_PATH: &str = "/sys/class/gpio/gpio60/value";
 
+/// Kicks between two GPIO60 open retries (kick period 500 ms: ~10 s).
+const GPIO60_RETRY_EVERY_KICKS: u32 = 20;
+/// GPIO60 open retries after a failed start (~5 min in total).
+const GPIO60_MAX_RETRIES: u32 = 30;
+
 /// Open a watchdog file for writing; the error text includes the path.
-fn open_watchdog_device(path: &str) -> Result<File, String> {
+fn open_watchdog_device(path: &Path) -> Result<File, String> {
     OpenOptions::new()
         .write(true)
         .open(path)
-        .map_err(|e| format!("{path}: {e}"))
+        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 fn log_unavailable(path: &str, err: &str) {
@@ -46,6 +56,12 @@ pub struct Watchdog {
     gpio60_value: Option<File>,
     /// Current GPIO60 toggle state (false=0, true=1).
     gpio60_state: bool,
+    /// GPIO60 value file, reopened from `kick()` while retries remain.
+    gpio60_path: PathBuf,
+    /// Open retries left while `gpio60_value` is `None`; 0 = no retry.
+    gpio60_retries_left: u32,
+    /// Kicks until the next retry.
+    gpio60_retry_countdown: u32,
 }
 
 impl Default for Watchdog {
@@ -62,6 +78,9 @@ impl Watchdog {
             dev_watchdog: None,
             gpio60_value: None,
             gpio60_state: false,
+            gpio60_path: PathBuf::from(GPIO60_VALUE_PATH),
+            gpio60_retries_left: 0,
+            gpio60_retry_countdown: 0,
         }
     }
 
@@ -72,8 +91,8 @@ impl Watchdog {
     /// is then protected only by systemd `WatchdogSec` (R-42). Elsewhere
     /// (dev machines) the devices are expected to be missing: `debug` only.
     pub fn new() -> Self {
-        let dev_watchdog = open_watchdog_device(DEV_WATCHDOG_PATH);
-        let gpio60_value = open_watchdog_device(GPIO60_VALUE_PATH);
+        let dev_watchdog = open_watchdog_device(Path::new(DEV_WATCHDOG_PATH));
+        let gpio60_value = open_watchdog_device(Path::new(GPIO60_VALUE_PATH));
 
         match &dev_watchdog {
             Ok(_) => info!("watchdog: /dev/watchdog opened"),
@@ -87,17 +106,57 @@ impl Watchdog {
         if dev_watchdog.is_err() && gpio60_value.is_err() {
             if cfg!(target_os = "linux") {
                 warn!(
-                    "watchdog: no watchdog device could be opened; kernel and hardware watchdog disabled, only systemd WatchdogSec applies"
+                    "watchdog: no watchdog device could be opened; kernel and hardware watchdog disabled, only systemd WatchdogSec applies until GPIO60 opens on retry"
                 );
             } else {
                 info!("watchdog: no watchdog devices available — watchdog disabled");
             }
         }
 
+        // Retrying only makes sense on the device.
+        let gpio60_retries_left = if gpio60_value.is_err() && cfg!(target_os = "linux") {
+            GPIO60_MAX_RETRIES
+        } else {
+            0
+        };
+
         Self {
             dev_watchdog: dev_watchdog.ok(),
             gpio60_value: gpio60_value.ok(),
             gpio60_state: false,
+            gpio60_path: PathBuf::from(GPIO60_VALUE_PATH),
+            gpio60_retries_left,
+            gpio60_retry_countdown: GPIO60_RETRY_EVERY_KICKS,
+        }
+    }
+
+    /// Try to open GPIO60 again, once every `GPIO60_RETRY_EVERY_KICKS`
+    /// kicks, while retries remain. Only called while it is not open.
+    fn retry_gpio60(&mut self) {
+        if self.gpio60_retries_left == 0 {
+            return;
+        }
+        self.gpio60_retry_countdown = self.gpio60_retry_countdown.saturating_sub(1);
+        if self.gpio60_retry_countdown > 0 {
+            return;
+        }
+        self.gpio60_retry_countdown = GPIO60_RETRY_EVERY_KICKS;
+        self.gpio60_retries_left -= 1;
+        let attempt = GPIO60_MAX_RETRIES.saturating_sub(self.gpio60_retries_left);
+        match open_watchdog_device(&self.gpio60_path) {
+            Ok(fd) => {
+                info!(attempt, "watchdog: GPIO60 (TPL5010) opened on retry");
+                self.gpio60_value = Some(fd);
+                self.gpio60_retries_left = 0;
+            }
+            Err(e) if self.gpio60_retries_left == 0 => {
+                warn!(
+                    attempt,
+                    err = %e,
+                    "watchdog: GPIO60 still unavailable, giving up; hardware watchdog disabled"
+                );
+            }
+            Err(e) => debug!(attempt, err = %e, "watchdog: GPIO60 retry failed"),
         }
     }
 
@@ -113,6 +172,9 @@ impl Watchdog {
         }
 
         // GPIO60 hardware watchdog: toggle state
+        if self.gpio60_value.is_none() {
+            self.retry_gpio60();
+        }
         if let Some(ref mut fd) = self.gpio60_value {
             self.gpio60_state = !self.gpio60_state;
             let val = if self.gpio60_state {
@@ -138,6 +200,8 @@ impl Watchdog {
         }
         self.dev_watchdog = None;
         self.gpio60_value = None;
+        // Never reopen after close.
+        self.gpio60_retries_left = 0;
     }
 }
 
@@ -161,8 +225,85 @@ mod tests {
 
     #[test]
     fn open_error_names_the_path() {
-        let err = open_watchdog_device("/nonexistent/sandstar-watchdog").unwrap_err();
-        assert!(err.starts_with("/nonexistent/sandstar-watchdog: "), "{err}");
+        let path = Path::new("/nonexistent/sandstar-watchdog");
+        let err = open_watchdog_device(path).unwrap_err();
+        assert!(err.starts_with(&format!("{}: ", path.display())), "{err}");
+    }
+
+    /// Watchdog with only GPIO60 at `path`, closed, with `retries` left.
+    fn gpio_only(path: &Path, retries: u32) -> Watchdog {
+        Watchdog {
+            dev_watchdog: None,
+            gpio60_value: None,
+            gpio60_state: false,
+            gpio60_path: path.to_path_buf(),
+            gpio60_retries_left: retries,
+            gpio60_retry_countdown: GPIO60_RETRY_EVERY_KICKS,
+        }
+    }
+
+    fn kick_n(wd: &mut Watchdog, n: u32) {
+        for _ in 0..n {
+            wd.kick();
+        }
+    }
+
+    #[test]
+    fn gpio60_opens_on_retry_and_toggles() {
+        let dir = tempfile::tempdir().unwrap();
+        let value = dir.path().join("value");
+        let mut wd = gpio_only(&value, 3);
+
+        // File missing: first retry (after 20 kicks) fails.
+        kick_n(&mut wd, GPIO60_RETRY_EVERY_KICKS);
+        assert!(wd.gpio60_value.is_none());
+        assert_eq!(wd.gpio60_retries_left, 2);
+
+        // File appears: next retry opens it and that kick toggles it.
+        std::fs::write(&value, b"").unwrap();
+        kick_n(&mut wd, GPIO60_RETRY_EVERY_KICKS - 1);
+        assert!(
+            wd.gpio60_value.is_none(),
+            "no retry before the countdown ends"
+        );
+        wd.kick();
+        assert!(wd.gpio60_value.is_some());
+        assert_eq!(wd.gpio60_retries_left, 0);
+        assert!(wd.gpio60_state);
+        wd.kick();
+        assert!(!wd.gpio60_state);
+        assert_eq!(std::fs::read(&value).unwrap(), b"10");
+    }
+
+    #[test]
+    fn gpio60_retries_stop_when_exhausted() {
+        let dir = tempfile::tempdir().unwrap();
+        let value = dir.path().join("value");
+        let mut wd = gpio_only(&value, 2);
+        kick_n(&mut wd, 2 * GPIO60_RETRY_EVERY_KICKS);
+        assert_eq!(wd.gpio60_retries_left, 0);
+
+        // Appearing later is ignored: no retries left.
+        std::fs::write(&value, b"").unwrap();
+        kick_n(&mut wd, 3 * GPIO60_RETRY_EVERY_KICKS);
+        assert!(wd.gpio60_value.is_none());
+    }
+
+    #[test]
+    fn gpio60_no_retry_after_close_or_when_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let value = dir.path().join("value");
+        std::fs::write(&value, b"").unwrap();
+
+        let mut closed = gpio_only(&value, 5);
+        closed.close();
+        kick_n(&mut closed, 2 * GPIO60_RETRY_EVERY_KICKS);
+        assert!(closed.gpio60_value.is_none());
+
+        let mut disabled = Watchdog::disabled();
+        disabled.gpio60_path = value.clone();
+        kick_n(&mut disabled, 2 * GPIO60_RETRY_EVERY_KICKS);
+        assert!(disabled.gpio60_value.is_none());
     }
 
     #[test]
@@ -171,6 +312,9 @@ mod tests {
             dev_watchdog: None,
             gpio60_value: None,
             gpio60_state: false,
+            gpio60_path: PathBuf::from(GPIO60_VALUE_PATH),
+            gpio60_retries_left: 0,
+            gpio60_retry_countdown: 0,
         };
         // Should not panic
         wd.kick();
