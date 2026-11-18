@@ -87,7 +87,7 @@ impl Watchdog {
         if dev_watchdog.is_err() && gpio60_value.is_err() {
             if cfg!(target_os = "linux") {
                 warn!(
-                    "watchdog: no watchdog device could be opened — kernel and                      hardware watchdog disabled, only systemd WatchdogSec applies"
+                    "watchdog: no watchdog device could be opened; kernel and hardware watchdog disabled, only systemd WatchdogSec applies"
                 );
             } else {
                 info!("watchdog: no watchdog devices available — watchdog disabled");
