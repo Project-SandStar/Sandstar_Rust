@@ -226,10 +226,7 @@ impl AnyDriver {
     }
 
     /// Handle a driver-specific custom message (Phase 12.0E).
-    pub async fn on_receive(
-        &mut self,
-        msg: DriverMessage,
-    ) -> Result<DriverMessage, DriverError> {
+    pub async fn on_receive(&mut self, msg: DriverMessage) -> Result<DriverMessage, DriverError> {
         match self {
             AnyDriver::Sync(d) => d.on_receive(msg),
             AnyDriver::Async(d) => d.on_receive(msg).await,

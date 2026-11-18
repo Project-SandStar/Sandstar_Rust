@@ -216,10 +216,7 @@ mod tests {
     fn safe_join_accepts_nested() {
         let root = PathBuf::from("/srv/root");
         let r = safe_join(&root, "kits/control/ConstFloat.kit").unwrap();
-        assert_eq!(
-            r,
-            PathBuf::from("/srv/root/kits/control/ConstFloat.kit")
-        );
+        assert_eq!(r, PathBuf::from("/srv/root/kits/control/ConstFloat.kit"));
     }
 
     #[test]
@@ -266,10 +263,19 @@ mod tests {
 
     #[test]
     fn content_type_maps_extensions() {
-        assert_eq!(guess_content_type(Path::new("a.sab")), "application/octet-stream");
-        assert_eq!(guess_content_type(Path::new("a.sax")), "text/xml; charset=utf-8");
+        assert_eq!(
+            guess_content_type(Path::new("a.sab")),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            guess_content_type(Path::new("a.sax")),
+            "text/xml; charset=utf-8"
+        );
         assert_eq!(guess_content_type(Path::new("a.json")), "application/json");
-        assert_eq!(guess_content_type(Path::new("a.unknown")), "application/octet-stream");
+        assert_eq!(
+            guess_content_type(Path::new("a.unknown")),
+            "application/octet-stream"
+        );
     }
 
     fn env_lock() -> &'static std::sync::Mutex<()> {

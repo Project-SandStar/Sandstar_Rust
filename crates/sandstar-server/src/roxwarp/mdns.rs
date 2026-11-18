@@ -132,7 +132,12 @@ pub fn start_mdns(
 
             if let ServiceEvent::ServiceResolved(info) = evt {
                 // instance name is the node id we advertised.
-                let peer_id = info.get_fullname().split('.').next().unwrap_or("").to_string();
+                let peer_id = info
+                    .get_fullname()
+                    .split('.')
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
                 if peer_id.is_empty() || peer_id == browser_id {
                     continue; // ignore ourself
                 }

@@ -60,7 +60,11 @@ pub async fn live_ws_handler(ws: WebSocketUpgrade, State(state): State<LiveState
         .rows_active
         .load(Ordering::Relaxed);
     if current >= MAX_LIVE_CONNECTIONS {
-        return (StatusCode::SERVICE_UNAVAILABLE, "too many /live connections").into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too many /live connections",
+        )
+            .into_response();
     }
     ws.on_upgrade(|socket| handle_live_session(socket, state))
 }
@@ -428,7 +432,10 @@ fn render_live_response(msg_type: char, reply_num: u8, response: SoxResponse) ->
 
     let mut out = serde_json::Map::new();
     let response_type = response_code_for(msg_type);
-    out.insert("msgType".into(), JsonValue::String(response_type.to_string()));
+    out.insert(
+        "msgType".into(),
+        JsonValue::String(response_type.to_string()),
+    );
     out.insert("replyNum".into(), JsonValue::Number(reply_num.into()));
 
     // Op-specific field mapping to match Fantom's response shapes.
@@ -538,10 +545,7 @@ fn handle_read_comp_live(state: &LiveState, reply_num: u8, msg: &JsonValue) -> O
         'c' | 'r' | 'C' | 'R' => {
             let payload = encode_slots_for_what(comp, what);
             let b64 = BASE64.encode(&payload);
-            out.insert(
-                "compProps".into(),
-                json!({ "propValues": b64 }),
-            );
+            out.insert("compProps".into(), json!({ "propValues": b64 }));
         }
         other => {
             return render_error(reply_num, &format!("unsupported 'what' code: {other}"));
@@ -566,7 +570,11 @@ fn handle_write_slot_live(state: &LiveState, reply_num: u8, msg: &JsonValue) -> 
         Some(id) => id,
         None => return render_error(reply_num, "missing compId"),
     };
-    let slot_idx = match msg.get("slotId").and_then(|v| v.as_u64()).map(|v| v as usize) {
+    let slot_idx = match msg
+        .get("slotId")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+    {
         Some(idx) => idx,
         None => return render_error(reply_num, "missing slotId"),
     };
@@ -597,7 +605,11 @@ fn handle_write_slot_live(state: &LiveState, reply_num: u8, msg: &JsonValue) -> 
         None => {
             return render_error(
                 reply_num,
-                &format!("cannot decode {} bytes as type_id {}", raw.len(), slot_type_id),
+                &format!(
+                    "cannot decode {} bytes as type_id {}",
+                    raw.len(),
+                    slot_type_id
+                ),
             );
         }
     };
@@ -849,10 +861,7 @@ mod tests {
     #[test]
     fn close_watch_returns_watch_id() {
         let state = make_test_state();
-        let v = dispatch(
-            &state,
-            r#"{"msgType":"x","replyNum":3,"watchId":"tab-7"}"#,
-        );
+        let v = dispatch(&state, r#"{"msgType":"x","replyNum":3,"watchId":"tab-7"}"#);
         assert_eq!(v["msgType"], "X");
         assert_eq!(v["watchId"], "tab-7");
     }
@@ -898,8 +907,8 @@ mod tests {
 
     #[test]
     fn encode_slots_respects_what() {
+        use crate::sox::sox_handlers::{VirtualComponent, VirtualSlot};
         use crate::sox::sox_protocol::SoxValueType;
-        use crate::sox::sox_handlers::{VirtualSlot, VirtualComponent};
 
         let comp = VirtualComponent {
             comp_id: 1,
@@ -955,9 +964,7 @@ mod tests {
     /// in the same call.
     #[test]
     fn add_link_propagates_immediately() {
-        use crate::sox::sox_handlers::{
-            VirtualComponent, VirtualSlot, NO_PARENT,
-        };
+        use crate::sox::sox_handlers::{VirtualComponent, VirtualSlot, NO_PARENT};
         use crate::sox::sox_protocol::SoxValueType;
 
         let state = make_test_state();

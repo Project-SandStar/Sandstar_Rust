@@ -15,9 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use sandstar_server::rest::sox_api::{
-    protected_router, public_router, SoxApiState,
-};
+use sandstar_server::rest::sox_api::{protected_router, public_router, SoxApiState};
 use sandstar_server::sox::{
     dyn_slots::DynSlotStore,
     sox_handlers::{ComponentTree, ManifestDb},
@@ -28,21 +26,14 @@ use serde_json::{json, Value};
 
 /// Send an HTTP request using tokio TcpStream directly, return (status, body).
 /// Kept small on purpose; just enough to drive REST tests.
-async fn http(
-    method: &str,
-    host_port: &str,
-    path: &str,
-    body: Option<Value>,
-) -> (u16, String) {
+async fn http(method: &str, host_port: &str, path: &str, body: Option<Value>) -> (u16, String) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut stream = tokio::net::TcpStream::connect(host_port)
         .await
         .expect("connect");
     let body_str = body.map(|v| v.to_string()).unwrap_or_default();
     let req = if body_str.is_empty() {
-        format!(
-            "{method} {path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n"
-        )
+        format!("{method} {path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n")
     } else {
         format!(
             "{method} {path} HTTP/1.1\r\nHost: {host_port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -175,13 +166,7 @@ async fn add_get_comp_round_trip() {
     let ctx = boot().await;
     let id = add(&ctx, 0, "widget_a").await;
 
-    let (s, b) = http(
-        "GET",
-        &ctx.host_port,
-        &format!("/api/sox/comp/{id}"),
-        None,
-    )
-    .await;
+    let (s, b) = http("GET", &ctx.host_port, &format!("/api/sox/comp/{id}"), None).await;
     assert_eq!(s, 200);
     let v: Value = serde_json::from_str(&b).expect("get_comp JSON");
     assert_eq!(v["compId"], id);
@@ -202,13 +187,7 @@ async fn rename_comp_updates_name() {
     .await;
     assert_eq!(s, 204);
 
-    let (_, b) = http(
-        "GET",
-        &ctx.host_port,
-        &format!("/api/sox/comp/{id}"),
-        None,
-    )
-    .await;
+    let (_, b) = http("GET", &ctx.host_port, &format!("/api/sox/comp/{id}"), None).await;
     let v: Value = serde_json::from_str(&b).unwrap();
     assert_eq!(v["name"], "after");
 }
@@ -242,13 +221,7 @@ async fn delete_comp_round_trip() {
     .await;
     assert_eq!(s, 204);
 
-    let (s_again, _) = http(
-        "GET",
-        &ctx.host_port,
-        &format!("/api/sox/comp/{id}"),
-        None,
-    )
-    .await;
+    let (s_again, _) = http("GET", &ctx.host_port, &format!("/api/sox/comp/{id}"), None).await;
     assert_eq!(s_again, 404, "after delete, GET should 404");
 }
 

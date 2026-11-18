@@ -637,28 +637,28 @@ async fn handle_client_msg(
             // Capture ids before passing them to the engine (moved there).
             let unsub_ids: Vec<u32> = ids.clone();
             match engine.watch_unsub(watch_id.clone(), close, ids).await {
-            Ok(()) => {
-                if close {
-                    watches.remove(&watch_id);
-                } else if let Some(meta) = watches.get_mut(&watch_id) {
-                    // Remove partially-unsubscribed ids from the COV filter.
-                    for pid in &unsub_ids {
-                        meta.subscribed_ids.remove(pid);
+                Ok(()) => {
+                    if close {
+                        watches.remove(&watch_id);
+                    } else if let Some(meta) = watches.get_mut(&watch_id) {
+                        // Remove partially-unsubscribed ids from the COV filter.
+                        for pid in &unsub_ids {
+                            meta.subscribed_ids.remove(pid);
+                        }
                     }
+                    serde_json::to_string(&ServerMsg::Unsubscribed {
+                        id,
+                        watch_id: &watch_id,
+                        ok: true,
+                    })
+                    .ok()
                 }
-                serde_json::to_string(&ServerMsg::Unsubscribed {
+                Err(e) => serde_json::to_string(&ServerMsg::Error {
                     id,
-                    watch_id: &watch_id,
-                    ok: true,
+                    code: "WATCH_NOT_FOUND",
+                    message: &e,
                 })
-                .ok()
-            }
-            Err(e) => serde_json::to_string(&ServerMsg::Error {
-                id,
-                code: "WATCH_NOT_FOUND",
-                message: &e,
-            })
-            .ok(),
+                .ok(),
             }
         }
         ClientMsg::Refresh { id, watch_id } => {

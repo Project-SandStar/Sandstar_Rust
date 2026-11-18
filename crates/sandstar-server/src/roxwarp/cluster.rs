@@ -431,8 +431,7 @@ impl ClusterManager {
                             return; // already known from static list or prior discovery
                         }
                     }
-                    super::peer::connect_to_peer(&pc, de, ps, hb_secs, ae_secs, tls, false)
-                        .await;
+                    super::peer::connect_to_peer(&pc, de, ps, hb_secs, ae_secs, tls, false).await;
                 });
             };
 

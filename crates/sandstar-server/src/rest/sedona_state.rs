@@ -35,9 +35,7 @@ use serde::Deserialize;
 use serde_json::{json, Value as JsonValue};
 use tracing::debug;
 
-use crate::sox::sox_handlers::{
-    ComponentTree, SlotValue, VirtualComponent, DEFAULT_KITS,
-};
+use crate::sox::sox_handlers::{ComponentTree, SlotValue, VirtualComponent, DEFAULT_KITS};
 use crate::sox::sox_ops::SoxState;
 
 use super::sox_api::decode_position;
@@ -80,11 +78,7 @@ pub async fn sedona_state_handler(
 
 // ── Snapshot builder ───────────────────────────────
 
-fn build_snapshot(
-    tree: &ComponentTree,
-    q: &SedonaStateQuery,
-    started: Instant,
-) -> JsonValue {
+fn build_snapshot(tree: &ComponentTree, q: &SedonaStateQuery, started: Instant) -> JsonValue {
     // Schema: kit table (kit id here is the DEFAULT_KITS index, matching
     // how /live's `version` op reports them).
     let kits: Vec<JsonValue> = DEFAULT_KITS
@@ -259,7 +253,13 @@ fn component_to_json(comp: &VirtualComponent) -> JsonValue {
 /// - Null → empty string
 fn slot_value_to_text(value: &SlotValue) -> String {
     match value {
-        SlotValue::Bool(b) => if *b { "true".into() } else { "false".into() },
+        SlotValue::Bool(b) => {
+            if *b {
+                "true".into()
+            } else {
+                "false".into()
+            }
+        }
         SlotValue::Int(v) => v.to_string(),
         SlotValue::Long(v) => v.to_string(),
         SlotValue::Float(v) => v.to_string(),
@@ -271,7 +271,9 @@ fn slot_value_to_text(value: &SlotValue) -> String {
             // never panic on odd bytes.
             match std::str::from_utf8(bytes) {
                 Ok(s) => s.trim_end_matches('\0').to_string(),
-                Err(_) => String::from_utf8_lossy(bytes).trim_end_matches('\0').to_string(),
+                Err(_) => String::from_utf8_lossy(bytes)
+                    .trim_end_matches('\0')
+                    .to_string(),
             }
         }
         SlotValue::Null => String::new(),

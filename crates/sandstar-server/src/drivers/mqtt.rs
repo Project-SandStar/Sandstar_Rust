@@ -578,9 +578,7 @@ impl AsyncDriver for MqttDriver {
                 None => {
                     ctx.update_write_err(
                         point_id,
-                        DriverError::ConfigFault(format!(
-                            "no publish_topic for point {point_id}"
-                        )),
+                        DriverError::ConfigFault(format!("no publish_topic for point {point_id}")),
                     );
                     continue;
                 }
@@ -636,10 +634,7 @@ impl MqttDriver {
     }
 
     /// Test helper: call `write` and collect results as a Vec.
-    async fn write_vec(
-        &mut self,
-        writes: &[(u32, f64)],
-    ) -> Vec<(u32, Result<(), DriverError>)> {
+    async fn write_vec(&mut self, writes: &[(u32, f64)]) -> Vec<(u32, Result<(), DriverError>)> {
         let mut ctx = WriteContext::new();
         <Self as AsyncDriver>::write(self, writes, &mut ctx).await;
         ctx.into_results()

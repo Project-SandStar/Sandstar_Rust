@@ -81,10 +81,7 @@ pub const DRIVER_POLL_INTERVAL: Duration = Duration::from_secs(5);
 ///
 /// Errors at any stage are logged but do not abort the caller (identical
 /// semantics to the previous `load_bacnet_drivers` / `load_mqtt_drivers`).
-pub async fn load_drivers<L: DriverLoader>(
-    handle: &DriverHandle,
-    engine_handle: &EngineHandle,
-) {
+pub async fn load_drivers<L: DriverLoader>(handle: &DriverHandle, engine_handle: &EngineHandle) {
     let json_str = match std::env::var(L::ENV_VAR) {
         Ok(s) => s,
         Err(_) => return, // Not configured — skip silently.

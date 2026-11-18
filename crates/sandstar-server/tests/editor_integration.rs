@@ -8,11 +8,11 @@
 
 use std::sync::Arc;
 
-use serde_json::Value as JsonValue;
 use sandstar_server::auth::{AuthState, AuthStore};
 use sandstar_server::rest::{self, EngineCmd, EngineHandle};
 use sandstar_server::sox::sox_handlers::{ComponentTree, ManifestDb};
 use sandstar_server::sox::SharedComponentTree;
+use serde_json::Value as JsonValue;
 use tokio::sync::mpsc;
 
 mod common;
@@ -53,9 +53,7 @@ impl EditorTestServer {
             Some(sox_state),
         );
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
@@ -84,7 +82,12 @@ async fn editor_serves_placeholder_when_web_dir_unset() {
     let srv = EditorTestServer::start().await;
     let resp = reqwest::get(srv.url("/editor")).await.unwrap();
     assert_eq!(resp.status(), 200);
-    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(ct.starts_with("text/html"));
     let body = resp.text().await.unwrap();
     // Placeholder HTML carries some recognisable Sedona/Sandstar markup.
@@ -148,11 +151,9 @@ async fn file_route_is_wired() {
 #[tokio::test]
 async fn sedona_state_returns_well_formed_payload() {
     let srv = EditorTestServer::start().await;
-    let resp = reqwest::get(srv.url(
-        "/live/sedonaState?h=127.0.0.1&p=1876&u=admin&pw=",
-    ))
-    .await
-    .unwrap();
+    let resp = reqwest::get(srv.url("/live/sedonaState?h=127.0.0.1&p=1876&u=admin&pw="))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let body: JsonValue = resp.json().await.unwrap();
 
@@ -187,11 +188,9 @@ async fn live_websocket_answers_version_request() {
         .expect("/live should upgrade");
 
     // Fantom version request.
-    ws.send(Message::text(
-        r#"{"msgType":"v","replyNum":1}"#.to_string(),
-    ))
-    .await
-    .unwrap();
+    ws.send(Message::text(r#"{"msgType":"v","replyNum":1}"#.to_string()))
+        .await
+        .unwrap();
 
     // Read until we get a text frame; ignore anything else (e.g. ping).
     let reply = loop {
@@ -251,11 +250,9 @@ async fn rows_websocket_still_answers_after_sox_ops_refactor() {
     let (mut ws, _) = tokio_tungstenite::connect_async(srv.ws_url("/api/rows"))
         .await
         .unwrap();
-    ws.send(Message::text(
-        r#"{"op":"ping","id":"ping-1"}"#.to_string(),
-    ))
-    .await
-    .unwrap();
+    ws.send(Message::text(r#"{"op":"ping","id":"ping-1"}"#.to_string()))
+        .await
+        .unwrap();
     let reply = loop {
         match ws.next().await {
             Some(Ok(Message::Text(t))) => break t,

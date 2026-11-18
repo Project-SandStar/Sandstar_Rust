@@ -712,9 +712,7 @@ async fn create_driver_async(
         None => {
             return (
                 axum::http::StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::json!({"error": "missing or non-string 'driver_type'"}),
-                ),
+                Json(serde_json::json!({"error": "missing or non-string 'driver_type'"})),
             )
                 .into_response();
         }
@@ -899,9 +897,7 @@ async fn sync_cur_async(
         None => {
             return (
                 axum::http::StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::json!({"error": "missing 'driverPoints' object"}),
-                ),
+                Json(serde_json::json!({"error": "missing 'driverPoints' object"})),
             )
                 .into_response();
         }
@@ -923,7 +919,10 @@ async fn sync_cur_async(
         };
         let mut refs: Vec<DriverPointRef> = Vec::with_capacity(arr.len());
         for item in arr {
-            let pid = item.get("pointId").and_then(|v| v.as_u64()).map(|n| n as u32);
+            let pid = item
+                .get("pointId")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u32);
             let addr = item.get("address").and_then(|v| v.as_str());
             match (pid, addr) {
                 (Some(point_id), Some(a)) => refs.push(DriverPointRef {
@@ -1244,10 +1243,7 @@ mod tests {
     fn point_status_from_driver_error_remote_status() {
         let err = DriverError::RemoteStatus("class=2 code=31".into());
         let ps = PointStatus::from_driver_error(&err);
-        assert_eq!(
-            ps,
-            PointStatus::RemoteFault("class=2 code=31".into())
-        );
+        assert_eq!(ps, PointStatus::RemoteFault("class=2 code=31".into()));
     }
 
     #[test]

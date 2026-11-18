@@ -393,15 +393,12 @@ impl ComponentTree {
         // link rather than letting both linger and have execute_links
         // pick a winner by insertion order. The editor's drag-drop UX
         // expects the latest wire to be authoritative.
-        let preexisting: Option<(u16, u8)> = self
-            .components
-            .get(&to_comp)
-            .and_then(|c| {
-                c.links
-                    .iter()
-                    .find(|l| l.to_comp == to_comp && l.to_slot == to_slot)
-                    .map(|l| (l.from_comp, l.from_slot))
-            });
+        let preexisting: Option<(u16, u8)> = self.components.get(&to_comp).and_then(|c| {
+            c.links
+                .iter()
+                .find(|l| l.to_comp == to_comp && l.to_slot == to_slot)
+                .map(|l| (l.from_comp, l.from_slot))
+        });
         if let Some((old_from_comp, old_from_slot)) = preexisting {
             tracing::info!(
                 old_from = old_from_comp,
@@ -7136,13 +7133,21 @@ mod tests {
         assert!(tree.add_link(201, 1, 202, 2));
 
         let tgt = tree.get(202).unwrap();
-        assert_eq!(tgt.links.len(), 1, "target should have exactly one incoming link");
+        assert_eq!(
+            tgt.links.len(),
+            1,
+            "target should have exactly one incoming link"
+        );
         assert_eq!(tgt.links[0].from_comp, 201, "new link should win");
 
         // The old source must no longer carry a stale outgoing link
         // record either (links live on both endpoints).
         let old_src = tree.get(200).unwrap();
-        assert_eq!(old_src.links.len(), 0, "old source's outgoing link must be cleaned");
+        assert_eq!(
+            old_src.links.len(),
+            0,
+            "old source's outgoing link must be cleaned"
+        );
     }
 
     /// Adding a link from the SAME source twice (truly duplicate) is
@@ -7603,7 +7608,10 @@ mod tests {
         tree.add(comp);
 
         let changed = tree.execute_components();
-        assert!(changed.contains(&200), "WriteFloat passthrough must mark out as changed");
+        assert!(
+            changed.contains(&200),
+            "WriteFloat passthrough must mark out as changed"
+        );
 
         let comp = tree.get(200).unwrap();
         // out (slot 2 in this layout) should now equal in (17.5).

@@ -328,10 +328,8 @@ impl AsyncDriver for LocalIoDriver {
                     ch.last_value = val;
                     ctx.update_write_ok(id);
                 }
-                Some(_) => ctx.update_write_err(
-                    id,
-                    DriverError::ConfigFault("not an output channel".into()),
-                ),
+                Some(_) => ctx
+                    .update_write_err(id, DriverError::ConfigFault("not an output channel".into())),
                 None => ctx.update_write_err(
                     id,
                     DriverError::ConfigFault(format!("channel {} not found", id)),

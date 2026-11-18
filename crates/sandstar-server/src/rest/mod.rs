@@ -721,7 +721,10 @@ pub fn router_with_auth(
         .route("/api/hisRead", post(handlers::his_read))
         .route("/api/nav", post(handlers::nav))
         .route("/api/invokeAction", post(handlers::invoke_action))
-        .route_layer(middleware::from_fn_with_state(auth_state.clone(), check_auth))
+        .route_layer(middleware::from_fn_with_state(
+            auth_state.clone(),
+            check_auth,
+        ))
         .with_state(handle.clone());
 
     // CORS policy: allow any origin (embedded device accessed by various IPs)
@@ -758,10 +761,7 @@ pub fn router_with_auth(
         let dh = driver_handle.clone();
         let eh = handle.clone();
         tokio::spawn(async move {
-            let driver = crate::drivers::local_io::LocalIoDriver::with_engine(
-                "localIo",
-                eh,
-            );
+            let driver = crate::drivers::local_io::LocalIoDriver::with_engine("localIo", eh);
             let any = crate::drivers::async_driver::AnyDriver::Async(Box::new(driver));
             if let Err(e) = dh.register(any).await {
                 tracing::warn!(error = %e, "failed to register LocalIoDriver");
@@ -832,10 +832,7 @@ pub fn router_with_auth(
         // same Router so the state flows through a single `.with_state`.
         let live_route = Router::new()
             .route("/live", get(live::live_ws_handler))
-            .route(
-                "/live/sedonaState",
-                get(sedona_state::sedona_state_handler),
-            )
+            .route("/live/sedonaState", get(sedona_state::sedona_state_handler))
             .with_state(live::LiveState {
                 tree: sox.tree.clone(),
                 manifest_db: sox.manifest_db.clone(),

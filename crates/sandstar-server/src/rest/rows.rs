@@ -375,10 +375,8 @@ fn parse_rows_op(op: &str, msg: &JsonValue) -> Result<SoxOp, (&'static str, Stri
             .map(|comp_id| SoxOp::ReadComp { comp_id })
             .ok_or(("BAD_REQUEST", "missing or invalid 'compId'".into())),
         "writeSlot" => {
-            let comp_id = u16_of("compId")
-                .ok_or(("BAD_REQUEST", "missing compId".into()))?;
-            let slot_idx = usize_of("slotIdx")
-                .ok_or(("BAD_REQUEST", "missing slotIdx".into()))?;
+            let comp_id = u16_of("compId").ok_or(("BAD_REQUEST", "missing compId".into()))?;
+            let slot_idx = usize_of("slotIdx").ok_or(("BAD_REQUEST", "missing slotIdx".into()))?;
             let value = msg
                 .get("value")
                 .cloned()
@@ -390,14 +388,10 @@ fn parse_rows_op(op: &str, msg: &JsonValue) -> Result<SoxOp, (&'static str, Stri
             })
         }
         "addComp" => {
-            let parent_id = u16_of("parentId")
-                .ok_or(("BAD_REQUEST", "missing parentId".into()))?;
-            let kit_id = u8_of("kitId")
-                .ok_or(("BAD_REQUEST", "missing kitId".into()))?;
-            let type_id = u8_of("typeId")
-                .ok_or(("BAD_REQUEST", "missing typeId".into()))?;
-            let name = str_of("name")
-                .ok_or(("BAD_REQUEST", "missing name".into()))?;
+            let parent_id = u16_of("parentId").ok_or(("BAD_REQUEST", "missing parentId".into()))?;
+            let kit_id = u8_of("kitId").ok_or(("BAD_REQUEST", "missing kitId".into()))?;
+            let type_id = u8_of("typeId").ok_or(("BAD_REQUEST", "missing typeId".into()))?;
+            let name = str_of("name").ok_or(("BAD_REQUEST", "missing name".into()))?;
             Ok(SoxOp::AddComp {
                 parent_id,
                 kit_id,
@@ -409,21 +403,15 @@ fn parse_rows_op(op: &str, msg: &JsonValue) -> Result<SoxOp, (&'static str, Stri
             .map(|comp_id| SoxOp::DeleteComp { comp_id })
             .ok_or(("BAD_REQUEST", "missing or invalid 'compId'".into())),
         "rename" => {
-            let comp_id = u16_of("compId")
-                .ok_or(("BAD_REQUEST", "missing compId".into()))?;
-            let name = str_of("name")
-                .ok_or(("BAD_REQUEST", "missing name".into()))?;
+            let comp_id = u16_of("compId").ok_or(("BAD_REQUEST", "missing compId".into()))?;
+            let name = str_of("name").ok_or(("BAD_REQUEST", "missing name".into()))?;
             Ok(SoxOp::Rename { comp_id, name })
         }
         "addLink" => {
-            let from_comp = u16_of("fromComp")
-                .ok_or(("BAD_REQUEST", "missing fromComp".into()))?;
-            let from_slot = u8_of("fromSlot")
-                .ok_or(("BAD_REQUEST", "missing fromSlot".into()))?;
-            let to_comp = u16_of("toComp")
-                .ok_or(("BAD_REQUEST", "missing toComp".into()))?;
-            let to_slot = u8_of("toSlot")
-                .ok_or(("BAD_REQUEST", "missing toSlot".into()))?;
+            let from_comp = u16_of("fromComp").ok_or(("BAD_REQUEST", "missing fromComp".into()))?;
+            let from_slot = u8_of("fromSlot").ok_or(("BAD_REQUEST", "missing fromSlot".into()))?;
+            let to_comp = u16_of("toComp").ok_or(("BAD_REQUEST", "missing toComp".into()))?;
+            let to_slot = u8_of("toSlot").ok_or(("BAD_REQUEST", "missing toSlot".into()))?;
             Ok(SoxOp::AddLink {
                 from_comp,
                 from_slot,
@@ -432,14 +420,10 @@ fn parse_rows_op(op: &str, msg: &JsonValue) -> Result<SoxOp, (&'static str, Stri
             })
         }
         "deleteLink" => {
-            let from_comp = u16_of("fromComp")
-                .ok_or(("BAD_REQUEST", "missing fromComp".into()))?;
-            let from_slot = u8_of("fromSlot")
-                .ok_or(("BAD_REQUEST", "missing fromSlot".into()))?;
-            let to_comp = u16_of("toComp")
-                .ok_or(("BAD_REQUEST", "missing toComp".into()))?;
-            let to_slot = u8_of("toSlot")
-                .ok_or(("BAD_REQUEST", "missing toSlot".into()))?;
+            let from_comp = u16_of("fromComp").ok_or(("BAD_REQUEST", "missing fromComp".into()))?;
+            let from_slot = u8_of("fromSlot").ok_or(("BAD_REQUEST", "missing fromSlot".into()))?;
+            let to_comp = u16_of("toComp").ok_or(("BAD_REQUEST", "missing toComp".into()))?;
+            let to_slot = u8_of("toSlot").ok_or(("BAD_REQUEST", "missing toSlot".into()))?;
             Ok(SoxOp::DeleteLink {
                 from_comp,
                 from_slot,
@@ -448,17 +432,14 @@ fn parse_rows_op(op: &str, msg: &JsonValue) -> Result<SoxOp, (&'static str, Stri
             })
         }
         "updatePos" => {
-            let comp_id = u16_of("compId")
-                .ok_or(("BAD_REQUEST", "missing compId".into()))?;
+            let comp_id = u16_of("compId").ok_or(("BAD_REQUEST", "missing compId".into()))?;
             let x = u8_of("x").ok_or(("BAD_REQUEST", "missing x".into()))?;
             let y = u8_of("y").ok_or(("BAD_REQUEST", "missing y".into()))?;
             Ok(SoxOp::UpdatePos { comp_id, x, y })
         }
         "invoke" => {
-            let comp_id = u16_of("compId")
-                .ok_or(("BAD_REQUEST", "missing compId".into()))?;
-            let slot_idx = usize_of("slotIdx")
-                .ok_or(("BAD_REQUEST", "missing slotIdx".into()))?;
+            let comp_id = u16_of("compId").ok_or(("BAD_REQUEST", "missing compId".into()))?;
+            let slot_idx = usize_of("slotIdx").ok_or(("BAD_REQUEST", "missing slotIdx".into()))?;
             Ok(SoxOp::Invoke { comp_id, slot_idx })
         }
         "nameTable" => Ok(SoxOp::NameTable),
@@ -473,8 +454,7 @@ fn parse_rows_op(op: &str, msg: &JsonValue) -> Result<SoxOp, (&'static str, Stri
             .map(|comp_id| SoxOp::ReadTags { comp_id })
             .ok_or(("BAD_REQUEST", "missing or invalid 'compId'".into())),
         "setTags" => {
-            let comp_id = u16_of("compId")
-                .ok_or(("BAD_REQUEST", "missing compId".into()))?;
+            let comp_id = u16_of("compId").ok_or(("BAD_REQUEST", "missing compId".into()))?;
             let tags = msg
                 .get("tags")
                 .cloned()
@@ -482,10 +462,8 @@ fn parse_rows_op(op: &str, msg: &JsonValue) -> Result<SoxOp, (&'static str, Stri
             Ok(SoxOp::SetTags { comp_id, tags })
         }
         "deleteTag" => {
-            let comp_id = u16_of("compId")
-                .ok_or(("BAD_REQUEST", "missing compId".into()))?;
-            let key = str_of("key")
-                .ok_or(("BAD_REQUEST", "missing key".into()))?;
+            let comp_id = u16_of("compId").ok_or(("BAD_REQUEST", "missing compId".into()))?;
+            let key = str_of("key").ok_or(("BAD_REQUEST", "missing key".into()))?;
             Ok(SoxOp::DeleteTag { comp_id, key })
         }
         "setFormat" => Ok(SoxOp::SetFormat {
@@ -495,8 +473,7 @@ fn parse_rows_op(op: &str, msg: &JsonValue) -> Result<SoxOp, (&'static str, Stri
         "version" => Ok(SoxOp::Version),
         "versionExt" => Ok(SoxOp::VersionExt),
         "reorder" => {
-            let comp_id = u16_of("compId")
-                .ok_or(("BAD_REQUEST", "missing compId".into()))?;
+            let comp_id = u16_of("compId").ok_or(("BAD_REQUEST", "missing compId".into()))?;
             let children = vec_u16("children");
             Ok(SoxOp::Reorder { comp_id, children })
         }
@@ -504,10 +481,8 @@ fn parse_rows_op(op: &str, msg: &JsonValue) -> Result<SoxOp, (&'static str, Stri
             let query_type = str_of("queryType")
                 .and_then(|s| s.chars().next())
                 .ok_or(("BAD_REQUEST", "missing queryType".into()))?;
-            let kit_id = u8_of("kitId")
-                .ok_or(("BAD_REQUEST", "missing kitId".into()))?;
-            let type_id = u8_of("typeId")
-                .ok_or(("BAD_REQUEST", "missing typeId".into()))?;
+            let kit_id = u8_of("kitId").ok_or(("BAD_REQUEST", "missing kitId".into()))?;
+            let type_id = u8_of("typeId").ok_or(("BAD_REQUEST", "missing typeId".into()))?;
             Ok(SoxOp::Query {
                 query_type,
                 kit_id,
@@ -1658,7 +1633,10 @@ mod tests {
         let v: JsonValue = serde_json::from_str(reply.as_deref().unwrap()).unwrap();
         assert_eq!(v["op"], "error");
         assert_eq!(v["code"], "BAD_REQUEST");
-        assert!(v["message"].as_str().unwrap().contains("unknown query type"));
+        assert!(v["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown query type"));
     }
 
     #[test]

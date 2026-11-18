@@ -400,10 +400,7 @@ pub async fn prometheus_metrics() -> Response {
     );
     (
         StatusCode::OK,
-        [(
-            CONTENT_TYPE,
-            "text/plain; version=0.0.4; charset=utf-8",
-        )],
+        [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
         body,
     )
         .into_response()

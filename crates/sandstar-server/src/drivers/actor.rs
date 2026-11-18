@@ -611,9 +611,7 @@ impl DriverManagerInner {
     async fn open_driver(&mut self, id: &str) -> Result<DriverMeta, DriverError> {
         match self.drivers.get_mut(id) {
             Some(d) => d.open().await,
-            None => Err(DriverError::ConfigFault(format!(
-                "driver '{id}' not found"
-            ))),
+            None => Err(DriverError::ConfigFault(format!("driver '{id}' not found"))),
         }
     }
 
@@ -623,18 +621,14 @@ impl DriverManagerInner {
                 d.close().await;
                 Ok(())
             }
-            None => Err(DriverError::ConfigFault(format!(
-                "driver '{id}' not found"
-            ))),
+            None => Err(DriverError::ConfigFault(format!("driver '{id}' not found"))),
         }
     }
 
     async fn ping_driver(&mut self, id: &str) -> Result<DriverMeta, DriverError> {
         match self.drivers.get_mut(id) {
             Some(d) => d.ping().await,
-            None => Err(DriverError::ConfigFault(format!(
-                "driver '{id}' not found"
-            ))),
+            None => Err(DriverError::ConfigFault(format!("driver '{id}' not found"))),
         }
     }
 
@@ -645,9 +639,7 @@ impl DriverManagerInner {
     ) -> Result<DriverMessage, DriverError> {
         match self.drivers.get_mut(id) {
             Some(d) => d.on_receive(msg).await,
-            None => Err(DriverError::ConfigFault(format!(
-                "driver '{id}' not found"
-            ))),
+            None => Err(DriverError::ConfigFault(format!("driver '{id}' not found"))),
         }
     }
 
@@ -1624,10 +1616,7 @@ mod tests {
         handle.open_all().await.unwrap();
 
         let err = handle
-            .send_message(
-                "d1",
-                crate::drivers::DriverMessage::new("anything"),
-            )
+            .send_message("d1", crate::drivers::DriverMessage::new("anything"))
             .await
             .unwrap_err();
         assert!(matches!(err, DriverError::NotSupported(_)));
@@ -1648,10 +1637,7 @@ mod tests {
         let resp = handle
             .send_message(
                 "e1",
-                crate::drivers::DriverMessage::with_payload(
-                    "echo",
-                    serde_json::json!({"n": 42}),
-                ),
+                crate::drivers::DriverMessage::with_payload("echo", serde_json::json!({"n": 42})),
             )
             .await
             .unwrap();

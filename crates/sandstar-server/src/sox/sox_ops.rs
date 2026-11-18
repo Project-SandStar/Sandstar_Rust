@@ -148,10 +148,7 @@ pub enum SoxResponse {
     /// the `/live` handler in G-2c encodes it per msgType.
     Ok(JsonValue),
     /// Error with a machine-readable code and a human-readable message.
-    Error {
-        code: &'static str,
-        message: String,
-    },
+    Error { code: &'static str, message: String },
 }
 
 impl SoxResponse {
@@ -703,17 +700,9 @@ fn handle_reorder(state: &SoxState, comp_id: u16, children: Vec<u16>) -> SoxResp
     SoxResponse::ok(serde_json::json!({ "ok": true }))
 }
 
-fn handle_query(
-    state: &SoxState,
-    query_type: char,
-    kit_id: u8,
-    type_id: u8,
-) -> SoxResponse {
+fn handle_query(state: &SoxState, query_type: char, kit_id: u8, type_id: u8) -> SoxResponse {
     if query_type != 's' {
-        return SoxResponse::error(
-            "BAD_REQUEST",
-            format!("unknown query type: {query_type}"),
-        );
+        return SoxResponse::error("BAD_REQUEST", format!("unknown query type: {query_type}"));
     }
     // v1 semantic: "type matches exactly". Fantom's pod checks declared
     // service interfaces via its Java client; we start narrower and widen
