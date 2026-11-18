@@ -7,7 +7,6 @@
 linker = "C:\\czb\\zigcc-arm.bat"
 rustflags = [
     "-C", "link-arg=-static-libgcc",     # Static libgcc (no runtime dependency)
-    "--sysroot", "C:\\Users\\TURKER~1\\RUSTUP~1\\TOOLCH~1\\STABLE~1",  # 8.3 short path — avoids space-in-path bug with zig linker
 ]
 
 # musl variant (unused — keeping for reference)
