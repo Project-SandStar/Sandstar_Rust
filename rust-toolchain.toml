@@ -1,0 +1,9 @@
+# Pinned toolchain (R-38): local builds, the ARM cross-build and CI use the
+# same rustc, so clippy and rustfmt results match across machines.
+# Bump deliberately: update this file and .github/workflows/ci.yml together.
+# MSRV (rust-version in Cargo.toml) is separate: the minimum the code needs.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+targets = ["armv7-unknown-linux-gnueabihf"]
+profile = "minimal"
