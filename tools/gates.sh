@@ -3,7 +3,9 @@
 # One line per gate; output is shown only for a red gate. Exit 1 if any is red.
 #
 # Usage: tools/gates.sh            all gates
-#        tools/gates.sh fmt clippy  only the named gates (fmt clippy test hal)
+#        tools/gates.sh fmt clippy  only the named gates (fmt clippy test hal docs)
+#
+# `docs` is a reminder, not a gate: it never makes the exit code 1.
 #
 # `cargo test` runs with --no-fail-fast: without it cargo stops at the first
 # failing test binary and the pass/fail totals are incomplete.
@@ -53,5 +55,53 @@ sel test && gate test '^test .* FAILED|panicked at|^---- |^error' \
     cargo test --workspace --no-fail-fast
 sel hal && gate hal '^(error|warning)|^ +--> ' \
     cargo check -p sandstar-server --no-default-features --features linux-hal,svm
+
+# docs: reminder only, never red (workflow.md "Doküman disiplini").
+# Compares the working tree with the merge-base of master and lists documents
+# from tools/docs-map.tsv whose code paths changed but which did not change.
+docs_reminders() {
+    local map=tools/docs-map.tsv base
+    base=$(git merge-base HEAD origin/master 2>/dev/null || git merge-base HEAD master 2>/dev/null) || {
+        echo "SKIP docs    (no merge-base with master)"; return; }
+    local changed untracked
+    changed=$(git diff --name-only "$base"; git ls-files --others --exclude-standard)
+    untracked=$(git ls-files --others --exclude-standard)
+    [ -n "$changed" ] || { echo "OK   docs    (no changes against master)"; return; }
+
+    # Added/removed lines of a tracked file, or the whole content of a new file.
+    file_changes() {
+        if printf '%s\n' "$untracked" | grep -qxF -- "$1"; then
+            cat -- "$1" 2>/dev/null
+        else
+            git diff "$base" -- "$1" 2>/dev/null | grep -E '^[+-]' | grep -vE '^(\+\+\+|---) '
+        fi
+    }
+
+    local out="" pat content doc reason files f hits
+    while IFS=$'\t' read -r pat content doc reason; do
+        case $pat in ''|'#'*) continue ;; esac
+        files=$(printf '%s\n' "$changed" | grep -E -- "$pat") || continue
+        printf '%s\n' "$changed" | grep -qxF -- "$doc" && continue
+        hits=()
+        while IFS= read -r f; do
+            if [ "$content" = - ] || file_changes "$f" | grep -qE -- "$content"; then
+                hits+=("$f")
+            fi
+        done <<<"$files"
+        [ ${#hits[@]} -eq 0 ] && continue
+        local more=""
+        [ ${#hits[@]} -gt 1 ] && more=" +$((${#hits[@]} - 1))"
+        out+="$doc  ($reason; ${hits[0]}$more)"$'\n'
+    done <"$map"
+
+    if [ -z "$out" ]; then
+        echo "OK   docs    (no reminders)"
+    else
+        out=$(printf '%s' "$out" | sort -u)
+        printf 'NOTE docs    %s document(s) to check (not a failure)\n' "$(printf '%s\n' "$out" | wc -l)"
+        printf '%s\n' "$out" | sed 's/^/     /'
+    fi
+}
+sel docs && docs_reminders
 
 exit $red

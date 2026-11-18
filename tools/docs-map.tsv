@@ -1,0 +1,34 @@
+# Code path -> document map for the `docs` reminder in tools/gates.sh.
+# Rule: .claude/rules/workflow.md "Doküman disiplini". This file is the single source.
+#
+# Columns are TAB-separated:
+#   1. path regex (ERE, repo-relative path of a changed file)
+#   2. content regex (ERE) matched against added/removed diff lines, or "-" for any change
+#   3. document to check
+#   4. what to check in it
+# A reminder is shown when column 1 (and 2) match a change on the branch and the
+# document itself has not changed on the branch. Reminders never fail the gate.
+#
+# Routes and auth layering
+^crates/sandstar-server/src/	\.route\(|route_layer|\.merge\(|check_auth	docs/Progress/OVERVIEW.md	§3 route/auth table
+^crates/sandstar-server/src/drivers/	\.route\(	docs/Progress/DRIVER_REST_API.md	driver REST routes and bodies
+# Tuning constants and CLI defaults
+^crates/	(const [A-Z0-9_]+ *:|default_value_t)	docs/Progress/HARDCODED_LIMITS.md	constant or default value
+# Packaging, unit files, device init, deploy tooling
+^(etc/|crates/sandstar-server/deb/)	-	docs/Progress/DEPLOYMENT_CHECKLIST.md	package scripts, conffiles, verify steps
+^crates/sandstar-server/Cargo\.toml$	/home/eacio|conf-files|maintainer-scripts|depends	docs/Progress/DEPLOYMENT_CHECKLIST.md	.deb assets or conffiles
+^crates/sandstar-server/src/(logging|watchdog)\.rs$	(info|warn|error)!	docs/Progress/DEPLOYMENT_CHECKLIST.md	§7 log lines used for verification
+# Driver operator guides
+^crates/sandstar-server/src/drivers/bacnet/	-	docs/Progress/BACNET_SETUP.md	config, defaults, log strings
+^crates/sandstar-server/src/drivers/mqtt	-	docs/Progress/MQTT_SETUP.md	config, defaults, log strings
+# Version bump: Cargo.toml, CHANGELOG.md and the git tag move together
+^Cargo\.toml$	^[+-]version *=	CHANGELOG.md	new version entry (and the tag, OVERVIEW header)
+# Build and CI
+^(\.github/workflows/|rust-toolchain\.toml$|\.cargo/config\.toml$)	-	docs/research/10_BUILD_CROSS_COMPILE.md	status block (toolchain, CI, aliases)
+# Research areas: is the doc's status block still right?
+^crates/sandstar-svm/	-	docs/research/13_SEDONA_VM_RUST_PORTING_STRATEGY.md	VM status block
+^crates/sandstar-server/src/roxwarp/	-	docs/research/16_ROXWARP_PROTOCOL.md	roxWarp status block
+^crates/sandstar-hal-linux/	-	docs/research/02_HARDWARE_DRIVERS.md	HAL status block
+^crates/sandstar-server/src/(zinc\.rs|rest/(zinc_|filter|trio))	-	docs/research/05_ZINC_IO_ENCODING.md	Zinc/filter status block
+^crates/sandstar-server/src/(sox/dyn_slots|rest/tags)	-	docs/research/19_DYNAMIC_SLOTS.md	dynamic slots status block
+^crates/sandstar-server/src/drivers/	-	docs/research/18_SEDONA_DRIVER_FRAMEWORK_V2.md	driver framework status block
