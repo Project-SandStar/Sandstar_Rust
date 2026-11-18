@@ -44,6 +44,11 @@ pub struct ServerArgs {
     #[arg(long, env = "SANDSTAR_LOG_FILE")]
     pub log_file: Option<PathBuf>,
 
+    /// Number of daily log files to keep (current day included); older files
+    /// are deleted at startup and at each daily rotation. 0 keeps all (R-41).
+    #[arg(long, env = "SANDSTAR_LOG_MAX_FILES", default_value_t = crate::logging::DEFAULT_LOG_MAX_FILES)]
+    pub log_max_files: usize,
+
     /// HTTP port for the Haystack REST API (0 = auto-assign).
     #[arg(long, env = "SANDSTAR_HTTP_PORT", default_value_t = 8085)]
     pub http_port: u16,
@@ -179,6 +184,25 @@ mod tests {
         assert_eq!(args.poll_interval_ms, 1000);
         assert_eq!(args.log_level, "info");
         assert!(args.log_file.is_none());
+        assert_eq!(args.log_max_files, 14);
+    }
+
+    #[test]
+    fn test_log_max_files_flag() {
+        let args = ServerArgs::parse_from(["sandstar-engine-server", "--log-max-files", "30"]);
+        assert_eq!(args.log_max_files, 30);
+
+        let args = ServerArgs::parse_from(["sandstar-engine-server", "--log-max-files", "0"]);
+        assert_eq!(args.log_max_files, 0);
+
+        // Negative or non-numeric values are rejected by clap, not wrapped.
+        assert!(
+            ServerArgs::try_parse_from(["sandstar-engine-server", "--log-max-files", "-1"])
+                .is_err()
+        );
+        assert!(
+            ServerArgs::try_parse_from(["sandstar-engine-server", "--log-max-files", "x"]).is_err()
+        );
     }
 
     #[test]

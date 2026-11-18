@@ -1,3 +1,8 @@
+# Note (R-41): sandstar-engine rotates and deletes its own log files
+# (sandstar-engine.log.YYYY-MM-DD), keeping SANDSTAR_LOG_MAX_FILES days
+# (default 14, --log-max-files). Those dated files do not match the pattern
+# below on purpose, so logrotate does not rotate them a second time.
+# This entry only covers plain *.log files other tools may write here.
 /var/log/sandstar/*.log {
     daily
     rotate 7

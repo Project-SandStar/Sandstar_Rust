@@ -135,7 +135,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = ServerArgs::parse();
 
     // 2. Initialize logging (stderr + optional file)
-    let _log_guard = logging::init(&args.log_level, args.log_file.as_deref());
+    let _log_guard = logging::init(
+        &args.log_level,
+        args.log_file.as_deref(),
+        args.log_max_files,
+    );
 
     // Log core dump status now that tracing is available.
     #[cfg(unix)]
