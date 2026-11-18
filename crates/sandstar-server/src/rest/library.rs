@@ -17,7 +17,7 @@
 use axum::response::Json;
 use axum::routing::get;
 use axum::Router;
-use serde_json::{json, Value as JsonValue};
+use serde_json::Value as JsonValue;
 
 use crate::sox::sox_ops::SoxState;
 
@@ -52,6 +52,7 @@ async fn list_tags() -> Json<Vec<JsonValue>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[tokio::test]
     async fn list_libraries_empty() {

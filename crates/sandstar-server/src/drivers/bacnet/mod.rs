@@ -1470,7 +1470,7 @@ impl AsyncDriver for BacnetDriver {
 
                 match self.read_properties_multiple(device_addr, &specs).await {
                     Ok(values) => {
-                        for ((pid, obj), val_res) in group.iter().zip(values.into_iter()) {
+                        for ((pid, obj), val_res) in group.iter().zip(values) {
                             let final_res = match val_res {
                                 Ok(v) => v
                                     .to_f64()

@@ -807,7 +807,7 @@ pub async fn get_palette(State(state): State<SoxApiState>) -> Response {
         })
         .collect();
     // Sort for stable output.
-    entries.sort_by(|a, b| (a.kit_id, a.type_id).cmp(&(b.kit_id, b.type_id)));
+    entries.sort_by_key(|e| (e.kit_id, e.type_id));
     Json(entries).into_response()
 }
 

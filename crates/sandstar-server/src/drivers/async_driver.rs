@@ -31,6 +31,9 @@ use super::{
 ///
 /// Sync drivers (e.g., `LocalIoDriver`) continue using the regular
 /// [`Driver`](super::Driver) trait. Both are managed uniformly via [`AnyDriver`].
+// `#[async_trait]` expands each async fn to one returning `Pin<Box<dyn Future>>`
+// and tags it `#[must_use]`; clippy then flags the generated code, not ours.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait AsyncDriver: Send + Sync {
     /// The driver type name (e.g., "modbus", "bacnet", "mqtt").

@@ -798,6 +798,8 @@ fn sha1_compute(data: &[u8]) -> [u8; 20] {
     msg.extend_from_slice(&bit_len.to_be_bytes());
 
     // Process each 512-bit (64-byte) block
+    // `as_chunks` needs Rust 1.88, above the workspace MSRV, so keep `chunks_exact`.
+    #[allow(clippy::chunks_exact_to_as_chunks)]
     for chunk in msg.chunks_exact(64) {
         let mut w = [0u32; 80];
 

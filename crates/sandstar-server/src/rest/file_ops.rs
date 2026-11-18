@@ -28,7 +28,7 @@ use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, put};
+use axum::routing::get;
 use axum::Router;
 use tokio::fs;
 use tracing::{debug, warn};
