@@ -73,7 +73,11 @@ Ne zaman çağrılmayacağı global fren kuralındadır.
 
 ## Git ve commit (karar 2026-11-18)
 Kaynak: kullanıcıyla konuşma; EnvanterTakip `DevelopingMds/03-GelistirmeKurallari.md` §8 incelendi, SandStar'a uyarlandı.
-- **Kim, ne zaman:** commit, `master`'a alma ve push yalnız kullanıcı isteyince ya da onayıyla. Mantıksal bir değişiklik bitip testler geçince Claude "commit atayım mı?" diye sorar, kendiliğinden atmaz.
+- **Kim, ne zaman:**
+  - **Commit:** yalnız kullanıcı isteyince ya da onayıyla. Mantıksal bir değişiklik bitip testler geçince Claude "commit atayım mı?" diye sorar, kendiliğinden atmaz.
+  - **`master`'a alma:** yalnız kullanıcı isteyince ya da onayıyla.
+  - **Dalı push etmek ve draft PR açmak:** sorulmaz (karar 2026-11-18). CI'ın koşması için yapılır, sonuç kullanıcıya bildirilir.
+  - **Hiçbir koşulda serbest değil:** `master`'a doğrudan push ve `--force` push.
 - **Dal:** her S adımı kendi dalında: `s<n>-<konu>` (ör. `s5-ci-gates`). Doğrudan `master`'a commit yok.
   - Gerekçe: uzak depo bir organizasyona ait (`Project-SandStar/Sandstar_Rust`) ve kod sahadaki cihaza gidiyor.
   - Dal içinde kırmızı kapıyla ara commit kabul edilir; mesaj gövdesinde hangi kapının neden kırmızı kaldığı yazılır.
