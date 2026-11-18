@@ -272,6 +272,7 @@ Host addresses, SSH details and site names are deliberately not written in this 
   2. `cargo clippy --workspace -- -D warnings`
   3. `cargo test --workspace --no-fail-fast`
   4. `cargo check -p sandstar-server --no-default-features --features linux-hal,svm`
+  5. `docs` reminder (not a gate): lists documents from `tools/docs-map.tsv` whose code paths changed on the branch while the document did not (rule: `.claude/rules/workflow.md` "Doküman disiplini").
 - **Tests:** 2748 passed on Windows, 2764 on Linux CI, 0 failed. `test_sys_ticks` is flaky.
 - **Toolchain:** pinned to 1.99.1 (`rust-toolchain.toml`, CI); MSRV 1.82.
 - **Not clean yet:** `cargo clippy --all-targets` (lints in test code).

@@ -7,7 +7,7 @@ Bu klasördeki proje kuralları (`.claude/rules/*.md`) `ecc-rust/` altındaki ge
 - ECC `hooks.md`'deki global hook önerileri kullanıcı onayı olmadan kurulmaz.
 
 ## "Bitti" demeden önce
-Tek komut: `bash tools/gates.sh`. Kapı başına bir satır basar, yalnız kırmızı kapının çıktısını gösterir; kırmızı kapı varsa çıkış kodu 1 olur. Tek kapı çalıştırmak için `bash tools/gates.sh fmt clippy`.
+Tek komut: `bash tools/gates.sh`. Kapı başına bir satır basar, yalnız kırmızı kapının çıktısını gösterir; kırmızı kapı varsa çıkış kodu 1 olur. Tek kapı çalıştırmak için `bash tools/gates.sh fmt clippy`. Son satır `docs` hatırlatmasıdır (aşağıda "Doküman disiplini"); kapı değildir, çıkış kodunu değiştirmez.
 1. `cargo fmt --all -- --check`
 2. `cargo clippy --workspace -- -D warnings`
 3. `cargo test --workspace --no-fail-fast`. `--no-fail-fast` olmadan cargo ilk başarısız test binary'sinde durur ve geçen/başarısız sayımı eksik çıkar.
@@ -101,6 +101,25 @@ Kaynak: kullanıcıyla konuşma; EnvanterTakip `DevelopingMds/03-GelistirmeKural
 ## Sürüm ve kayıt
 - Sürüm değişikliğinde `Cargo.toml` `[workspace.package] version`, `CHANGELOG.md` ve git tag birlikte güncellenir.
 - Her adım (S-n) bitince `docs/DevelopingMds/` güncellenir: en az `08-ILERLEME.md`, gerekiyorsa 06, 07 ve 10.
+
+## Doküman disiplini (karar 2026-11-19, EnvanterTakip `CLAUDE.md` §9'dan uyarlandı)
+Gerekçe: git'teki `docs/Progress` ve `docs/research` altı ay koddan koptu (R-32, S-10'da toplu düzeltildi). Kural, kod değişikliğiyle aynı dalda ilgili dokümanı güncellemektir.
+
+| Kodda değişen | Güncellenecek doküman |
+|---|---|
+| Rota ya da auth katmanı | `docs/Progress/OVERVIEW.md` §3 rota/auth tablosu; sürücü rotasıysa `DRIVER_REST_API.md` |
+| Sabit, limit, CLI varsayılanı | `docs/Progress/HARDCODED_LIMITS.md` |
+| `.deb` içeriği, unit dosyası, `initialize.sh`, deploy betiği, doğrulamada okunan log satırı | `docs/Progress/DEPLOYMENT_CHECKLIST.md` |
+| BACnet ya da MQTT sürücü davranışı | `BACNET_SETUP.md` / `MQTT_SETUP.md` |
+| Bir araştırma alanındaki iş (VM, roxWarp, HAL, Zinc/filter, dinamik slot, sürücü çatısı, build/CI) | İlgili `docs/research/NN_*.md` Status bloğu: uygulanan / farklı yapılan / açık listesi hâlâ doğru mu |
+| Sürüm | `Cargo.toml`, `CHANGELOG.md`, git tag ve OVERVIEW başlığı birlikte |
+| Risk açıldı, ilerledi, kapandı | 06 (durum basamağı ve kanıtla) |
+| Her S-n adımı | 08, gerekiyorsa 10 |
+
+- **Hatırlatma:** `tools/gates.sh` sonundaki `docs` satırı, dalın `master` ile ortak atasına göre değişen yolları `tools/docs-map.tsv` ile eşler. Kod yolu değişip doküman değişmediyse dokümanı listeler. Eşlemenin tek kaynağı `docs-map.tsv`'dir; yukarıdaki tablo onun okunur özetidir. İkisi birlikte değişir.
+- **Hatırlatma kapı değildir.** Doküman gerekmiyorsa (ör. yalnız yorum ya da test değişti) atlanır; commit gövdesine bir satır yazılır: "docs: <doküman> gerekmedi, çünkü …".
+- DevelopingMds git dışında olduğu için hatırlatma onu göremez; 08/06/10 için yukarıdaki "Sürüm ve kayıt" geçerlidir.
+- Dokümanda sonuç doğrulanmadan "tamamlandı" yazılmaz; sahaya giden işlerde durum basamakları (yukarıda) uygulanır.
 
 ## Cihaz ve saha
 - BeagleBone'a SSH, deploy, servis yeniden başlatma, cutover veya rollback yalnız açık kullanıcı onayıyla yapılır. Deploy betikleri host key doğrulamasını kapatıyor (R-22).

@@ -1,5 +1,6 @@
 # Sandstar (Rust)
-- Kalite kapısı: `bash tools/gates.sh` (fmt, clippy `-D warnings`, `test --no-fail-fast`, `linux-hal,svm` check; ayrıntı `workflow.md`)
+- Kalite kapısı: `bash tools/gates.sh` (fmt, clippy `-D warnings`, `test --no-fail-fast`, `linux-hal,svm` check, sonunda `docs` hatırlatması; ayrıntı `workflow.md`)
+- Kod değişince ilgili doküman aynı dalda güncellenir (`workflow.md` "Doküman disiplini", eşleme `tools/docs-map.tsv`).
 - ARM: `cargo arm-build-svm && cargo arm-deb --no-strip` (önce `C:\czb\arm-env.*`; linker yolu `C:\czb` makineye özgü)
 - Demo: `cargo run -p sandstar-server` · Sim: `cargo sim-run`
 
