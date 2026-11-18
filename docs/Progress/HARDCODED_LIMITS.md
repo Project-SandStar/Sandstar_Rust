@@ -1,5 +1,29 @@
 # Hardcoded Limits Audit
 
+> **Status (2026-11-18)**: re-checked against `master` `b48484b`. Most values are unchanged, but many line numbers moved. Search by constant name rather than trusting the `file:line` below.
+>
+> **Moved (same value):**
+> - `MAX_PARSE_DEPTH` → `rest/filter.rs:115`; CORS max-age → `rest/mod.rs:748`; `ws.rs` constants → lines 26-30.
+> - `CONSECUTIVE_FAIL_THRESHOLD` → `engine.rs:42`. The code comment describes it as the count before the fail counter resets.
+> - `ERR_YIELD` / `ERR_RESTART` / `ERR_HIBERNATE` → `sandstar-svm/src/types.rs:72-74`.
+> - `args.rs`: rate limit line 75, port 53, bind 57.
+> - `main.rs`: command channel 423, watch expiry 380, poll result timeout 1020, slow-poll warning 873.
+>
+> **Changed or removed:**
+> - `RETRY_COOLDOWN` is gone. It is now `RETRY_COOLDOWN_BASE = 30` and `RETRY_COOLDOWN_MAX = 300` with exponential backoff (`engine.rs:35,39`).
+> - `sandstar-svm/src/runner.rs` was deleted with the C path. Its `STACK_SIZE` and sleep constants no longer exist. The unused `VmConfig.max_stack_size` is 64 KB, while the interpreter hardcodes a 4096-cell (16 KB) stack.
+>
+> **Added since the audit:**
+> - `MAX_SESSIONS = 4` in `sox/dasp.rs:35`. Different from `auth.rs` `MAX_SESSIONS = 256`.
+> - `CLIENT_TIMEOUT_SECS` also in `rest/live.rs` and `rest/rows.rs`.
+> - Driver write level 16, duration 30 s and poll interval 5 s (`drivers/loader.rs`).
+> - MQTT cache max age 600 s; BACnet discovery 2 s, COV renewal 240 s, foreign-device TTL 300 s, COV cache 600 s.
+> - Request body limit 1 MB (`rest/mod.rs`); driver actor channel capacity 64.
+> - Log files kept: 14 by default (`--log-max-files`, `logging.rs`).
+> - roxWarp timer bounds: 1..=86400 s (`roxwarp/cluster.rs`).
+> - GPIO60 retry every 20 watchdog kicks, at most 30 retries (`watchdog.rs`).
+> - systemd unit: `WatchdogSec=10`, `MemoryLimit=128M`.
+
 Comprehensive list of all hardcoded limits and constants across the Sandstar Rust codebase.
 Audited: 2026-03-10
 

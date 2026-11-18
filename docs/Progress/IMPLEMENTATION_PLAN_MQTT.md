@@ -1,5 +1,11 @@
 # Implementation Plan: MQTT Driver
 
+> **Status (2026-11-18): Completed (M1-M4), with resilience gaps.** Audited against `master` `b48484b`; the plan text below is history.
+> - **Commits:** M1 `3abd14c`, M2 `a6b7049`, M3 `4191fc2`, M4 `763bdea`. `rumqttc 0.24`; cache max age 600 s; env var loader; `mqtt_e2e_test.rs`; [`MQTT_SETUP.md`](MQTT_SETUP.md).
+> - **Done differently:** the generic `load_drivers::<MqttLoader>` replaced `load_mqtt_drivers`. Poll mode is `Manual`.
+> - **Open:** no reconnect. The event loop exits on the first error (`drivers/mqtt.rs`, `break`), and status stays `Ok`; only `POST /api/drivers/{id}/ping` reveals it (R-25). The `tls` field is parsed but never applied.
+> - **Known inaccuracies below:** "rumqttc handles reconnect automatically - just log and continue" is wrong (see above). Site-specific broker addresses were replaced with placeholders (2026-11-18).
+
 **Date:** 2026-04-17
 **Scope:** Pure-Rust MQTT v3.1.1 / v5 client driver for Sandstar, following the same patterns proven in the BACnet/IP driver (v2.1.0 – v2.7.0).
 **Target:** Sandstar Rust v2.8.0+ on BeagleBone
@@ -168,7 +174,7 @@ MQTT driver is "done" when:
 - ✅ Deployed to 1-11 and validated against a live broker
 - ✅ `MQTT_SETUP.md` documents the full setup + troubleshooting
 
-**All criteria met. Live validation (2026-04-17) against mosquitto 2.1.2 on Windows dev box `192.168.1.9:1884`:**
+**All criteria met. Live validation (2026-04-17) against mosquitto 2.1.2 on Windows dev box `<dev-host>:1884`:**
 ```
 mosquitto_pub -t sandstar/test/humidity -m "55.5" -q 1
   → rumqttc receives PUBLISH on 1-11

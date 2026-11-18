@@ -1,7 +1,20 @@
 # Sandstar Rust Migration -- Roadmap v2
 
-**Date:** 2026-04-17 (updated)
-**Status:** PRODUCTION DEPLOYED — Rust v2.8.1 on BeagleBone 1-11 (v2.0.0 still on 1-3 Todd Air Flow). **Pure Rust VM complete** (240 opcodes, 131 native methods, zero C). **Three drivers live-validated end-to-end against real peer speakers**: Modbus TCP (pre-existing), BACnet/IP (v2.1.0–v2.7.0, 11 phases), MQTT (v2.8.0, 4 phases). **Phase 12.0A shipped** — generic `DriverLoader` trait collapses ~400 lines of driver-loader duplication (v2.8.1). **Visual DDC programming working** — 35 executable component types with dataflow engine, values propagate through links in real-time. **20/20 SOX commands complete**. **Full DDC loop verified with real hardware** — real sensor (121F) through Tstat to heating output. **Phase 14.0A IN PROGRESS** — Web-based Visual DDC Editor REST endpoints (paused while driver work shipped).
+**Date:** 2026-04-17 (updated; status block added 2026-11-18)
+
+> **Status (2026-11-18)**: this ledger was last fully updated on 2026-04-19. Current state, audited against `master` `b48484b`:
+> - **Version:** workspace 2.9.0; tags v2.9.0 and v2.9.1. One field device runs `2.9.0+3b8e97c`. Tests: 2748 (Windows) / 2764 (Linux CI), 0 failed. Gate: `bash tools/gates.sh`.
+> - **Shipped after this ledger:** v2.8.9 (14.0Aj/Ak, 9.0b mDNS), v2.8.10 (Prometheus `/metrics`), Phase 14.0G native editor backend (v2.9.0, fix-pack v2.9.1; see [IMPLEMENTATION_PLAN_NATIVE_EDITOR_BACKEND.md](IMPLEMENTATION_PLAN_NATIVE_EDITOR_BACKEND.md)), maintenance steps S-5 to S-9 ([OVERVIEW.md](OVERVIEW.md) §2.9).
+> - **Statements below that no longer hold:**
+>   - "Pure Rust VM complete": the port is complete, but the VM cannot run real scode (natives get no VM memory) and the field service does not start it.
+>   - "0 security issues" / "Security issues open: 0": the field service binds `0.0.0.0` with no auth configured, and several write routes are outside `check_auth` (OVERVIEW §3). SIGTERM is not handled.
+>   - "Three drivers live-validated … Modbus TCP": Modbus has no loader and cannot be created via REST, so it is not usable in production. MQTT never reconnects after an event-loop error; BACnet COV subscriptions never start in production (no caller of `add_watch`).
+>   - "9.0a binary Trio COMPLETE": the typed binary-Trio module exists, but the wire carries `rmp_serde` of an internal message enum.
+>   - "Research coverage ~99.75%": the 2026-11-18 audit found many docs implemented differently or partially; see [PROGRESS_REPORT_2026_11_18.md](../research/PROGRESS_REPORT_2026_11_18.md).
+>   - Phase 14.0A is complete; 14.0B-F were superseded by 14.0G. Phase 12 is complete.
+>   - Device addresses, SSH details and site names were removed from this file (2026-11-18); older device labels refer to the same unit.
+
+**Status:** PRODUCTION DEPLOYED — Rust v2.8.1 on BeagleBone 1-11 (v2.0.0 still on 1-3 site A). **Pure Rust VM complete** (240 opcodes, 131 native methods, zero C). **Three drivers live-validated end-to-end against real peer speakers**: Modbus TCP (pre-existing), BACnet/IP (v2.1.0–v2.7.0, 11 phases), MQTT (v2.8.0, 4 phases). **Phase 12.0A shipped** — generic `DriverLoader` trait collapses ~400 lines of driver-loader duplication (v2.8.1). **Visual DDC programming working** — 35 executable component types with dataflow engine, values propagate through links in real-time. **20/20 SOX commands complete**. **Full DDC loop verified with real hardware** — real sensor (121F) through Tstat to heating output. **Phase 14.0A IN PROGRESS** — Web-based Visual DDC Editor REST endpoints (paused while driver work shipped).
 **Version:** 2.8.1 (7 crates, 2,643 tests, ~40,000+ lines of pure Rust)
 **Feature Parity:** ~99% (80/80 features vs C system + extras)
 **Research Documents:** 20 analysis docs (00-19) — deep gap analysis completed 2026-03-20
@@ -91,22 +104,22 @@
 | Phase | Description | Done | Remaining |
 |-------|-------------|------|-----------|
 | Phase 4 (SVM/Sedona) | Sedona FFI bridge | Bridge crate exists with ChannelSnapshot, SvmRunner, native method stubs (kit 4 + kit 100). **SOX protocol fully implemented in pure Rust** — all 20/20 SOX commands complete including fileWrite/fileRename. No SVM or C FFI needed. | VM binary compilation optional (config-driven control replaces VM for EacIo). |
-| Phase 5 (Integration) | Production deployment | **v1.4.0 DEPLOYED**. C sandstar removed, Rust live on BeagleBone (192.168.1.3:1919). 1,637 tests, CI/CD, diagnostics, health monitoring. | No longer blocked. Production validated. |
+| Phase 5 (Integration) | Production deployment | **v1.4.0 DEPLOYED**. C sandstar removed, Rust live on BeagleBone (<device-ip>:<ssh-port>). 1,637 tests, CI/CD, diagnostics, health monitoring. | No longer blocked. Production validated. |
 
 ### Not Started
 
 | Phase | Description | Complexity | Research Doc | Priority |
 |-------|-------------|-----------|--------------|----------|
 | ~~Phase 8.0B~~ | ~~Full ROX Protocol~~ — **COMPLETE.** All 20/20 SOX commands implemented: readSchema(v), readVersion(y), readComp(c), subscribe(s), unsubscribe(u), write(w), fileOpen(f), fileRead(g), fileClose(q), event(e), readSchemaDetail(n), readProp(r), invoke(i), add(a), delete(d), rename(n), link(l), reorder(o), fileWrite(h), fileRename(x). | S | 15 | **COMPLETE** |
-| **Phase 14.0A** | **Web-Based Visual DDC Editor: REST API Endpoints** | **M** | -- | **IN PROGRESS** |
-| Phase 14.0B | Web-Based Visual DDC Editor: HTML Scaffold | M | -- | PLANNED |
-| Phase 14.0C | Web-Based Visual DDC Editor: Canvas Rendering Engine | L | -- | PLANNED |
-| Phase 14.0D | Web-Based Visual DDC Editor: Interactions | L | -- | PLANNED |
-| Phase 14.0E | Web-Based Visual DDC Editor: Component Palette & CRUD | M | -- | PLANNED |
-| Phase 14.0F | Web-Based Visual DDC Editor: Live Data & WebSocket | M | -- | PLANNED |
+| **Phase 14.0A** | **Web-Based Visual DDC Editor: REST API Endpoints** | **M** | -- | **COMPLETE** (2026-04-18) |
+| Phase 14.0B | Web-Based Visual DDC Editor: HTML Scaffold | M | -- | SUPERSEDED by 14.0G (2026-11-18 note) |
+| Phase 14.0C | Web-Based Visual DDC Editor: Canvas Rendering Engine | L | -- | SUPERSEDED by 14.0G (2026-11-18 note) |
+| Phase 14.0D | Web-Based Visual DDC Editor: Interactions | L | -- | SUPERSEDED by 14.0G (2026-11-18 note) |
+| Phase 14.0E | Web-Based Visual DDC Editor: Component Palette & CRUD | M | -- | SUPERSEDED by 14.0G (2026-11-18 note) |
+| Phase 14.0F | Web-Based Visual DDC Editor: Live Data & WebSocket | M | -- | SUPERSEDED by 14.0G (2026-11-18 note) |
 | Phase 9.0 | Northbound clustering (roxWarp) | XL | 16 | **9.0a+b+c COMPLETE** (2026-04-18); only 9.0d (external Fantom pod) remaining |
 | Phase 11.0 | Sedona VM Rust port (bytecode interpreter, name interning) | XL | 12, 13, 14, 17 | **COMPLETE** (2026-04-10) |
-| Phase 12.0 | Driver Framework v2 (Haxall-inspired, pure Rust) | XL | 18 | Very Low |
+| Phase 12.0 | Driver Framework v2 (Haxall-inspired, pure Rust) | XL | 18 | **COMPLETE** (12.0A-G, v2.8.8) |
 | Phase 13.0 | Dynamic Slots (hybrid static+dynamic slot model) | L | 19 | **COMPLETE** (all 7 sub-phases 13.0a-g, 2026-04-18) |
 
 ---
@@ -183,6 +196,8 @@ Pure Rust link execution engine — values propagate through wired connections:
 ---
 
 ## 2. Security Audit Findings
+
+> **Note (2026-11-18):** the findings below were resolved in Phases 5.7 and 6.5. A later full review opened new items: no auth in the field configuration, write routes outside `check_auth`, panic paths on network input in release builds, SIGTERM handling. See [OVERVIEW.md](OVERVIEW.md) §3 and §6.
 
 The security audit identified issues across four severity levels. These MUST be addressed relative to deployment context (embedded device on private industrial network vs internet-exposed).
 
@@ -291,7 +306,7 @@ The security audit identified issues across four severity levels. These MUST be 
 
 | Task | Description | Effort | Status |
 |------|-------------|--------|--------|
-| 5.8a | **Deploy from Linux VM**: SSH to BeagleBone via jump host (172.28.109.221), install .deb package. | [S] | Awaiting hardware access |
+| 5.8a | **Deploy from Linux VM**: SSH to BeagleBone via jump host (<jump-host>), install .deb package. | [S] | Awaiting hardware access |
 | 5.8b | **Side-by-side validation**: Run validation service on port 8086 (--read-only), C on 8085. Use `soak-monitor.sh` for 4-8h continuous comparison. | [M] | Awaiting hardware access |
 | 5.8c | **Metric collection**: Log poll durations, memory RSS, HAL errors every 60s to file. Compare with C system. | [S] | Awaiting hardware access |
 | 5.8d | **Edge case validation**: Verify I2C sensor reconnect, ADC accuracy across temperature range, GPIO debounce behavior, UART framing. | [M] | Awaiting hardware access |
@@ -685,8 +700,10 @@ The security audit identified issues across four severity levels. These MUST be 
 
 ## 5. Critical Path to Production
 
+> **Note (2026-11-18):** historical (v2.0.0 era). For the current deploy procedure see [DEPLOYMENT_CHECKLIST.md](DEPLOYMENT_CHECKLIST.md) (in `docs/Progress/`).
+
 ```
-PRODUCTION DEPLOYED — Rust v2.0.0 live on BeagleBone (192.168.1.3)
+PRODUCTION DEPLOYED — Rust v2.0.0 live on BeagleBone (<device-ip>)
   1,637 tests, 0 warnings, 0 security issues, CI/CD active
 
 COMPLETED production tracks:
@@ -719,7 +736,7 @@ Remaining future tracks (post-production):
 ```
 
 **Status:** PRODUCTION LIVE since 2026-03-18, v2.0.0 (pure Rust VM, 20/20 SOX, 35 component types, visual DDC, full DDC loop verified, 1,637 tests). **Phase 14.0A (Web DDC Editor REST API) IN PROGRESS.**
-**BeagleBone:** 192.168.1.3 (Todd Air Flow), port 1919
+**BeagleBone:** <device-ip> (site A), SSH port <ssh-port>
 **Deployment guide:** `docs/DEPLOYMENT_CHECKLIST.md` (copy-paste ready)
 
 ---
@@ -761,6 +778,8 @@ Remaining future tracks (post-production):
 
 ## 7. Metrics Snapshot
 
+> **Note (2026-11-18):** snapshot as of 2026-04-18. Corrections: tests are now 2748 (Windows) / 2764 (Linux CI); the release binary is built unstripped (`--no-strip`, about 7.0 MB server + 0.8 MB CLI); CLI has 16 subcommands; IPC has 14 command variants; the router has 30+ routes; `clippy --all-targets` is not clean; "Security issues open: 0" and "Research coverage ~99.75%" no longer hold (see the status block at the top).
+
 | Metric | Value |
 |--------|-------|
 | Rust source lines | ~39,000 (~7,700 new VM + native methods) |
@@ -774,7 +793,7 @@ Remaining future tracks (post-production):
 | IPC commands | 13 |
 | CLI commands | 12 (status, channels, polls, tables, read, write, shutdown, reload, history, convert-sax, health, diagnostics) |
 | Feature parity | ~99% (80/80 features + extras) |
-| Production deployment | BeagleBone (Todd Air Flow, DHCP-leased — currently 192.168.1.11) running v2.8.8 as of 2026-04-17. Phase 12 Driver Framework v2 validated end-to-end on hardware; BACnet-backed channel 102 and live Solidyne sensor channel 1713 both flowing. |
+| Production deployment | BeagleBone (site A, DHCP-leased — currently <device-ip>) running v2.8.8 as of 2026-04-17. Phase 12 Driver Framework v2 validated end-to-end on hardware; BACnet-backed channel 102 and live Solidyne sensor channel 1713 both flowing. |
 | Live sensors | 1 — Solidyne 00-WTS-A (10K NTC, channel 1713, 78°F validated) |
 | CI/CD | GitHub Actions: fmt + clippy + test on push/PR, ARM cross-compile on master |
 | Monitoring | health-monitor.sh cron (5min), /api/diagnostics endpoint, CLI health + diagnostics |
@@ -790,11 +809,13 @@ Remaining future tracks (post-production):
 | Clippy warnings | 0 |
 | Test coverage (est.) | ~80% public API |
 | Project health score | 9.7/10 (production validated, full DDC loop verified, Phase 12 + 13 shipped, Phase 9.0a+c validated, 2026-04-18) |
-| GitHub | https://github.com/TurkerMertkan/Sandstar_Rust (private) |
+| GitHub | `Project-SandStar/Sandstar_Rust` (organization repo) |
 
 ---
 
 ## 8. Research Document Coverage
+
+> **Note (2026-11-18):** superseded by the per-document status blocks and [PROGRESS_REPORT_2026_11_18.md](../research/PROGRESS_REPORT_2026_11_18.md). Several 100% rows below (e.g. 03, 05, 07, 09) describe goals met by a different design, not the design in the doc.
 
 Deep gap analysis completed 2026-03-20 (3-agent, 20 documents vs full codebase).
 
@@ -835,7 +856,7 @@ Deep gap analysis completed 2026-03-20 (3-agent, 20 documents vs full codebase).
 | Bearer token before SCRAM | Simple, sufficient for private network; SCRAM deferred to Phase 6.5 with TLS | 2026-03-04 |
 | TLS deferred to 6.5 | C system has no TLS either; private industrial network; parity first | 2026-03-04 |
 | ~~Sedona VM stays C for now~~ | ~~100K lines, stable, FFI bridge works~~ -- **SUPERSEDED:** Phase 11.0 complete (2026-04-10), VM is now pure Rust | 2026-03-04 |
-| No internet exposure planned | BeagleBone sits on private 172.28.x.x subnet; security measures are defense-in-depth | 2026-03-04 |
+| No internet exposure planned | BeagleBone sits on private site subnet; security measures are defense-in-depth | 2026-03-04 |
 | ROX split into 8.0A + 8.0A-SOX + 8.0B | Haystack-over-WS (8.0A) ready; SOX/DASP (8.0A-SOX) implemented in pure Rust with 11 commands; remaining ops (8.0B) no longer blocked by SVM FFI | 2026-03-04 |
 | Custom rate limiter over tower::limit | Atomic sliding-window implementation — zero additional deps, simpler than enabling tower features | 2026-03-05 |
 | Virtual write non-propagation matches C | C system has ENGINE_MESSAGE_WRITE_VIRTUAL commented out; documented with tests rather than diverging | 2026-03-05 |
@@ -860,15 +881,15 @@ Deep gap analysis completed 2026-03-20 (3-agent, 20 documents vs full codebase).
 | Hardware soak reduced 48h→4-8h | 800 tests + SimulatorHal E2E + soak/stress tests provide confidence that 48h was designed to build. 4-8h validates only hardware-specific behavior (I2C timing, ADC accuracy, ARM constraints) | 2026-03-10 |
 | Web-based DDC editor (Phase 14.0) | Browser-based visual editor served from Rust server replaces need for Java-based Sedona Application Editor. Single HTML file with embedded CSS/JS, no build tooling. Hybrid DOM nodes + Canvas wires for rendering. 6 sub-phases (A-F) from REST API through live WebSocket sync | 2026-03-31 |
 | Project declared hardware-ready | All software phases complete. 800 tests, 0 clippy, 0 security issues. Only blocker is BeagleBone network access. Deployment checklist created at docs/DEPLOYMENT_CHECKLIST.md | 2026-03-10 |
-| Phase 5.9 production cutover | C sandstar v0.1.1 removed, Rust v1.0.0 deployed to BeagleBone (Todd Air Flow). 150 channels, 15 polls, 3.4MB memory, 0.28% CPU | 2026-03-18 |
+| Phase 5.9 production cutover | C sandstar v0.1.1 removed, Rust v1.0.0 deployed to BeagleBone (site A). 150 channels, 15 polls, 3.4MB memory, 0.28% CPU | 2026-03-18 |
 | I2C protocol detection by address | SDP810 channels with generic labels ("CFM Flow") were using wrong protocol. Added address-based fallback (0x25 → SDP810) | 2026-03-19 |
 | ADC out-of-range fault detection | Disconnected thermistors showed Ok/-40°F. Now raw at table boundaries → Fault status. 2% margin distinguishes near-limit from at-limit | 2026-03-19 |
 | I2C exponential backoff | Reinit spam ~232 WARN/hr → ~12 DEBUG/hr. Backoff 30s→60s→120s→240s→300s cap. Recovery resets immediately | 2026-03-20 |
 | CLI health command | At-a-glance device status: channel fault/down summary, per-type breakdown, uptime. Supports --json | 2026-03-20 |
 | Custom Zinc/filter over libhaystack | Research docs 03/05 proposed libhaystack crate. Deliberate choice to use custom impl (~1500 lines) — no external dependency on third-party crate for critical data format | 2026-03-20 |
 | Channel-centric over component-centric | Rust uses flat channel tables instead of Sedona component tree. Simpler, works for EacIo. Future Driver Framework (Phase 12.0) may need component model | 2026-03-20 |
-| GitHub repo created | Private repo at TurkerMertkan/Sandstar_Rust. Milestone releases for significant phases | 2026-03-19 |
+| GitHub repo created | Private repo (now the organization repo `Project-SandStar/Sandstar_Rust`). Milestone releases for significant phases | 2026-03-19 |
 | Solidyne 00-WTS-A requires halved table | EacIo voltage divider produces ADC at half expected range for this sensor. Created thermistor10K2_wts.txt (values/2). Swapped on device | 2026-03-20 |
 | auto_detect skip when pre-configured | auto_detect_sensor() was overwriting zinc-loaded config every poll. Now skips if table_index+low+high already set | 2026-03-20 |
-| BeagleBone needs static IP | DHCP reassigns IP on power loss (was .104, then .105, now .102). Static IP or DHCP reservation needed for reliable access | 2026-03-20 |
+| BeagleBone needs static IP | DHCP reassigns IP on power loss (it changed several times). Static IP or DHCP reservation needed for reliable access | 2026-03-20 |
 | Haystack API opened to 0.0.0.0 | Changed --http-bind from 127.0.0.1 to 0.0.0.0 in systemd service for future SkySpark connectivity | 2026-03-20 |

@@ -1,8 +1,14 @@
 # Implementation Plan: Haystack Filter Improvements + BACnet/IP Driver
 
+> **Status (2026-11-18): Completed in code (~95%), with open caveats.** Audited against `master` `b48484b`; the plan text below is history.
+> - **Completed:** filter `not` and `->` with pather (`45cbde8`, `crates/sandstar-server/src/rest/filter.rs`); BACnet B1-B5 (`drivers/bacnet/`), B7 WriteProperty, B9 ReadPropertyMultiple (`0cf6a1c`), B8 COV (`24361fe`), B8.1 + B10 (`c936528`), B8.2 (`90aacab`), poll wiring (`f50fdf8`, v2.6.0).
+> - **Done differently:** config is JSON in `SANDSTAR_BACNET_CONFIGS`, loaded by the generic driver loader in `rest/mod.rs`, not YAML/TOML wired from `main.rs`. E2E tests are in `drivers/bacnet/e2e_test.rs`.
+> - **Open:** a BVLL frame shorter than 4 bytes panics (R-5); replies are not checked against the source address (R-34); SubscribeCOV only runs via `add_watch`, which has no production caller (R-25); no recorded test against a real BACnet device.
+> - **Known inaccuracies below:** the A.1 table marks `->` and pather "not implemented" (both are); `sync_cur`/`write` take `&mut SyncContext`/`&mut WriteContext` since 12.0C; `object_type` is `u16`. Site-specific addresses were replaced with placeholders (2026-11-18).
+
 **Date:** 2026-04-13 (created), 2026-04-16 (final completion)
 **Scope:** Two projects — a small filter improvement (~1 day) followed by a multi-session BACnet/IP driver
-**Target:** Sandstar Rust v2.0.0 → v2.7.0 running on BeagleBone 1-11 at 192.168.1.11
+**Target:** Sandstar Rust v2.0.0 → v2.7.0 running on BeagleBone 1-11 at <device-ip>
 **Status:** ✅ **ALL PHASES COMPLETE** — Project A (Filter) 2026-04-13, Project B (BACnet) 2026-04-10 → 2026-04-16. Live-validated end-to-end against `tools/bacnet_sim.py`. Driver is no longer "read-only" — the original plan was read-only, but B7 (WriteProperty) was added mid-sprint and is also shipped. Full details per phase in the sections below.
 
 **Shipped versions (BACnet-related):**

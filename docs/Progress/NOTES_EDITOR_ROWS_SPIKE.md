@@ -1,5 +1,9 @@
 # G-1 Spike Findings: Editor dialect ↔ `/api/rows` compatibility
 
+> **Status (2026-11-18): Completed spike.** Its recommendation was implemented in G-2a/2b/2c (`369d84f`, `f260189`); see [`IMPLEMENTATION_PLAN_NATIVE_EDITOR_BACKEND.md`](IMPLEMENTATION_PLAN_NATIVE_EDITOR_BACKEND.md).
+> - **Done differently:** 5 new ops shipped, not 4 (`versionExt` added); dispatch lives in `sox_ops::apply_op`. `/live` has its own event loop. `w` needed a dedicated binary decoder; the semantics were not identical.
+> - **Open:** `r` (read property) has no `/live` handler; `whatMask` is ignored.
+
 **Date:** 2026-04-23
 **Author:** Phase 14.0G G-1
 **Purpose:** Determine whether the existing `/api/rows` (RoWS) WebSocket endpoint can be re-used to serve the Vue web editor, eliminating some of G-2's implementation cost. Go/no-go for "alias `/live` → `/api/rows`" vs. "ship independent native `/live`."

@@ -1,5 +1,11 @@
 # Pure Rust VM Completion Plan
 
+> **Status (2026-11-18): Completed.** All five phases landed in `2f5f463` (2026-04-10), although the checkboxes below were never ticked. Audited against `master` `b48484b`.
+> - **Completed:** component and inet natives registered (`crates/sandstar-svm/src/native_mod.rs`); the server uses `RustSvmRunner`; tests in `crates/sandstar-svm/tests/`; no `csrc/`, `ffi.rs` or `runner.rs`.
+> - **Done differently:** the `c-ffi-vm` transition release was skipped. `native_tests.rs` became `native_method_tests.rs`.
+> - **Open:** the "zero `extern "C"`" criterion is not literally met (unused ABI type aliases in `types.rs`). The ARM link still needs the C cross environment (`CC`/`AR`) for dependencies. The same caveat as `PURE_RUST_PLAN.md` applies: the VM cannot yet run real scode.
+> - **Known inaccuracies below:** "Phase S in progress", "37 disabled native methods", "server uses the C FFI runner" and "build.rs compiles vm.c" are all stale.
+
 **Date:** 2026-04-10
 **Goal:** Eliminate all C code from the Sedona VM, making `pure-rust-vm` the default
 **Estimated Effort:** 5 phases, ~1-2 weeks total

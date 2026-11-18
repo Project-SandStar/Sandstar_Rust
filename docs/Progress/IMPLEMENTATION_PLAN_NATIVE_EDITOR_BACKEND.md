@@ -1,5 +1,11 @@
 # Implementation Plan: Phase 14.0G — Native Editor Backend
 
+> **Status (2026-11-18): Partially completed (~75%).** G-0 to G-5 done; G-7 and G-8 partial; G-6 open. v2.9.0 and v2.9.1 are tagged. Audited against `master` `b48484b`.
+> - **Completed:** G-2a/2b `369d84f` (`crates/sandstar-server/src/sox/sox_ops.rs`); G-2c `f260189` (`rest/live.rs`); G-3 `5d164ad` (`rest/sedona_state.rs`); G-4/G-5/G-7 skeleton `42ff920` (`file_ops.rs`, `library.rs`, `editor_assets.rs`); production fixes `03b4979` (pong, typed `w` decoding; v2.9.0) and `44de90b`.
+> - **Done differently:** `/live` `w` uses a typed decoder (`handle_write_slot_live`), so the "base64 → UTF-8 string" follow-up is resolved. Editor endpoint tests are in `tests/editor_integration.rs`.
+> - **Open:** G-6 (`.sab` → `.sax` conversion endpoint); G-7 `.deb` bundling and SCRAM on `/live` and `/file`, which are outside the auth layer (R-2); G-8 (`live_protocol.rs` tests, `EDITOR_SETUP.md`); G-2c `whatMask`, `configProps`, split event frames; `r` (read property) has no `/live` handler.
+> - **Known inaccuracies below:** "handles all 19 Fantom msgTypes" (`r` is unhandled, `f`/`z`/`b` are rejected); there is no `rest::mod::build_app` (routes are in `router_with_auth`); the changelog stops at 04-23. Site-specific addresses were replaced with placeholders (2026-11-18).
+
 **Goal:** Remove the SkySpark + `bassgSoxWebSocket` Fantom pod dependency of the Vue-based Sedona Web Editor. When this plan completes, a freshly-provisioned BeagleBone running only the Sandstar `.deb` package serves the full visual DDC editor from `http://<device>/editor`. No Java runtime, no SkySpark, no Fantom.
 
 **Started:** 2026-04-23
@@ -12,7 +18,7 @@
 
 Phase 14.0B–F (the editor UI itself) was built in a separate monorepo (`C:\Coding\swe\sedonaWebEditor`) as a Vue 3 + Rete.js SPA. In its current form the frontend talks to a **SkySpark extension named `bassgSoxWebSocket`** — a Fantom pod that bridges JSON-over-WebSocket requests from the browser down to UDP DASP/SOX datagrams on a Sedona-speaking device.
 
-This works, but it breaks Sandstar's core value proposition ("single self-contained Rust binary on a 512 MB BeagleBone"). It also couples the editor to a proprietary analytics platform that some deployments cannot license, and it hides a second failure mode behind a second process. Observed in the wild on 2026-04-23: SkySpark at `192.168.1.8:9099` was unreachable, which made the editor unreachable even though the underlying Sandstar engine was healthy.
+This works, but it breaks Sandstar's core value proposition ("single self-contained Rust binary on a 512 MB BeagleBone"). It also couples the editor to a proprietary analytics platform that some deployments cannot license, and it hides a second failure mode behind a second process. Observed in the wild on 2026-04-23: SkySpark at `<skyspark-host>:<port>` was unreachable, which made the editor unreachable even though the underlying Sandstar engine was healthy.
 
 The fix is to reimplement, natively in Rust, the handful of HTTP/WebSocket endpoints the editor actually consumes, and then serve the editor's compiled static bundle from Sandstar itself.
 
@@ -403,7 +409,7 @@ From `C:\Coding\swe\bassgSoxWebSocket\`:
 
 ## Changelog
 
-- **2026-04-23** — Plan drafted after two-agent endpoint inventory sweep (Sandstar side: 52 routes + UDP:1876; Fantom pod side: 13 endpoints). SkySpark at 192.168.1.8:9099 confirmed unreachable, reinforcing the case for this phase. Starting with G-0 SAB parser audit.
+- **2026-04-23** — Plan drafted after two-agent endpoint inventory sweep (Sandstar side: 52 routes + UDP:1876; Fantom pod side: 13 endpoints). SkySpark at <skyspark-host>:<port> confirmed unreachable, reinforcing the case for this phase. Starting with G-0 SAB parser audit.
 - **2026-04-23** — G-0 complete. No existing SAB parser in `sandstar-svm`; only header + opcode validator. Risk #1 downgraded from "open" to "realised, mitigated." Total estimate narrowed to 21–25 days (upper end of original band). G-3 parser sub-task retained with ~400–600 line budget and `image_loader.rs` / `ComponentStore` / `native_table.rs` / `sab_validator.rs` as building blocks. Next: G-1 compatibility spike to determine whether `/api/rows` can serve as the `/live` backing implementation.
 - **2026-04-23** — G-1 complete. Full wire-format comparison in `NOTES_EDITOR_ROWS_SPIKE.md`. 19 Fantom msgTypes vs 19 RoWS ops: 8 clean, 4 adaptable, 7 gap (3 are G-4 file ops). Wire-shim approach rejected; refactor-into-shared-module approach selected. G-2 restructured into 2a (refactor), 2b (4 new ops), 2c (`/live` handler) — same 3–4 day total. `/api/rows` preserved as first-class endpoint, gains 4 new ops as side benefit. Next: G-2a — extract `rows.rs::handle_client_msg` into shared `sox_ops.rs`.
 - **2026-04-23** — G-2b protocol spec locked in `NOTES_FANTOM_MSGTYPE_SEMANTICS.md`. Deep dive into Fantom `SoxSession.fan` / `WatchManager.fan` produced request/response shapes and side-effect semantics for `v`, `y`, `o`, `q`, `x`. Final scope: 5 ops (`version`, `versionExt`, `reorder`, `query`, `closeWatch`). `query` v1 uses type-match; `closeWatch` v1 uses implicit-subscription; both defer fidelity upgrades to future minor releases if real callers surface. Open question: does `ManifestDb` store kit checksums? — to resolve inside G-2a. Proceeding to G-2a.

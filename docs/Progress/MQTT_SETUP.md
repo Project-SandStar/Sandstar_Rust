@@ -1,5 +1,13 @@
 # MQTT Setup Guide
 
+> **Status (2026-11-18)**: verified against `master` `b48484b`. Config fields and defaults (port 1883, keep-alive 60, QoS 1, QoS 2 downgraded to 1), cache max age 600 s and the log strings match the code. Corrections:
+> - **No ConnAck wait and no reconnect.** `open()` sets status `Ok` right after queuing the subscribes; it does not wait for ConnAck, so `"status":"Ok"` does not prove a broker connection. The event loop exits on the first error (`mqtt event loop error`) and status stays `Ok`. Check with `POST /api/drivers/{id}/ping`: a dead loop returns 503 `mqtt event loop dead`. Recover with `close` then `open`, or restart the service.
+> - `objects` is optional (defaults to an empty list).
+> - `learn` names each point after `subscribe_topic` (falling back to `publish_topic`) with `kind: "Number"`, wrapped in `{"driverId": …, "points": [...]}`. `GET /api/drivers` reports `pollMode: "Manual"` for MQTT.
+> - The `tls` field is parsed but not applied; connections are plain TCP.
+> - Outbound TCP 1883 to public brokers may be blocked on site networks; a local mosquitto is the tested path.
+> - Logs: prefer `/var/log/sandstar/sandstar-engine.log.YYYY-MM-DD` over `journalctl` on the device (volatile journal).
+
 Sandstar v2.8.0+ supports MQTT v3.1.1 as a network driver: subscribes to broker topics to receive live values, publishes to broker topics on writes, caches incoming values for fast `sync_cur()`, and integrates with the shared driver-framework tick task used by BACnet.
 
 This guide covers:
@@ -144,7 +152,7 @@ net start mosquitto
 
 Then point the BeagleBone at the dev box IP:
 ```bash
-SANDSTAR_MQTT_CONFIGS=[{"id":"mqtt-dev","host":"192.168.1.9","port":1883,"client_id":"sandstar-dev","objects":[...]}]
+SANDSTAR_MQTT_CONFIGS=[{"id":"mqtt-dev","host":"<dev-host>","port":1883,"client_id":"sandstar-dev","objects":[...]}]
 ```
 
 ---
@@ -318,6 +326,6 @@ If a SOX/HVAC control component is writing at level 1-15, its value wins. Either
 
 ## See also
 
-- `docs/IMPLEMENTATION_PLAN_MQTT.md` — implementation phases M1-M4
-- `docs/BACNET_SETUP.md` — sibling network-driver setup guide
+- [`IMPLEMENTATION_PLAN_MQTT.md`](IMPLEMENTATION_PLAN_MQTT.md) — implementation phases M1-M4
+- [`BACNET_SETUP.md`](BACNET_SETUP.md) — sibling network-driver setup guide
 - MQTT v3.1.1 spec: https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/

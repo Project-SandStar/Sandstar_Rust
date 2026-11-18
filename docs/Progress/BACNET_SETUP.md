@@ -1,5 +1,13 @@
 # BACnet/IP Setup Guide
 
+> **Status (2026-11-18)**: verified against `master` `b48484b`. Config fields, defaults (port 47808, discovery 2 s, COV renewal 240 s, foreign-device TTL 300 s, COV cache 600 s), write level 16 / 30 s and the log strings in §5 match the code. Corrections:
+> - `GET /api/drivers` also returns `pollMode` per driver (fields: `id`, `driverType`, `status`, `pollMode`, `pollBuckets`, `pollPoints`).
+> - `GET /api/drivers/{id}/learn` returns `{"driverId": …, "points": [...]}`, not a bare list.
+> - The renewal log line is `COV subscription renewed` (no "BACnet" prefix). A write to a missing channel logs `BACnet engine write_channel failed — is point_id a configured virtual channel?` with `error=channel N not found`.
+> - Logs: on the field device the systemd journal needs `sudo` and keeps well under an hour. The durable log is `/var/log/sandstar/sandstar-engine.log.YYYY-MM-DD` (newest 14 kept); read it instead of `journalctl` for anything older.
+> - A systemd drop-in that sets `SANDSTAR_BACNET_CONFIGS` is not owned by the `.deb`; include it in the pre-deploy backup ([DEPLOYMENT_CHECKLIST.md](DEPLOYMENT_CHECKLIST.md)).
+> - Known gaps: COV subscriptions never start in production (no production caller of `add_watch`; values arrive by the 5 s poll); drivers created via REST get no poll tick; replies are not checked against the source address; a BVLL frame shorter than 4 bytes panics (release builds abort).
+
 Sandstar v2.6.0+ supports BACnet/IP as a network driver: discovery (Who-Is / I-Am), ReadProperty, WriteProperty, ReadPropertyMultiple batching, SubscribeCOV notifications with 240s renewal, and BBMD foreign-device registration for multi-subnet deployments.
 
 This guide covers:
@@ -121,7 +129,7 @@ sudo firewall-cmd --permanent --zone=public --add-port=47808/udp
 sudo firewall-cmd --reload
 ```
 
-**Why this matters:** firewalld's stateful tracking records outbound flows, but when Sandstar sends Who-Is to the broadcast address (`192.168.1.255:47808`), the I-Am reply comes from a **different source** (`192.168.1.9:47808`). Conntrack treats it as unrelated and the default REJECT rule drops it. Without an explicit allow rule, **discovery silently fails** — the driver's `collect_i_am` never sees any packets.
+**Why this matters:** firewalld's stateful tracking records outbound flows, but when Sandstar sends Who-Is to the broadcast address (`192.168.1.255:47808`), the I-Am reply comes from a **different source** (`<dev-host>:47808`). Conntrack treats it as unrelated and the default REJECT rule drops it. Without an explicit allow rule, **discovery silently fails** — the driver's `collect_i_am` never sees any packets.
 
 ### Linux (iptables)
 
@@ -290,7 +298,7 @@ The `point_id` in your BACnet config doesn't correspond to a defined channel. Ad
 ### COV notifications not updating the cache
 
 - Check the driver issued SubscribeCOV: log line `BACnet COV subscribed`.
-- On 1-11 you also need the firewalld rule (§3) — COV notifications arrive as unsolicited UDP with a source IP that doesn't match any outbound conntrack entry.
+- On a firewalld host you also need the firewalld rule (§3) — COV notifications arrive as unsolicited UDP with a source IP that doesn't match any outbound conntrack entry.
 - COV cache entries expire after 600s. If the device isn't pushing notifications, the cache stays stale. `sync_cur` falls back to polling.
 
 ---
@@ -305,5 +313,5 @@ The `point_id` in your BACnet config doesn't correspond to a defined channel. Ad
 
 ## See also
 
-- `docs/IMPLEMENTATION_PLAN_FILTER_AND_BACNET.md` — implementation phases B1-B10, B8.1, B8.2
+- [`IMPLEMENTATION_PLAN_FILTER_AND_BACNET.md`](IMPLEMENTATION_PLAN_FILTER_AND_BACNET.md) — implementation phases B1-B10, B8.1, B8.2
 - ASHRAE 135 — BACnet protocol spec

@@ -3,6 +3,11 @@
 
 # Pure Rust Sandstar — Implementation Plan
 
+> **Status (2026-11-18): Completed.** C was eliminated in `2f5f463`; v2.0.0 was released in `d2ca587` (2026-04-10). Audited against `master` `b48484b`; the plan text below is history.
+> - **Done differently:** no `sox_auth.rs`; SHA-1 is in-house. The `pure-rust-vm` feature and `csrc/` no longer exist; the Rust VM is the only path, and `build.rs` compiles nothing. SOX add/delete, marked "Later", are implemented.
+> - **Caveat:** "complete" refers to the port. The VM still cannot run real scode (natives get no VM memory) and is not started by the field service; see the doc 13 status block.
+> - **Superseded by:** [`PURE_RUST_VM_COMPLETION_PLAN.md`](PURE_RUST_VM_COMPLETION_PLAN.md); SOX later extended by Phase 14.0G.
+
 **Date:** 2026-03-21 (updated)
 **Goal:** Eliminate all C code, enable Sedona Application Editor connectivity
 **Total Effort:** ~42 dev-days (~8,300 lines of new Rust)

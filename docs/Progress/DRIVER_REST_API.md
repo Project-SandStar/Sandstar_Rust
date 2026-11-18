@@ -1,5 +1,13 @@
 # Driver REST API Guide
 
+> **Status (2026-11-18)**: verified against `master` `b48484b`. Routes, the public/protected split, body shapes, status codes (201/400/404/409/501/503) and the Prometheus metric names match the code. Corrections:
+> - **Auth options:** `--auth-token` / `SANDSTAR_AUTH_TOKEN` (bearer) or SCRAM-SHA-256 via `--auth-user` / `--auth-pass` (`SANDSTAR_AUTH_USER` / `SANDSTAR_AUTH_PASS`). With neither configured, the auth gate lets every request through. The packaged service binds `0.0.0.0` with no auth, so on the field device the "auth-gated" routes below are open.
+> - Other write surfaces (`/api/sox/*`, `/live`, `/file/*`, `/api/tags*`, `/api/alerts/*`, `/api/cluster/query`) stay unauthenticated even when auth is configured.
+> - **REST-created drivers** (`POST /api/drivers`) get no poll tick task, so their values never reach engine channels, and they are lost on restart. Only drivers loaded from the environment at startup are polled.
+> - Rate limiting is on by default (100 req/s, `--rate-limit` / `SANDSTAR_RATE_LIMIT`; 0 disables).
+> - The sample build info in §7 shows 2.8.10; current builds report `2.9.0` with the git hash.
+> - Device addresses in the examples were replaced with `<device-ip>` (2026-11-18).
+
 Sandstar v2.8.5+ exposes runtime driver management through a REST surface. You can **list, create, open, close, ping, delete, write, batch-read, and send custom messages** to any registered driver (BACnet, MQTT, LocalIoDriver, or future types) without restarting the service.
 
 This guide covers:
@@ -51,7 +59,7 @@ Every running Sandstar registers a `localIo` driver automatically (the engine-ch
 List every registered driver with its status and poll statistics.
 
 ```bash
-curl -s http://192.168.1.11:8085/api/drivers | python3 -m json.tool
+curl -s http://<device-ip>:8085/api/drivers | python3 -m json.tool
 ```
 
 Response:
@@ -81,7 +89,7 @@ Response:
 Driver-level status plus per-point status inheritance (Phase 12.0B).
 
 ```bash
-curl -s http://192.168.1.11:8085/api/drivers/bacnet-local/status | python3 -m json.tool
+curl -s http://<device-ip>:8085/api/drivers/bacnet-local/status | python3 -m json.tool
 ```
 
 Response:
@@ -102,7 +110,7 @@ When the remote device is down, a point's status will be `"Down"` (RemoteDown) o
 Ask the driver to discover its points. Returns a Haystack-style grid. Drivers that don't implement learn return `501 Not Implemented`.
 
 ```bash
-curl -s http://192.168.1.11:8085/api/drivers/bacnet-local/learn | python3 -m json.tool
+curl -s http://<device-ip>:8085/api/drivers/bacnet-local/learn | python3 -m json.tool
 ```
 
 ---
@@ -116,7 +124,7 @@ Body: `{"driver_type": "bacnet"|"mqtt", "config": { ... }}`. The `config` must m
 The driver is registered but **not auto-opened**. Call `POST /api/drivers/{id}/open` to bring it up.
 
 ```bash
-curl -s -X POST http://192.168.1.11:8085/api/drivers \
+curl -s -X POST http://<device-ip>:8085/api/drivers \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
   -d '{
@@ -137,7 +145,7 @@ Response: `{"ok": true, "id": "bac-shop"}` (HTTP 201) or `{"ok": false, "error":
 Bring the driver up. For network drivers this runs their discovery/handshake (e.g. BACnet Who-Is, MQTT CONNECT). Returns driver meta:
 
 ```bash
-curl -s -X POST http://192.168.1.11:8085/api/drivers/bacnet-local/open \
+curl -s -X POST http://<device-ip>:8085/api/drivers/bacnet-local/open \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -159,7 +167,7 @@ Response:
 Shut the driver down without removing it from the registry. The driver keeps its config, so `open` can bring it back.
 
 ```bash
-curl -s -X POST http://192.168.1.11:8085/api/drivers/bacnet-local/close \
+curl -s -X POST http://<device-ip>:8085/api/drivers/bacnet-local/close \
   -H "Authorization: Bearer $TOKEN"
 # {"id": "bacnet-local", "ok": true}
 ```
@@ -169,7 +177,7 @@ curl -s -X POST http://192.168.1.11:8085/api/drivers/bacnet-local/close \
 Health-check the driver. Returns the same meta shape as `open`. `503 Service Unavailable` on comm fault, `404` if driver id unknown.
 
 ```bash
-curl -s -X POST http://192.168.1.11:8085/api/drivers/localIo/ping \
+curl -s -X POST http://<device-ip>:8085/api/drivers/localIo/ping \
   -H "Authorization: Bearer $TOKEN"
 # {"ok": true, "id": "localIo", "model": "BeagleBone Black", ...}
 ```
@@ -179,7 +187,7 @@ curl -s -X POST http://192.168.1.11:8085/api/drivers/localIo/ping \
 Close and deregister. The driver is gone until next startup or another `POST /api/drivers`.
 
 ```bash
-curl -s -X DELETE http://192.168.1.11:8085/api/drivers/bac-shop \
+curl -s -X DELETE http://<device-ip>:8085/api/drivers/bac-shop \
   -H "Authorization: Bearer $TOKEN"
 # {"ok": true, "id": "bac-shop"}
 ```
@@ -195,7 +203,7 @@ Write one or more point values through the driver. For BACnet this emits WritePr
 Body: `{"writes": [[pointId, value], ...]}` (array of `[u32, f64]` pairs).
 
 ```bash
-curl -s -X POST http://192.168.1.11:8085/api/drivers/bacnet-local/write \
+curl -s -X POST http://<device-ip>:8085/api/drivers/bacnet-local/write \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"writes": [[102, 72.5]]}'
@@ -221,7 +229,7 @@ Batch-read current values for multiple drivers in one request. Body: `{"driverPo
 `address` must match the driver's internal addressing (e.g. BACnet uses the text the driver tagged on its `DriverPointRef`, not that it matters for most — the driver looks up `point_id` internally).
 
 ```bash
-curl -s -X POST http://192.168.1.11:8085/api/syncCur \
+curl -s -X POST http://<device-ip>:8085/api/syncCur \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
   -d '{
@@ -255,7 +263,7 @@ Dispatch a driver-specific custom message (Phase 12.0E infrastructure). Body: `{
 The default trait implementation returns `501 Not Implemented` — drivers opt in to specific message ids. No shipping driver currently implements custom messages; this is infrastructure for future driver-specific commands (e.g. force BACnet Who-Is, request MQTT reconnect, export driver stats).
 
 ```bash
-curl -s -X POST http://192.168.1.11:8085/api/drivers/bacnet-local/message \
+curl -s -X POST http://<device-ip>:8085/api/drivers/bacnet-local/message \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"id": "whoIs", "payload": {}}'
@@ -275,7 +283,7 @@ Sandstar v2.8.7+ routes driver `CovEvent`s (change-of-value broadcasts) into Hay
 `tools/ws_latency_test.py` exercises this end-to-end against a running device:
 
 ```bash
-py tools/ws_latency_test.py 192.168.1.11:8085 102 45
+py tools/ws_latency_test.py <device-ip>:8085 102 45
 # connects, subscribes with pollInterval=10000, records updates for 45 s,
 # prints gap statistics and declares bridge LIVE when median gap << client interval.
 ```
@@ -291,7 +299,7 @@ Expected against `bacnet_sim.py --vary`:
 Sandstar v2.8.10+ exposes internal counters and gauges in the Prometheus text exposition format (version 0.0.4) at `GET /metrics` — **no auth** (intended for internal scrape; gate with a reverse proxy if external exposure is a concern).
 
 ```bash
-curl -s http://192.168.1.4:8085/metrics | head -30
+curl -s http://<device-ip>:8085/metrics | head -30
 ```
 
 Sample output:
@@ -335,7 +343,7 @@ scrape_configs:
   - job_name: sandstar
     scrape_interval: 30s
     static_configs:
-      - targets: ["192.168.1.4:8085"]
+      - targets: ["<device-ip>:8085"]
 ```
 
 ### Legacy JSON format
@@ -367,17 +375,17 @@ Error responses are always `{"error": "<message>"}` with a human-readable reason
 
 ```bash
 # remove the current one
-curl -X DELETE http://192.168.1.11:8085/api/drivers/bacnet-local \
+curl -X DELETE http://<device-ip>:8085/api/drivers/bacnet-local \
   -H "Authorization: Bearer $TOKEN"
 
 # create a new config
-curl -X POST http://192.168.1.11:8085/api/drivers \
+curl -X POST http://<device-ip>:8085/api/drivers \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
   -d @new-bacnet-config.json
 
 # bring it up
-curl -X POST http://192.168.1.11:8085/api/drivers/bacnet-local/open \
+curl -X POST http://<device-ip>:8085/api/drivers/bacnet-local/open \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -386,11 +394,11 @@ curl -X POST http://192.168.1.11:8085/api/drivers/bacnet-local/open \
 When the BACnet/MQTT simulator on your Windows dev box was not running at Sandstar startup, its driver discovers zero peers. Re-discovery **without** a full service restart:
 
 ```bash
-curl -X POST http://192.168.1.11:8085/api/drivers/bacnet-local/close \
+curl -X POST http://<device-ip>:8085/api/drivers/bacnet-local/close \
   -H "Authorization: Bearer $TOKEN"
 # brief pause so the socket releases
 sleep 1
-curl -X POST http://192.168.1.11:8085/api/drivers/bacnet-local/open \
+curl -X POST http://<device-ip>:8085/api/drivers/bacnet-local/open \
   -H "Authorization: Bearer $TOKEN"
 # expect: "model": "BACnet/IP port=47808 (N devices)"
 ```
@@ -399,7 +407,7 @@ curl -X POST http://192.168.1.11:8085/api/drivers/bacnet-local/open \
 
 ```bash
 # local digital output channel 5000
-curl -X POST http://192.168.1.11:8085/api/drivers/localIo/write \
+curl -X POST http://<device-ip>:8085/api/drivers/localIo/write \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"writes": [[5000, 1.0]]}'
@@ -413,7 +421,7 @@ The write goes to `engine.write_channel(5000, Some(1.0), level=16, who="localIo:
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `POST /api/drivers/{id}/open` returns `Address already in use (os error 98)` | The driver is currently registered and its socket is bound. `open` tries to re-bind the same port. | `close` first, then `open`. See §8. |
+| `POST /api/drivers/{id}/open` returns `Address already in use (os error 98)` | The driver is currently registered and its socket is bound. `open` tries to re-bind the same port. | `close` first, then `open`. See §9. |
 | `POST /api/drivers` returns `409 Conflict` | A driver with that id is already registered. | `DELETE` first, or pick a new id. |
 | `POST /api/drivers/{id}/message` always returns `501` | The driver doesn't implement `on_receive` for that message id. This is expected for all shipping drivers today — the infrastructure is there, opt-in per driver. | Wait for a driver to add support, or implement custom messages in your own out-of-tree driver. |
 | Long-pollInterval WS client misses value changes | The server doesn't have a `driver_handle` in its `WsState` (shouldn't happen in production; occurs in some test harnesses). | Check that `rest::mod.rs` passes `Some(driver_handle.clone())` to `WsState`. |

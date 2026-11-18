@@ -1,5 +1,11 @@
 # Implementation Plan: Driver Framework v2 (Phase 12)
 
+> **Status (2026-11-18): Completed.** Phases 12.0A-G are in code and shipped in v2.8.8. Audited against `master` `b48484b`; the plan text below is history.
+> - **Commits:** 12.0A `e994b2f`, 12.0B `c285fc5`, 12.0C `29a1886`, 12.0D `0e81750`, 12.0G `e8295c5`, 12.0E `85d1532`, 12.0D.WS `0926e4a`, 12.0F `3c02a30`. The sync `DriverManager` and the stub `LocalIoDriver` were removed in `87a0755`.
+> - **Done differently:** CovEvents come only from the 5 s `sync_all` tick, so the "~200 ms push" covers only CovEvent → WebSocket; source freshness is still 5 s.
+> - **Caveats (open):** drivers created via REST get no tick task and are lost on restart (R-26). With no auth configured the auth gate is a no-op (R-1). No production driver implements `on_receive`.
+> - **Known inaccuracies below:** the HAL does not use gpio-cdev/i2cdev/industrial-io (sysfs via `libc`); 12.0A is `e994b2f`, not `763bdea`; the progress-log hash placeholders are filled in above; some "deferred / this session" text sits under completed headings.
+
 **Date:** 2026-04-17 (created), 2026-04-17 (expanded with 12.0B–G, 12.0C shipped)
 **Baseline:** v2.8.3 (12.0A + 12.0B + 12.0C shipped)
 **Reference:** [research/18_SEDONA_DRIVER_FRAMEWORK_V2.md](../research/18_SEDONA_DRIVER_FRAMEWORK_V2.md) — full Haxall-inspired vision

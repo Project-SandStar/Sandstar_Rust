@@ -1,5 +1,9 @@
 # Fantom Pod msgType Semantics — Reference Spec for G-2b
 
+> **Status (2026-11-18): Implemented** (with the v1 simplifications documented below) in `369d84f`: `version`, `versionExt`, `reorder`, `query` (type match only) and `closeWatch` in `crates/sandstar-server/src/sox/sox_ops.rs`.
+> - **Done differently:** five msgTypes, not four. Kit checksums come from the static `DEFAULT_KITS` table, not parsed manifests. Error texts are lowercase Rust variants with `BAD_REQUEST`/`NOT_FOUND` codes; the Fantom wording is not preserved.
+> - **Open:** service-interface query walk; multiple watch ids.
+
 **Date:** 2026-04-23
 **Source:** `C:\Coding\swe\bassgSoxWebSocket\fan\SoxSession.fan`, `SoxWebSocketMod.fan`, `WatchManager.fan` (Fantom source)
 **Cross-reference:** `C:\Coding\swe\sedonaWebEditor\src\services\sox\SoxClient.ts`, `SoxMessages.ts`, `workers\coordinator.ts` (TypeScript client)
