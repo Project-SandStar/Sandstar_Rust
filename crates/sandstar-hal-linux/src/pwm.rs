@@ -509,7 +509,15 @@ mod tests {
 
             let polarity_content =
                 fs::read_to_string(root.join("pwmchip4").join("pwm-4:0").join("polarity")).unwrap();
-            assert_eq!(polarity_content, "normal");
+            // A real sysfs attribute replaces its whole value on write; the
+            // mock is a regular file, so writing "normal" over "inversed"
+            // leaves the old tail ("normaled"). write_cached matches C
+            // io_write_cached (seek 0 + write, no truncate), so check the
+            // bytes actually written.
+            assert!(
+                polarity_content.starts_with("normal"),
+                "got {polarity_content:?}"
+            );
         }
 
         #[test]
