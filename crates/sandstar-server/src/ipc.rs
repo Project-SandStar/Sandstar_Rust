@@ -87,27 +87,67 @@ pub fn cleanup(path: &str) {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_create_listener() {
-        // Bind to port 0 for dynamic assignment
+    // Tests run against the platform transport: a Unix socket file on Unix
+    // (the production path on the device), TCP on localhost elsewhere.
+    #[cfg(unix)]
+    type Target = std::path::PathBuf;
+    #[cfg(not(unix))]
+    type Target = std::net::SocketAddr;
+
+    #[cfg(unix)]
+    async fn bind_test(name: &str) -> (Listener, Target) {
+        let path = std::env::temp_dir().join(format!(
+            "sandstar-ipc-test-{}-{name}.sock",
+            std::process::id()
+        ));
+        let listener = create_listener(path.to_str().unwrap()).await.unwrap();
+        (listener, path)
+    }
+
+    #[cfg(not(unix))]
+    async fn bind_test(_name: &str) -> (Listener, Target) {
         let listener = create_listener("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        // Should have been assigned a real port
-        assert_ne!(addr.port(), 0);
+        (listener, addr)
+    }
+
+    fn connect(target: &Target) -> Stream {
+        Stream::connect(target).unwrap()
+    }
+
+    fn cleanup_test(target: &Target) {
+        #[cfg(unix)]
+        cleanup(target.to_str().unwrap());
+        #[cfg(not(unix))]
+        let _ = target;
+    }
+
+    #[tokio::test]
+    async fn test_create_listener() {
+        let (_listener, target) = bind_test("create").await;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o660, "socket must be owner+group only");
+        }
+        #[cfg(not(unix))]
+        assert_ne!(target.port(), 0);
+        cleanup_test(&target);
     }
 
     #[tokio::test]
     async fn test_accept_sets_read_timeout() {
-        let listener = create_listener("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let (listener, target) = bind_test("timeout").await;
 
         // Connect a client
-        let _client = std::net::TcpStream::connect(addr).unwrap();
+        let _client = connect(&target);
 
         // Accept it on the server side
         let (stream, _, _) = accept(&listener).await.unwrap();
         let timeout = stream.read_timeout().unwrap();
         assert_eq!(timeout, Some(Duration::from_secs(5)));
+        cleanup_test(&target);
     }
 
     #[test]
@@ -118,17 +158,26 @@ mod tests {
         // If we get here without panicking, the test passes
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_cleanup_removes_socket_file() {
+        let (_listener, target) = bind_test("cleanup").await;
+        assert!(target.exists());
+        cleanup(target.to_str().unwrap());
+        assert!(!target.exists());
+    }
+
     #[tokio::test]
     async fn test_round_trip_frame() {
         use sandstar_ipc::protocol::{read_frame, write_frame};
         use sandstar_ipc::types::{EngineCommand, EngineResponse};
 
-        let listener = create_listener("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let (listener, target) = bind_test("roundtrip").await;
+        let client_target = target.clone();
 
         // Client sends a command
         let handle = std::thread::spawn(move || {
-            let mut client = std::net::TcpStream::connect(addr).unwrap();
+            let mut client = connect(&client_target);
             let cmd = EngineCommand::Status;
             write_frame(&mut client, &cmd).unwrap();
 
@@ -149,18 +198,18 @@ mod tests {
 
         let client_resp = handle.join().unwrap();
         assert!(matches!(client_resp, EngineResponse::Ok));
+        cleanup_test(&target);
     }
 
     #[tokio::test]
     async fn test_concurrent_connections() {
-        let listener = create_listener("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let (listener, target) = bind_test("concurrent").await;
 
         // Three sequential clients connect and exchange a frame
         for i in 0..3 {
-            let addr_clone = addr;
+            let client_target = target.clone();
             let handle = std::thread::spawn(move || {
-                let mut client = std::net::TcpStream::connect(addr_clone).unwrap();
+                let mut client = connect(&client_target);
                 let cmd = sandstar_ipc::types::EngineCommand::ListChannels;
                 sandstar_ipc::protocol::write_frame(&mut client, &cmd).unwrap();
             });
@@ -178,5 +227,6 @@ mod tests {
 
             handle.join().unwrap();
         }
+        cleanup_test(&target);
     }
 }
