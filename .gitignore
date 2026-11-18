@@ -33,6 +33,8 @@ server_stderr.log
 # Device/site credentials: these tools scripts embed plain-text passwords
 # (expect `send` after a password prompt). Never commit them. Scripts that
 # should be versioned must read credentials from tools/connections/ instead.
+# .claude/hooks/protect-secrets.js reads this block (up to the blank line):
+# Claude's file tools may not open these paths.
 /tools/connections/
 /tools/sandstar/legacy-c/
 /tools/sandstar/connection_helper.sh
@@ -42,6 +44,14 @@ server_stderr.log
 /tools/skyspark/local/diagnose_memory.sh
 /tools/skyspark/local/setup_swap_auto.sh
 /tools/skyspark/local/start_skyspark.sh
+/tools/skyspark/local/check_startup_time.sh
+/tools/skyspark/local/cleanup_logs.sh
+/tools/skyspark/local/download_logs.sh
+/tools/skyspark/local/optimize_aggressive.sh
+/tools/skyspark/local/optimize_cpu_for_ram.sh
+/tools/skyspark/local/optimize_startup.sh
+/tools/skyspark/local/setup_swap.sh
+/tools/skyspark/local/startup_check.expect
 /tools/skyspark/PERSISTENT_JOURNAL_SETUP.md
 /tools/xeto/checkXetoFiles.sh
 
