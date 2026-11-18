@@ -1,5 +1,21 @@
 # 05 - Zinc I/O & Encoding Migration
 
+> **Status (2026-11-18)**: audited against `master` `b48484b`. The plan below is kept as design rationale; this block records what the code does today. Doc-by-doc report: [PROGRESS_REPORT_2026_11_18.md](PROGRESS_REPORT_2026_11_18.md).
+>
+> **Verdict:** the libhaystack plan was not adopted. Zinc encoding, a `database.zinc` reader, a filter and Trio were written in-house. About 60% of the functional goal: the output side is complete, request-side Zinc decoding is absent.
+> - **Implemented:** Zinc 3.0 grid writer (`crates/sandstar-server/src/rest/zinc_grid.rs`); per-endpoint grid builders (`crates/sandstar-server/src/rest/zinc_format.rs`); `Accept: text/zinc` negotiation (`crates/sandstar-server/src/rest/handlers.rs:22-33`); `database.zinc` parser with typed accessors (`crates/sandstar-server/src/zinc.rs`); filter parse/eval (`crates/sandstar-server/src/rest/filter.rs`); Trio encode/decode (`crates/sandstar-server/src/rest/trio.rs`).
+> - **Done differently:** the parsers are eager and string-cell based, not streaming typed values. JSON output is plain serde JSON, not Haystack JSON.
+> - **Not done / open:** Zinc request bodies. All POST ops take JSON, yet `/api/formats` advertises `text/zinc` with `receive: true` (`crates/sandstar-server/src/rest/types.rs:117-121`, risk R-46). Also open: `\uXXXX` and general escape decoding (only `\"` and `\n` are handled); Ref/Date/Uri filter literals; Zinc round-trip tests.
+> - **Superseded by:** decision "Custom Zinc/filter over libhaystack" (2026-03-20) in [`../Progress/ROADMAP_v2.md`](../Progress/ROADMAP_v2.md). Its description of `zinc_format.rs` as "encoder + decoder" is wrong: it is encoder-only.
+>
+> **Known inaccuracies in the text below** (section: current fact):
+> - *Overview*, *Lines Eliminated*: libhaystack is not a dependency. The in-house code is ~3,200 lines (`zinc.rs` 384, `zinc_grid.rs` 277, `zinc_format.rs` 442, `filter.rs` 1574, `trio.rs` 522), not ~100.
+> - *Content Negotiation*: only `text/zinc` and plain JSON are offered.
+> - *Rust Replacement* (`load_zinc_file`): `ZincGrid` stores `Vec<Vec<String>>` and interprets cells at access time.
+> - *libhaystack Decoder Performance*: parsing is eager; escape handling is limited.
+> - *Filter Class Hierarchy Elimination*: a custom `Expr` (Has/Missing/Not/Cmp/And/Or) replaces it.
+> - *Exact API Mapping: Grid Reading*: no handler accepts a Zinc request body.
+
 ## Overview
 
 The current Sandstar system contains two independent Zinc implementations plus supporting infrastructure for parsing, serialization, and filter evaluation. This document maps every component to its Rust replacement via the `libhaystack` crate.

@@ -1,5 +1,15 @@
 # Sedona VM Architecture: Deep Analysis for Rust Conversion
 
+> **Status (2026-11-18)**: audited against `master` `b48484b`. This is a reference analysis of the C VM and stays valid as such; this block records how the port turned out. Doc-by-doc report: [PROGRESS_REPORT_2026_11_18.md](PROGRESS_REPORT_2026_11_18.md).
+>
+> **Verdict:** the port covers about 80% of the VM surface, but this doc's predictions about `unsafe` were wrong.
+> - **Implemented:** all 240 opcodes in an exhaustive `match` (`crates/sandstar-svm/src/opcodes.rs`, `vm_interpreter.rs`); scode header validation (`image_loader.rs`); Sedona NaN == NaN semantics.
+> - **Done differently:** a fixed 4-byte `i32` cell stack on every host instead of a pointer-sized union, plus a handle table on 64-bit hosts; call frames in a separate `Vec`; natives take `&[i32]`. The interpreter, stack and memory modules contain **no** `unsafe`; memory access is bounds-checked.
+> - **Not done / open:** natives receive an empty placeholder buffer instead of VM memory (`vm_interpreter.rs`, "placeholder"); method headers are not read on entry; serial and shaystack natives are stubs. Together these mean the VM cannot run real scode (R-11).
+> - **Superseded by:** doc 13 status block.
+>
+> **Known inaccuracies in the text below:** storage opcodes and natives do not need `unsafe` or raw `Cell` pointers; the VM does not follow the host pointer size; the loader uses a 32-byte header; the Rust native table has 137 slots (60 in `sys`), not ~78.
+
 ## Document Purpose
 
 This document provides a comprehensive analysis of the Sedona Virtual Machine as implemented in the Sandstar codebase. Unlike the previous 12 research documents (00–11), which assumed the Sedona VM would **stay as C** with FFI into Rust, this document analyzes what it would actually take to **rewrite the Sedona VM itself in Rust**.

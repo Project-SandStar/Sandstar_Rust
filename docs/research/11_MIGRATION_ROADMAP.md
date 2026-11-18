@@ -1,5 +1,23 @@
 # Sandstar Rust Migration -- Phased Roadmap
 
+> **Status (2026-11-18)**: audited against `master` `b48484b`. The roadmap below is kept as the original plan; this block records what happened. Doc-by-doc report: [PROGRESS_REPORT_2026_11_18.md](PROGRESS_REPORT_2026_11_18.md).
+>
+> **Verdict:** the end goal is reached (single Rust binary, no C), but by a very different route. About 60% of the deliverables happened as written; the rest were replaced (no libhaystack, no POSIX message queues, no C Sedona FFI).
+> - **Implemented:** 7-crate Cargo workspace; ARM cross-build and `.deb` packaging; CI (fmt, clippy, test, ARM build); engine core (`crates/sandstar-engine`); hardware drivers (`crates/sandstar-hal-linux`); single process with `EngineHandle`; axum REST (about, ops, formats, read, pointWrite, watch*, hisRead, nav); CORS; `database.zinc` load with diff-based reload (`crates/sandstar-server/src/loader.rs`, `reload.rs`); clap CLI (`crates/sandstar-cli`).
+> - **Done differently:** in-house Haystack types/Zinc/filter; bincode over a Unix socket instead of POSIX message queues; pure-Rust Sedona VM; SCRAM-SHA-256 + bearer token instead of SCRAM-SHA1/Basic; explicit reload (`POST /api/reload`, SIGHUP) instead of a file watcher; routes under `/api/*`.
+> - **Not done / open:** `/xeto`, `/root`, `/commit`, `/restart` ops; CLI tools watch, notify, watches, notifies, pwmscan; the 24-48 h soak test.
+> - **Superseded by:** [`../Progress/ROADMAP_v2.md`](../Progress/ROADMAP_v2.md) and [`../Progress/PURE_RUST_PLAN.md`](../Progress/PURE_RUST_PLAN.md).
+>
+> **Known inaccuracies in the text below** (section: current fact):
+> - *Tasks* (workspace): the repo root holds 7 crates under `crates/`; there is no `sandstar-haystack` or `sandstar-ffi` crate, and no libhaystack. The linker is a Zig wrapper, not `arm-linux-gnueabihf-gcc`.
+> - *Goal* (Phase 1 IPC): no POSIX message queue key is used anywhere.
+> - *Step 1a*: endpoints are `/api/about`, `/api/ops`, `/api/formats`. Host addresses in the examples were replaced with placeholders (2026-11-18).
+> - *Step 1f* (`/nav`, `/root`, `/xeto`): `/root` and `/xeto` do not exist; `reqwest` is dev-only.
+> - *Step 1h* (hot-reload): no file watcher.
+> - *Step 1i* (CORS and auth): SCRAM-SHA-256 + bearer, not SCRAM-SHA1/Basic.
+> - *Goal* (Sedona stays C): the VM is pure Rust.
+> - *Tools to Port*: the CLI has read, write, relinquish, writeLevels, convert, channels, tables, polls, status, poll, shutdown, reload, history, health, diagnostics, convertSax.
+
 ## Document Purpose
 
 This document is the authoritative implementation plan for migrating Sandstar from C/C++ to Rust. It covers the complete migration path from a multi-process C/C++ system to a unified Rust binary, organized into independently deployable phases.
@@ -128,9 +146,9 @@ These three endpoints are self-contained and validate that Axum + libhaystack wo
 
 **Testing:**
 ```bash
-curl -s http://172.28.211.135:8085/about
-curl -s http://172.28.211.135:8085/ops
-curl -s http://172.28.211.135:8085/formats
+curl -s http://<device-ip>:8085/about
+curl -s http://<device-ip>:8085/ops
+curl -s http://<device-ip>:8085/formats
 ```
 Compare output to C++ server byte-for-byte.
 

@@ -1,5 +1,24 @@
 # 10 - Build System & Cross-Compilation Migration
 
+> **Status (2026-11-18)**: audited against `master` `b48484b`. The plan below is kept as design rationale; this block records what the build does today. Doc-by-doc report: [PROGRESS_REPORT_2026_11_18.md](PROGRESS_REPORT_2026_11_18.md).
+>
+> **Verdict:** a Cargo-based ARM cross-build with cargo-deb packaging exists, but it uses Zig instead of GCC or `cross`, has no C/FFI step, and has a different CI. About 55% implemented.
+> - **Implemented:** target `armv7-unknown-linux-gnueabihf` with `-static-libgcc` (`.cargo/config.toml`); size-optimised release profile with `panic = "abort"`; aliases `arm-build`, `arm-build-svm`, `arm-check`, `arm-deb`, `lint`, `sim-run`; cargo-deb metadata (`crates/sandstar-server/Cargo.toml` `[package.metadata.deb]`); `tools/build-rust.sh`; `Cross.toml`; CI with fmt, clippy `-D warnings` and tests (`.github/workflows/ci.yml`).
+> - **Done differently:** the linker is a machine-local Zig wrapper targeting glibc 2.24. Local builds also need `CC`/`AR` from the machine-local `arm-env` script (see `CLAUDE.md`). CI uses `cargo zigbuild`, not `cross`. The toolchain is pinned to 1.99.1 (`rust-toolchain.toml`, CI) with MSRV 1.82. Quality gates: `bash tools/gates.sh`.
+> - **Not done / open:** QEMU runner; `arm-debug`/`arm-test` aliases; `clippy.toml`; `+neon`. CI does not build the `svm` feature or a `.deb`.
+> - **Not needed:** `cc`/FFI linking of a C Sedona VM; the SVM is pure Rust.
+>
+> **Known inaccuracies in the text below** (section: current fact):
+> - *5. Linking Sedona VM (C) into Rust*: obsolete; `crates/sandstar-svm/build.rs` compiles no C. The server `build.rs` only embeds build time and git hash.
+> - *Configure Linker*, *4. `.cargo/config.toml` Configuration*: no `arm-linux-gnueabihf-gcc`, runner, `jobs` or `+neon`. Aliases and the `lint` definition (`clippy --all-targets -- -W clippy::all`) differ.
+> - *Rust Approach*: the device runs Debian 9 with glibc 2.24, not >= 2.28.
+> - *Configuration in `Cargo.toml`* (deb): assets are `sandstar-engine-server` + `sandstar-cli`, `sandstar-engine.service`, `sandstar-rust-validate.service`, cutover/rollback scripts, lookup tables; `initialize.sh` and the unit files are conf-files; there is a `linux-hal` variant.
+> - *GitHub Actions CI*: the real CI is `ci.yml` on branch `master` with toolchain 1.99.1: fmt + clippy + test, then a zigbuild ARM build (`linux-hal`, no `svm`) on push only, without `.deb` or artifacts.
+> - *Release Profile Optimization*: `opt-level = "s"`, `lto = "thin"`.
+> - *Build*: the binary is `sandstar-engine-server`, not `sandstar`.
+> - *Comparison: Docker vs Native Toolchain*: releases are built locally with `cargo arm-build-svm && cargo arm-deb --no-strip`.
+> - *`clippy.toml` Configuration*: the file does not exist.
+
 ## Overview
 
 This document covers the complete migration of the Sandstar build system from CMake + Docker + GCC cross-compilation to Cargo + Rust cross-compilation. It addresses every aspect of the current build pipeline and shows the Rust equivalent.
@@ -891,7 +910,7 @@ cargo build
 # New:
 cargo clippy 2>&1 | grep "^error"
 
-# Old: /home/parallels/code/ssCompile/tools/installSandstar.sh BahaHost2Device
+# Old: <dev-workspace>/ssCompile/tools/installSandstar.sh <connection-name>
 # New: (same script, just different .deb file)
-/home/parallels/code/ssCompile/tools/installSandstar.sh BahaHost2Device
+<dev-workspace>/ssCompile/tools/installSandstar.sh <connection-name>
 ```

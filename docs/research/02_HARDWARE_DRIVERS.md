@@ -1,5 +1,20 @@
 # 02: Hardware Drivers -- C to Rust Migration
 
+> **Status (2026-11-18)**: audited against `master` `b48484b`. The driver analysis below is kept as design rationale; this block records what the code does today. Doc-by-doc report: [PROGRESS_REPORT_2026_11_18.md](PROGRESS_REPORT_2026_11_18.md).
+>
+> **Verdict:** all five drivers exist in `crates/sandstar-hal-linux`, but none of the recommended crates or async designs was adopted. About 80% of the functionality, about 20% of the design as written.
+> - **Implemented:** ADC via sysfs (`adc.rs`); cached sysfs FD helpers (`sysfs.rs`); GPIO cached read/write (`gpio.rs`); PWM cached duty write and pinmux (`pwm.rs`); SDP510/SDP810 with label/address detection and Sensirion CRC-8 (`i2c.rs`, `crc.rs`); per-bus lock; UART termios 9600 8N1 (`uart.rs`); tempfile-based sysfs mock tests.
+> - **Done differently:** GPIO uses sysfs, not gpio-cdev. I2C and UART use raw `libc` ioctl/read/write, not i2cdev/serialport. The I2C thread pool was replaced by engine-level coalescing plus a `spawn_blocking` poll. The UART device prefix is `/dev/ttyO`.
+> - **Not done / open:** async I2C worker; async UART (epoll); GPIO edge detection and active_low; a per-transaction I2C timeout (reads are plain blocking `libc::read`); PWM chip resolution (chips are exported by `etc/initialize.sh`).
+> - **Superseded by:** decision "sysfs GPIO, sync I/O" in [`../Progress/ROADMAP_v2.md`](../Progress/ROADMAP_v2.md).
+>
+> **Known inaccuracies in the text below** (section: current fact):
+> - *9.1 Crate Dependency Table*: none of gpio-cdev, i2cdev, serialport, tokio-serial is a dependency. `sandstar-hal-linux` depends on `nix` and `libc` only.
+> - *2.2 Rust Equivalent (gpio-cdev)*: GPIO still uses `/sys/class/gpio`.
+> - *4.1 / 4.2 (I2C worker, tokio tasks)*: there is no `i2c_worker.rs` and no tokio in the HAL. I/O is synchronous with `thread::sleep` retries and no read timeout, so a stuck bus blocks the poll thread.
+> - *6.2 / 7.2 (serialport, tokio-serial)*: the code uses raw termios on `/dev/ttyO{N}` with `O_NONBLOCK`, `VMIN=0`, `VTIME=1`. Async UART was not ported.
+> - *Overview*: `hal-linux/src` is ~3,555 lines including tests; the server runtime is `current_thread`.
+
 ## Overview
 
 The Sandstar engine communicates with BeagleBone hardware through eight C source files that interface with Linux sysfs, ioctl, and device nodes. This document provides a function-by-function analysis of each driver, maps every C construct to its Rust equivalent, identifies the exact Rust crates to use, and catalogs the memory safety issues that Rust eliminates.

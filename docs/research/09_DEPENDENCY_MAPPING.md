@@ -1,5 +1,19 @@
 # 09 - Complete Dependency Mapping: C/C++ to Rust
 
+> **Status (2026-11-18)**: audited against `master` `b48484b`. The mapping below is kept as design rationale; this block records what the code does today. Doc-by-doc report: [PROGRESS_REPORT_2026_11_18.md](PROGRESS_REPORT_2026_11_18.md).
+>
+> **Verdict:** the mapping's goals were met, but about half of the proposed crates were not adopted and many unlisted ones were added. About 40% of the §5 Cargo.toml matches reality.
+> - **Adopted as mapped:** tokio, axum, tower-http, serde/serde_json, tracing + tracing-subscriber, clap, fs2, nix + libc (`sandstar-hal-linux`), hmac/sha2/pbkdf2/base64, quick-xml, rand, chrono (svm). Versions: `Cargo.toml` `[workspace.dependencies]` and the crate manifests.
+> - **Done differently:** own Zinc parser/writer and filter instead of libhaystack; hand-split CSV instead of `csv`; sysfs/ioctl HAL instead of embedded-hal; thiserror 2; SIGHUP / `POST /api/reload` instead of `notify`.
+> - **Not adopted:** libhaystack, csv, notify, url, uuid, itertools, anyhow, hyper (direct), tracing-journald, embedded-hal, linux-embedded-hal, `cc`. `reqwest` is a dev-dependency only.
+> - **Added (not in this doc):** bincode, rmp-serde, toml, tracing-appender, async-trait, tokio-tungstenite, axum-server, rustls/rustls-pemfile/webpki-roots, rumqttc, mdns-sd, sha1, futures-util, bitflags, smallvec.
+>
+> **Known inaccuracies in the text below** (section: current fact):
+> - *5. Complete Cargo.toml*: the project is a 7-crate workspace at version 2.9.0, not one `sandstar` crate at 0.1.0. tokio features are rt, net, time, sync, signal, macros, io-util on a `current_thread` runtime. The release profile is `opt-level = "s"`, `lto = "thin"`, `panic = "abort"`, set in `.cargo/config.toml`. There is no `cc` build-dependency: the SVM is pure Rust.
+> - *Crate Count*: the dependency set differs (see above).
+> - *2.2 HTTP Client (reqwest)*: outbound connections use tokio-tungstenite (roxWarp peers); `url` is not used.
+> - *1.2 IPC (mpsc)*: partly right. The SVM bridge uses RwLock + Mutex queues; the CLI uses a Unix socket with bincode.
+
 ## Overview
 
 This document provides a complete mapping of every C and C++ dependency in the Sandstar codebase to its Rust equivalent. Each entry includes the current usage location, the Rust replacement, and migration notes.

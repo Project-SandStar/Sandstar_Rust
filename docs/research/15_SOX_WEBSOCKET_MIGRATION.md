@@ -1,5 +1,21 @@
 # 15. ROX Protocol: Trio-over-WebSocket & Northbound Clustering
 
+> **Status (2026-11-18)**: audited against `master` `b48484b`. The design below is kept as rationale; this block records what the code does today. Doc-by-doc report: [PROGRESS_REPORT_2026_11_18.md](PROGRESS_REPORT_2026_11_18.md).
+>
+> **Verdict:** ROX as designed (Trio-over-WebSocket on :7070) was never built. Client WebSockets are JSON endpoints on the REST port; SCRAM-SHA-256 and the roxWarp foundation exist. About 40% implemented.
+> - **Implemented:** SCRAM-SHA-256 for HTTP and WebSocket (`crates/sandstar-server/src/auth.rs`); roxWarp listener on :7443 with optional mTLS (`crates/sandstar-server/src/main.rs`, `roxwarp/mtls.rs`); cluster filter query; reconnect with exponential backoff; peer timeout; opt-in mDNS discovery; Trio text encoder for REST content negotiation.
+> - **Done differently:** client WebSockets run on :8085: `/api/ws` (JSON), `/api/rows` ("RoWS", JSON) and `/live` (native Rust form of the bassgSoxWebSocket Fantom dialect). SOX/DASP is ported to Rust, off by default (`--sox`). Cluster config is JSON via `--cluster-config`, not `cluster.toml`. REST HTTPS is behind the `tls` feature, which the `arm-build-svm` alias does not enable.
+> - **Not done / open:** ROX server on :7070 and Trio message dispatch; TLS on client WebSockets in the deployed build; rcgen certificate generation and rotation; SCRAM-PLUS; per-channel replication filter; Java `SoxClient` ROX support; Fantom pods. Auth gaps: `/api/rows`, `/live`, `/roxwarp` and `POST /api/cluster/query` are outside `check_auth` (R-2).
+> - **Superseded by:** [`../Progress/ROADMAP_v2.md`](../Progress/ROADMAP_v2.md) (Phases 8.0, 9.0, 14.0) and [`../Progress/NOTES_EDITOR_ROWS_SPIKE.md`](../Progress/NOTES_EDITOR_ROWS_SPIKE.md).
+>
+> **Known inaccuracies in the text below** (section: current fact):
+> - *Overview*, *4.2 Architecture*: there is no :7070 listener. The VM is pure Rust, not "C FFI". `scram-rs`, `rcgen`, `dashmap` and `tokio-rustls` are not dependencies; SCRAM is hand-written with sha2/hmac/pbkdf2.
+> - *5.2 SCRAM Handshake Over WebSocket*: the real flow is JSON `{"op":"hello"}` → `challenge` → `authenticate` → `authOk`.
+> - *roxWarp Message Types*: on the wire they are `warp:*`; the heartbeat carries only `nodeId` and `ts`.
+> - *8.4 Key Storage on Device*: cluster config is JSON (heartbeat, anti-entropy and feed intervals, cert/key/ca paths, `enable_mdns`); all enabled channels are fed, with no filter.
+> - *4.3 Protocol Comparison*: roxWarp TLS is optional and falls back to plain WS; `/roxwarp` is also mounted without TLS on :8085; TLS 1.2 is enabled.
+> - *Appendix A*: no certificate renewal, CRL or OCSP; `mtls.rs` only loads PEM files.
+
 ## Overview
 
 This document analyzes the current SOX/DASP/UDP communication stack in the Sedona Framework, documents its limitations, and presents the **ROX** (Rust Object eXchange) protocol — a modern WebSocket-based replacement using **Trio encoding** for human-readable messages and SCRAM-SHA-256 authentication. SOX is retained for backward compatibility; ROX operates alongside it on a separate port.
@@ -252,7 +268,7 @@ digest = SHA1(serverNonce + ":" + SHA1(username + ":" + password))
 
 ### 3.1 Architecture
 
-The `bassgSoxWebSocket` Fantom pod (in `/home/parallels/code/bassgSoxWebSocket/`) provides a bridge between WebSocket clients and SOX/DASP/UDP devices:
+The `bassgSoxWebSocket` Fantom pod (in `<dev-workspace>/bassgSoxWebSocket/`) provides a bridge between WebSocket clients and SOX/DASP/UDP devices:
 
 ```
 [Browser/Vue App]

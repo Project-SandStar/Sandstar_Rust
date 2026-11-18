@@ -1,5 +1,15 @@
 # Driver Framework v2: Pure Rust Haxall-Inspired Architecture
 
+> **Status (2026-11-18)**: audited against `master` `b48484b`. The design below is kept as rationale; this block records what shipped. Doc-by-doc report: [PROGRESS_REPORT_2026_11_18.md](PROGRESS_REPORT_2026_11_18.md).
+>
+> **Verdict:** about 60%. The core framework shipped in Phase 12; hardware I/O, the VM bridge and the REST surface took different routes.
+> - **Implemented:** `AsyncDriver` trait (open/close/ping/learn/sync_cur/write/on_watch/on_unwatch/on_receive; `crates/sandstar-server/src/drivers/async_driver.rs`); `PollMode` including `Manual`; driver/point status and error types; driver actor, `PollScheduler`, `DriverWatchManager` (`drivers/actor.rs`); BACnet/IP, MQTT and Modbus TCP drivers; lifecycle REST under `/api/drivers*` (see [`../Progress/DRIVER_REST_API.md`](../Progress/DRIVER_REST_API.md)).
+> - **Done differently:** `LocalIoDriver` is a façade over `EngineHandle`; it does not replace the engine. Hardware goes through `sandstar-hal-linux` (sysfs via `libc`), not gpio-cdev/i2cdev/industrial-io. The VM reaches I/O through the bridge snapshot and write queue, not `DriverManager`. The priority array lives in the engine. Status/error enums have different shapes. No libhaystack.
+> - **Not done / open:** `/api/points*`, `/api/watches*`, `/api/write`, `learn/*path`; `on_poll_manual`. Modbus is not loadable in production (only `bacnet` and `mqtt` are wired, `drivers/mod.rs`). Modbus RTU and BACnet MS/TP. BACnet COV subscriptions never start in production because `add_watch` has no non-test caller (R-25).
+> - **Superseded by:** [`../Progress/IMPLEMENTATION_PLAN_DRIVER_FRAMEWORK.md`](../Progress/IMPLEMENTATION_PLAN_DRIVER_FRAMEWORK.md).
+>
+> **Known inaccuracies in the text below:** the "C/C++ (Current)" column no longer describes the system, which is all Rust. Native methods do not call `DriverManager` via `block_on`; `sandstar-svm` does not depend on the server crate.
+
 ## Overview
 
 This document proposes **Driver Framework v2**, a pure Rust driver architecture that incorporates the best methodologies from Haxall's connector framework. This replaces all C/C++ components with native Rust implementations while **preserving full compatibility with existing Sedona applications**.

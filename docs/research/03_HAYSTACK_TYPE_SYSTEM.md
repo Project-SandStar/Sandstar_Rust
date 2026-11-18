@@ -1,5 +1,21 @@
 # 03: Haystack Type System -- C++ to libhaystack (Rust) Migration
 
+> **Status (2026-11-18)**: audited against `master` `b48484b`. The proposal below is kept as design rationale; this block records what the code does today. Doc-by-doc report: [PROGRESS_REPORT_2026_11_18.md](PROGRESS_REPORT_2026_11_18.md).
+>
+> **Verdict:** the core proposal (adopt libhaystack 2.0 for the full Haystack 4 type system) was **not** implemented. A minimal in-house subset covers the REST/SOX needs: about 0% of the proposal as written, about 30% of its functional goal.
+> - **Implemented via libhaystack:** none.
+> - **Done differently:** tag values are `DynValue` {Null, Marker, Bool, Int, Float, Str, Ref} (`crates/sandstar-server/src/sox/dyn_slots.rs`). Zinc output values are `ZincValue` {Marker, Null, Str, Num+unit, Bool, DateTime} (`crates/sandstar-server/src/rest/zinc_grid.rs`). The filter is a custom AST (`crates/sandstar-server/src/rest/filter.rs`). Trio uses `serde_json::Value` (`crates/sandstar-server/src/rest/trio.rs`).
+> - **Not done / open:** Date, Time, Coord, Uri, Bin, XStr, List, Dict, Grid and NA kinds; unit database and validation; Haystack JSON encoding; Haystack 4 Symbol/Remove; Xeto.
+> - **Superseded by:** decision "Custom Zinc/filter over libhaystack" (2026-03-20) in [`../Progress/ROADMAP_v2.md`](../Progress/ROADMAP_v2.md). Its line "all required types shipped, Zinc/Trio round-trip tests" overstates this: only Trio has round-trip tests.
+>
+> **Known inaccuracies in the text below** (section: current fact):
+> - *Overview*: no crate depends on libhaystack.
+> - *6. JSON Encoding*: JSON responses are plain serde of Rust structs; there is no `application/vnd.haystack+json`.
+> - *Units (libhaystack::units)*: units are plain strings.
+> - *Filter (libhaystack::haystack::filter)*: a custom parser supports Num/Str/Bool literals only (no Ref/Date/Uri), with depth limit 32 and a `Not` operator.
+> - *8. Complete Type Mapping Summary*: none of the `haystack::val::*` types exist.
+> - *10. Migration Checklist*: "filter-based read" and a JSON response exist in custom form; read them as "done differently", not open.
+
 ## Overview
 
 Sandstar's C++ codebase contains a full custom implementation of the Project Haystack type system: 30+ files totaling ~6,000 lines of value types, plus ~1,500 lines of Zinc I/O (reader, writer, tokenizer). Every one of these lines is replaced by a single dependency:

@@ -1,5 +1,14 @@
 # 17. Sedona Component Name Length: Analysis & Optimization Strategy
 
+> **Status (2026-11-18)**: audited against `master` `b48484b`. The analysis below is kept as rationale; this block records what was built. Doc-by-doc report: [PROGRESS_REPORT_2026_11_18.md](PROGRESS_REPORT_2026_11_18.md).
+>
+> **Verdict:** about 50%. A name intern table exists in the SOX layer as a lookup optimisation, but the 31-character limit was kept.
+> - **Implemented:** `NameInternTable` with 2-byte `NameId` (`crates/sandstar-server/src/sox/name_intern.rs`), used on add and rename; shared Sedona name validation called from REST and SOX.
+> - **Done differently:** components still store `name: String`; interning sits beside it. Maximum length stays 31.
+> - **Not done / open:** unlimited names; `.sab` loading with longer names; roxWarp `beam:nameTable`; mapping names to Haystack `navName`/`dis`. The intern table never frees entries and asserts at 65,535 names, so a long series of distinct renames would abort the process (R-47).
+>
+> **Known inaccuracies in the text below:** the recommended "unlimited" length was not adopted; the claim that interning uses less memory than the original 8-byte limit contradicts this doc's own table. Absolute developer paths in examples were replaced with repo-relative ones (2026-11-18).
+
 ## Overview
 
 This document analyzes the Sedona Framework's component name length constraint (originally 7 characters, patched to 31 characters in Sandstar) and proposes a better solution for the Rust migration that balances usability with embedded memory constraints.
@@ -48,13 +57,13 @@ public static String checkName(String name)
 
 The Sandstar codebase has already applied the patch to extend names to 31 characters:
 
-**Source: `/home/parallels/code/ssCompile/shaystack/sandstar/sandstar/EacIo/src/sys/Component.sedona:511`**
+**Source: `shaystack/sandstar/sandstar/EacIo/src/sys/Component.sedona:511`**
 ```sedona
 define int nameLen = 32
 inline Str(nameLen) name
 ```
 
-**Source: `/home/parallels/code/ssCompile/shaystack/sandstar/sandstar/EacIo/src/sedona/src/sedona/Component.java:293-295`**
+**Source: `shaystack/sandstar/sandstar/EacIo/src/sedona/src/sedona/Component.java:293-295`**
 ```java
 public static String checkName(String name)
 {
@@ -620,5 +629,5 @@ For a 500-component application:
 - [Sedona Components Documentation](https://www.sedona-alliance.org/archive/doc/components.html)
 - [Sedona Memory Documentation](https://www.sedona-alliance.org/archive/doc/memory.html)
 - [Sedona Alliance Forums](https://groups.google.com/g/sedonaalliance) (historical discussions)
-- Sandstar Component.sedona: `/home/parallels/code/ssCompile/shaystack/sandstar/sandstar/EacIo/src/sys/Component.sedona`
-- Sandstar Component.java: `/home/parallels/code/ssCompile/shaystack/sandstar/sandstar/EacIo/src/sedona/src/sedona/Component.java`
+- Sandstar Component.sedona: `shaystack/sandstar/sandstar/EacIo/src/sys/Component.sedona`
+- Sandstar Component.java: `shaystack/sandstar/sandstar/EacIo/src/sedona/src/sedona/Component.java`

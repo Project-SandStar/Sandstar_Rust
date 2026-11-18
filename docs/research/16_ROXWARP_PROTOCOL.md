@@ -1,5 +1,23 @@
 # 16. roxWarp: Binary Trio Diff Gossip Protocol
 
+> **Status (2026-11-18)**: audited against `master` `b48484b`. The protocol design below is kept as rationale; this block records what is on the wire today. Doc-by-doc report: [PROGRESS_REPORT_2026_11_18.md](PROGRESS_REPORT_2026_11_18.md).
+>
+> **Verdict:** the gossip skeleton runs (hello/welcome, delta, versions, deltaReq, full/fullReq, ack, query, heartbeat), but the designed binary-Trio wire format, string table, join/leave messages and the Fantom pod are not on the wire or in the repo. About 45% implemented.
+> - **Implemented:** `/roxwarp` WebSocket with MessagePack binary frames and a `?debug=trio` text mode (`crates/sandstar-server/src/roxwarp/handler.rs`, `peer.rs`); version-vector delta, anti-entropy and deltaReq; last-writer-wins by timestamp; backoff reconnect; distributed query; optional mTLS; cluster timer validation, 1..=86400 s (R-39).
+> - **Done differently:** the wire carries `rmp_serde::to_vec` of a private `handler::WarpMessage`. Points are `{channel: u32, value: f64, unit, status, version, timestamp}` (`crates/sandstar-server/src/roxwarp/cluster.rs`), not typed Haystack values. Debug mode sends JSON text, not Trio. Deltas are pushed on each heartbeat tick (5 s by default), not immediately.
+> - **Not done / open:** typed ext-code binary Trio and the string table (`binary_trio.rs`, `string_table.rs` and `protocol.rs` exist but are unused on the wire, R-27); `warp:join`/`warp:leave`; capabilities and load metrics; `roxwarp.v1` subprotocol; node-id tie-break; the Fantom `bassgRoxWarp` pod; certificate-bound node identity. The feed does not check `is_finite` before replicating a value (R-45).
+> - **Superseded by:** [`../Progress/ROADMAP_v2.md`](../Progress/ROADMAP_v2.md) Phase 9.0. Its "9.0a binary Trio COMPLETE" overstates what goes over the wire.
+>
+> **Known inaccuracies in the text below** (section: current fact):
+> - *Protocol Naming*, *5.1 WebSocket Frame Types*: TLS is optional (fails open) and `/roxwarp` is also served in plain text on :8085. There is no subprotocol and no `warp:leave`; debug frames are JSON.
+> - *2.1 Overview* (type codes, "MessagePack map with a `type` key"): no ext codes on the wire. `rmp_serde::to_vec` encodes structs as positional arrays, which matters for any non-Rust peer (crate behaviour; not verified on the wire).
+> - *3.2 Versioned Point State*: `channel` is `u32`, `value` is `f64`; fields are `unit`, `status`, `version`, `timestamp`.
+> - *2.5 String Table Optimization*: not negotiated; the wire `Hello` has only `nodeId` and `versions`.
+> - *4.2 Message Types*: no load metrics, join/leave or capabilities on the wire.
+> - *4.4 Anti-Entropy*: deltas go out on the heartbeat timer, not immediately.
+> - *4.5 Conflict Resolution*: strict `>` on timestamp with no node-id tie-break; points are keyed by channel number only, so a remote point overwrites a local one with the same number (R-27).
+> - *7. Fantom Pod: bassgRoxWarp*: specified here, not present in the repo.
+
 ## Overview
 
 **roxWarp** is a gossip-based state synchronization protocol for Sandstar device clusters. It transmits **binary-encoded Trio diffs** over mTLS WebSocket connections, enabling efficient change-of-value (COV) replication across a mesh of embedded IoT devices.

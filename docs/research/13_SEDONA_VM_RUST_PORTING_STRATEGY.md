@@ -1,5 +1,15 @@
 # Sedona VM Rust Porting Strategy
 
+> **Status (2026-11-18)**: audited against `master` `b48484b`. The strategy below is kept as design history; this block records what happened. Doc-by-doc report: [PROGRESS_REPORT_2026_11_18.md](PROGRESS_REPORT_2026_11_18.md).
+>
+> **Verdict:** carried out in a different, safer form (about 60%). Phases 1-7 exist in code, but the VM cannot run real scode, and fuzzing, benchmarking and C-vs-Rust comparison were not done.
+> - **Implemented:** `match` dispatch; scode loader and validator; stack-overflow, frame-depth and instruction-count limits; `AtomicBool` running flag; inet natives on `std::net`; datetime on `chrono`.
+> - **Done differently:** safe `Vec<i32>` cells instead of a `repr(C)` union; allocation via `alloc_zeroed` and a handle table (on 32-bit targets `free` is a no-op). Dependencies are only `chrono` and `smallvec`. Doc 06's FFI step (Priority 2) was skipped and the full rewrite (Priority 3) was done.
+> - **Not done / open:** fuzzing, criterion benchmarks, C-vs-Rust comparison; serial natives (stubs) and 28 shaystack stubs; natives get no VM memory (R-11); real-scode integration tests skip when the scode file is missing. The field service does not start the VM (no `--sedona` in `etc/sandstar-engine.service`); control logic runs on the SOX component dataflow (`crates/sandstar-server/src/sox/`).
+> - **Superseded by:** open decision on the VM's future (fix, mark experimental, or remove).
+>
+> **Known inaccuracies in the text below:** the interpreter core has no `unsafe` (not "~80%"); out-of-bounds block access returns an error, not a segfault.
+
 ## Document Purpose
 
 This is the companion document to [12_SEDONA_VM_ARCHITECTURE_ANALYSIS.md](12_SEDONA_VM_ARCHITECTURE_ANALYSIS.md). While document 12 analyzes the existing C implementation, this document provides a detailed, actionable strategy for converting the Sedona VM to Rust.

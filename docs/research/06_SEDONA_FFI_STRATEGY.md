@@ -1,5 +1,15 @@
 # 06: Sedona VM FFI Strategy — C-to-Rust Foreign Function Interface
 
+> **Status (2026-11-18)**: audited against `master` `b48484b`. The strategy below is kept as design history; this block records what the code does today. Doc-by-doc report: [PROGRESS_REPORT_2026_11_18.md](PROGRESS_REPORT_2026_11_18.md).
+>
+> **Verdict:** superseded. The FFI plan was never carried out (about 0%): the C VM was replaced by a pure-Rust VM instead.
+> - **Implemented:** none of the FFI items (no cbindgen, staticlib, CMake link, `#[no_mangle]` exports, libhaystack).
+> - **Done differently:** the whole Sedona VM is Rust (`crates/sandstar-svm/build.rs` compiles nothing). Natives use a Rust signature `fn(&mut NativeContext, &[i32]) -> VmResult<i32>` (`crates/sandstar-svm/src/native_table.rs`). The SVM runs synchronously in the server main loop. SCRAM-SHA-256 exists only on the server side, not as a Haystack client.
+> - **Not done / open:** the shaystack kit (100) has 28 slots, all stubs; there is no Rust Haystack client. Unused FFI-era type aliases remain in `crates/sandstar-svm/src/types.rs`, whose comments still point at a deleted `csrc/sedona.h`.
+> - **Superseded by:** docs 12/13 (pure-Rust VM). Whether the VM stays, is fixed, or is removed is an open decision; it does not run in production (see doc 13 status).
+>
+> **Known inaccuracies in the text below:** "It will **not** be rewritten. The VM stays as C" is wrong. The `vm.c`/`sedona.h` line counts conflict with doc 12 (they look like byte counts; the C sources are no longer in this repo).
+
 ## Overview
 
 The Sedona VM is a ~100K line C bytecode interpreter (`vm.c`: 49,670 lines, `scode.h`: 28,575 lines, `sedona.h`: 12,179 lines). It will **not** be rewritten. The VM stays as C and calls into Rust through a C-compatible FFI boundary.

@@ -1,5 +1,21 @@
 # Sandstar Rust Migration: Executive Summary
 
+> **Status (2026-11-18)**: audited against `master` `b48484b` (field device runs `2.9.0+3b8e97c`). The text below is kept as the original v1.0.0 snapshot (2026-03-05); this block records what the code does today. Doc-by-doc report: [PROGRESS_REPORT_2026_11_18.md](PROGRESS_REPORT_2026_11_18.md).
+>
+> **Verdict:** the architecture shipped and Rust runs in production, but most metrics, the Sedona/FFI description, the deferred-phase list and the security claims are outdated. About 70% still holds as a description.
+> - **Implemented:** `Engine<H>` core (`crates/sandstar-engine/src/engine.rs:99`); bincode IPC with length-prefixed frames (`crates/sandstar-ipc/src/protocol.rs`, `crates/sandstar-server/src/ipc.rs`); filter depth limit 32 (`crates/sandstar-server/src/rest/filter.rs:115`); watch cap 64 (`crates/sandstar-server/src/cmd_handler.rs:30`); default bind 127.0.0.1 (`crates/sandstar-server/src/args.rs:57`); I2C coalescing (`crates/sandstar-engine/src/engine.rs:698-708`); SCRAM-SHA-256 (`crates/sandstar-server/src/auth.rs`); feature-gated TLS (`crates/sandstar-server/src/tls.rs`); rate limiter (`crates/sandstar-server/src/rest/mod.rs:637`); `.sax` converter.
+> - **Done differently:** the Sedona VM is pure Rust; no C is compiled (`crates/sandstar-svm/build.rs`, `crates/sandstar-svm/src/lib.rs`). Haystack types, Zinc and filter are in-house, not libhaystack. The runtime is `current_thread`, not M:N (`crates/sandstar-server/src/main.rs:90`).
+> - **Shipped since this snapshot:** SOX/DASP (8.0B, `crates/sandstar-server/src/sox/`), roxWarp clustering (9.0, `crates/sandstar-server/src/roxwarp/`), the native editor backend (14.0G). The field service runs with `--sox --cluster` (`etc/sandstar-engine.service`).
+> - **Not done / open:** 24-48 h soak test. The field service binds 0.0.0.0 without auth, and several write routes sit outside the auth layer (risks R-1, R-2). The VM cannot yet run real scode (R-11).
+> - **Superseded by:** [`../Progress/ROADMAP_v2.md`](../Progress/ROADMAP_v2.md), [`../Progress/OVERVIEW.md`](../Progress/OVERVIEW.md).
+>
+> **Known inaccuracies in the text below** (section: current fact):
+> - *Migration Status: Complete*: version is 2.9.0 (`Cargo.toml`), not 1.0.0. Metrics today: 2748 tests (Windows) / 2764 (Linux CI), 16 CLI subcommands, 14 IPC command variants, 30+ REST routes. "Security issues open: 0" is wrong: R-1, R-2 and R-13 (SIGTERM not handled) are open.
+> - *System Overview*, *What Rust Delivered*: "Sedona VM retained as C via FFI" and "replaced by libhaystack" are wrong (see above). Control logic is ~4,300 lines (`control.rs`, `pid.rs`, `sequencer.rs`, `components.rs`), not ~400.
+> - *ROX Split*, *Decision Log*: 8.0B and 9.0 are no longer deferred or blocked. `rustls`/`axum-server` are non-optional dependencies even though TLS code is feature-gated.
+> - *Binary Size and Performance*: the runtime is `current_thread`; the poll runs in `spawn_blocking` (`crates/sandstar-server/src/main.rs:695`).
+> - *Blocker*: the cutover is done; the device runs the Rust build. Host addresses were removed from this section (2026-11-18).
+
 ## Document Index
 
 | # | Document | Description |
@@ -286,7 +302,7 @@ cargo-zigbuild (ARM cross-compile on Windows/Linux)
 
 ### Blocker
 
-Hardware soak testing (Phase 5.8) and production cutover (Phase 5.9) are blocked by BeagleBone network access. The device at 172.28.211.135 is reachable only via jump host (172.28.109.221) from a Linux VM, not from the Windows development machine.
+Hardware soak testing (Phase 5.8) and production cutover (Phase 5.9) are blocked by BeagleBone network access. The device at <device-ip> is reachable only via jump host (<jump-host>) from a Linux VM, not from the Windows development machine.
 
 **Minimum time to production once network is available:** 48-hour soak test + 1-2 hour cutover.
 

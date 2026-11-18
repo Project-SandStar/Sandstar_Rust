@@ -1,5 +1,21 @@
 # 01: Engine Core Analysis — C to Rust Mapping
 
+> **Status (2026-11-18)**: audited against `master` `b48484b`. The C-to-Rust analysis below is kept as design rationale; this block records what the code does today. Doc-by-doc report: [PROGRESS_REPORT_2026_11_18.md](PROGRESS_REPORT_2026_11_18.md).
+>
+> **Verdict:** the engine-core mapping is implemented, often with different structures than proposed. About 90% of the intent is met.
+> - **Implemented:** `EngineStatus` (`crates/sandstar-engine/src/lib.rs:26`); `ValueConv` with `Option` fields and a `ConversionFn` enum (`crates/sandstar-engine/src/value.rs`); `FlowConfig`; `ChannelType`/`ChannelDirection` (`crates/sandstar-engine/src/channel.rs:20-45`); `ChannelStore` and `PollStore` as HashMaps; table lookup with interpolation (`crates/sandstar-engine/src/table.rs`); three-path convert; signal handling via tokio, no fork.
+> - **Done differently:** `EngineValue` uses `ValueFlags` bitflags and `trigger: bool`. `Channel` has flat fields plus a priority array and tags. The engine is synchronous and owned by the server main loop; other tasks reach it through `EngineHandle` (mpsc + oneshot). Watch and notify stores are `Vec`, not HashMap/HashSet. Config uses an in-house Zinc/CSV loader (`crates/sandstar-server/src/zinc.rs`, `crates/sandstar-server/src/loader.rs`).
+> - **Not done / open:** `is_finite` guards on all outputs (R-9); unvalidated `clamp` bounds (R-10).
+> - **Superseded by:** internal data-model notes; no later public doc.
+>
+> **Known inaccuracies in the text below** (section: current fact):
+> - *Rust Equivalent* (config loading): no libhaystack, no `csv` crate. Parsing is in-house (`zinc.rs`, `loader.rs`).
+> - *Rust Equivalent* (conversion): `f64::clamp()` is a panic hazard here (release builds use `panic = "abort"`, and bounds come from config); see R-10. The error type is `EngineError`, not `ConversionError`. Table search is hand-written, not `binary_search_by`.
+> - *Rust Equivalent* (engine loop): `Engine<H>` has no async `run` loop or `watchdog`/`config` fields. The loop is in `crates/sandstar-server/src/main.rs`; the watchdog is `crates/sandstar-server/src/watchdog.rs`.
+> - *4. Poll / Watch / Notify Subsystems*: watch/notify are `Vec` with linear scans, not O(1) maps.
+> - *ENGINE_VALUE*: the Rust struct uses `flags: ValueFlags`, not `has_raw`/`has_cur` booleans.
+> - *Summary: Lines of Code Comparison*: `crates/sandstar-engine/src` is ~9,000 lines (with PID, sequencer, components and tests), not ~1,510.
+
 ## Overview
 
 The engine core is the heart of Sandstar: a daemon process that manages hardware channels, polls sensors, converts values, and communicates via POSIX IPC. This document maps every C construct to its Rust equivalent.

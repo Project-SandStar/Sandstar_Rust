@@ -1,5 +1,25 @@
 # 04 -- REST API / Axum Migration
 
+> **Status (2026-11-18)**: audited against `master` `b48484b`. The migration plan below is kept as design rationale; this block records what the code does today. Doc-by-doc report: [PROGRESS_REPORT_2026_11_18.md](PROGRESS_REPORT_2026_11_18.md).
+>
+> **Verdict:** the POCO-to-axum migration happened, but router, state, reload and shutdown differ from this plan. About 55% of the planned ops/features exist; many routes not in this plan were added.
+> - **Implemented:** axum 0.8 router under `/api/`: about, ops, formats, read (GET), pointWrite (GET+POST), watchSub/Unsub/Poll, hisRead, nav, invokeAction (`crates/sandstar-server/src/rest/mod.rs:690-728`). Zinc output on `Accept: text/zinc`. Haystack filter parser. tower-http `CorsLayer`. Bearer + SCRAM-SHA-256 auth middleware `check_auth` (`crates/sandstar-server/src/rest/mod.rs:361`).
+> - **Done differently:** state is an `EngineHandle` (mpsc + oneshot) to the main-loop owner of the engine, not `Arc<AppState>` + `RwLock`. POST bodies are JSON, not a Zinc extractor. Reload is SIGHUP or `POST /api/reload`, not a `notify` watcher; `/restart` became `/api/reload`. Nav is a flat site/equip tree. CORS allows any origin. The runtime is `current_thread`. The default bind is `127.0.0.1:8085` (`--http-bind`); the field service passes `0.0.0.0`.
+> - **Added (not in this plan):** status, health, metrics, diagnostics, channels, polls, tables, history, `/api/ws`, `/api/rows`, `/live`, `/live/sedonaState`, `/file`, `/library/`, tags, alerts, editor assets, `/api/drivers*`, `/api/sox/*`, `/api/cluster/*`, `/roxwarp`.
+> - **Not done / open:** `watchList`, `hisWrite`, `commit`, `root/*path`, `xeto`. Graceful shutdown: `axum::serve` has no `with_graceful_shutdown`, and only Ctrl+C (SIGINT) is handled, not SIGTERM (risk R-13). Auth layering: `check_auth` covers pointWrite POST, reload, watch*, hisRead, nav, invokeAction and driver writes. It does **not** cover `/api/sox/*` writes, `PUT /file/*`, tags and alerts writes, `/api/sim/*`, `POST /api/cluster/query`, or the `/api/rows` and `/live` WebSockets. With no auth configured, `check_auth` lets everything through (risks R-1, R-2).
+> - **Superseded by:** the engine-actor design (`.claude/rules/engine-async.md`) and the SOX / `/live` editor APIs (Phase 14.0G, [`../Progress/IMPLEMENTATION_PLAN_NATIVE_EDITOR_BACKEND.md`](../Progress/IMPLEMENTATION_PLAN_NATIVE_EDITOR_BACKEND.md)).
+>
+> **Known inaccuracies in the text below** (section: current fact):
+> - *2.1 Cargo Dependencies*: axum 0.8 with `ws`, a reduced tokio feature set, no `notify`; `reqwest` is a dev-dependency only.
+> - *2.2 Complete Router Setup*: all routes are under `/api/`; each op is GET-only or POST-only.
+> - *2.3 Server Startup with Graceful Shutdown*, *Rust (Built-in to Axum + Tokio)*: graceful shutdown is not wired; see R-13.
+> - *4.2 Rust State (Arc<AppState> + Fine-Grained Locks)*: there is no `AppState`. Handlers get `State<EngineHandle>`.
+> - *Rust (notify crate + tokio channel)*: no file watcher (see above).
+> - *6.2 POST Request Parsing*: bodies are `Json<T>`, not `ZincBody`.
+> - *Rust (tower-http CorsLayer)*: `allow_origin(Any)` with GET/POST/PUT/DELETE/OPTIONS; `AllowedCorsUrl.config` is not read.
+> - *3.6 NavOp*: nav returns a static flat hierarchy; no `/spy/backup` fetch.
+> - *Phase 1: Scaffold Axum Server*: the code lives in `crates/sandstar-server/src/rest/`, not `sandstar_rust/src/haystack/server.rs`.
+
 ## Overview
 
 This document details the migration of Sandstar's Haystack REST API from POCO C++ to Axum (Rust). The current implementation relies on POCO (~500,000 lines vendored) for HTTP server functionality, XML parsing, URI handling, directory watching, timers, and threading primitives. The Axum migration replaces this entire dependency stack with axum (~5K lines in binary) plus a handful of focused crates (tower-http, tokio, notify, serde), resulting in a dramatically smaller, safer, and faster HTTP layer.

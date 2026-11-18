@@ -1,5 +1,20 @@
 # 07: IPC Bridge — POSIX Message Queues to Rust Channels
 
+> **Status (2026-11-18)**: audited against `master` `b48484b`. The plan below is kept as design rationale; this block records what the code does today. Doc-by-doc report: [PROGRESS_REPORT_2026_11_18.md](PROGRESS_REPORT_2026_11_18.md).
+>
+> **Verdict:** superseded. System V IPC was removed entirely when engine and SVM became one process. What shipped is closest to this doc's Phase 3 "hybrid", but simpler. About 50% matches the intent; Phases 1-2 as written: 0%.
+> - **Implemented:** in-process shared snapshot `Arc<RwLock<ChannelSnapshot>>` plus a write queue `Arc<Mutex<Vec<SvmWrite>>>` (`crates/sandstar-svm/src/bridge.rs`), wired in `crates/sandstar-server/src/main.rs`. The snapshot is refreshed after each poll; SVM writes are applied at priority level 8.
+> - **Done differently:** the SVM is a synchronous `RustSvmRunner::resume()` call inside the main loop, not an OS thread with channels. REST reaches the engine through `EngineHandle` (mpsc + oneshot). CLI-to-server is length-prefixed bincode over a Unix socket (`crates/sandstar-ipc/src/lib.rs`, `crates/sandstar-server/src/ipc.rs`).
+> - **Not done (no longer needed):** Phase 1 `nix`/`libc` msgget wrapper; the 200-message buffer port; `ENGINE_MESSAGE` FFI layout tests.
+> - **Superseded by:** the pure-Rust SVM (commit `2f5f463`) and the engine-actor rule (`.claude/rules/engine-async.md`).
+>
+> **Known inaccuracies in the text below** (section: current fact):
+> - *Overview*: describes the C system only; the Rust system is a single process with no SysV IPC.
+> - *2. Phase 1 (nix crate)*: never implemented.
+> - *3.3 Architecture*: the runtime is `current_thread`; the SVM runs synchronously in the main loop.
+> - *3.4 Channel Definitions*: `SvmToEngine`/`EngineToSvm` do not exist; the bridge uses `ChannelSnapshot`, `SvmWrite`, `SvmTagWrite`.
+> - *4.2 Shared Memory Model*: one `RwLock` over a whole-snapshot map, no per-channel locks or dirty flags.
+
 ## Overview
 
 The Sandstar system uses two OS processes that communicate via POSIX System V message queues:
