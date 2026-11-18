@@ -16,6 +16,28 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use tracing::{debug, info, warn};
 
+const DEV_WATCHDOG_PATH: &str = "/dev/watchdog";
+const GPIO60_VALUE_PATH: &str = "/sys/class/gpio/gpio60/value";
+
+/// Open a watchdog file for writing; the error text includes the path.
+fn open_watchdog_device(path: &str) -> Result<File, String> {
+    OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("{path}: {e}"))
+}
+
+fn log_unavailable(path: &str, err: &str) {
+    if cfg!(target_os = "linux") {
+        info!(path, err, "watchdog: device not available");
+    } else {
+        debug!(
+            path,
+            err, "watchdog: device not available (expected off-device)"
+        );
+    }
+}
+
 /// Dual watchdog manager (software + GPIO60 hardware).
 pub struct Watchdog {
     /// Open fd to `/dev/watchdog` (Linux kernel watchdog).
@@ -44,38 +66,37 @@ impl Watchdog {
     }
 
     /// Open watchdog devices. Non-fatal if unavailable.
+    ///
+    /// On Linux (the device) a device that cannot be opened is logged with
+    /// its reason at `info`, and `warn` when neither opens: the process
+    /// is then protected only by systemd `WatchdogSec` (R-42). Elsewhere
+    /// (dev machines) the devices are expected to be missing: `debug` only.
     pub fn new() -> Self {
-        let dev_watchdog = OpenOptions::new()
-            .write(true)
-            .open("/dev/watchdog")
-            .map_err(|e| {
-                debug!(err = %e, "watchdog: /dev/watchdog not available (expected on non-Linux)");
-            })
-            .ok();
+        let dev_watchdog = open_watchdog_device(DEV_WATCHDOG_PATH);
+        let gpio60_value = open_watchdog_device(GPIO60_VALUE_PATH);
 
-        if dev_watchdog.is_some() {
-            info!("watchdog: /dev/watchdog opened");
+        match &dev_watchdog {
+            Ok(_) => info!("watchdog: /dev/watchdog opened"),
+            Err(e) => log_unavailable(DEV_WATCHDOG_PATH, e),
+        }
+        match &gpio60_value {
+            Ok(_) => info!("watchdog: GPIO60 (TPL5010) opened"),
+            Err(e) => log_unavailable(GPIO60_VALUE_PATH, e),
         }
 
-        let gpio60_value = OpenOptions::new()
-            .write(true)
-            .open("/sys/class/gpio/gpio60/value")
-            .map_err(|e| {
-                debug!(err = %e, "watchdog: GPIO60 not available (expected on non-BeagleBone)");
-            })
-            .ok();
-
-        if gpio60_value.is_some() {
-            info!("watchdog: GPIO60 (TPL5010) opened");
-        }
-
-        if dev_watchdog.is_none() && gpio60_value.is_none() {
-            info!("watchdog: no watchdog devices available — watchdog disabled");
+        if dev_watchdog.is_err() && gpio60_value.is_err() {
+            if cfg!(target_os = "linux") {
+                warn!(
+                    "watchdog: no watchdog device could be opened — kernel and                      hardware watchdog disabled, only systemd WatchdogSec applies"
+                );
+            } else {
+                info!("watchdog: no watchdog devices available — watchdog disabled");
+            }
         }
 
         Self {
-            dev_watchdog,
-            gpio60_value,
+            dev_watchdog: dev_watchdog.ok(),
+            gpio60_value: gpio60_value.ok(),
             gpio60_state: false,
         }
     }
@@ -136,6 +157,12 @@ mod tests {
         let wd = Watchdog::new();
         assert!(wd.dev_watchdog.is_none() || cfg!(target_os = "linux"));
         assert!(wd.gpio60_value.is_none() || cfg!(target_os = "linux"));
+    }
+
+    #[test]
+    fn open_error_names_the_path() {
+        let err = open_watchdog_device("/nonexistent/sandstar-watchdog").unwrap_err();
+        assert!(err.starts_with("/nonexistent/sandstar-watchdog: "), "{err}");
     }
 
     #[test]
