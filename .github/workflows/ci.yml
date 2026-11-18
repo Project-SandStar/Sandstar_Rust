@@ -55,6 +55,9 @@ jobs:
         with:
           toolchain: 1.99.1
           targets: armv7-unknown-linux-gnueabihf
+          # Same components as rust-toolchain.toml; adding them later via the
+          # toolchain file fails on the runner (rustfmt: conflict bin/cargo-fmt).
+          components: rustfmt, clippy
 
       - name: Cache cargo registry and target
         uses: actions/cache@v4
