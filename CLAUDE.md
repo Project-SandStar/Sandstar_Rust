@@ -29,5 +29,5 @@ Değiştirmek gerekirse önce kullanıcıyla konuş. Gerekçe parantezdeki kayna
 - **Watchdog (GPIO60):**
   - `initialize.sh` export'u dener ve sonucu journal'a yazar; servis başlangıcını asla başarısız yapmaz.
   - Engine açılışta GPIO60 yoksa ~5 dk yeniden dener; toggle hatasından sonra denemez (R-42, S-8).
-- **Dal ve commit:** her S adımı kendi dalında, doğrudan `master`'a commit yok. Commit özeti İngilizce (`workflow.md`, karar 2026-11-18).
+- **Dal ve commit:** `master` kararlı, `develop` entegrasyon dalı. Her S adımı `develop`'tan açılan `s<n>-<konu>` dalında yapılır, PR ile `develop`'a alınır; `master`'a yalnız kilit geliştirmeden sonra kullanıcı onayıyla. Commit özeti İngilizce (`workflow.md`, kararlar 2026-11-18, 2026-11-19).
 - **Sır dosyaları:** sır içeren `tools/` betikleri git dışında (`.gitignore` credentials bloğu) ve hook ile dosya araçlarına kapalı (S-6, S-9).
