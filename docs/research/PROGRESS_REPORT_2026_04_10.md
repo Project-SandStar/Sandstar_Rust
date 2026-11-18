@@ -1,5 +1,12 @@
 # Sandstar Rust — Document-by-Document Progress Report
 
+> **Status (2026-11-18): Superseded** by [PROGRESS_REPORT_2026_11_18.md](PROGRESS_REPORT_2026_11_18.md).
+>
+> The percentages below overstate several documents. In particular, they count "goal met by a different design" as 100% (docs 03, 05, 07, 09). They also missed things that did not happen as stated:
+> - graceful shutdown was never wired;
+> - no C is compiled for the Sedona VM;
+> - `reqwest` is a dev-dependency only.
+
 **Date:** 2026-04-10
 **Method:** Each of the 20 research documents was cross-referenced against the actual codebase (123 source files, 85,346 lines) to determine exact implementation status.
 
@@ -624,7 +631,7 @@ Every architectural element documented has a Rust implementation:
 
 ## Conclusion
 
-The Sandstar Rust project has achieved **~87% weighted completion** across all 20 research documents, with the actual codebase **substantially exceeding** what the documents planned in multiple critical areas (SOX protocol, pure Rust VM, roxWarp clustering, driver framework). The primary gaps are in future-facing features (ROX Trio encoding, BACnet/MQTT drivers, learn→dyn_slots pipeline) that are not needed for current production operations on the Todd Air Flow BeagleBone device.
+The Sandstar Rust project has achieved **~87% weighted completion** across all 20 research documents, with the actual codebase **substantially exceeding** what the documents planned in multiple critical areas (SOX protocol, pure Rust VM, roxWarp clustering, driver framework). The primary gaps are in future-facing features (ROX Trio encoding, BACnet/MQTT drivers, learn→dyn_slots pipeline) that are not needed for current production operations on the site A BeagleBone device.
 
 **The most significant architectural divergence from the research docs** is the non-adoption of `libhaystack` — the project built custom Zinc format handling instead. This was likely a pragmatic choice that avoided a heavy external dependency on the embedded ARM target while maintaining full functional equivalence.
 

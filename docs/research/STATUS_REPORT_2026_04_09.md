@@ -1,5 +1,9 @@
 # Sandstar Rust Migration - Comprehensive Status Report
 
+> **Status (2026-11-18): Superseded.** This is a historical snapshot (v1.6.0). For the current state see [PROGRESS_REPORT_2026_11_18.md](PROGRESS_REPORT_2026_11_18.md) and [`../Progress/OVERVIEW.md`](../Progress/OVERVIEW.md).
+>
+> Most "open" items listed here have since shipped: BACnet and MQTT drivers, the full Haystack filter, Phases 12 and 13, and roxWarp mDNS. Still open are `hisWrite`, `watchList`, `commit` and `xeto`, GPIO edge detection and async I2C/UART. Device addresses and site names were removed from this file (2026-11-18).
+
 **Date:** 2026-04-10 (Updated)
 **Version:** 1.6.0
 **Status:** Production Deployed
@@ -30,7 +34,7 @@
 
 ## 1. Executive Summary
 
-The Sandstar engine has been **fully rewritten from C/C++ to Rust** and deployed to production on a BeagleBone ARM device (192.168.1.3). The migration replaced ~32,314 lines of custom C/C++ and eliminated ~550,000 lines of vendored dependencies (POCO framework + Boost), producing a Rust codebase of **~85,346 lines across 123 source files in 7 workspace crates** with **2,319+ tests and 0 failures**.
+The Sandstar engine has been **fully rewritten from C/C++ to Rust** and deployed to production on a BeagleBone ARM device (<device-ip>). The migration replaced ~32,314 lines of custom C/C++ and eliminated ~550,000 lines of vendored dependencies (POCO framework + Boost), producing a Rust codebase of **~85,346 lines across 123 source files in 7 workspace crates** with **2,319+ tests and 0 failures**.
 
 The rewrite delivered significantly more than a straight port. Beyond full feature parity, it added: TLS encryption, SCRAM-SHA-256 authentication, rate limiting, WebSocket push, I2C coalescing (270ms to 45ms), config-driven DDC control, a full SOX/DASP protocol implementation (20/20 commands), visual wiring through the Sedona Editor, a pure Rust VM interpreter (90% complete), roxWarp clustering infrastructure, protocol drivers (Modbus/BACnet/MQTT), an alert system, Prometheus-style metrics, a conversion filter pipeline, and a SAX-to-TOML converter.
 
@@ -436,8 +440,8 @@ The Sedona VM has been largely ported from C to pure Rust (20,947 lines, 27 file
 | `build-rust.sh` | ARM cross-compile (replaces 303-line C build script) |
 | `build-sedona-sox.sh` | Build Sedona kit manifests for SOX protocol |
 | `installSandstarRust.sh` | Deploy .deb to BeagleBone via scp |
-| `deploy-todd.sh` | Todd Air Flow (30-113) specific deployment |
-| `deploy-baha.sh` | Baha device (211-135) specific deployment |
+| `deploy-todd.sh` | site A (<device-id>) specific deployment |
+| `deploy-baha.sh` | site B device (<device-id>) specific deployment |
 | `validate-engines.sh` | Compare C vs Rust engine side-by-side (REST polling, discrepancy logging) |
 | `soak-monitor.sh` | Long-running stability test (memory/CPU/uptime, 4-8 hours) |
 | `cutover-to-rust.sh` | Switch production from C to Rust (health check, backup, swap, verify) |
@@ -611,7 +615,7 @@ The 20 research documents form a complete technical record of the migration:
 ### Production Deployment
 
 - **Device:** BeagleBone Black (ARM Cortex-A8, 512MB RAM)
-- **Target:** Todd Air Flow unit (30-113), 192.168.1.3:1919
+- **Target:** site A unit (<device-id>), <device-ip>:<ssh-port>
 - **Binary:** ~2.1 MB (server, stripped), ~580 KB (CLI, stripped)
 - **Systemd:** Type=simple, MemoryLimit (Debian 9 / systemd 232 compatible)
 - **Cross-compile:** Zig CC wrappers for ARM7, glibc 2.24 target, cargo-zigbuild in CI
@@ -835,7 +839,7 @@ Per `PURE_RUST_PLAN.md`, the remaining work includes final native method coverag
 |------|----------|-----------|
 | SDP810 I2C sensor failure | Low | Exponential backoff + garbage detection in software |
 | libhaystack breaking change | Low | Pinned to exact version |
-| Single production device | Medium | Baha (211-135) unreachable from Windows dev host |
+| Single production device | Medium | site B (<device-id>) unreachable from Windows dev host |
 | README version outdated (says 1.0.0) | Low | Update README to match Cargo.toml v1.6.0 |
 
 ### 16.3 Future Enhancement Risks
@@ -867,7 +871,7 @@ cargo arm-build
 cargo deb --target armv7-unknown-linux-gnueabihf --no-strip
 
 # Deploy
-tools/installSandstarRust.sh 30-113
+tools/installSandstarRust.sh <device-id>
 
 # Validate
 tools/validate-engines.sh <device-ip>
