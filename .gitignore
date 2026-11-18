@@ -29,3 +29,22 @@ server_stderr.log
 *.pem
 *.key
 *.cert
+
+# Device/site credentials: these tools scripts embed plain-text passwords
+# (expect `send` after a password prompt). Never commit them. Scripts that
+# should be versioned must read credentials from tools/connections/ instead.
+/tools/connections/
+/tools/sandstar/legacy-c/
+/tools/sandstar/connection_helper.sh
+/tools/installSandstar.sh
+/tools/cp2eac.sh
+/tools/skyspark/local/check_status.sh
+/tools/skyspark/local/diagnose_memory.sh
+/tools/skyspark/local/setup_swap_auto.sh
+/tools/skyspark/local/start_skyspark.sh
+/tools/skyspark/PERSISTENT_JOURNAL_SETUP.md
+/tools/xeto/checkXetoFiles.sh
+
+# Local tool output
+/.playwright-mcp/
+/editor_connected.png
