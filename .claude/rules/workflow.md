@@ -7,13 +7,69 @@ Bu klasördeki proje kuralları (`.claude/rules/*.md`) `ecc-rust/` altındaki ge
 - ECC `hooks.md`'deki global hook önerileri kullanıcı onayı olmadan kurulmaz.
 
 ## "Bitti" demeden önce
+Tek komut: `bash tools/gates.sh`. Kapı başına bir satır basar, yalnız kırmızı kapının çıktısını gösterir; kırmızı kapı varsa çıkış kodu 1 olur. Tek kapı çalıştırmak için `bash tools/gates.sh fmt clippy`.
 1. `cargo fmt --all -- --check`
 2. `cargo clippy --workspace -- -D warnings`
-3. `cargo test --workspace`
-4. `crates/sandstar-hal-linux` veya `linux-hal`/`svm` feature'larına dokunulduysa: `cargo check -p sandstar-server --no-default-features --features linux-hal,svm`. Gerekiyorsa gerçek ARM build: önce `. C:\czb\arm-env.ps1` (Git Bash: `source /c/czb/arm-env.sh`), sonra `cargo arm-build-svm`. Ortam betiği olmadan C çapraz derleyicisi (`CC`/`AR`) bulunamadığı için başarısız olur (R-21). Toolchain `rust-toolchain.toml` ile 1.99.1'e sabit; yükseltirken `ci.yml` ile birlikte değiştir.
+3. `cargo test --workspace --no-fail-fast`. `--no-fail-fast` olmadan cargo ilk başarısız test binary'sinde durur ve geçen/başarısız sayımı eksik çıkar.
+4. `cargo check -p sandstar-server --no-default-features --features linux-hal,svm`.
+   - Gerçek ARM build gerekiyorsa:
+     - Önce ortam betiği: `. C:\czb\arm-env.ps1` (Git Bash'te `source /c/czb/arm-env.sh`), sonra `cargo arm-build-svm`.
+     - Ortam betiği olmadan C çapraz derleyicisi (`CC`/`AR`) bulunamadığı için build başarısız olur (R-21).
+   - Toolchain `rust-toolchain.toml` ile 1.99.1'e sabit. Yükseltirken `ci.yml` ile birlikte değiştir.
 5. Kapsama ölçümü (isteğe bağlı): `cargo llvm-cov -p <crate> --summary-only`.
 
-Kırmızı bir kapı yeşil gösterilmez. Mevcut taban: fmt ve clippy HEAD'de zaten kırmızı (R-37). Senin değişikliğin **yeni** hata eklememeli; tabanı düzeltmek ayrı bir adımdır.
+Kırmızı bir kapı yeşil gösterilmez.
+- Taban `master`'da yeşil (R-37, S-5'te kapandı).
+- Kararsız bir test bir koşuda düşer, tekrarda geçerse:
+  - "geçti" denmez;
+  - iki koşu da raporlanır;
+  - test 08'de "Dokunulmayanlar"a yazılır.
+
+## Doğrulama ve durum (karar 2026-11-18, EnvanterTakip'ten uyarlandı)
+- **Durum basamakları:** 06'daki bir risk ya da bulgu şu sırayla ilerler:
+  1. `🔄 kodda` (commit'lendi, testler geçti)
+  2. `🔄 cihazda` (deploy edildi)
+  3. `✅ sahada doğrulandı`
+
+  ✅, sahada beklenen davranışın kanıtı görülmeden (günlük satırı, ölçüm, dosya durumu) verilmez. Kanıt, kimin doğruladığıyla birlikte yazılır: "Claude, salt okunur" ya da "kullanıcı". Sahaya gitmeyen işler (CI, araç, doküman) için ✅ = kapılar ve CI yeşil.
+  - Gerekçe: R-41 kodda düzeltildi ve deploy edildi, sahada tek dosya silmedi.
+- **Platforma bağlı davranış kaynaktan doğrulanır.**
+  - Kapsam: dosya sistemi, sysfs, saat, izinler, sinyaller gibi hedef platforma bağlı kütüphane davranışları.
+  - Doğrulama, kurulu sürümün kaynağından yapılır (`~/.cargo/registry/src/…/<crate>-<sürüm>/`), dokümana ya da hafızaya dayanılmaz.
+  - Windows'ta yeşil test, cihazdaki Linux'u (kernel 4.9, armv7) kanıtlamaz.
+  - Örnek: `tracing-appender` budaması dosya oluşturma zamanına dayanıyordu; cihazın dosya sisteminde bu zaman yoktu (R-41).
+
+## Plan ve adım kaydı
+- **Önce plan, onay, sonra kod.**
+  - Kapsam: çok dosyaya yayılan, davranış değiştiren ya da cihaza giden S-n adımları.
+  - Plan, uygulamadan önce 08'de adımın altına "Plan — ONAY BEKLİYOR" başlığıyla 5-10 satır yazılır:
+    - koddaki mevcut durum (`dosya:satır`);
+    - yapılacaklar;
+    - testler;
+    - inceleme ajanı;
+    - riskler.
+  - Onaydan sonra başlık "ONAYLANDI <tarih>" olur.
+  - Plandan sapma "Plan revizyonu" satırıyla yazılır; sessiz sapma olmaz.
+  - Tek dosyalık küçük düzeltmede plan gerekmez (global onay eşiği).
+- **08 girdisi kısa tutulur.** Adım bitince "Sonuç" 5-10 satıra indirilir; ayrıntı commit gövdesinde ve PR'da yaşar.
+
+## İnceleme ajanları
+Ne zaman çağrılmayacağı global fren kuralındadır.
+
+| Değişiklik | Ajan |
+|---|---|
+| `unsafe`, `sandstar-svm`, FFI, ownership/lifetime ağırlıklı değişiklik | `rust-reviewer` |
+| Yeni ya da değişen rota, auth katmanı, tel protokolü ayrıştırıcısı (SOX/DASP, BACnet, roxWarp, `/live`), istekten gelen dosya yolu | `security-reviewer` |
+| Sürücü, hata yolu, yeniden deneme, `unwrap_or`/`ok()` ile hata yutma ihtimali | `silent-failure-hunter` |
+| Derleme ya da bağımlılık hatası | `rust-build-resolver` |
+
+**Brifing:** ajana değişikliği (diff ya da dosyalar) ve sözleşmeyi (kabul ölçütü, ilgili `.claude/rules/` maddeleri) ver. Kendi gerekçeni ("şunu şu yüzden böyle yaptım") ve beklediğin sonucu **verme**; ajan kararı onaylamaya değil çürütmeye çalışsın.
+
+## Hook'lar (`.claude/settings.json`, karar 2026-11-18)
+- `.claude/hooks/protect-secrets.js` (PreToolUse; Read, Edit, Write, Grep, NotebookEdit):
+  - **Sır dosyaları:** `.gitignore`'daki "Device/site credentials" bloğunda listelenen sır içeren `tools/` dosyalarını dosya araçlarıyla açmayı reddeder. Liste tek yerde, `.gitignore`'da tutulur; yeni sır dosyası oraya eklenir.
+  - **`graphify-out/`:** bu dizine yazmayı reddeder.
+  - **Bir güvenlik ağıdır, tam koruma değildir:** Bash ile okumayı engellemez. Sır içeren dosyaların içeriği Bash çıktısına da basılmaz; maskeleme yerine yalnız gereken bilgi (dosya adı, sayı, eşitlik) yazdırılır.
 
 ## Git ve commit (karar 2026-11-18)
 Kaynak: kullanıcıyla konuşma; EnvanterTakip `DevelopingMds/03-GelistirmeKurallari.md` §8 incelendi, SandStar'a uyarlandı.
@@ -44,6 +100,15 @@ Kaynak: kullanıcıyla konuşma; EnvanterTakip `DevelopingMds/03-GelistirmeKural
 
 ## Cihaz ve saha
 - BeagleBone'a SSH, deploy, servis yeniden başlatma, cutover veya rollback yalnız açık kullanıcı onayıyla yapılır. Deploy betikleri host key doğrulamasını kapatıyor (R-22).
+- **Onay oturum başınadır (karar 2026-11-18):** kullanıcı bir oturumda cihaz erişimine onay verince, o oturumda şunlar ayrıca sorulmaz:
+  - salt okunur SSH ve `sudo` ile okuma komutları;
+  - onaylanan işin kapsamındaki yazmalar (ör. onaylı deploy'un yedeği, kurulumu, servis yeniden başlatması).
+
+  Şunlar yine sorulur:
+  - kapsam dışı yeni bir yazma türü (cihaz ayarı, GPIO/sysfs yazma, paket kaldırma, rollback, cutover);
+  - geri dönüşü zor işlem (silme).
+
+  Deploy öncesi yedek kuralı değişmez.
 - BACnet/MQTT ile gerçek ekipmana yazma testi yapılmaz. Simülatörleri kullan: `tools/bacnet_sim.py`, yerel mosquitto, `cargo sim-run`.
 - Host, IP, kullanıcı adı ve parola değerleri dokümana veya koda yazılmaz.
 
