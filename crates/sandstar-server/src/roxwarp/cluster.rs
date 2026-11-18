@@ -102,11 +102,41 @@ impl Default for ClusterConfig {
     }
 }
 
+/// Largest accepted timer interval (one day). Larger values make
+/// `tokio::time::interval` overflow `Instant` and panic (R-39).
+pub const MAX_INTERVAL_SECS: u64 = 86_400;
+
 impl ClusterConfig {
-    /// Load cluster configuration from a JSON file.
+    /// Load cluster configuration from a JSON file and validate it.
     pub fn load(path: &str) -> Result<Self, String> {
         let data = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
-        serde_json::from_str(&data).map_err(|e| format!("parse {path}: {e}"))
+        let config: Self = serde_json::from_str(&data).map_err(|e| format!("parse {path}: {e}"))?;
+        config
+            .validate()
+            .map_err(|e| format!("invalid {path}: {e}"))?;
+        Ok(config)
+    }
+
+    /// Check the timer intervals before any task uses them.
+    ///
+    /// `tokio::time::interval` panics on a zero period and overflows on a
+    /// huge one; with `panic = "abort"` either would kill the process (R-39).
+    pub fn validate(&self) -> Result<(), String> {
+        for (name, value) in [
+            ("heartbeat_interval_secs", self.heartbeat_interval_secs),
+            (
+                "anti_entropy_interval_secs",
+                self.anti_entropy_interval_secs,
+            ),
+            ("feed_interval_secs", self.feed_interval_secs),
+        ] {
+            if value == 0 || value > MAX_INTERVAL_SECS {
+                return Err(format!(
+                    "{name} must be between 1 and {MAX_INTERVAL_SECS}, got {value}"
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -604,6 +634,58 @@ pub struct PeerStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn load_json(json: &str) -> Result<ClusterConfig, String> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cluster.json");
+        std::fs::write(&path, json).unwrap();
+        ClusterConfig::load(path.to_str().unwrap())
+    }
+
+    #[test]
+    fn default_config_is_valid() {
+        assert!(ClusterConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn load_rejects_zero_intervals() {
+        for field in [
+            "heartbeat_interval_secs",
+            "anti_entropy_interval_secs",
+            "feed_interval_secs",
+        ] {
+            let err = load_json(&format!(r#"{{"node_id":"n1","{field}":0}}"#)).unwrap_err();
+            assert!(err.contains(field), "{err}");
+        }
+    }
+
+    #[test]
+    fn load_rejects_huge_interval() {
+        let err = load_json(&format!(
+            r#"{{"node_id":"n1","feed_interval_secs":{}}}"#,
+            u64::MAX
+        ))
+        .unwrap_err();
+        assert!(err.contains("feed_interval_secs"), "{err}");
+        assert!(load_json(r#"{"node_id":"n1","feed_interval_secs":86401}"#).is_err());
+    }
+
+    #[test]
+    fn load_accepts_bounds() {
+        let c = load_json(
+            r#"{"node_id":"n1","heartbeat_interval_secs":1,"anti_entropy_interval_secs":86400}"#,
+        )
+        .unwrap();
+        assert_eq!(c.heartbeat_interval_secs, 1);
+        assert_eq!(c.anti_entropy_interval_secs, 86_400);
+    }
+
+    #[test]
+    fn load_rejects_empty_and_malformed_json() {
+        assert!(load_json("").is_err());
+        assert!(load_json("{").is_err());
+        assert!(load_json(r#"{"node_id":"çğü-node","feed_interval_secs":"x"}"#).is_err());
+    }
 
     #[test]
     fn cluster_config_defaults() {
