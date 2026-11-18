@@ -57,16 +57,18 @@ sel hal && gate hal '^(error|warning)|^ +--> ' \
     cargo check -p sandstar-server --no-default-features --features linux-hal,svm
 
 # docs: reminder only, never red (workflow.md "Doküman disiplini").
-# Compares the working tree with the merge-base of master and lists documents
-# from tools/docs-map.tsv whose code paths changed but which did not change.
+# Compares the working tree with the merge-base of develop (else master) and lists
+# documents from tools/docs-map.tsv whose code paths changed but which did not.
 docs_reminders() {
     local map=tools/docs-map.tsv base
-    base=$(git merge-base HEAD origin/master 2>/dev/null || git merge-base HEAD master 2>/dev/null) || {
-        echo "SKIP docs    (no merge-base with master)"; return; }
+    base=$(git merge-base HEAD origin/develop 2>/dev/null \
+        || git merge-base HEAD origin/master 2>/dev/null \
+        || git merge-base HEAD master 2>/dev/null) || {
+        echo "SKIP docs    (no merge-base with develop or master)"; return; }
     local changed untracked
     changed=$(git diff --name-only "$base"; git ls-files --others --exclude-standard)
     untracked=$(git ls-files --others --exclude-standard)
-    [ -n "$changed" ] || { echo "OK   docs    (no changes against master)"; return; }
+    [ -n "$changed" ] || { echo "OK   docs    (no changes against the base branch)"; return; }
 
     # Added/removed lines of a tracked file, or the whole content of a new file.
     file_changes() {
