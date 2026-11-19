@@ -601,20 +601,35 @@ async fn evaluate_query_against_delta_engine(
 /// It handles the most common patterns without requiring the full
 /// Haystack filter parser (which operates on `ChannelInfo`).
 pub(crate) fn evaluate_point_filter(filter: &str, point: &VersionedPoint) -> bool {
+    evaluate_filter_at(filter, point, 0)
+}
+
+/// Deepest `and`/`or` nesting evaluated. The filter comes from the
+/// network (REST, roxWarp peers); without a bound, a long `a and a and …`
+/// chain recursed once per keyword and overflowed the stack, which kills
+/// the process like a panic (S-24). Terms past this depth do not match.
+const MAX_FILTER_DEPTH: usize = 32;
+
+fn evaluate_filter_at(filter: &str, point: &VersionedPoint, depth: usize) -> bool {
+    if depth > MAX_FILTER_DEPTH {
+        return false;
+    }
     let f = filter.trim();
 
     // Handle "and" conjunction
     if let Some(pos) = find_keyword(f, " and ") {
         let left = &f[..pos];
         let right = &f[pos + 5..];
-        return evaluate_point_filter(left, point) && evaluate_point_filter(right, point);
+        return evaluate_filter_at(left, point, depth + 1)
+            && evaluate_filter_at(right, point, depth + 1);
     }
 
     // Handle "or" disjunction
     if let Some(pos) = find_keyword(f, " or ") {
         let left = &f[..pos];
         let right = &f[pos + 4..];
-        return evaluate_point_filter(left, point) || evaluate_point_filter(right, point);
+        return evaluate_filter_at(left, point, depth + 1)
+            || evaluate_filter_at(right, point, depth + 1);
     }
 
     let f_lower = f.to_lowercase();
@@ -711,23 +726,25 @@ pub(crate) fn evaluate_point_filter(filter: &str, point: &VersionedPoint) -> boo
     point.unit.to_lowercase().contains(&f_lower) || point.status.to_lowercase().contains(&f_lower)
 }
 
-/// Find the position of a keyword in a filter string, avoiding
-/// matches inside quoted strings.
+/// Byte offset of the first `keyword` in `s` outside double quotes,
+/// ignoring ASCII case.
+///
+/// Works on the original string so the offset is a byte index into `s`
+/// (R-7: the old version returned a char index of the lowercased string,
+/// which panicked or split wrongly on non-ASCII filters). `keyword` is
+/// ASCII (" and ", " or "), so a match starts and ends on char boundaries.
 fn find_keyword(s: &str, keyword: &str) -> Option<usize> {
-    let lower = s.to_lowercase();
-    let kw_lower = keyword.to_lowercase();
-    // Simple: find the keyword outside of quotes
+    let kw = keyword.as_bytes();
     let mut in_quotes = false;
-    let chars: Vec<char> = lower.chars().collect();
-    let kw_chars: Vec<char> = kw_lower.chars().collect();
-    for i in 0..chars.len() {
-        if chars[i] == '"' {
+    for (i, c) in s.char_indices() {
+        if c == '"' {
             in_quotes = !in_quotes;
             continue;
         }
         if !in_quotes
-            && i + kw_chars.len() <= chars.len()
-            && chars[i..i + kw_chars.len()] == kw_chars[..]
+            && s.as_bytes()
+                .get(i..i + kw.len())
+                .is_some_and(|w| w.eq_ignore_ascii_case(kw))
         {
             return Some(i);
         }
@@ -1150,5 +1167,51 @@ mod tests {
         .join();
         assert!(tree.is_poisoned());
         assert!(name_table_entries(Some(&tree)).contains(&"ahuTemp".to_string()));
+    }
+
+    // ── S-24: byte vs char index in the filter (R-7) ────────────
+
+    #[test]
+    fn filter_with_non_ascii_text_does_not_panic_and_splits_right() {
+        let p = test_point(1113, 72.5, "°C", "ok");
+        // Multibyte characters before the keyword shift char and byte
+        // positions apart.
+        assert!(evaluate_point_filter("unit==\"°C\" and channel==1113", &p));
+        assert!(!evaluate_point_filter("unit==\"°C\" and channel==612", &p));
+        assert!(evaluate_point_filter(
+            "unit==\"Ölçüm\" or channel==1113",
+            &p
+        ));
+        assert!(!evaluate_point_filter(
+            "status==\"ölü\" or channel==612",
+            &p
+        ));
+        // A character whose lowercase form is longer (İ → i̇).
+        assert!(!evaluate_point_filter("İİİİ and channel==1113", &p));
+    }
+
+    #[test]
+    fn a_very_long_filter_chain_does_not_overflow_the_stack() {
+        let p = test_point(1113, 72.5, "degF", "ok");
+        // ~1.5 MB, about 100k keywords: one stack frame each without a bound.
+        let long_and = "channel==1113 and ".repeat(100_000) + "point";
+        assert!(
+            !evaluate_point_filter(&long_and, &p),
+            "terms past the depth bound do not match"
+        );
+        let long_or = "channel==612 or ".repeat(100_000) + "channel==1113";
+        assert!(!evaluate_point_filter(&long_or, &p));
+        // Within the bound, chains still work.
+        let short = "channel==1113 and ".repeat(MAX_FILTER_DEPTH - 1) + "point";
+        assert!(evaluate_point_filter(&short, &p));
+    }
+
+    #[test]
+    fn filter_keywords_are_case_insensitive_and_skip_quotes() {
+        let p = test_point(1113, 72.5, "degF", "ok");
+        assert!(evaluate_point_filter("point AND channel==1113", &p));
+        assert!(evaluate_point_filter("channel==612 Or channel==1113", &p));
+        // " and " inside quotes is not a conjunction.
+        assert!(!evaluate_point_filter("unit==\"a and b\"", &p));
     }
 }
