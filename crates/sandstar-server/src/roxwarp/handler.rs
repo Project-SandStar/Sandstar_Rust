@@ -336,21 +336,14 @@ async fn handle_roxwarp_connection(
 
 /// Component names from the SOX name intern table, sent in `warp:welcome`.
 ///
-/// Runs on every incoming peer connection, so it must not panic. A poisoned
-/// lock (a writer panicked; only possible where panics unwind, not in the
-/// `panic = "abort"` release build) still yields the names: this is a
-/// read-only list, and a half-updated one is harmless for a peer.
+/// Runs on every incoming peer connection, so it must not panic: a poisoned
+/// lock still yields the names (see [`crate::lock`]). This is a read-only
+/// list, and a half-updated one is harmless for a peer.
 fn name_table_entries(sox_tree: Option<&crate::sox::SharedComponentTree>) -> Vec<String> {
     let Some(tree) = sox_tree else {
         return Vec::new();
     };
-    let t = match tree.read() {
-        Ok(t) => t,
-        Err(poisoned) => {
-            warn!("roxWarp: SOX component tree lock poisoned; sending name table anyway");
-            poisoned.into_inner()
-        }
-    };
+    let t = crate::lock::read_or_recover(tree, "SOX component tree");
     t.name_table
         .all_names()
         .into_iter()
