@@ -86,7 +86,18 @@ Kaynak: kullanıcıyla konuşma; EnvanterTakip `DevelopingMds/03-GelistirmeKural
   - Birleşen adım dalı yerelde ve uzakta silinir; böylece yalnız `master` ve `develop` kalıcıdır.
   - Gerekçe: uzak depo bir organizasyona ait (`Project-SandStar/Sandstar_Rust`) ve kod sahadaki cihaza gidiyor; `master` yalnız doğrulanmış toplu değişiklik alır.
   - Dal içinde kırmızı kapıyla ara commit kabul edilir; mesaj gövdesinde hangi kapının neden kırmızı kaldığı yazılır.
-  - Alma şartı (`develop` ve `master`): aşağıdaki kontrol listesi ve CI yeşil. Fast-forward tercih edilir; olmazsa `--no-ff` merge.
+  - Alma şartı (`develop` ve `master`): aşağıdaki kontrol listesi ve CI `Test` işi yeşil.
+  - Birleştirme yalnız GitHub'dan (karar 2026-11-19):
+    - adım dalı → `develop`: `gh pr merge <n> --rebase --delete-branch`. Atomik commit'ler korunur, hash'ler değişir; 08'e birleşme sonrası hash'ler yazılır.
+    - `develop` → `master`: `gh pr merge <n> --merge`. Her kilit geliştirme `master`'da tek bir birleşme commit'i olur.
+    - Birleştirmeden sonra yerelde `git pull --ff-only`; adım dalı yerelde `git branch -D` ile silinir (rebase sonrası hash'ler farklı olduğu için `-d` reddeder).
+- **GitHub ruleset'leri (karar 2026-11-19, kullanıcı):** `master` ve `develop` için ayrı ruleset, istisnasız (adminler dahil):
+  - dal silinemez, force push yasak;
+  - değişiklik yalnız PR ile; onay sayısı 0 (tek geliştirici; kendi PR'ını onaylamak mümkün değil);
+  - CI `Test` işi geçmeden birleşmez;
+  - izinli yöntem: `develop` için yalnız rebase, `master` için yalnız merge commit.
+  - Ruleset'i değiştirmek ya da kapatmak kullanıcı kararıdır; organizasyondaki diğer admini de bağlar.
+  - `Build ARM` işi PR'da koşmadığı için zorunlu değil; ARM kırılması birleşmeden sonra push CI'ında görülür.
   - Sahaya deploy `master`'dan yapılır. `develop`'tan deploy yalnız kullanıcı açıkça isterse (ör. sahada deneme); 08'e hangi daldan ve hangi hash'ten deploy edildiği yazılır.
 - **Mesaj biçimi:** `tür(kapsam): özet`, İngilizce, emir kipinde, ~72 karakter.
   - Türler: `feat`, `fix`, `refactor`, `perf`, `test`, `docs`, `style` (yalnız biçim), `ci`, `build`, `chore`.
