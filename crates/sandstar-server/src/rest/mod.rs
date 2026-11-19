@@ -149,6 +149,13 @@ pub const ENGINE_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 /// start with this text to 503 (`rest/error.rs`).
 pub const ENGINE_TIMEOUT_ERR: &str = "engine timeout";
 
+/// Whether an `EngineHandle` error is a timeout (the engine is busy or hung,
+/// as opposed to a rejected command or a stopped engine). Callers use this to
+/// stop sending further commands for the current round.
+pub fn is_engine_timeout(err: &str) -> bool {
+    err.starts_with(ENGINE_TIMEOUT_ERR)
+}
+
 /// Minimum gap between two timeout warnings; the rest are logged at debug.
 const TIMEOUT_WARN_INTERVAL_SECS: u64 = 60;
 
@@ -242,6 +249,17 @@ impl EngineHandle {
     pub async fn status(&self) -> Result<StatusInfo, String> {
         self.request("status", Effect::Read, |reply| EngineCmd::Status { reply })
             .await
+    }
+
+    /// Like [`status`](Self::status), but waits at most `limit` (never longer
+    /// than the handle's own timeout). Used by `/health`, whose callers
+    /// (systemd, deploy checks) expect a quick answer.
+    pub async fn status_within(&self, limit: Duration) -> Result<StatusInfo, String> {
+        let bounded = Self {
+            tx: self.tx.clone(),
+            reply_timeout: limit.min(self.reply_timeout),
+        };
+        bounded.status().await
     }
 
     pub async fn list_channels(&self) -> Result<Vec<ChannelInfo>, String> {
@@ -363,10 +381,12 @@ impl EngineHandle {
         watch_id: String,
         refresh: bool,
     ) -> Result<WatchResponse, String> {
-        self.request("watch_poll", Effect::Read, |reply| EngineCmd::WatchPoll {
-            watch_id,
-            refresh,
-            reply,
+        self.request("watch_poll", Effect::Changes("poll"), |reply| {
+            EngineCmd::WatchPoll {
+                watch_id,
+                refresh,
+                reply,
+            }
         })
         .await?
     }
@@ -463,6 +483,45 @@ mod engine_handle_timeout_tests {
             drop(rx.recv().await);
         });
         assert_eq!(h.status().await.unwrap_err(), "engine dropped reply");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn status_within_uses_the_shorter_limit() {
+        let (h, mut rx) = handle(4);
+        let keep = tokio::spawn(async move {
+            let cmd = rx.recv().await;
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            drop(cmd);
+        });
+        let start = tokio::time::Instant::now();
+        let err = h.status_within(Duration::from_secs(2)).await.unwrap_err();
+        assert!(is_engine_timeout(&err));
+        assert_eq!(start.elapsed(), Duration::from_secs(2));
+        keep.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn status_within_never_exceeds_the_handle_timeout() {
+        let (h, mut rx) = handle(4);
+        let keep = tokio::spawn(async move {
+            let cmd = rx.recv().await;
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            drop(cmd);
+        });
+        let start = tokio::time::Instant::now();
+        let _ = h.status_within(Duration::from_secs(60)).await.unwrap_err();
+        assert_eq!(start.elapsed(), ENGINE_REPLY_TIMEOUT);
+        keep.abort();
+    }
+
+    #[test]
+    fn is_engine_timeout_matches_only_the_timeout_prefix() {
+        assert!(is_engine_timeout(ENGINE_TIMEOUT_ERR));
+        assert!(is_engine_timeout(&timeout_error(Effect::Changes("write"))));
+        assert!(!is_engine_timeout("engine stopped"));
+        assert!(!is_engine_timeout("engine dropped reply"));
+        assert!(!is_engine_timeout("channel 5 not found"));
+        assert!(!is_engine_timeout(""));
     }
 
     #[tokio::test]

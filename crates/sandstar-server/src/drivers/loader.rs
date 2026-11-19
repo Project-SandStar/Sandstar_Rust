@@ -228,8 +228,17 @@ pub async fn load_drivers<L: DriverLoader>(handle: &DriverHandle, engine_handle:
                 }
             };
             let (mut ok_count, mut err_count, mut write_err_count) = (0usize, 0usize, 0usize);
+            // After one engine timeout the remaining writes of this tick are
+            // skipped: each would wait another ENGINE_REPLY_TIMEOUT (R-28).
+            // Skipped writes are counted separately, not as write errors.
+            let mut engine_timed_out = false;
+            let mut skipped_count = 0usize;
             for (driver_id, point_id, res) in &results {
                 match res {
+                    Ok(_) if engine_timed_out => {
+                        ok_count += 1;
+                        skipped_count += 1;
+                    }
                     Ok(v) => {
                         ok_count += 1;
                         tracing::info!(
@@ -251,14 +260,26 @@ pub async fn load_drivers<L: DriverLoader>(handle: &DriverHandle, engine_handle:
                             .await
                         {
                             write_err_count += 1;
-                            tracing::warn!(
-                                driver = %driver_id,
-                                point_id,
-                                error = %e,
-                                "{} engine write_channel failed — \
-                                 is point_id a configured virtual channel?",
-                                L::LABEL
-                            );
+                            if crate::rest::is_engine_timeout(&e) {
+                                engine_timed_out = true;
+                                tracing::warn!(
+                                    driver = %driver_id,
+                                    point_id,
+                                    error = %e,
+                                    "{} engine did not answer write_channel; \
+                                     skipping the remaining writes of this tick",
+                                    L::LABEL
+                                );
+                            } else {
+                                tracing::warn!(
+                                    driver = %driver_id,
+                                    point_id,
+                                    error = %e,
+                                    "{} engine write_channel failed — \
+                                     is point_id a configured virtual channel?",
+                                    L::LABEL
+                                );
+                            }
                         }
                     }
                     Err(e) => {
@@ -277,6 +298,7 @@ pub async fn load_drivers<L: DriverLoader>(handle: &DriverHandle, engine_handle:
                 ok = ok_count,
                 err = err_count,
                 write_err = write_err_count,
+                write_skipped = skipped_count,
                 "{} poll tick complete",
                 L::LABEL
             );

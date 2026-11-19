@@ -33,6 +33,9 @@ use tracing::{debug, error, info, warn};
 /// Default manifest directory on the BeagleBone device.
 pub const DEFAULT_MANIFESTS_DIR: &str = "/home/eacio/sandstar/etc/manifests";
 
+/// Minimum gap between two "failed to refresh channels" warnings.
+const REFRESH_WARN_INTERVAL: Duration = Duration::from_secs(60);
+
 /// Start the SOX/DASP server as a background tokio task.
 ///
 /// The server binds a UDP socket on `port`, runs the DASP handshake for
@@ -136,7 +139,9 @@ async fn run_sox_server(
         // exist, so an empty start would stay empty. Retry while the engine
         // is merely slow (each attempt is bounded by ENGINE_REPLY_TIMEOUT,
         // R-28); start empty only if the engine is gone.
+        let mut attempt: u32 = 0;
         let initial_tree = loop {
+            attempt = attempt.saturating_add(1);
             match engine_handle.list_channels().await {
                 Ok(channels) => {
                     let t =
@@ -148,8 +153,11 @@ async fn run_sox_server(
                     );
                     break t;
                 }
-                Err(e) if e.starts_with(crate::rest::ENGINE_TIMEOUT_ERR) => {
-                    warn!("SOX: engine did not answer for the initial channel list; retrying");
+                Err(e) if crate::rest::is_engine_timeout(&e) => {
+                    warn!(
+                        attempt,
+                        "SOX: engine did not answer for the initial channel list; retrying"
+                    );
                 }
                 Err(e) => {
                     warn!("SOX: failed to get initial channels: {e}, starting with empty tree");
@@ -199,6 +207,9 @@ async fn run_sox_server(
 
     let mut tree_refresh_interval = tokio::time::interval(Duration::from_secs(1));
     tree_refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Last refresh-failure warning; the refresh runs every second, so further
+    // failures within REFRESH_WARN_INTERVAL are logged at debug.
+    let mut last_refresh_warn: Option<tokio::time::Instant> = None;
 
     // Persistence save timer: check dirty flag every 5 seconds.
     let mut persist_interval = tokio::time::interval(Duration::from_secs(5));
@@ -618,8 +629,20 @@ async fn run_sox_server(
                             });
                         }
                     }
-                    Err(e) => {
+                    // Timeouts are already reported (rate-limited) by EngineHandle.
+                    Err(e) if crate::rest::is_engine_timeout(&e) => {
                         debug!("SOX: failed to refresh channels: {e}");
+                    }
+                    Err(e) => {
+                        let now = tokio::time::Instant::now();
+                        if last_refresh_warn
+                            .is_none_or(|t| now.duration_since(t) >= REFRESH_WARN_INTERVAL)
+                        {
+                            last_refresh_warn = Some(now);
+                            warn!("SOX: failed to refresh channels: {e} (repeats within 60 s logged at debug)");
+                        } else {
+                            debug!("SOX: failed to refresh channels: {e}");
+                        }
                     }
                 }
             }

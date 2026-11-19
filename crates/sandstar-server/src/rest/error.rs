@@ -36,7 +36,7 @@ impl IntoResponse for AppError {
 impl From<String> for AppError {
     fn from(s: String) -> Self {
         // Classify known error patterns
-        if s.starts_with(super::ENGINE_TIMEOUT_ERR) {
+        if super::is_engine_timeout(&s) {
             Self::ServiceUnavailable(s)
         } else if s.contains("not found") || s.contains("NotFound") {
             Self::NotFound(s)

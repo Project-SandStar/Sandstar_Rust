@@ -116,7 +116,9 @@ Audited: 2026-03-10
 | `MAX_FRAME_SIZE` | 1,048,576 (1MB) | `sandstar-ipc/src/protocol.rs` | 11 | **Document** — max IPC message size. Prevents unbounded allocation. |
 | IPC read timeout | 5s | `sandstar-server/src/ipc.rs` | 58,68 | **Document** — prevents blocking IPC reads indefinitely. |
 | `ENGINE_REPLY_TIMEOUT` | 10s | `sandstar-server/src/rest/mod.rs` | 146 | **Document** — max wait for an `EngineHandle` command (send + reply). On timeout the caller gets `engine timeout` (REST: 503); a state-changing command may still run later (R-28, S-20). |
-| Engine timeout warn interval | 60s | `sandstar-server/src/rest/mod.rs` | 153 | **Keep** — first timeout per 60 s logged at `warn`, the rest at `debug`. |
+| Engine timeout warn interval | 60s | `sandstar-server/src/rest/mod.rs` | 160 | **Keep** — first timeout per 60 s logged at `warn`, the rest at `debug`. |
+| `HEALTH_ENGINE_TIMEOUT` | 2s | `sandstar-server/src/rest/handlers.rs` | 369 | **Document** — `/health` waits at most this long for the engine; otherwise 503 with `healthy:false` (R-28, S-21). |
+| `REFRESH_WARN_INTERVAL` | 60s | `sandstar-server/src/sox/mod.rs` | 37 | **Keep** — SOX tree refresh runs every second; a non-timeout failure is logged at `warn` at most once per interval, the rest at `debug` (S-21). |
 | Command channel capacity | 64 | `sandstar-server/src/main.rs` | 423 | **Document** — mpsc channel buffer for REST commands. |
 
 ## Sedona VM (SVM)

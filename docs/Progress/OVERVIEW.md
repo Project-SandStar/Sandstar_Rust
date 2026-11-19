@@ -232,7 +232,11 @@ Router: `router_with_auth` in `crates/sandstar-server/src/rest/mod.rs`, plus rou
 - REST TLS is behind the `tls` cargo feature; the release alias `arm-build-svm` does not enable it.
 - Filter depth cap 32, watch cap 64, max channels per watch 256, body limit 1 MB, rate limit on by default (100 req/s).
 - CORS: any origin, with an explicit method and header list.
-- Engine calls from REST, `/live`, SOX, roxWarp and drivers wait at most 10 s (`ENGINE_REPLY_TIMEOUT`). REST then answers `503 {"err":"engine timeout"}`; for writes and other state-changing commands the text adds "may still be applied" (R-28, S-20).
+- Engine calls from REST, the `/api/ws` WebSocket, SOX, roxWarp and drivers wait at most 10 s (`ENGINE_REPLY_TIMEOUT`). REST then answers `503 {"err":"engine timeout"}`; for writes and other state-changing commands the text adds "may still be applied" (R-28, S-20).
+- On an engine timeout (R-28, S-21):
+  - `/health` waits at most 2 s and answers `503 {"healthy":false,"uptimeSecs":0}`; a healthy engine still gives 200.
+  - `/api/ws` replies with error code `ENGINE_TIMEOUT` and ends the current push round; the timed-out watch asks for all values on its next poll, because the queued poll may still advance the change baseline.
+  - `localIo` marks the points `Down` (`RemoteDown`) instead of `Fault` and stops the round.
 - Only Ctrl+C (SIGINT) and SIGHUP are handled; `systemctl stop` (SIGTERM) ends the process without graceful shutdown.
 
 ---
