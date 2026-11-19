@@ -6,7 +6,7 @@
 //! - Spawns outbound connection tasks for configured peers
 //! - Provides cluster status for diagnostics
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -16,6 +16,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::rest::EngineHandle;
+use sandstar_engine::EngineStatus;
 
 // ── Configuration ─────────────────────────────────────
 
@@ -212,6 +213,19 @@ pub struct DeltaEngine {
     points: RwLock<HashMap<u32, VersionedPoint>>,
     /// Peer version vectors: peer_id -> last acknowledged version.
     peer_versions: RwLock<HashMap<String, u64>>,
+    /// Unix ms of the last warn about non-finite peer values (rate limit).
+    peer_non_finite_warn_ms: AtomicU64,
+}
+
+/// Minimum time between two warns about non-finite peer values.
+const NON_FINITE_WARN_INTERVAL_MS: u64 = 60_000;
+
+/// Current Unix time in milliseconds (0 if the clock is before the epoch).
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 impl DeltaEngine {
@@ -222,6 +236,7 @@ impl DeltaEngine {
             version: AtomicU64::new(0),
             points: RwLock::new(HashMap::new()),
             peer_versions: RwLock::new(HashMap::new()),
+            peer_non_finite_warn_ms: AtomicU64::new(0),
         }
     }
 
@@ -236,7 +251,20 @@ impl DeltaEngine {
     }
 
     /// Record a local point change; returns the new version.
-    pub async fn record_change(&self, channel: u32, value: f64, unit: &str, status: &str) -> u64 {
+    ///
+    /// Returns `None` and records nothing when `value` is NaN or infinite, so the
+    /// replicated state only ever holds finite values (R-45). The feed loop maps
+    /// such readings to the last finite value with a fault status beforehand.
+    pub async fn record_change(
+        &self,
+        channel: u32,
+        value: f64,
+        unit: &str,
+        status: &str,
+    ) -> Option<u64> {
+        if !value.is_finite() {
+            return None;
+        }
         let version = self.version.fetch_add(1, Ordering::SeqCst) + 1;
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -251,7 +279,7 @@ impl DeltaEngine {
             timestamp: now_ms,
         };
         self.points.write().await.insert(channel, point);
-        version
+        Some(version)
     }
 
     /// Compute delta: points that changed since a given version.
@@ -288,20 +316,71 @@ impl DeltaEngine {
     }
 
     /// Apply a remote delta from a peer (last-writer-wins by timestamp).
+    ///
+    /// Peer input is untrusted: a NaN or infinite value is never stored (R-45).
+    /// If the channel is already known, the newer point keeps the known finite
+    /// value and carries a fault status instead; otherwise it is dropped. The
+    /// peer version still advances, so the peer does not resend the point forever.
     pub async fn apply_remote_delta(&self, peer_id: &str, points: Vec<VersionedPoint>) {
         let mut local = self.points.write().await;
         let mut max_ver = 0u64;
+        let mut kept_as_fault = 0usize;
+        let mut dropped = 0usize;
         for point in &points {
             max_ver = max_ver.max(point.version);
-            let should_update = local
-                .get(&point.channel)
+            let existing = local.get(&point.channel);
+            let should_update = existing
                 .map(|existing| point.timestamp > existing.timestamp)
                 .unwrap_or(true);
-            if should_update {
-                local.insert(point.channel, point.clone());
+            if !should_update {
+                continue;
             }
+            let incoming = if point.value.is_finite() {
+                point.clone()
+            } else if let Some(existing) = existing {
+                kept_as_fault += 1;
+                VersionedPoint {
+                    value: existing.value,
+                    unit: existing.unit.clone(),
+                    status: fault_status(&point.status),
+                    ..point.clone()
+                }
+            } else {
+                dropped += 1;
+                continue;
+            };
+            local.insert(point.channel, incoming);
         }
         drop(local);
+
+        if kept_as_fault + dropped > 0 {
+            let now_ms = unix_millis();
+            let last = self.peer_non_finite_warn_ms.load(Ordering::Relaxed);
+            // At most one warn per interval across all peers; the rest go to debug.
+            if now_ms.saturating_sub(last) >= NON_FINITE_WARN_INTERVAL_MS
+                && self
+                    .peer_non_finite_warn_ms
+                    .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            {
+                warn!(
+                    peer = %peer_id,
+                    kept_as_fault,
+                    dropped,
+                    total = points.len(),
+                    "roxWarp: peer sent non-finite values; kept last value as fault or dropped \
+                     (further reports within 60 s at debug level)"
+                );
+            } else {
+                debug!(
+                    peer = %peer_id,
+                    kept_as_fault,
+                    dropped,
+                    total = points.len(),
+                    "roxWarp: peer sent non-finite values"
+                );
+            }
+        }
 
         if max_ver > 0 {
             self.peer_versions
@@ -541,8 +620,9 @@ impl ClusterManager {
 
 /// Feed engine channel values into the delta engine.
 ///
-/// Periodically reads all channels from the engine handle, compares with
-/// the delta engine's stored values, and records changes.
+/// Periodically reads all channels from the engine handle, compares each with
+/// what this loop last recorded for it, and records changes. NaN/inf readings
+/// are mapped by [`feed_decision`] (R-45).
 async fn channel_feed_loop(
     delta_engine: Arc<DeltaEngine>,
     engine_handle: EngineHandle,
@@ -551,8 +631,10 @@ async fn channel_feed_loop(
     let mut timer = tokio::time::interval(Duration::from_secs(interval_secs));
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    // Track previous values to only record actual changes
-    let mut prev_values: HashMap<u32, (f64, String)> = HashMap::new();
+    // What was last recorded per channel, to only record actual changes.
+    let mut prev_values: HashMap<u32, FedValue> = HashMap::new();
+    // Channels whose current reading is NaN/inf, to log only on transitions.
+    let mut non_finite: HashSet<u32> = HashSet::new();
 
     loop {
         timer.tick().await;
@@ -570,29 +652,127 @@ async fn channel_feed_loop(
                 continue;
             }
 
-            let changed = prev_values
-                .get(&ch.id)
-                .map(|(prev_val, prev_status)| {
-                    (*prev_val - ch.cur).abs() > f64::EPSILON || *prev_status != ch.status
-                })
-                .unwrap_or(true);
-
-            if changed {
-                // Determine unit from channel type or default
-                let unit = channel_unit(&ch.channel_type);
-                delta_engine
-                    .record_change(ch.id, ch.cur, &unit, &ch.status)
-                    .await;
-                prev_values.insert(ch.id, (ch.cur, ch.status.clone()));
-                debug!(
+            let prev = prev_values.get(&ch.id);
+            if !ch.cur.is_finite() {
+                if non_finite.insert(ch.id) {
+                    if prev.is_some() {
+                        warn!(
+                            channel = ch.id,
+                            value = %ch.cur,
+                            status = %ch.status,
+                            "roxWarp feed: non-finite channel value; publishing last value as fault"
+                        );
+                    } else {
+                        warn!(
+                            channel = ch.id,
+                            value = %ch.cur,
+                            status = %ch.status,
+                            "roxWarp feed: non-finite channel value; not published (no prior value)"
+                        );
+                    }
+                }
+            } else if non_finite.remove(&ch.id) {
+                info!(
                     channel = ch.id,
                     value = ch.cur,
-                    status = %ch.status,
-                    "roxWarp: recorded change"
+                    "roxWarp feed: channel value finite again"
                 );
+            }
+
+            let FeedAction::Record(next) = feed_decision(prev, ch.cur, &ch.status) else {
+                continue;
+            };
+            let unit = channel_unit(&ch.channel_type);
+            match delta_engine
+                .record_change(ch.id, next.value, &unit, &next.status)
+                .await
+            {
+                Some(_) => {
+                    debug!(
+                        channel = ch.id,
+                        value = next.value,
+                        status = %next.status,
+                        "roxWarp: recorded change"
+                    );
+                    prev_values.insert(ch.id, next);
+                }
+                // feed_decision only yields finite values; reaching this is a bug.
+                None => warn!(
+                    channel = ch.id,
+                    value = next.value,
+                    "roxWarp feed: delta engine rejected a value; not published"
+                ),
             }
         }
     }
+}
+
+/// The value and status last recorded for a channel by the feed loop.
+#[derive(Debug, Clone, PartialEq)]
+struct FedValue {
+    /// Always finite.
+    value: f64,
+    status: String,
+}
+
+/// What the feed loop does with one channel reading.
+#[derive(Debug, PartialEq)]
+enum FeedAction {
+    /// Nothing new to publish, or a non-finite reading with no prior value.
+    Skip,
+    /// Record this value and status.
+    Record(FedValue),
+}
+
+/// Decide what to publish for a channel reading (R-45).
+///
+/// A finite reading is published when value or status changed. A NaN/inf
+/// reading is never published as a value: a channel that was published before
+/// keeps its last finite value with a fault status; one that never was is skipped.
+fn feed_decision(prev: Option<&FedValue>, cur: f64, status: &str) -> FeedAction {
+    let next = if cur.is_finite() {
+        FedValue {
+            value: cur,
+            status: status.to_string(),
+        }
+    } else {
+        match prev {
+            Some(p) => FedValue {
+                value: p.value,
+                status: fault_status(status),
+            },
+            None => return FeedAction::Skip,
+        }
+    };
+    let changed = prev
+        .map(|p| (p.value - next.value).abs() > f64::EPSILON || p.status != next.status)
+        .unwrap_or(true);
+    if changed {
+        FeedAction::Record(next)
+    } else {
+        FeedAction::Skip
+    }
+}
+
+/// Status published for a point whose value is not finite.
+///
+/// A known degraded engine status (Unknown, Stale, Disabled, Fault, Down) is
+/// kept in its canonical spelling; anything else, including "Ok", "ok ",
+/// an empty or an unknown peer-supplied string, becomes `Fault`, so a stale
+/// value is never published as healthy.
+fn fault_status(status: &str) -> String {
+    const KEPT: [EngineStatus; 5] = [
+        EngineStatus::Unknown,
+        EngineStatus::Stale,
+        EngineStatus::Disabled,
+        EngineStatus::Fault,
+        EngineStatus::Down,
+    ];
+    KEPT.iter()
+        .find(|s| s.as_str().eq_ignore_ascii_case(status))
+        .unwrap_or(&EngineStatus::Fault)
+        .as_str()
+        .to_string()
 }
 
 /// Map channel type string to a reasonable unit string.
@@ -812,13 +992,13 @@ mod tests {
 
         // Record a change
         let v1 = engine.record_change(1113, 72.5, "degF", "ok").await;
-        assert_eq!(v1, 1);
+        assert_eq!(v1, Some(1));
         assert_eq!(engine.current_version(), 1);
         assert_eq!(engine.point_count().await, 1);
 
         // Record another change
         let v2 = engine.record_change(1206, 4.2, "mA", "ok").await;
-        assert_eq!(v2, 2);
+        assert_eq!(v2, Some(2));
         assert_eq!(engine.point_count().await, 2);
 
         // Delta since version 0 returns all points
@@ -929,5 +1109,211 @@ mod tests {
         let vv = engine.get_version_vector().await;
         assert_eq!(*vv.get("node-a").unwrap(), 1);
         assert_eq!(*vv.get("node-b").unwrap(), 5);
+    }
+
+    // ── R-45: non-finite values ─────────────────────────
+
+    fn fed(value: f64, status: &str) -> FedValue {
+        FedValue {
+            value,
+            status: status.to_string(),
+        }
+    }
+
+    fn remote(channel: u32, value: f64, status: &str, version: u64) -> VersionedPoint {
+        VersionedPoint {
+            channel,
+            value,
+            unit: "degF".to_string(),
+            status: status.to_string(),
+            version,
+            timestamp: i64::MAX,
+        }
+    }
+
+    #[test]
+    fn feed_first_finite_reading_is_recorded() {
+        assert_eq!(
+            feed_decision(None, 72.5, "Ok"),
+            FeedAction::Record(fed(72.5, "Ok"))
+        );
+    }
+
+    #[test]
+    fn feed_unchanged_reading_is_skipped() {
+        let prev = fed(72.5, "Ok");
+        assert_eq!(feed_decision(Some(&prev), 72.5, "Ok"), FeedAction::Skip);
+    }
+
+    #[test]
+    fn feed_first_non_finite_reading_is_skipped() {
+        for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(feed_decision(None, v, "Ok"), FeedAction::Skip, "value {v}");
+        }
+    }
+
+    #[test]
+    fn feed_finite_to_non_finite_publishes_last_value_as_fault() {
+        let prev = fed(72.5, "Ok");
+        for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                feed_decision(Some(&prev), v, "Ok"),
+                FeedAction::Record(fed(72.5, "Fault")),
+                "value {v}"
+            );
+        }
+    }
+
+    #[test]
+    fn feed_non_finite_keeps_non_ok_status() {
+        let prev = fed(72.5, "Ok");
+        assert_eq!(
+            feed_decision(Some(&prev), f64::NAN, "Down"),
+            FeedAction::Record(fed(72.5, "Down"))
+        );
+    }
+
+    #[test]
+    fn feed_repeated_non_finite_is_skipped() {
+        let prev = fed(72.5, "Fault");
+        assert_eq!(feed_decision(Some(&prev), f64::NAN, "Ok"), FeedAction::Skip);
+    }
+
+    #[test]
+    fn feed_recovery_after_non_finite_is_recorded() {
+        // Before R-45 the NaN comparison was always false, so recovery to the
+        // same status was never published.
+        let prev = fed(72.5, "Fault");
+        assert_eq!(
+            feed_decision(Some(&prev), 73.0, "Ok"),
+            FeedAction::Record(fed(73.0, "Ok"))
+        );
+        // Recovery to the same value is still a status change.
+        assert_eq!(
+            feed_decision(Some(&prev), 72.5, "Ok"),
+            FeedAction::Record(fed(72.5, "Ok"))
+        );
+    }
+
+    #[test]
+    fn fault_status_keeps_only_known_degraded_statuses() {
+        // Healthy, malformed or unknown statuses never survive a non-finite value.
+        for s in [
+            "Ok", "ok", "Ok ", "", "Healthy", "Ok
+",
+        ] {
+            assert_eq!(fault_status(s), "Fault", "status {s:?}");
+        }
+        // Known degraded statuses are kept, in canonical spelling.
+        assert_eq!(fault_status("Stale"), "Stale");
+        assert_eq!(fault_status("down"), "Down");
+        assert_eq!(fault_status("DISABLED"), "Disabled");
+        assert_eq!(fault_status("Unknown"), "Unknown");
+        assert_eq!(fault_status("Fault"), "Fault");
+    }
+
+    #[tokio::test]
+    async fn record_change_rejects_non_finite() {
+        let engine = DeltaEngine::new("node-a".to_string());
+        for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(engine.record_change(1113, v, "degF", "Ok").await, None);
+        }
+        assert_eq!(engine.current_version(), 0);
+        assert_eq!(engine.point_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn apply_remote_non_finite_unknown_channel_is_dropped() {
+        let engine = DeltaEngine::new("node-a".to_string());
+        engine
+            .apply_remote_delta(
+                "node-b",
+                vec![
+                    remote(1113, f64::NAN, "ok", 3),
+                    remote(1206, 4.2, "ok", 4),
+                    remote(1300, f64::INFINITY, "ok", 5),
+                ],
+            )
+            .await;
+        let (_, all) = engine.full_state().await;
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].channel, 1206);
+        // Peer version advances past the dropped points.
+        let vv = engine.get_version_vector().await;
+        assert_eq!(vv.get("node-b").copied(), Some(5));
+    }
+
+    #[tokio::test]
+    async fn apply_remote_non_finite_known_channel_keeps_value_as_fault() {
+        let engine = DeltaEngine::new("node-a".to_string());
+        engine.record_change(1113, 72.5, "degC", "Ok").await;
+        engine
+            .apply_remote_delta(
+                "node-b",
+                vec![remote(1113, f64::NEG_INFINITY, "Healthy", 9)],
+            )
+            .await;
+        let (_, all) = engine.full_state().await;
+        let p = all.iter().find(|p| p.channel == 1113).unwrap();
+        assert!((p.value - 72.5).abs() < f64::EPSILON);
+        assert_eq!(p.status, "Fault");
+        // The stored unit belongs to the kept value, not to the peer point.
+        assert_eq!(p.unit, "degC");
+        assert_eq!(p.version, 9);
+    }
+
+    #[tokio::test]
+    async fn apply_remote_older_non_finite_point_is_ignored() {
+        let engine = DeltaEngine::new("node-a".to_string());
+        engine.record_change(1113, 72.5, "degF", "Ok").await;
+        let old = VersionedPoint {
+            timestamp: 0,
+            ..remote(1113, f64::NAN, "ok", 4)
+        };
+        engine.apply_remote_delta("node-b", vec![old]).await;
+        let (_, all) = engine.full_state().await;
+        let p = all.iter().find(|p| p.channel == 1113).unwrap();
+        assert!((p.value - 72.5).abs() < f64::EPSILON);
+        assert_eq!(p.status, "Ok");
+        assert_eq!(
+            engine.get_version_vector().await.get("node-b").copied(),
+            Some(4)
+        );
+    }
+
+    #[tokio::test]
+    async fn delta_with_non_finite_inputs_stays_decodable() {
+        use crate::roxwarp::handler::WarpMessage;
+
+        let engine = DeltaEngine::new("node-a".to_string());
+        engine.record_change(1113, 72.5, "degF", "Ok").await;
+        engine.record_change(1206, f64::NAN, "mA", "Ok").await;
+        engine
+            .apply_remote_delta(
+                "node-b",
+                vec![
+                    remote(1113, f64::NAN, "ok", 2),
+                    remote(1300, f64::NAN, "ok", 3),
+                ],
+            )
+            .await;
+        let (version, points) = engine.full_state().await;
+        assert!(points.iter().all(|p| p.value.is_finite()));
+
+        let msg = WarpMessage::Delta {
+            node_id: "node-a".to_string(),
+            from_version: 0,
+            to_version: version,
+            points,
+        };
+        // JSON writes NaN as null, which a peer cannot decode into f64.
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(!json.contains("null"), "{json}");
+        let decoded: WarpMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(decoded, WarpMessage::Delta { ref points, .. } if points.len() == 1));
+
+        let bytes = rmp_serde::to_vec(&msg).unwrap();
+        let decoded: WarpMessage = rmp_serde::from_slice(&bytes).unwrap();
+        assert!(matches!(decoded, WarpMessage::Delta { ref points, .. } if points.len() == 1));
     }
 }
