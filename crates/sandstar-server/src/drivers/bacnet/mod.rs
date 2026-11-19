@@ -72,6 +72,58 @@ impl From<BacnetError> for super::DriverError {
     }
 }
 
+// ── Malformed frames ───────────────────────────────────────
+
+/// At most one `warn` per this many seconds for frames that fail to
+/// decode; the others go to `debug` (wire-protocols.md).
+const MALFORMED_WARN_INTERVAL_SECS: u64 = 60;
+
+/// Decode a received frame; log and drop it if it is malformed (S-24).
+pub(crate) fn decode_or_log(
+    data: &[u8],
+    src: SocketAddr,
+    context: &'static str,
+) -> Option<(frame::NpduHeader, frame::Apdu)> {
+    match frame::decode_packet(data) {
+        Ok(decoded) => Some(decoded),
+        Err(e) => {
+            log_malformed(data.len(), src, context, &e);
+            None
+        }
+    }
+}
+
+fn log_malformed(len: usize, src: SocketAddr, context: &'static str, err: &BacnetError) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::OnceLock;
+    static ORIGIN: OnceLock<std::time::Instant> = OnceLock::new();
+    // Seconds since ORIGIN at the last warning, plus one (0 = never).
+    static LAST_WARN: AtomicU64 = AtomicU64::new(0);
+
+    let now = ORIGIN
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_secs()
+        .saturating_add(1);
+    let last = LAST_WARN.load(Ordering::Relaxed);
+    let due = last == 0 || now.saturating_sub(last) >= MALFORMED_WARN_INTERVAL_SECS;
+    if due
+        && LAST_WARN
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        tracing::warn!(
+            from = %src,
+            bytes = len,
+            context,
+            error = %err,
+            "BACnet: dropped malformed frame (further ones for {MALFORMED_WARN_INTERVAL_SECS} s at debug)"
+        );
+    } else {
+        tracing::debug!(from = %src, bytes = len, context, error = %err, "BACnet: dropped malformed frame");
+    }
+}
+
 // ── DeviceInfo ─────────────────────────────────────────────
 
 /// A discovered BACnet device.
@@ -451,9 +503,9 @@ async fn bacnet_transact(
             match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
                 Err(_elapsed) => break, // per-attempt timeout expired
                 Ok(Err(_io)) => break,  // IO error — retry
-                Ok(Ok((n, _src))) => {
+                Ok(Ok((n, src))) => {
                     // Decode and dispatch to the correct waiter.
-                    if let Ok((_npdu, apdu)) = frame::decode_packet(&buf[..n]) {
+                    if let Some((_npdu, apdu)) = decode_or_log(&buf[..n], src, "transaction") {
                         if let Some(id) = apdu_invoke_id(&apdu) {
                             transactions.dispatch(id, apdu);
                         }
@@ -532,8 +584,8 @@ where
                     }
                 }
                 Ok(Err(e)) => return Err(DriverError::CommFault(format!("bacnet recv: {e}"))),
-                Ok(Ok((n, _src))) => {
-                    if let Ok((_npdu, apdu)) = frame::decode_packet(&buf[..n]) {
+                Ok(Ok((n, src))) => {
+                    if let Some((_npdu, apdu)) = decode_or_log(&buf[..n], src, "read") {
                         // Side-effect: COV notifications update the cache (Phase B8.1)
                         match &apdu {
                             frame::Apdu::UnconfirmedCovNotification { notification }
@@ -670,8 +722,8 @@ impl BacnetDriver {
                         }
                     }
                     Ok(Err(e)) => return Err(BacnetError::Io(e)),
-                    Ok(Ok((n, _src))) => {
-                        if let Ok((_npdu, apdu)) = frame::decode_packet(&buf[..n]) {
+                    Ok(Ok((n, src))) => {
+                        if let Some((_npdu, apdu)) = decode_or_log(&buf[..n], src, "read") {
                             // Side-effect: process COV notifications (Phase B8.1)
                             match &apdu {
                                 frame::Apdu::UnconfirmedCovNotification { notification }
@@ -769,8 +821,8 @@ impl BacnetDriver {
                         }
                     }
                     Ok(Err(e)) => return Err(BacnetError::Io(e)),
-                    Ok(Ok((n, _src))) => {
-                        if let Ok((_npdu, apdu)) = frame::decode_packet(&buf[..n]) {
+                    Ok(Ok((n, src))) => {
+                        if let Some((_npdu, apdu)) = decode_or_log(&buf[..n], src, "read") {
                             // Side-effect: process COV notifications (Phase B8.1)
                             match &apdu {
                                 frame::Apdu::UnconfirmedCovNotification { notification }
