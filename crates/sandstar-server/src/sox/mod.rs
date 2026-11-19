@@ -132,19 +132,29 @@ async fn run_sox_server(
     // Build initial component tree from current channel data.
     // Values will be corrected on the first `update_from_channels` tick.
     {
-        let initial_tree = match engine_handle.list_channels().await {
-            Ok(channels) => {
-                let t = ComponentTree::from_channels_with_manifest(&channels, manifest_db.clone());
-                info!(
-                    components = t.len(),
-                    manifest_types = manifest_db.type_count(),
-                    "SOX component tree built"
-                );
-                t
-            }
-            Err(e) => {
-                warn!("SOX: failed to get initial channels: {e}, starting with empty tree");
-                ComponentTree::new_with_manifest(manifest_db.clone())
+        // `update_from_channels` only refreshes components that already
+        // exist, so an empty start would stay empty. Retry while the engine
+        // is merely slow (each attempt is bounded by ENGINE_REPLY_TIMEOUT,
+        // R-28); start empty only if the engine is gone.
+        let initial_tree = loop {
+            match engine_handle.list_channels().await {
+                Ok(channels) => {
+                    let t =
+                        ComponentTree::from_channels_with_manifest(&channels, manifest_db.clone());
+                    info!(
+                        components = t.len(),
+                        manifest_types = manifest_db.type_count(),
+                        "SOX component tree built"
+                    );
+                    break t;
+                }
+                Err(e) if e.starts_with(crate::rest::ENGINE_TIMEOUT_ERR) => {
+                    warn!("SOX: engine did not answer for the initial channel list; retrying");
+                }
+                Err(e) => {
+                    warn!("SOX: failed to get initial channels: {e}, starting with empty tree");
+                    break ComponentTree::new_with_manifest(manifest_db.clone());
+                }
             }
         };
         // Replace the empty shared tree with the fully initialized one.
