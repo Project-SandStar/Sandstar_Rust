@@ -115,7 +115,9 @@ Audited: 2026-03-10
 |----------|-------|------|------|----------------|
 | `MAX_FRAME_SIZE` | 1,048,576 (1MB) | `sandstar-ipc/src/protocol.rs` | 11 | **Document** — max IPC message size. Prevents unbounded allocation. |
 | IPC read timeout | 5s | `sandstar-server/src/ipc.rs` | 58,68 | **Document** — prevents blocking IPC reads indefinitely. |
-| Command channel capacity | 64 | `sandstar-server/src/main.rs` | 344 | **Document** — mpsc channel buffer for REST commands. |
+| `ENGINE_REPLY_TIMEOUT` | 10s | `sandstar-server/src/rest/mod.rs` | 146 | **Document** — max wait for an `EngineHandle` command (send + reply). On timeout the caller gets `engine timeout` (REST: 503); a state-changing command may still run later (R-28, S-20). |
+| Engine timeout warn interval | 60s | `sandstar-server/src/rest/mod.rs` | 153 | **Keep** — first timeout per 60 s logged at `warn`, the rest at `debug`. |
+| Command channel capacity | 64 | `sandstar-server/src/main.rs` | 423 | **Document** — mpsc channel buffer for REST commands. |
 
 ## Sedona VM (SVM)
 
