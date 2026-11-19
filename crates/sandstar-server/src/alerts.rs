@@ -554,7 +554,7 @@ pub fn alert_router(manager: SharedAlertManager) -> Router {
 
 /// GET /api/alerts/config — view current alert config (password masked).
 async fn get_config(State(mgr): State<SharedAlertManager>) -> impl IntoResponse {
-    let mgr = mgr.lock().unwrap();
+    let mgr = crate::lock::lock_or_recover(&mgr, "alert manager");
     Json(mgr.config().masked())
 }
 
@@ -563,7 +563,7 @@ async fn put_config(
     State(mgr): State<SharedAlertManager>,
     Json(new_config): Json<AlertConfig>,
 ) -> impl IntoResponse {
-    let mut mgr = mgr.lock().unwrap();
+    let mut mgr = crate::lock::lock_or_recover(&mgr, "alert manager");
     match mgr.update_config(new_config) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))),
         Err(e) => (
@@ -575,7 +575,7 @@ async fn put_config(
 
 /// GET /api/alerts/recipients — list recipient email addresses.
 async fn get_recipients(State(mgr): State<SharedAlertManager>) -> impl IntoResponse {
-    let mgr = mgr.lock().unwrap();
+    let mgr = crate::lock::lock_or_recover(&mgr, "alert manager");
     Json(mgr.config().recipients.clone())
 }
 
@@ -589,7 +589,7 @@ async fn add_recipient(
     State(mgr): State<SharedAlertManager>,
     Json(req): Json<AddRecipientRequest>,
 ) -> impl IntoResponse {
-    let mut mgr = mgr.lock().unwrap();
+    let mut mgr = crate::lock::lock_or_recover(&mgr, "alert manager");
     match mgr.add_recipient(&req.email) {
         Ok(true) => (
             StatusCode::CREATED,
@@ -613,7 +613,7 @@ async fn remove_recipient(
     State(mgr): State<SharedAlertManager>,
     AxumPath(email): AxumPath<String>,
 ) -> impl IntoResponse {
-    let mut mgr = mgr.lock().unwrap();
+    let mut mgr = crate::lock::lock_or_recover(&mgr, "alert manager");
     match mgr.remove_recipient(&email) {
         Ok(true) => (
             StatusCode::OK,
@@ -632,19 +632,19 @@ async fn remove_recipient(
 
 /// GET /api/alerts/active — list currently active (unresolved) alerts.
 async fn get_active(State(mgr): State<SharedAlertManager>) -> impl IntoResponse {
-    let mgr = mgr.lock().unwrap();
+    let mgr = crate::lock::lock_or_recover(&mgr, "alert manager");
     Json(mgr.active_alerts())
 }
 
 /// GET /api/alerts/history — recent alert history (newest first, max 100).
 async fn get_history(State(mgr): State<SharedAlertManager>) -> impl IntoResponse {
-    let mgr = mgr.lock().unwrap();
+    let mgr = crate::lock::lock_or_recover(&mgr, "alert manager");
     Json(mgr.history())
 }
 
 /// POST /api/alerts/test — send a test email.
 async fn send_test(State(mgr): State<SharedAlertManager>) -> impl IntoResponse {
-    let mgr = mgr.lock().unwrap();
+    let mgr = crate::lock::lock_or_recover(&mgr, "alert manager");
     let notified = mgr.send_test();
     Json(serde_json::json!({
         "test_sent": true,
