@@ -7,7 +7,6 @@
 //! # Architecture
 //!
 //! - `binary_trio` — Binary Trio encoder/decoder (Haystack values as MessagePack)
-//! - `delta` — Synchronous delta engine with version vectors and LWW merge
 //! - `protocol` — Full roxWarp message types with JSON + MessagePack serialization
 //! - `cluster` — Async cluster manager, channel feed loop, peer state tracking
 //! - `handler` — Incoming WebSocket handler (server side)
@@ -27,7 +26,6 @@
 
 pub mod binary_trio;
 pub mod cluster;
-pub mod delta;
 pub mod handler;
 pub mod mdns;
 pub mod mtls;

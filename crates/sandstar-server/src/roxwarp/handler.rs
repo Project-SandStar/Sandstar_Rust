@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
-use super::cluster::{ClusterConfig, DeltaEngine, VersionedPoint};
+use super::cluster::{resync_from, ClusterConfig, DeltaEngine, VersionedPoint};
 
 // ── Shared State ──────────────────────────────────────
 
@@ -168,10 +168,10 @@ async fn handle_roxwarp_connection(
     info!("roxWarp: incoming connection");
 
     // Phase 1: Wait for hello (binary or text)
-    let peer_node_id = match wait_for_hello(&mut ws_rx).await {
-        Some((node_id, _peer_versions)) => {
+    let (peer_node_id, peer_versions) = match wait_for_hello(&mut ws_rx).await {
+        Some((node_id, peer_versions)) => {
             info!(peer = %node_id, "roxWarp: received hello");
-            node_id
+            (node_id, peer_versions)
         }
         None => {
             warn!("roxWarp: no hello received, closing");
@@ -204,12 +204,18 @@ async fn handle_roxwarp_connection(
         return;
     }
 
-    // Phase 3: Send initial delta to peer (full state if peer is new)
-    let (current_version, deltas) = delta_engine.delta_for_peer(&peer_node_id).await;
+    // Phase 3: Send initial delta from what the peer says it has of ours
+    // (full state if the peer is new or saw us before our restart).
+    let current_version = delta_engine.current_version();
+    let from_version = resync_from(
+        peer_versions.get(&config.node_id).copied().unwrap_or(0),
+        current_version,
+    );
+    let deltas = delta_engine.delta_since(from_version).await;
     if !deltas.is_empty() {
         let delta_msg = WarpMessage::Delta {
             node_id: config.node_id.clone(),
-            from_version: 0,
+            from_version,
             to_version: current_version,
             points: deltas,
         };
@@ -421,7 +427,9 @@ async fn process_warp_message(
                 count = points.len(),
                 "roxWarp: received delta"
             );
-            delta_engine.apply_remote_delta(&node_id, points).await;
+            delta_engine
+                .apply_remote_delta(&node_id, to_version, points)
+                .await;
 
             // Ack the delta
             let ack = WarpMessage::Ack {
@@ -443,7 +451,10 @@ async fn process_warp_message(
             debug!(peer = %node_id, "roxWarp: received version vector");
             // Check if peer is behind on our data
             let our_version = delta_engine.current_version();
-            let peer_has = versions.get(&config.node_id).copied().unwrap_or(0);
+            let peer_has = resync_from(
+                versions.get(&config.node_id).copied().unwrap_or(0),
+                our_version,
+            );
             if peer_has < our_version {
                 // Send deltas for what the peer is missing
                 let deltas = delta_engine.delta_since(peer_has).await;
@@ -463,9 +474,12 @@ async fn process_warp_message(
 
         WarpMessage::DeltaReq { node_id, want_from } => {
             debug!(peer = %node_id, "roxWarp: received delta request");
-            let since = want_from.get(&config.node_id).copied().unwrap_or(0);
-            let deltas = delta_engine.delta_since(since).await;
             let current = delta_engine.current_version();
+            let since = resync_from(
+                want_from.get(&config.node_id).copied().unwrap_or(0),
+                current,
+            );
+            let deltas = delta_engine.delta_since(since).await;
             let delta_msg = WarpMessage::Delta {
                 node_id: config.node_id.clone(),
                 from_version: since,

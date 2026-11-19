@@ -183,7 +183,7 @@ impl std::fmt::Display for PeerState {
 // ── Versioned Point ───────────────────────────────────
 
 /// A point value with version tracking for delta sync.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VersionedPoint {
     /// Channel number (e.g. 1113).
     pub channel: u32,
@@ -211,14 +211,24 @@ pub struct DeltaEngine {
     version: AtomicU64,
     /// Local point state: channel -> versioned point.
     points: RwLock<HashMap<u32, VersionedPoint>>,
-    /// Peer version vectors: peer_id -> last acknowledged version.
-    peer_versions: RwLock<HashMap<String, u64>>,
-    /// Unix ms of the last warn about non-finite peer values (rate limit).
-    peer_non_finite_warn_ms: AtomicU64,
+    /// Highest version of each peer's own counter seen in its deltas:
+    /// peer_id -> version. Advertised in our version vector.
+    seen_from_peer: RwLock<HashMap<String, u64>>,
+    /// Our version each peer last acknowledged: peer_id -> version.
+    acked_by_peer: RwLock<HashMap<String, u64>>,
+    /// Unix ms of the last warn about bad peer points (rate limit).
+    peer_anomaly_warn_ms: AtomicU64,
 }
 
-/// Minimum time between two warns about non-finite peer values.
-const NON_FINITE_WARN_INTERVAL_MS: u64 = 60_000;
+/// Minimum time between two warns about bad peer points (non-finite value,
+/// future timestamp); the rest are logged at debug level.
+const PEER_ANOMALY_WARN_INTERVAL_MS: u64 = 60_000;
+
+/// How far a peer timestamp may be ahead of our clock. A point further ahead
+/// is rejected: under last-writer-wins it would pin the channel, and storing
+/// it with the receive time instead would let each re-delivery of the stale
+/// value beat newer ones (R-27).
+const MAX_PEER_FUTURE_SKEW_MS: i64 = 300_000;
 
 /// Current Unix time in milliseconds (0 if the clock is before the epoch).
 fn unix_millis() -> u64 {
@@ -228,6 +238,24 @@ fn unix_millis() -> u64 {
         .unwrap_or(0)
 }
 
+/// [`unix_millis`] as the signed type used in point timestamps.
+fn unix_millis_i64() -> i64 {
+    i64::try_from(unix_millis()).unwrap_or(i64::MAX)
+}
+
+/// The version to send deltas from, given the version of our counter a peer
+/// claims to have.
+///
+/// Counters start at 0 on every start and carry no epoch, so a claim beyond
+/// our current version comes from before our restart: resend everything.
+pub(crate) fn resync_from(peer_claims: u64, current: u64) -> u64 {
+    if peer_claims > current {
+        0
+    } else {
+        peer_claims
+    }
+}
+
 impl DeltaEngine {
     /// Create a new delta engine for the given node.
     pub fn new(node_id: String) -> Self {
@@ -235,8 +263,9 @@ impl DeltaEngine {
             node_id,
             version: AtomicU64::new(0),
             points: RwLock::new(HashMap::new()),
-            peer_versions: RwLock::new(HashMap::new()),
-            peer_non_finite_warn_ms: AtomicU64::new(0),
+            seen_from_peer: RwLock::new(HashMap::new()),
+            acked_by_peer: RwLock::new(HashMap::new()),
+            peer_anomaly_warn_ms: AtomicU64::new(0),
         }
     }
 
@@ -266,10 +295,7 @@ impl DeltaEngine {
             return None;
         }
         let version = self.version.fetch_add(1, Ordering::SeqCst) + 1;
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
+        let now_ms = unix_millis_i64();
         let point = VersionedPoint {
             channel,
             value,
@@ -293,23 +319,23 @@ impl DeltaEngine {
             .collect()
     }
 
-    /// Compute delta for a specific peer based on their last known version.
+    /// Compute delta for a specific peer from the version it last acknowledged.
     pub async fn delta_for_peer(&self, peer_id: &str) -> (u64, Vec<VersionedPoint>) {
-        let peer_ver = self
-            .peer_versions
+        let acked = self
+            .acked_by_peer
             .read()
             .await
             .get(peer_id)
             .copied()
             .unwrap_or(0);
         let current = self.version.load(Ordering::SeqCst);
-        let deltas = self.delta_since(peer_ver).await;
+        let deltas = self.delta_since(resync_from(acked, current)).await;
         (current, deltas)
     }
 
-    /// Update a peer's acknowledged version after successful sync.
+    /// Record the version of our counter a peer acknowledged.
     pub async fn ack_peer(&self, peer_id: &str, version: u64) {
-        self.peer_versions
+        self.acked_by_peer
             .write()
             .await
             .insert(peer_id.to_string(), version);
@@ -317,17 +343,35 @@ impl DeltaEngine {
 
     /// Apply a remote delta from a peer (last-writer-wins by timestamp).
     ///
-    /// Peer input is untrusted: a NaN or infinite value is never stored (R-45).
-    /// If the channel is already known, the newer point keeps the known finite
-    /// value and carries a fault status instead; otherwise it is dropped. The
-    /// peer version still advances, so the peer does not resend the point forever.
-    pub async fn apply_remote_delta(&self, peer_id: &str, points: Vec<VersionedPoint>) {
+    /// Peer input is untrusted:
+    /// - A NaN or infinite value is never stored (R-45). If the channel is
+    ///   already known, the newer point keeps the known finite value and unit
+    ///   and carries a fault status instead; otherwise it is dropped.
+    /// - A point whose timestamp is more than [`MAX_PEER_FUTURE_SKEW_MS`] ahead
+    ///   of our clock is rejected, so a peer cannot pin a channel (R-27). A peer
+    ///   with a fast clock stays visible in the log until its clock is fixed.
+    ///
+    /// `sender_version` is the sender's own counter when it sent the message
+    /// (`toVersion` of a delta, `version` of a full state). It is stored as
+    /// what we have seen from this peer. Point versions are not used for this:
+    /// relayed or echoed points carry other nodes' counters. The value may go
+    /// down: a restarted peer counts from 0 again.
+    pub async fn apply_remote_delta(
+        &self,
+        peer_id: &str,
+        sender_version: u64,
+        points: Vec<VersionedPoint>,
+    ) {
+        let latest_allowed = unix_millis_i64().saturating_add(MAX_PEER_FUTURE_SKEW_MS);
         let mut local = self.points.write().await;
-        let mut max_ver = 0u64;
         let mut kept_as_fault = 0usize;
         let mut dropped = 0usize;
+        let mut future_ts = 0usize;
         for point in &points {
-            max_ver = max_ver.max(point.version);
+            if point.timestamp > latest_allowed {
+                future_ts += 1;
+                continue;
+            }
             let existing = local.get(&point.channel);
             let should_update = existing
                 .map(|existing| point.timestamp > existing.timestamp)
@@ -353,40 +397,53 @@ impl DeltaEngine {
         }
         drop(local);
 
-        if kept_as_fault + dropped > 0 {
-            let now_ms = unix_millis();
-            let last = self.peer_non_finite_warn_ms.load(Ordering::Relaxed);
-            // At most one warn per interval across all peers; the rest go to debug.
-            if now_ms.saturating_sub(last) >= NON_FINITE_WARN_INTERVAL_MS
-                && self
-                    .peer_non_finite_warn_ms
-                    .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
-                    .is_ok()
-            {
-                warn!(
-                    peer = %peer_id,
-                    kept_as_fault,
-                    dropped,
-                    total = points.len(),
-                    "roxWarp: peer sent non-finite values; kept last value as fault or dropped \
-                     (further reports within 60 s at debug level)"
-                );
-            } else {
-                debug!(
-                    peer = %peer_id,
-                    kept_as_fault,
-                    dropped,
-                    total = points.len(),
-                    "roxWarp: peer sent non-finite values"
-                );
-            }
+        if kept_as_fault + dropped + future_ts > 0 {
+            self.report_peer_anomaly(peer_id, kept_as_fault, dropped, future_ts, points.len());
         }
 
-        if max_ver > 0 {
-            self.peer_versions
-                .write()
-                .await
-                .insert(peer_id.to_string(), max_ver);
+        self.seen_from_peer
+            .write()
+            .await
+            .insert(peer_id.to_string(), sender_version);
+    }
+
+    /// Log bad points from a peer: at most one warn per
+    /// [`PEER_ANOMALY_WARN_INTERVAL_MS`] across all peers, the rest at debug.
+    fn report_peer_anomaly(
+        &self,
+        peer_id: &str,
+        kept_as_fault: usize,
+        dropped: usize,
+        future_ts: usize,
+        total: usize,
+    ) {
+        let now_ms = unix_millis();
+        let last = self.peer_anomaly_warn_ms.load(Ordering::Relaxed);
+        if now_ms.saturating_sub(last) >= PEER_ANOMALY_WARN_INTERVAL_MS
+            && self
+                .peer_anomaly_warn_ms
+                .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            warn!(
+                peer = %peer_id,
+                kept_as_fault,
+                dropped,
+                future_ts,
+                total,
+                "roxWarp: peer sent bad points (non-finite value kept as fault or dropped; \
+                 point with a timestamp over 5 min ahead rejected); further reports within 60 s \
+                 at debug level"
+            );
+        } else {
+            debug!(
+                peer = %peer_id,
+                kept_as_fault,
+                dropped,
+                future_ts,
+                total,
+                "roxWarp: peer sent bad points"
+            );
         }
     }
 
@@ -397,9 +454,10 @@ impl DeltaEngine {
         (current, points)
     }
 
-    /// Get the version vector: node_id -> last known version.
+    /// Get the version vector: node_id -> last version we have of that node
+    /// (our own current version, and what we have seen from each peer).
     pub async fn get_version_vector(&self) -> HashMap<String, u64> {
-        let mut vv = self.peer_versions.read().await.clone();
+        let mut vv = self.seen_from_peer.read().await.clone();
         vv.insert(self.node_id.clone(), self.version.load(Ordering::SeqCst));
         vv
     }
@@ -1053,9 +1111,10 @@ mod tests {
             unit: "degF".to_string(),
             status: "ok".to_string(),
             version: 10,
-            timestamp: i64::MAX, // far future = always wins
+            // Newer than the local point, within the allowed clock skew.
+            timestamp: unix_millis_i64() + 1_000,
         }];
-        engine.apply_remote_delta("node-b", remote_points).await;
+        engine.apply_remote_delta("node-b", 10, remote_points).await;
 
         // The remote value should win (last-writer-wins)
         let (_, all) = engine.full_state().await;
@@ -1079,7 +1138,7 @@ mod tests {
             version: 1,
             timestamp: 0,
         }];
-        engine.apply_remote_delta("node-b", remote_points).await;
+        engine.apply_remote_delta("node-b", 10, remote_points).await;
 
         // Local value should remain (it's newer)
         let (_, all) = engine.full_state().await;
@@ -1104,11 +1163,16 @@ mod tests {
         let engine = DeltaEngine::new("node-a".to_string());
 
         engine.record_change(1113, 72.5, "degF", "ok").await;
-        engine.ack_peer("node-b", 5).await;
+        engine
+            .apply_remote_delta("node-b", 5, vec![remote(1206, 4.2, "ok", 5)])
+            .await;
+        // An ack is about our counter and must not show up as node-c data.
+        engine.ack_peer("node-c", 7).await;
 
         let vv = engine.get_version_vector().await;
-        assert_eq!(*vv.get("node-a").unwrap(), 1);
-        assert_eq!(*vv.get("node-b").unwrap(), 5);
+        assert_eq!(vv.get("node-a").copied(), Some(1));
+        assert_eq!(vv.get("node-b").copied(), Some(5));
+        assert_eq!(vv.get("node-c"), None);
     }
 
     // ── R-45: non-finite values ─────────────────────────
@@ -1127,7 +1191,8 @@ mod tests {
             unit: "degF".to_string(),
             status: status.to_string(),
             version,
-            timestamp: i64::MAX,
+            // Newer than any local point recorded before, within the allowed skew.
+            timestamp: unix_millis_i64() + 1_000,
         }
     }
 
@@ -1228,6 +1293,7 @@ mod tests {
         engine
             .apply_remote_delta(
                 "node-b",
+                10,
                 vec![
                     remote(1113, f64::NAN, "ok", 3),
                     remote(1206, 4.2, "ok", 4),
@@ -1238,9 +1304,9 @@ mod tests {
         let (_, all) = engine.full_state().await;
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].channel, 1206);
-        // Peer version advances past the dropped points.
+        // The sender's version is recorded although its points were dropped.
         let vv = engine.get_version_vector().await;
-        assert_eq!(vv.get("node-b").copied(), Some(5));
+        assert_eq!(vv.get("node-b").copied(), Some(10));
     }
 
     #[tokio::test]
@@ -1250,6 +1316,7 @@ mod tests {
         engine
             .apply_remote_delta(
                 "node-b",
+                10,
                 vec![remote(1113, f64::NEG_INFINITY, "Healthy", 9)],
             )
             .await;
@@ -1270,14 +1337,14 @@ mod tests {
             timestamp: 0,
             ..remote(1113, f64::NAN, "ok", 4)
         };
-        engine.apply_remote_delta("node-b", vec![old]).await;
+        engine.apply_remote_delta("node-b", 10, vec![old]).await;
         let (_, all) = engine.full_state().await;
         let p = all.iter().find(|p| p.channel == 1113).unwrap();
         assert!((p.value - 72.5).abs() < f64::EPSILON);
         assert_eq!(p.status, "Ok");
         assert_eq!(
             engine.get_version_vector().await.get("node-b").copied(),
-            Some(4)
+            Some(10)
         );
     }
 
@@ -1291,6 +1358,7 @@ mod tests {
         engine
             .apply_remote_delta(
                 "node-b",
+                10,
                 vec![
                     remote(1113, f64::NAN, "ok", 2),
                     remote(1300, f64::NAN, "ok", 3),
@@ -1315,5 +1383,120 @@ mod tests {
         let bytes = rmp_serde::to_vec(&msg).unwrap();
         let decoded: WarpMessage = rmp_serde::from_slice(&bytes).unwrap();
         assert!(matches!(decoded, WarpMessage::Delta { ref points, .. } if points.len() == 1));
+    }
+
+    // ── R-27: timestamps and version bookkeeping ───────
+
+    #[tokio::test]
+    async fn far_future_peer_timestamp_is_rejected() {
+        let engine = DeltaEngine::new("node-a".to_string());
+        engine.record_change(1113, 70.0, "degF", "Ok").await;
+        let beyond_skew = unix_millis_i64() + MAX_PEER_FUTURE_SKEW_MS + 60_000;
+        for ts in [i64::MAX, beyond_skew] {
+            let point = VersionedPoint {
+                timestamp: ts,
+                ..remote(1113, 75.0, "ok", 1)
+            };
+            engine.apply_remote_delta("node-b", 10, vec![point]).await;
+        }
+        // Unknown channel: not stored either.
+        let new_channel = VersionedPoint {
+            timestamp: i64::MAX,
+            ..remote(1300, 1.0, "ok", 2)
+        };
+        engine
+            .apply_remote_delta("node-b", 10, vec![new_channel])
+            .await;
+
+        let (_, all) = engine.full_state().await;
+        assert_eq!(all.len(), 1);
+        assert!((all[0].value - 70.0).abs() < f64::EPSILON);
+        // The sender's version is still recorded, so it does not resend forever.
+        assert_eq!(
+            engine.get_version_vector().await.get("node-b").copied(),
+            Some(10)
+        );
+
+        // A later local change still wins.
+        engine.record_change(1113, 71.0, "degF", "Ok").await;
+        let (_, all) = engine.full_state().await;
+        assert!((all[0].value - 71.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn peer_timestamp_within_skew_is_kept() {
+        let engine = DeltaEngine::new("node-a".to_string());
+        let ts = unix_millis_i64() + MAX_PEER_FUTURE_SKEW_MS / 2;
+        let point = VersionedPoint {
+            timestamp: ts,
+            ..remote(1113, 75.0, "ok", 1)
+        };
+        engine.apply_remote_delta("node-b", 10, vec![point]).await;
+        let (_, all) = engine.full_state().await;
+        assert_eq!(all[0].timestamp, ts);
+    }
+
+    #[tokio::test]
+    async fn peer_counter_does_not_hide_our_points() {
+        // Before R-27 the peer's own counter (500) was stored where the
+        // initial delta looked up what the peer had of ours.
+        let engine = DeltaEngine::new("node-a".to_string());
+        engine.record_change(1113, 72.5, "degF", "Ok").await;
+        engine.record_change(1206, 4.2, "mA", "Ok").await;
+        engine
+            .apply_remote_delta("node-b", 500, vec![remote(1300, 1.0, "ok", 500)])
+            .await;
+        let (version, deltas) = engine.delta_for_peer("node-b").await;
+        assert_eq!(version, 2);
+        let mut channels: Vec<u32> = deltas.iter().map(|p| p.channel).collect();
+        channels.sort_unstable();
+        assert_eq!(channels, vec![1113, 1206, 1300]);
+    }
+
+    #[tokio::test]
+    async fn seen_version_follows_restarted_peer() {
+        let engine = DeltaEngine::new("node-a".to_string());
+        engine
+            .apply_remote_delta("node-b", 40, vec![remote(1113, 1.0, "ok", 40)])
+            .await;
+        // node-b restarted and counts from 1 again.
+        engine
+            .apply_remote_delta("node-b", 1, vec![remote(1206, 2.0, "ok", 1)])
+            .await;
+        let vv = engine.get_version_vector().await;
+        assert_eq!(vv.get("node-b").copied(), Some(1));
+    }
+
+    #[test]
+    fn resync_from_resends_after_our_restart() {
+        assert_eq!(resync_from(0, 10), 0);
+        assert_eq!(resync_from(7, 10), 7);
+        assert_eq!(resync_from(10, 10), 10);
+        // Peer saw a higher counter of ours than we have: we restarted.
+        assert_eq!(resync_from(11, 10), 0);
+        assert_eq!(resync_from(u64::MAX, 0), 0);
+    }
+
+    #[tokio::test]
+    async fn delta_for_peer_resends_when_ack_is_ahead() {
+        let engine = DeltaEngine::new("node-a".to_string());
+        engine.record_change(1113, 72.5, "degF", "Ok").await;
+        engine.ack_peer("node-b", 99).await;
+        let (_, deltas) = engine.delta_for_peer("node-b").await;
+        assert_eq!(deltas.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn echoed_point_does_not_inflate_seen_version() {
+        // node-b's own point (its counter at 500) comes back from node-a,
+        // whose counter is only 2. Before the fix node-b recorded node-a:500,
+        // advertised it, and node-a resent its full state every anti-entropy
+        // round because 500 > 2.
+        let engine_b = DeltaEngine::new("node-b".to_string());
+        let echoed = remote(1300, 1.0, "ok", 500);
+        engine_b.apply_remote_delta("node-a", 2, vec![echoed]).await;
+        let vv = engine_b.get_version_vector().await;
+        assert_eq!(vv.get("node-a").copied(), Some(2));
+        assert_eq!(resync_from(2, 2), 2, "no full resend for an honest claim");
     }
 }
