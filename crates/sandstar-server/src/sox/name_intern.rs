@@ -80,14 +80,14 @@ impl NameInternTable {
     pub fn intern(&self, name: &str) -> NameId {
         // Fast path: read lock only.
         {
-            let lookup = self.lookup.read().unwrap();
+            let lookup = crate::lock::read_or_recover(&self.lookup, "SOX name table");
             if let Some(&id) = lookup.get(name) {
                 return NameId(id);
             }
         }
         // Slow path: acquire write locks and double-check.
-        let mut names = self.names.write().unwrap();
-        let mut lookup = self.lookup.write().unwrap();
+        let mut names = crate::lock::write_or_recover(&self.names, "SOX name table");
+        let mut lookup = crate::lock::write_or_recover(&self.lookup, "SOX name table");
         if let Some(&id) = lookup.get(name) {
             return NameId(id);
         }
@@ -102,13 +102,13 @@ impl NameInternTable {
     ///
     /// Returns an empty string for invalid or out-of-range IDs.
     pub fn resolve(&self, id: NameId) -> String {
-        let names = self.names.read().unwrap();
+        let names = crate::lock::read_or_recover(&self.names, "SOX name table");
         names.get(id.0 as usize).cloned().unwrap_or_default()
     }
 
     /// Check whether a name has already been interned.
     pub fn contains(&self, name: &str) -> bool {
-        let lookup = self.lookup.read().unwrap();
+        let lookup = crate::lock::read_or_recover(&self.lookup, "SOX name table");
         lookup.contains_key(name)
     }
 
@@ -116,7 +116,7 @@ impl NameInternTable {
     ///
     /// Returns `None` if the name has not been interned.
     pub fn get_id(&self, name: &str) -> Option<NameId> {
-        let lookup = self.lookup.read().unwrap();
+        let lookup = crate::lock::read_or_recover(&self.lookup, "SOX name table");
         lookup.get(name).map(|&id| NameId(id))
     }
 
@@ -150,7 +150,7 @@ impl NameInternTable {
 
     /// Number of interned names (excluding the reserved empty entry).
     pub fn len(&self) -> usize {
-        self.names.read().unwrap().len() - 1
+        crate::lock::read_or_recover(&self.names, "SOX name table").len() - 1
     }
 
     /// Whether the table contains no interned names.
@@ -160,7 +160,7 @@ impl NameInternTable {
 
     /// Statistics: `(name_count, total_bytes, avg_length)`.
     pub fn stats(&self) -> (usize, usize, f32) {
-        let names = self.names.read().unwrap();
+        let names = crate::lock::read_or_recover(&self.names, "SOX name table");
         let count = names.len() - 1;
         let total_bytes: usize = names[1..].iter().map(|s| s.len()).sum();
         let avg = if count > 0 {
@@ -173,7 +173,7 @@ impl NameInternTable {
 
     /// Return all interned `(NameId, String)` pairs (for debugging / serialisation).
     pub fn all_names(&self) -> Vec<(NameId, String)> {
-        let names = self.names.read().unwrap();
+        let names = crate::lock::read_or_recover(&self.names, "SOX name table");
         names
             .iter()
             .enumerate()
