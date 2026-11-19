@@ -181,17 +181,7 @@ async fn handle_roxwarp_connection(
 
     // Phase 2: Send welcome with our version vector + name table
     let our_versions = delta_engine.get_version_vector().await;
-    let name_table_entries: Vec<String> = sox_tree
-        .as_ref()
-        .map(|tree| {
-            let t = tree.read().unwrap();
-            t.name_table
-                .all_names()
-                .into_iter()
-                .map(|(_, n)| n)
-                .collect()
-        })
-        .unwrap_or_default();
+    let name_table_entries = name_table_entries(sox_tree.as_ref());
     let welcome = WarpMessage::Welcome {
         node_id: config.node_id.clone(),
         versions: our_versions,
@@ -342,6 +332,30 @@ async fn handle_roxwarp_connection(
     }
 
     info!(peer = %peer_node_id, "roxWarp: connection closed");
+}
+
+/// Component names from the SOX name intern table, sent in `warp:welcome`.
+///
+/// Runs on every incoming peer connection, so it must not panic. A poisoned
+/// lock (a writer panicked; only possible where panics unwind, not in the
+/// `panic = "abort"` release build) still yields the names: this is a
+/// read-only list, and a half-updated one is harmless for a peer.
+fn name_table_entries(sox_tree: Option<&crate::sox::SharedComponentTree>) -> Vec<String> {
+    let Some(tree) = sox_tree else {
+        return Vec::new();
+    };
+    let t = match tree.read() {
+        Ok(t) => t,
+        Err(poisoned) => {
+            warn!("roxWarp: SOX component tree lock poisoned; sending name table anyway");
+            poisoned.into_inner()
+        }
+    };
+    t.name_table
+        .all_names()
+        .into_iter()
+        .map(|(_, n)| n)
+        .collect()
 }
 
 /// Wait for a `warp:hello` message from the connecting peer.
@@ -1111,5 +1125,37 @@ mod tests {
         } else {
             panic!("expected QueryResult");
         }
+    }
+
+    // ── name table (panic safety) ───────────────────────
+
+    #[test]
+    fn name_table_entries_without_tree_is_empty() {
+        assert!(name_table_entries(None).is_empty());
+    }
+
+    #[test]
+    fn name_table_entries_lists_interned_names() {
+        let tree: crate::sox::SharedComponentTree = Arc::new(std::sync::RwLock::new(
+            crate::sox::sox_handlers::ComponentTree::new(),
+        ));
+        tree.read().unwrap().name_table.intern("ahuTemp");
+        assert!(name_table_entries(Some(&tree)).contains(&"ahuTemp".to_string()));
+    }
+
+    #[test]
+    fn name_table_entries_survives_poisoned_lock() {
+        let tree: crate::sox::SharedComponentTree = Arc::new(std::sync::RwLock::new(
+            crate::sox::sox_handlers::ComponentTree::new(),
+        ));
+        tree.read().unwrap().name_table.intern("ahuTemp");
+        let writer = Arc::clone(&tree);
+        let _ = std::thread::spawn(move || {
+            let _guard = writer.write().unwrap();
+            panic!("poison the tree lock");
+        })
+        .join();
+        assert!(tree.is_poisoned());
+        assert!(name_table_entries(Some(&tree)).contains(&"ahuTemp".to_string()));
     }
 }
