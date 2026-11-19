@@ -4329,7 +4329,7 @@ fn handle_file_open(req: &SoxRequest) -> SoxResponse {
 
     // Check if a transfer is already active
     {
-        let xfer = SOX_FILE_XFER.lock().expect("SOX file xfer mutex poisoned");
+        let xfer = crate::lock::lock_or_recover(&SOX_FILE_XFER, "SOX file transfer");
         if xfer.is_some() {
             return error_msg(SoxCmd::FileOpen, req.req_id, "busy");
         }
@@ -4358,7 +4358,8 @@ fn handle_file_open(req: &SoxRequest) -> SoxResponse {
 
                     tracing::info!(path = ?canonical, size = effective_size, "SOX: fileOpen GET OK");
 
-                    let mut xfer = SOX_FILE_XFER.lock().expect("SOX file xfer mutex poisoned");
+                    let mut xfer =
+                        crate::lock::lock_or_recover(&SOX_FILE_XFER, "SOX file transfer");
                     *xfer = Some(SoxFileXfer {
                         data,
                         chunk_size,
@@ -4407,7 +4408,7 @@ fn handle_file_open(req: &SoxRequest) -> SoxResponse {
 
             tracing::info!(path = %write_path_str, file_size, num_chunks, chunk_size, "SOX: fileOpen PUT OK");
 
-            let mut xfer = SOX_FILE_XFER.lock().expect("SOX file xfer mutex poisoned");
+            let mut xfer = crate::lock::lock_or_recover(&SOX_FILE_XFER, "SOX file transfer");
             *xfer = Some(SoxFileXfer {
                 data: vec![0u8; file_size],
                 chunk_size,
@@ -4436,7 +4437,7 @@ fn handle_file_read(req: &SoxRequest) -> SoxResponse {
     let mut reader = SoxReader::new(&req.payload);
     let chunk_num = reader.read_u16().unwrap_or(0) as usize;
 
-    let xfer = SOX_FILE_XFER.lock().expect("SOX file xfer mutex poisoned");
+    let xfer = crate::lock::lock_or_recover(&SOX_FILE_XFER, "SOX file transfer");
     if let Some(ref file) = *xfer {
         if file.mode != SoxFileXferMode::Get {
             return error_msg(SoxCmd::FileRead, req.req_id, "not in get mode");
@@ -4466,7 +4467,7 @@ fn handle_file_read(req: &SoxRequest) -> SoxResponse {
 /// For GET: simply releases the file data.
 /// For PUT: writes the received data to disk, then releases the transfer state.
 fn handle_file_close(req: &SoxRequest) -> SoxResponse {
-    let mut xfer = SOX_FILE_XFER.lock().expect("SOX file xfer mutex poisoned");
+    let mut xfer = crate::lock::lock_or_recover(&SOX_FILE_XFER, "SOX file transfer");
     if let Some(ref file) = *xfer {
         if file.mode == SoxFileXferMode::Put {
             if let Some(ref path) = file.write_path {
@@ -4521,7 +4522,7 @@ fn handle_file_write_chunk_inner(payload: &[u8], req_id: u8) -> SoxResponse {
         None => return error_msg(SoxCmd::FileWrite, req_id, "truncated chunk"),
     };
 
-    let mut xfer = SOX_FILE_XFER.lock().expect("SOX file xfer mutex poisoned");
+    let mut xfer = crate::lock::lock_or_recover(&SOX_FILE_XFER, "SOX file transfer");
     if let Some(ref mut file) = *xfer {
         if file.mode != SoxFileXferMode::Put {
             return error_msg(SoxCmd::FileWrite, req_id, "not in put mode");
@@ -4565,7 +4566,7 @@ fn handle_file_write_chunk_inner(payload: &[u8], req_id: u8) -> SoxResponse {
 /// This is used by the dispatch loop to route 'k' messages to the chunk
 /// handler instead of the invoke handler when a put transfer is active.
 pub fn is_put_transfer_active() -> bool {
-    let xfer = SOX_FILE_XFER.lock().expect("SOX file xfer mutex poisoned");
+    let xfer = crate::lock::lock_or_recover(&SOX_FILE_XFER, "SOX file transfer");
     matches!(&*xfer, Some(ref f) if f.mode == SoxFileXferMode::Put)
 }
 
@@ -4602,7 +4603,7 @@ pub fn handle_put_chunk(payload: &[u8]) -> Option<SoxResponse> {
         }
     };
 
-    let mut xfer = SOX_FILE_XFER.lock().expect("SOX file xfer mutex poisoned");
+    let mut xfer = crate::lock::lock_or_recover(&SOX_FILE_XFER, "SOX file transfer");
     if let Some(ref mut file) = *xfer {
         if file.mode != SoxFileXferMode::Put {
             tracing::warn!("SOX: received chunk but not in put mode");
@@ -4841,7 +4842,7 @@ fn handle_read_comp_dynamic(
     response: &mut SoxResponse,
 ) {
     if let Some(store_handle) = dyn_store {
-        let store = store_handle.read().unwrap();
+        let store = crate::lock::read_or_recover(store_handle, "dyn slot store");
         let tags = store.get_all_with_computed(comp_id);
         response.write_u16(tags.len() as u16);
         // Sort by key for deterministic wire order (important for tests and debugging).

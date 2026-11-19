@@ -1,4 +1,5 @@
-//! Poison-tolerant access to `std::sync::RwLock` on request paths (R-4).
+//! Poison-tolerant access to `std::sync::RwLock` and `Mutex` on request
+//! paths (R-4).
 //!
 //! A lock is poisoned only when its holder panics and the panic unwinds.
 //! Release builds use `panic = "abort"`, so the process dies first and a
@@ -9,7 +10,7 @@
 //! the log on every request.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use tracing::{debug, warn};
 
@@ -49,6 +50,16 @@ pub fn read_or_recover<'a, T>(lock: &'a RwLock<T>, what: &str) -> RwLockReadGuar
 pub fn write_or_recover<'a, T>(lock: &'a RwLock<T>, what: &str) -> RwLockWriteGuard<'a, T> {
     lock.write().unwrap_or_else(|poisoned| {
         report_poisoned(what, "write");
+        poisoned.into_inner()
+    })
+}
+
+/// `mutex.lock()`, continuing with the data if the mutex is poisoned.
+///
+/// Same trade-off as [`write_or_recover`].
+pub fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>, what: &str) -> MutexGuard<'a, T> {
+    mutex.lock().unwrap_or_else(|poisoned| {
+        report_poisoned(what, "lock");
         poisoned.into_inner()
     })
 }
@@ -94,6 +105,27 @@ mod tests {
     fn works_through_arc() {
         let lock = Arc::new(RwLock::new(3u32));
         assert_eq!(*read_or_recover(&lock, "test"), 3);
+    }
+
+    #[test]
+    fn healthy_mutex_locks() {
+        let m = Mutex::new(1u32);
+        *lock_or_recover(&m, "test") += 1;
+        assert_eq!(*lock_or_recover(&m, "test"), 2);
+    }
+
+    #[test]
+    fn poisoned_mutex_still_locks() {
+        let m = Arc::new(Mutex::new(5u32));
+        let holder = Arc::clone(&m);
+        let _ = std::thread::spawn(move || {
+            let _guard = holder.lock().unwrap();
+            panic!("poison the mutex");
+        })
+        .join();
+        assert!(m.is_poisoned());
+        *lock_or_recover(&m, "test") += 1;
+        assert_eq!(*lock_or_recover(&m, "test"), 6);
     }
 
     #[test]

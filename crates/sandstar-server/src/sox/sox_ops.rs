@@ -225,7 +225,7 @@ pub fn apply_op(state: &SoxState, op: SoxOp, session: &mut SessionState<'_>) -> 
 // ── Op handlers ────────────────────────────────────
 
 fn handle_read_tree(state: &SoxState) -> SoxResponse {
-    let tree = state.tree.read().unwrap();
+    let tree = crate::lock::read_or_recover(&state.tree, "SOX component tree");
     let mut comps: Vec<JsonValue> = tree
         .comp_ids()
         .into_iter()
@@ -240,7 +240,7 @@ fn handle_read_tree(state: &SoxState) -> SoxResponse {
 }
 
 fn handle_read_comp(state: &SoxState, comp_id: u16) -> SoxResponse {
-    let tree = state.tree.read().unwrap();
+    let tree = crate::lock::read_or_recover(&state.tree, "SOX component tree");
     match tree.get(comp_id) {
         Some(comp) => {
             let mut detail = comp_to_detail_json(comp, &tree);
@@ -265,7 +265,7 @@ fn handle_write_slot(
     slot_idx: usize,
     value: &JsonValue,
 ) -> SoxResponse {
-    let mut tree = state.tree.write().unwrap();
+    let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
     let slot_type_id = {
         let comp = match tree.get(comp_id) {
             Some(c) => c,
@@ -312,7 +312,7 @@ fn handle_add_comp(
         return SoxResponse::error("BAD_REQUEST", err);
     }
 
-    let mut tree = state.tree.write().unwrap();
+    let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
 
     if tree.get(parent_id).is_none() {
         return SoxResponse::error("NOT_FOUND", format!("parent {parent_id} not found"));
@@ -360,7 +360,7 @@ fn handle_delete_comp(state: &SoxState, comp_id: u16) -> SoxResponse {
         return SoxResponse::error("FORBIDDEN", "cannot delete system components (id < 7)");
     }
 
-    let mut tree = state.tree.write().unwrap();
+    let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
 
     let link_peers: Vec<(u16, u8, u16, u8)> = tree
         .get(comp_id)
@@ -389,7 +389,7 @@ fn handle_rename(state: &SoxState, comp_id: u16, name: &str) -> SoxResponse {
         return SoxResponse::error("BAD_REQUEST", err);
     }
 
-    let mut tree = state.tree.write().unwrap();
+    let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
     if tree.rename(comp_id, name.to_string()) {
         tree.mark_dirty();
         SoxResponse::ok(serde_json::json!({ "ok": true }))
@@ -405,7 +405,7 @@ fn handle_add_link(
     to_comp: u16,
     to_slot: u8,
 ) -> SoxResponse {
-    let mut tree = state.tree.write().unwrap();
+    let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
     if tree.add_link(from_comp, from_slot, to_comp, to_slot) {
         tree.mark_dirty();
         SoxResponse::ok(serde_json::json!({ "ok": true }))
@@ -421,7 +421,7 @@ fn handle_delete_link(
     to_comp: u16,
     to_slot: u8,
 ) -> SoxResponse {
-    let mut tree = state.tree.write().unwrap();
+    let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
     if tree.remove_link(from_comp, from_slot, to_comp, to_slot) {
         tree.mark_dirty();
         SoxResponse::ok(serde_json::json!({ "ok": true }))
@@ -431,7 +431,7 @@ fn handle_delete_link(
 }
 
 fn handle_update_pos(state: &SoxState, comp_id: u16, x: u8, y: u8) -> SoxResponse {
-    let mut tree = state.tree.write().unwrap();
+    let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
     let comp = match tree.get_mut(comp_id) {
         Some(c) => c,
         None => return SoxResponse::error("NOT_FOUND", format!("component {comp_id} not found")),
@@ -445,7 +445,7 @@ fn handle_update_pos(state: &SoxState, comp_id: u16, x: u8, y: u8) -> SoxRespons
 }
 
 fn handle_invoke(state: &SoxState, comp_id: u16, slot_idx: usize) -> SoxResponse {
-    let mut tree = state.tree.write().unwrap();
+    let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
     let comp = match tree.get_mut(comp_id) {
         Some(c) => c,
         None => return SoxResponse::error("NOT_FOUND", format!("component {comp_id} not found")),
@@ -489,7 +489,7 @@ fn handle_invoke(state: &SoxState, comp_id: u16, slot_idx: usize) -> SoxResponse
 }
 
 fn handle_name_table(state: &SoxState, session: &mut SessionState<'_>) -> SoxResponse {
-    let tree = state.tree.read().unwrap();
+    let tree = crate::lock::read_or_recover(&state.tree, "SOX component tree");
     let names: Vec<JsonValue> = tree
         .name_table
         .all_names()
@@ -562,7 +562,7 @@ fn handle_subscribe(
     }
     // Prime the cache for newly subscribed components.
     {
-        let tree = state.tree.read().unwrap();
+        let tree = crate::lock::read_or_recover(&state.tree, "SOX component tree");
         for &cid in &comp_ids {
             if let Some(comp) = tree.get(cid) {
                 let vals: Vec<JsonValue> = comp
@@ -598,7 +598,7 @@ fn handle_read_tags(state: &SoxState, comp_id: u16) -> SoxResponse {
         Some(ds) => ds,
         None => return SoxResponse::error("NOT_SUPPORTED", "dynamic tags not available"),
     };
-    let store = dyn_store.read().expect("dyn_slots lock poisoned");
+    let store = crate::lock::read_or_recover(dyn_store, "dyn slot store");
     let tags = store
         .get_all(comp_id)
         .map(|t| serde_json::to_value(t).unwrap_or_default())
@@ -616,7 +616,7 @@ fn handle_set_tags(state: &SoxState, comp_id: u16, tags_val: &JsonValue) -> SoxR
         None => return SoxResponse::error("BAD_REQUEST", "'tags' must be a JSON object"),
     };
 
-    let mut store = dyn_store.write().expect("dyn_slots lock poisoned");
+    let mut store = crate::lock::write_or_recover(dyn_store, "dyn slot store");
     for (key, val) in obj {
         let dv = serde_json::from_value::<DynValue>(val.clone())
             .unwrap_or_else(|_| crate::rest::tags::json_to_dynvalue(val));
@@ -632,7 +632,7 @@ fn handle_delete_tag(state: &SoxState, comp_id: u16, key: &str) -> SoxResponse {
         Some(ds) => ds,
         None => return SoxResponse::error("NOT_SUPPORTED", "dynamic tags not available"),
     };
-    let mut store = dyn_store.write().expect("dyn_slots lock poisoned");
+    let mut store = crate::lock::write_or_recover(dyn_store, "dyn slot store");
     let removed = store.remove(comp_id, key).is_some();
     SoxResponse::ok(serde_json::json!({ "ok": true, "removed": removed }))
 }
@@ -688,7 +688,7 @@ fn handle_version_ext() -> SoxResponse {
 }
 
 fn handle_reorder(state: &SoxState, comp_id: u16, children: Vec<u16>) -> SoxResponse {
-    let mut tree = state.tree.write().unwrap();
+    let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
     let comp = match tree.get_mut(comp_id) {
         Some(c) => c,
         None => return SoxResponse::error("NOT_FOUND", format!("component {comp_id} not found")),
@@ -714,7 +714,7 @@ fn handle_query(state: &SoxState, query_type: char, kit_id: u8, type_id: u8) -> 
             format!("type not found: kitId={kit_id} typeId={type_id}"),
         );
     }
-    let tree = state.tree.read().unwrap();
+    let tree = crate::lock::read_or_recover(&state.tree, "SOX component tree");
     let matches: Vec<u16> = tree
         .comp_ids()
         .into_iter()
