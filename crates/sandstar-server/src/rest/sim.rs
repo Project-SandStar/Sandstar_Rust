@@ -157,7 +157,7 @@ async fn inject_handler(
     State(state): State<SharedSimState>,
     Json(req): Json<InjectRequest>,
 ) -> Json<InjectResponse> {
-    let mut s = state.write().expect("sim state lock poisoned");
+    let mut s = crate::lock::write_or_recover(&state, "sim state");
     let count = req.points.len();
     for point in &req.points {
         tracing::debug!(
@@ -178,7 +178,7 @@ async fn inject_handler(
 /// Each call drains the write buffer, so outputs are only returned once.
 /// This prevents stale data accumulation during long test runs.
 async fn outputs_handler(State(state): State<SharedSimState>) -> Json<OutputsResponse> {
-    let mut s = state.write().expect("sim state lock poisoned");
+    let mut s = crate::lock::write_or_recover(&state, "sim state");
     let outputs: Vec<OutputEntry> = s
         .writes
         .drain()
@@ -198,7 +198,7 @@ async fn outputs_handler(State(state): State<SharedSimState>) -> Json<OutputsRes
 
 /// GET /api/sim/state — snapshot of current sim state sizes (read-only).
 async fn state_handler(State(state): State<SharedSimState>) -> Json<StateResponse> {
-    let s = state.read().expect("sim state lock poisoned");
+    let s = crate::lock::read_or_recover(&state, "sim state");
     Json(StateResponse {
         read_count: s.reads.len(),
         digital_read_count: s.digital_reads.len(),
@@ -224,7 +224,7 @@ async fn scenario_handler(
             let target = start + Duration::from_millis(offset_ms);
             tokio::time::sleep_until(target).await;
             let point_count = step.points.len();
-            let mut s = state_clone.write().expect("sim state lock poisoned");
+            let mut s = crate::lock::write_or_recover(&state_clone, "sim state");
             for point in step.points {
                 apply_inject_point(&mut s, point);
             }

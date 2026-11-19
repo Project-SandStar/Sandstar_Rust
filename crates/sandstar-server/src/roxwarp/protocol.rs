@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::delta::VersionedPoint;
+use super::cluster::VersionedPoint;
 
 // ── Load Metrics ─────────────────────────────────────
 
@@ -313,7 +313,6 @@ mod tests {
             status: "ok".into(),
             version: 42,
             timestamp: 1706000000_000,
-            node_id: "node-a".into(),
         }
     }
 

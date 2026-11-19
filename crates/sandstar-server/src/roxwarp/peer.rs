@@ -11,7 +11,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use tracing::{debug, info, warn};
 
-use super::cluster::{DeltaEngine, PeerConfig, PeerState};
+use super::cluster::{resync_from, DeltaEngine, PeerConfig, PeerState};
 use super::handler::WarpMessage;
 
 /// Optional mTLS client configuration for outbound connections.
@@ -137,12 +137,15 @@ async fn try_connect(
     // Phase 3: Send initial delta based on peer's version vector
     set_peer_state(peer_states, &peer.node_id, PeerState::Syncing).await;
 
-    let peer_has_our_version = peer_versions
-        .get(&delta_engine.node_id)
-        .copied()
-        .unwrap_or(0);
-    let deltas = delta_engine.delta_since(peer_has_our_version).await;
     let current_version = delta_engine.current_version();
+    let peer_has_our_version = resync_from(
+        peer_versions
+            .get(&delta_engine.node_id)
+            .copied()
+            .unwrap_or(0),
+        current_version,
+    );
+    let deltas = delta_engine.delta_since(peer_has_our_version).await;
 
     if !deltas.is_empty() {
         let delta_msg = WarpMessage::Delta {
@@ -347,7 +350,9 @@ where
                 count = points.len(),
                 "roxWarp peer: received delta"
             );
-            delta_engine.apply_remote_delta(&node_id, points).await;
+            delta_engine
+                .apply_remote_delta(&node_id, to_version, points)
+                .await;
 
             // Ack
             let ack = WarpMessage::Ack {
@@ -367,7 +372,10 @@ where
             debug!(peer = %node_id, "roxWarp peer: received version vector");
             // Check if peer is behind on our data
             let our_version = delta_engine.current_version();
-            let peer_has = versions.get(&delta_engine.node_id).copied().unwrap_or(0);
+            let peer_has = resync_from(
+                versions.get(&delta_engine.node_id).copied().unwrap_or(0),
+                our_version,
+            );
             if peer_has < our_version {
                 let deltas = delta_engine.delta_since(peer_has).await;
                 if !deltas.is_empty() {
@@ -389,7 +397,7 @@ where
 
         WarpMessage::Full {
             node_id,
-            version: _,
+            version,
             points,
         } => {
             debug!(
@@ -397,7 +405,9 @@ where
                 count = points.len(),
                 "roxWarp peer: received full state"
             );
-            delta_engine.apply_remote_delta(&node_id, points).await;
+            delta_engine
+                .apply_remote_delta(&node_id, version, points)
+                .await;
         }
 
         _ => {

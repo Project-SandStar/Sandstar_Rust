@@ -64,7 +64,7 @@ pub fn router(store: DynSlotStoreHandle) -> Router {
 ///
 /// Response: `{ "components": [{ "compId": 10, "tagCount": 3 }, ...] }`
 async fn list_tags(State(store): State<DynSlotStoreHandle>) -> Response {
-    let store = store.read().expect("dyn_slots lock poisoned");
+    let store = crate::lock::read_or_recover(&store, "dyn slot store");
     let mut comps: Vec<serde_json::Value> = store
         .comp_ids()
         .into_iter()
@@ -96,7 +96,7 @@ async fn get_tags(
     Query(query): Query<GetTagsQuery>,
 ) -> Response {
     let include_computed = query.computed.unwrap_or(true);
-    let store = store.read().expect("dyn_slots lock poisoned");
+    let store = crate::lock::read_or_recover(&store, "dyn slot store");
 
     if include_computed {
         let tags = store.get_all_with_computed(comp_id);
@@ -129,7 +129,7 @@ async fn get_tags(
 ///
 /// Response: `{ "totalTags": 42, "components": 5, "interner": { ... } }`
 async fn get_stats(State(store): State<DynSlotStoreHandle>) -> Response {
-    let store = store.read().expect("dyn_slots lock poisoned");
+    let store = crate::lock::read_or_recover(&store, "dyn slot store");
     let stats = store.interner_stats();
     let body = serde_json::json!({
         "totalTags": store.total_count(),
@@ -186,7 +186,7 @@ async fn set_tags(
         new_tags.insert(key.clone(), dv);
     }
 
-    let mut store = store.write().expect("dyn_slots lock poisoned");
+    let mut store = crate::lock::write_or_recover(&store, "dyn slot store");
 
     if replace {
         // Full replacement.
@@ -219,7 +219,7 @@ async fn delete_tag(
     State(store): State<DynSlotStoreHandle>,
     Path((comp_id, key)): Path<(u16, String)>,
 ) -> Response {
-    let mut store = store.write().expect("dyn_slots lock poisoned");
+    let mut store = crate::lock::write_or_recover(&store, "dyn slot store");
     let removed = store.remove(comp_id, &key).is_some();
     Json(serde_json::json!({
         "ok": true,

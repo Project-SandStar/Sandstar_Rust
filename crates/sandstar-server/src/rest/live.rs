@@ -523,7 +523,7 @@ fn handle_read_comp_live(state: &LiveState, reply_num: u8, msg: &JsonValue) -> O
         .and_then(|s| s.chars().next())
         .unwrap_or('c');
 
-    let tree = state.tree.read().unwrap();
+    let tree = crate::lock::read_or_recover(&state.tree, "SOX component tree");
     let comp = match tree.get(comp_id) {
         Some(c) => c,
         None => return render_error(reply_num, &format!("component {comp_id} not found")),
@@ -587,7 +587,7 @@ fn handle_write_slot_live(state: &LiveState, reply_num: u8, msg: &JsonValue) -> 
         Err(e) => return render_error(reply_num, &format!("bad base64 value: {e}")),
     };
 
-    let mut tree = state.tree.write().unwrap();
+    let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
     let slot_type_id = {
         let comp = match tree.get(comp_id) {
             Some(c) => c,
@@ -693,7 +693,7 @@ fn build_live_events(
     cov_cache: &mut HashMap<u16, Vec<JsonValue>>,
     tree_cache: &mut HashMap<u16, Vec<u16>>,
 ) -> Vec<String> {
-    let tree = tree_handle.read().unwrap();
+    let tree = crate::lock::read_or_recover(tree_handle, "SOX component tree");
     let mut frames: Vec<String> = Vec::new();
 
     for &comp_id in subscribed {

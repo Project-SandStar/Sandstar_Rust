@@ -404,7 +404,7 @@ fn comp_to_detail_json(
 ///
 /// Returns `{ "components": [...] }` so the editor can destructure easily.
 pub async fn get_tree(State(state): State<SoxApiState>) -> Response {
-    let tree = state.tree.read().unwrap();
+    let tree = crate::lock::read_or_recover(&state.tree, "SOX component tree");
     let mut comps: Vec<TreeComponentJson> = tree
         .comp_ids()
         .into_iter()
@@ -424,7 +424,7 @@ pub async fn get_comp(
     State(state): State<SoxApiState>,
     Path(id): Path<u16>,
 ) -> Response {
-    let tree = state.tree.read().unwrap();
+    let tree = crate::lock::read_or_recover(&state.tree, "SOX component tree");
     match tree.get(id) {
         Some(comp) => {
             let detail = comp_to_detail_json(comp, &tree, state.dyn_store.as_ref());
@@ -473,7 +473,7 @@ pub async fn add_comp(
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
 
-    let mut tree = state.tree.write().unwrap();
+    let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
 
     // Validate parent exists.
     if tree.get(req.parent_id).is_none() {
@@ -534,7 +534,7 @@ pub async fn delete_comp(State(state): State<SoxApiState>, Path(id): Path<u16>) 
             .into_response();
     }
 
-    let mut tree = state.tree.write().unwrap();
+    let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
 
     // Remove all links involving this component from other components.
     let link_peers: Vec<(u16, u8, u16, u8)> = tree
@@ -569,7 +569,7 @@ pub async fn rename_comp(
     if let Some(err) = crate::sox::name_intern::NameInternTable::validate_name(&req.name) {
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
-    let mut tree = state.tree.write().unwrap();
+    let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
     if tree.rename(id, req.name) {
         tree.mark_dirty();
         StatusCode::NO_CONTENT.into_response()
@@ -584,7 +584,7 @@ pub async fn write_slot(
     Path((id, idx)): Path<(u16, usize)>,
     Json(req): Json<SlotWriteRequest>,
 ) -> Response {
-    let mut tree = state.tree.write().unwrap();
+    let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
     let slot_type_id = {
         let comp = match tree.get(id) {
             Some(c) => c,
@@ -635,7 +635,7 @@ pub async fn invoke_action(
     Path((id, slot_name)): Path<(u16, String)>,
     body: Option<Json<SlotWriteRequest>>,
 ) -> Response {
-    let mut tree = state.tree.write().unwrap();
+    let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
 
     let comp = match tree.get_mut(id) {
         Some(c) => c,
@@ -693,7 +693,7 @@ pub async fn invoke_action(
 
 /// POST /api/sox/link — add a link.
 pub async fn add_link(State(state): State<SoxApiState>, Json(req): Json<LinkRequest>) -> Response {
-    let mut tree = state.tree.write().unwrap();
+    let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
     if tree.add_link(req.from_comp, req.from_slot, req.to_comp, req.to_slot) {
         tree.mark_dirty();
         StatusCode::CREATED.into_response()
@@ -711,7 +711,7 @@ pub async fn delete_link(
     State(state): State<SoxApiState>,
     Json(req): Json<LinkRequest>,
 ) -> Response {
-    let mut tree = state.tree.write().unwrap();
+    let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
     if tree.remove_link(req.from_comp, req.from_slot, req.to_comp, req.to_slot) {
         tree.mark_dirty();
         StatusCode::NO_CONTENT.into_response()
@@ -733,7 +733,7 @@ pub async fn reorder_children(
     Path(id): Path<u16>,
     Json(req): Json<ReorderRequest>,
 ) -> Response {
-    let mut tree = state.tree.write().unwrap();
+    let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
     if tree.get(id).is_none() {
         return (StatusCode::NOT_FOUND, format!("component {id} not found")).into_response();
     }
@@ -754,7 +754,7 @@ pub async fn update_pos(
     Path(id): Path<u16>,
     Json(req): Json<PosRequest>,
 ) -> Response {
-    let mut tree = state.tree.write().unwrap();
+    let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
     let comp = match tree.get_mut(id) {
         Some(c) => c,
         None => {
@@ -813,7 +813,7 @@ pub async fn get_palette(State(state): State<SoxApiState>) -> Response {
 
 /// GET /api/sox/names — interned name table statistics and entries.
 pub async fn get_names(State(state): State<SoxApiState>) -> Response {
-    let tree = state.tree.read().unwrap();
+    let tree = crate::lock::read_or_recover(&state.tree, "SOX component tree");
     let (count, total_bytes, avg_length) = tree.name_table.stats();
     let names: Vec<serde_json::Value> = tree
         .name_table

@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
-use super::cluster::{ClusterConfig, DeltaEngine, VersionedPoint};
+use super::cluster::{resync_from, ClusterConfig, DeltaEngine, VersionedPoint};
 
 // ── Shared State ──────────────────────────────────────
 
@@ -168,10 +168,10 @@ async fn handle_roxwarp_connection(
     info!("roxWarp: incoming connection");
 
     // Phase 1: Wait for hello (binary or text)
-    let peer_node_id = match wait_for_hello(&mut ws_rx).await {
-        Some((node_id, _peer_versions)) => {
+    let (peer_node_id, peer_versions) = match wait_for_hello(&mut ws_rx).await {
+        Some((node_id, peer_versions)) => {
             info!(peer = %node_id, "roxWarp: received hello");
-            node_id
+            (node_id, peer_versions)
         }
         None => {
             warn!("roxWarp: no hello received, closing");
@@ -181,17 +181,7 @@ async fn handle_roxwarp_connection(
 
     // Phase 2: Send welcome with our version vector + name table
     let our_versions = delta_engine.get_version_vector().await;
-    let name_table_entries: Vec<String> = sox_tree
-        .as_ref()
-        .map(|tree| {
-            let t = tree.read().unwrap();
-            t.name_table
-                .all_names()
-                .into_iter()
-                .map(|(_, n)| n)
-                .collect()
-        })
-        .unwrap_or_default();
+    let name_table_entries = name_table_entries(sox_tree.as_ref());
     let welcome = WarpMessage::Welcome {
         node_id: config.node_id.clone(),
         versions: our_versions,
@@ -204,12 +194,18 @@ async fn handle_roxwarp_connection(
         return;
     }
 
-    // Phase 3: Send initial delta to peer (full state if peer is new)
-    let (current_version, deltas) = delta_engine.delta_for_peer(&peer_node_id).await;
+    // Phase 3: Send initial delta from what the peer says it has of ours
+    // (full state if the peer is new or saw us before our restart).
+    let current_version = delta_engine.current_version();
+    let from_version = resync_from(
+        peer_versions.get(&config.node_id).copied().unwrap_or(0),
+        current_version,
+    );
+    let deltas = delta_engine.delta_since(from_version).await;
     if !deltas.is_empty() {
         let delta_msg = WarpMessage::Delta {
             node_id: config.node_id.clone(),
-            from_version: 0,
+            from_version,
             to_version: current_version,
             points: deltas,
         };
@@ -338,6 +334,23 @@ async fn handle_roxwarp_connection(
     info!(peer = %peer_node_id, "roxWarp: connection closed");
 }
 
+/// Component names from the SOX name intern table, sent in `warp:welcome`.
+///
+/// Runs on every incoming peer connection, so it must not panic: a poisoned
+/// lock still yields the names (see [`crate::lock`]). This is a read-only
+/// list, and a half-updated one is harmless for a peer.
+fn name_table_entries(sox_tree: Option<&crate::sox::SharedComponentTree>) -> Vec<String> {
+    let Some(tree) = sox_tree else {
+        return Vec::new();
+    };
+    let t = crate::lock::read_or_recover(tree, "SOX component tree");
+    t.name_table
+        .all_names()
+        .into_iter()
+        .map(|(_, n)| n)
+        .collect()
+}
+
 /// Wait for a `warp:hello` message from the connecting peer.
 ///
 /// Accepts both binary (MessagePack) and text (JSON) frames.
@@ -421,7 +434,9 @@ async fn process_warp_message(
                 count = points.len(),
                 "roxWarp: received delta"
             );
-            delta_engine.apply_remote_delta(&node_id, points).await;
+            delta_engine
+                .apply_remote_delta(&node_id, to_version, points)
+                .await;
 
             // Ack the delta
             let ack = WarpMessage::Ack {
@@ -443,7 +458,10 @@ async fn process_warp_message(
             debug!(peer = %node_id, "roxWarp: received version vector");
             // Check if peer is behind on our data
             let our_version = delta_engine.current_version();
-            let peer_has = versions.get(&config.node_id).copied().unwrap_or(0);
+            let peer_has = resync_from(
+                versions.get(&config.node_id).copied().unwrap_or(0),
+                our_version,
+            );
             if peer_has < our_version {
                 // Send deltas for what the peer is missing
                 let deltas = delta_engine.delta_since(peer_has).await;
@@ -463,9 +481,12 @@ async fn process_warp_message(
 
         WarpMessage::DeltaReq { node_id, want_from } => {
             debug!(peer = %node_id, "roxWarp: received delta request");
-            let since = want_from.get(&config.node_id).copied().unwrap_or(0);
-            let deltas = delta_engine.delta_since(since).await;
             let current = delta_engine.current_version();
+            let since = resync_from(
+                want_from.get(&config.node_id).copied().unwrap_or(0),
+                current,
+            );
+            let deltas = delta_engine.delta_since(since).await;
             let delta_msg = WarpMessage::Delta {
                 node_id: config.node_id.clone(),
                 from_version: since,
@@ -1097,5 +1118,37 @@ mod tests {
         } else {
             panic!("expected QueryResult");
         }
+    }
+
+    // ── name table (panic safety) ───────────────────────
+
+    #[test]
+    fn name_table_entries_without_tree_is_empty() {
+        assert!(name_table_entries(None).is_empty());
+    }
+
+    #[test]
+    fn name_table_entries_lists_interned_names() {
+        let tree: crate::sox::SharedComponentTree = Arc::new(std::sync::RwLock::new(
+            crate::sox::sox_handlers::ComponentTree::new(),
+        ));
+        tree.read().unwrap().name_table.intern("ahuTemp");
+        assert!(name_table_entries(Some(&tree)).contains(&"ahuTemp".to_string()));
+    }
+
+    #[test]
+    fn name_table_entries_survives_poisoned_lock() {
+        let tree: crate::sox::SharedComponentTree = Arc::new(std::sync::RwLock::new(
+            crate::sox::sox_handlers::ComponentTree::new(),
+        ));
+        tree.read().unwrap().name_table.intern("ahuTemp");
+        let writer = Arc::clone(&tree);
+        let _ = std::thread::spawn(move || {
+            let _guard = writer.write().unwrap();
+            panic!("poison the tree lock");
+        })
+        .join();
+        assert!(tree.is_poisoned());
+        assert!(name_table_entries(Some(&tree)).contains(&"ahuTemp".to_string()));
     }
 }

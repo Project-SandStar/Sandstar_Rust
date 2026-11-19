@@ -341,7 +341,7 @@ pub fn load_demo_channels(
     // With default ValueConv (no table/scale), raw passes through as cur directly,
     // so we inject engineering units (°F, CFM) rather than raw ADC counts.
     let state = engine.hal.shared_state();
-    let mut s = state.write().expect("sim state lock poisoned");
+    let mut s = crate::lock::write_or_recover(&state, "sim state");
     s.reads.insert(
         ReadKey::Analog {
             device: 0,

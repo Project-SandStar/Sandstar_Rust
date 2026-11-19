@@ -116,7 +116,7 @@ pub async fn read(
         // Channel components have comp_id = CHANNEL_COMP_BASE + index.
         let dyn_store_lock = dyn_store_ext
             .as_ref()
-            .map(|Extension(ds)| ds.read().unwrap());
+            .map(|Extension(ds)| crate::lock::read_or_recover(ds, "dyn slot store"));
 
         let matched: Vec<_> = all
             .iter()

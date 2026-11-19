@@ -174,7 +174,7 @@ fn build_cov_messages_with_tags(
     dyn_store: Option<&DynSlotStoreHandle>,
     tags_cache: Option<&mut HashMap<u16, JsonValue>>,
 ) -> Vec<String> {
-    let tree = tree_handle.read().unwrap();
+    let tree = crate::lock::read_or_recover(tree_handle, "SOX component tree");
     let mut messages = Vec::new();
 
     for &comp_id in subscribed {

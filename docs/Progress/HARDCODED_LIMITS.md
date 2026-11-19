@@ -21,6 +21,8 @@
 > - Request body limit 1 MB (`rest/mod.rs`); driver actor channel capacity 64.
 > - Log files kept: 14 by default (`--log-max-files`, `logging.rs`).
 > - roxWarp timer bounds: 1..=86400 s (`roxwarp/cluster.rs`).
+> - roxWarp `PEER_ANOMALY_WARN_INTERVAL_MS` = 60,000 ms (`roxwarp/cluster.rs:225`, R-45/R-27, 2026-11-19): at most one `warn` per minute about bad peer points (NaN/inf value, future timestamp); the rest go to `debug`. Keep hardcoded.
+> - roxWarp `MAX_PEER_FUTURE_SKEW_MS` = 300,000 ms (5 min) (`roxwarp/cluster.rs:230`, R-27, 2026-11-19): a peer point whose timestamp is further ahead of the local clock is rejected (logged, rate-limited), so a peer cannot pin a channel under last-writer-wins. **Consider** making it configurable if field clocks drift more.
 > - GPIO60 retry every 20 watchdog kicks, at most 30 retries (`watchdog.rs`).
 > - systemd unit: `WatchdogSec=10`, `MemoryLimit=128M`.
 

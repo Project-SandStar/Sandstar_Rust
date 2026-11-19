@@ -148,12 +148,12 @@ async fn run_sox_server(
             }
         };
         // Replace the empty shared tree with the fully initialized one.
-        *shared_tree.write().unwrap() = initial_tree;
+        *crate::lock::write_or_recover(&shared_tree, "SOX component tree") = initial_tree;
     }
 
     // Load persisted user-added components from disk (survives restarts).
     {
-        let mut tree = shared_tree.write().unwrap();
+        let mut tree = crate::lock::write_or_recover(&shared_tree, "SOX component tree");
         match tree.load_user_components() {
             Ok(0) => debug!("SOX: no persisted components to load"),
             Ok(n) => info!(count = n, "SOX: restored persisted user components"),
@@ -173,7 +173,7 @@ async fn run_sox_server(
 
     // Load persisted dynamic tags from disk (survives restarts).
     {
-        let mut ds = dyn_store_handle.write().unwrap();
+        let mut ds = crate::lock::write_or_recover(&dyn_store_handle, "dyn slot store");
         match ds.load(&dyn_persist_path) {
             Ok(0) => debug!("dyn_slots: no persisted tags to load"),
             Ok(n) => info!(count = n, "dyn_slots: restored persisted tags"),
@@ -205,7 +205,7 @@ async fn run_sox_server(
         //    (no .await points here, so holding std::sync::RwLock is safe).
         let mut packets_this_round = 0;
         {
-            let mut tree = shared_tree.write().unwrap();
+            let mut tree = crate::lock::write_or_recover(&shared_tree, "SOX component tree");
             while packets_this_round < 16 {
                 match transport.poll() {
                     Some((session_id, payload)) => {
@@ -480,7 +480,7 @@ async fn run_sox_server(
                 match engine_handle.list_channels().await {
                     Ok(channels) => {
                         // All tree operations below are synchronous — safe to hold std::sync::RwLock.
-                        let mut tree = shared_tree.write().unwrap();
+                        let mut tree = crate::lock::write_or_recover(&shared_tree, "SOX component tree");
 
                         let changed = tree.update_from_channels(&channels);
 
@@ -615,7 +615,7 @@ async fn run_sox_server(
             }
             _ = persist_interval.tick() => {
                 // Save user-added components to disk if dirty.
-                let mut tree = shared_tree.write().unwrap();
+                let mut tree = crate::lock::write_or_recover(&shared_tree, "SOX component tree");
                 if tree.take_dirty() {
                     if let Err(e) = tree.save_user_components() {
                         warn!("SOX: failed to save user components: {e}");

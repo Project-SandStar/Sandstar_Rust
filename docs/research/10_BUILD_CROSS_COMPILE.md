@@ -13,7 +13,7 @@
 > - *Configure Linker*, *4. `.cargo/config.toml` Configuration*: no `arm-linux-gnueabihf-gcc`, runner, `jobs` or `+neon`. Aliases and the `lint` definition (`clippy --all-targets -- -W clippy::all`) differ.
 > - *Rust Approach*: the device runs Debian 9 with glibc 2.24, not >= 2.28.
 > - *Configuration in `Cargo.toml`* (deb): assets are `sandstar-engine-server` + `sandstar-cli`, `sandstar-engine.service`, `sandstar-rust-validate.service`, cutover/rollback scripts, lookup tables; `initialize.sh` and the unit files are conf-files; there is a `linux-hal` variant.
-> - *GitHub Actions CI*: the real CI is `ci.yml` on branch `master` with toolchain 1.99.1: fmt + clippy + test, then a zigbuild ARM build (`linux-hal`, no `svm`) on push only, without `.deb` or artifacts.
+> - *GitHub Actions CI*: the real CI is `ci.yml` on `master` and `develop` (push and pull request, since 2026-11-19) with toolchain 1.99.1: fmt + clippy + test, then a zigbuild ARM build (`linux-hal`, no `svm`) on push only, without `.deb` or artifacts.
 > - *Release Profile Optimization*: `opt-level = "s"`, `lto = "thin"`.
 > - *Build*: the binary is `sandstar-engine-server`, not `sandstar`.
 > - *Comparison: Docker vs Native Toolchain*: releases are built locally with `cargo arm-build-svm && cargo arm-deb --no-strip`.

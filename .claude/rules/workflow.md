@@ -19,7 +19,7 @@ Tek komut: `bash tools/gates.sh`. Kapı başına bir satır basar, yalnız kırm
 5. Kapsama ölçümü (isteğe bağlı): `cargo llvm-cov -p <crate> --summary-only`.
 
 Kırmızı bir kapı yeşil gösterilmez.
-- Taban `master`'da yeşil (R-37, S-5'te kapandı).
+- Taban `master`'da ve `develop`'ta yeşil (R-37, S-5'te kapandı).
 - Kararsız bir test bir koşuda düşer, tekrarda geçerse:
   - "geçti" denmez;
   - iki koşu da raporlanır;
@@ -75,13 +75,30 @@ Ne zaman çağrılmayacağı global fren kuralındadır.
 Kaynak: kullanıcıyla konuşma; EnvanterTakip `DevelopingMds/03-GelistirmeKurallari.md` §8 incelendi, SandStar'a uyarlandı.
 - **Kim, ne zaman:**
   - **Commit:** yalnız kullanıcı isteyince ya da onayıyla. Mantıksal bir değişiklik bitip testler geçince Claude "commit atayım mı?" diye sorar, kendiliğinden atmaz.
-  - **`master`'a alma:** yalnız kullanıcı isteyince ya da onayıyla.
-  - **Dalı push etmek ve draft PR açmak:** sorulmaz (karar 2026-11-18). CI'ın koşması için yapılır, sonuç kullanıcıya bildirilir.
-  - **Hiçbir koşulda serbest değil:** `master`'a doğrudan push ve `--force` push.
-- **Dal:** her S adımı kendi dalında: `s<n>-<konu>` (ör. `s5-ci-gates`). Doğrudan `master`'a commit yok.
-  - Gerekçe: uzak depo bir organizasyona ait (`Project-SandStar/Sandstar_Rust`) ve kod sahadaki cihaza gidiyor.
+  - **`develop`'a alma:** S adımı bitince, kapılar ve PR'ın CI'ı yeşilse sorulmaz (karar 2026-11-19). Sonuç kullanıcıya bildirilir.
+  - **`master`'a alma:** yalnız kilit bir geliştirme bitince (ör. sahaya gidecek sürüm, bir fazın kapanışı). Claude önerir, kullanıcı onaylar.
+  - **Dalı push etmek ve PR açmak:** sorulmaz (karar 2026-11-18). CI'ın koşması için yapılır, sonuç kullanıcıya bildirilir.
+  - **Hiçbir koşulda serbest değil:** `master`'a ya da `develop`'a PR'sız commit, `--force` push.
+- **Dal modeli (karar 2026-11-19, kullanıcı):**
+  - `master`: kararlı; sahaya giden sürümler buradan derlenir.
+  - `develop`: entegrasyon dalı. Her S adımı `develop`'tan açılan kendi dalında yapılır: `s<n>-<konu>` (ör. `s12-develop-flow`).
+  - Akış: `develop` → `s<n>-<konu>` → PR (taban `develop`) → `develop`. Kilit geliştirmeden sonra `develop` → PR (taban `master`) → `master`.
+  - Birleşen adım dalı yerelde ve uzakta silinir; böylece yalnız `master` ve `develop` kalıcıdır.
+  - Gerekçe: uzak depo bir organizasyona ait (`Project-SandStar/Sandstar_Rust`) ve kod sahadaki cihaza gidiyor; `master` yalnız doğrulanmış toplu değişiklik alır.
   - Dal içinde kırmızı kapıyla ara commit kabul edilir; mesaj gövdesinde hangi kapının neden kırmızı kaldığı yazılır.
-  - `master`'a alma şartı: aşağıdaki kontrol listesi yeşil. Fast-forward tercih edilir; olmazsa `--no-ff` merge.
+  - Alma şartı (`develop` ve `master`): aşağıdaki kontrol listesi ve CI `Test` işi yeşil.
+  - Birleştirme yalnız GitHub'dan (karar 2026-11-19):
+    - adım dalı → `develop`: `gh pr merge <n> --rebase --delete-branch`. Atomik commit'ler korunur, hash'ler değişir; 08'e birleşme sonrası hash'ler yazılır.
+    - `develop` → `master`: `gh pr merge <n> --merge`. Her kilit geliştirme `master`'da tek bir birleşme commit'i olur.
+    - Birleştirmeden sonra yerelde `git pull --ff-only`; adım dalı yerelde `git branch -D` ile silinir (rebase sonrası hash'ler farklı olduğu için `-d` reddeder).
+- **GitHub ruleset'leri (karar 2026-11-19, kullanıcı):** `master` ve `develop` için ayrı ruleset, istisnasız (adminler dahil):
+  - dal silinemez, force push yasak;
+  - değişiklik yalnız PR ile; onay sayısı 0 (tek geliştirici; kendi PR'ını onaylamak mümkün değil);
+  - CI `Test` işi geçmeden birleşmez;
+  - izinli yöntem: `develop` için yalnız rebase, `master` için yalnız merge commit.
+  - Ruleset'i değiştirmek ya da kapatmak kullanıcı kararıdır; organizasyondaki diğer admini de bağlar.
+  - `Build ARM` işi PR'da koşmadığı için zorunlu değil; ARM kırılması birleşmeden sonra push CI'ında görülür.
+  - Sahaya deploy `master`'dan yapılır. `develop`'tan deploy yalnız kullanıcı açıkça isterse (ör. sahada deneme); 08'e hangi daldan ve hangi hash'ten deploy edildiği yazılır.
 - **Mesaj biçimi:** `tür(kapsam): özet`, İngilizce, emir kipinde, ~72 karakter.
   - Türler: `feat`, `fix`, `refactor`, `perf`, `test`, `docs`, `style` (yalnız biçim), `ci`, `build`, `chore`.
   - Kapsam: crate ya da modül adı (`rest`, `live`, `sox`, `bacnet`, `mqtt`, `roxwarp`, `engine`, `hal`, `svm`, `cli`, `deb`, `tools`, `ci`).
@@ -116,7 +133,7 @@ Gerekçe: git'teki `docs/Progress` ve `docs/research` altı ay koddan koptu (R-3
 | Risk açıldı, ilerledi, kapandı | 06 (durum basamağı ve kanıtla) |
 | Her S-n adımı | 08, gerekiyorsa 10 |
 
-- **Hatırlatma:** `tools/gates.sh` sonundaki `docs` satırı, dalın `master` ile ortak atasına göre değişen yolları `tools/docs-map.tsv` ile eşler. Kod yolu değişip doküman değişmediyse dokümanı listeler. Eşlemenin tek kaynağı `docs-map.tsv`'dir; yukarıdaki tablo onun okunur özetidir. İkisi birlikte değişir.
+- **Hatırlatma:** `tools/gates.sh` sonundaki `docs` satırı, dalın `develop` ile (yoksa `master` ile) ortak atasına göre değişen yolları `tools/docs-map.tsv` ile eşler. Kod yolu değişip doküman değişmediyse dokümanı listeler. Eşlemenin tek kaynağı `docs-map.tsv`'dir; yukarıdaki tablo onun okunur özetidir. İkisi birlikte değişir.
 - **Hatırlatma kapı değildir.** Doküman gerekmiyorsa (ör. yalnız yorum ya da test değişti) atlanır; commit gövdesine bir satır yazılır: "docs: <doküman> gerekmedi, çünkü …".
 - DevelopingMds git dışında olduğu için hatırlatma onu göremez; 08/06/10 için yukarıdaki "Sürüm ve kayıt" geçerlidir.
 - Dokümanda sonuç doğrulanmadan "tamamlandı" yazılmaz; sahaya giden işlerde durum basamakları (yukarıda) uygulanır.

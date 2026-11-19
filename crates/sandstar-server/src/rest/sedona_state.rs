@@ -71,7 +71,7 @@ pub async fn sedona_state_handler(
     Query(q): Query<SedonaStateQuery>,
 ) -> impl IntoResponse {
     let started = Instant::now();
-    let tree = state.tree.read().unwrap();
+    let tree = crate::lock::read_or_recover(&state.tree, "SOX component tree");
     let snapshot = build_snapshot(&tree, &q, started);
     Json(snapshot)
 }
