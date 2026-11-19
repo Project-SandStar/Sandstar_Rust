@@ -21,6 +21,7 @@
 > - Request body limit 1 MB (`rest/mod.rs`); driver actor channel capacity 64.
 > - Log files kept: 14 by default (`--log-max-files`, `logging.rs`).
 > - roxWarp timer bounds: 1..=86400 s (`roxwarp/cluster.rs`).
+> - roxWarp `NON_FINITE_WARN_INTERVAL_MS` = 60,000 ms (`roxwarp/cluster.rs:221`, R-45, 2026-11-19): at most one `warn` per minute about NaN/inf values from peers; the rest go to `debug`. Keep hardcoded.
 > - GPIO60 retry every 20 watchdog kicks, at most 30 retries (`watchdog.rs`).
 > - systemd unit: `WatchdogSec=10`, `MemoryLimit=128M`.
 
