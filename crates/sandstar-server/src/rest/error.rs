@@ -14,6 +14,8 @@ pub enum AppError {
     Forbidden(String),
     /// 500 — internal server error.
     Internal(String),
+    /// 503 — the engine did not answer in time (R-28); retry later.
+    ServiceUnavailable(String),
 }
 
 impl IntoResponse for AppError {
@@ -23,6 +25,7 @@ impl IntoResponse for AppError {
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
             AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
+            AppError::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg),
         };
         let body = serde_json::json!({ "err": message });
         (status, Json(body)).into_response()
@@ -33,12 +36,45 @@ impl IntoResponse for AppError {
 impl From<String> for AppError {
     fn from(s: String) -> Self {
         // Classify known error patterns
-        if s.contains("not found") || s.contains("NotFound") {
+        if s.starts_with(super::ENGINE_TIMEOUT_ERR) {
+            Self::ServiceUnavailable(s)
+        } else if s.contains("not found") || s.contains("NotFound") {
             Self::NotFound(s)
         } else if s.contains("read-only") {
             Self::Forbidden(s)
         } else {
             Self::Internal(s)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status_of(msg: &str) -> StatusCode {
+        AppError::from(msg.to_string()).into_response().status()
+    }
+
+    #[test]
+    fn engine_timeout_maps_to_503() {
+        assert_eq!(
+            status_of(super::super::ENGINE_TIMEOUT_ERR),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            status_of("engine timeout; write may still be applied"),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn other_engine_errors_keep_their_codes() {
+        assert_eq!(
+            status_of("engine stopped"),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(status_of("channel 9 not found"), StatusCode::NOT_FOUND);
+        assert_eq!(status_of("read-only mode"), StatusCode::FORBIDDEN);
     }
 }

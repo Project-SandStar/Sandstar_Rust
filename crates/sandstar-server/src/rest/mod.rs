@@ -137,63 +137,139 @@ pub struct WatchResponse {
     pub rows: Vec<ChannelValue>,
 }
 
+/// How long a caller waits for the engine to accept and answer a command.
+///
+/// The main loop takes commands only between polls (`main.rs`, the
+/// `cmd_rx.recv()` branch is guarded by `engine.is_some()`), so a hung poll
+/// would otherwise block every caller forever (R-28). 10 s is 10x the default
+/// poll interval and 2x the shutdown wait for an in-flight poll.
+pub const ENGINE_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Error text for an engine command that timed out. REST maps errors that
+/// start with this text to 503 (`rest/error.rs`).
+pub const ENGINE_TIMEOUT_ERR: &str = "engine timeout";
+
+/// Minimum gap between two timeout warnings; the rest are logged at debug.
+const TIMEOUT_WARN_INTERVAL_SECS: u64 = 60;
+
+/// Monotonic origin for the warn limiter (the device may boot with a wrong
+/// wall clock that later steps backwards).
+static TIMEOUT_CLOCK_ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// Seconds since `TIMEOUT_CLOCK_ORIGIN` at the last timeout warning, plus one
+/// (0 = never warned).
+static LAST_TIMEOUT_WARN: AtomicU64 = AtomicU64::new(0);
+
+/// Whether a command changes engine state. A timed-out command stays queued
+/// and may still run later, so callers of a changing command are told so.
+#[derive(Clone, Copy)]
+enum Effect {
+    Read,
+    /// The noun used in the error text ("write", "command").
+    Changes(&'static str),
+}
+
+fn timeout_error(effect: Effect) -> String {
+    match effect {
+        Effect::Read => ENGINE_TIMEOUT_ERR.to_string(),
+        Effect::Changes(noun) => format!("{ENGINE_TIMEOUT_ERR}; {noun} may still be applied"),
+    }
+}
+
+fn report_timeout(cmd: &'static str, timeout: Duration) {
+    let origin = *TIMEOUT_CLOCK_ORIGIN.get_or_init(std::time::Instant::now);
+    // +1 so that the first warning is not mistaken for "never warned".
+    let now = origin.elapsed().as_secs().saturating_add(1);
+    let last = LAST_TIMEOUT_WARN.load(Ordering::Relaxed);
+    if (last == 0 || now.saturating_sub(last) >= TIMEOUT_WARN_INTERVAL_SECS)
+        && LAST_TIMEOUT_WARN
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        tracing::warn!(
+            cmd,
+            timeout_ms = timeout.as_millis() as u64,
+            "engine did not answer in time (R-28); further timeouts within 60 s logged at debug"
+        );
+    } else {
+        tracing::debug!(cmd, "engine did not answer in time");
+    }
+}
+
 /// Cloneable, Send+Sync handle to the engine command channel.
 ///
-/// Passed to Axum as `State<EngineHandle>`. Each handler method
-/// sends a command and awaits the oneshot reply.
+/// Passed to Axum as `State<EngineHandle>`. Each method sends a command and
+/// awaits the oneshot reply, bounded by [`ENGINE_REPLY_TIMEOUT`].
 #[derive(Clone)]
 pub struct EngineHandle {
     tx: mpsc::Sender<EngineCmd>,
+    reply_timeout: Duration,
 }
 
 impl EngineHandle {
     pub fn new(tx: mpsc::Sender<EngineCmd>) -> Self {
-        Self { tx }
+        Self {
+            tx,
+            reply_timeout: ENGINE_REPLY_TIMEOUT,
+        }
+    }
+
+    /// Send a command and wait for its reply. Both the send (the channel may
+    /// be full) and the reply are covered by `reply_timeout`.
+    async fn request<T>(
+        &self,
+        cmd: &'static str,
+        effect: Effect,
+        make: impl FnOnce(oneshot::Sender<T>) -> EngineCmd,
+    ) -> Result<T, String> {
+        let (reply, rx) = oneshot::channel();
+        let exchange = async {
+            self.tx
+                .send(make(reply))
+                .await
+                .map_err(|_| "engine stopped".to_string())?;
+            rx.await.map_err(|_| "engine dropped reply".to_string())
+        };
+        match tokio::time::timeout(self.reply_timeout, exchange).await {
+            Ok(result) => result,
+            Err(_) => {
+                report_timeout(cmd, self.reply_timeout);
+                Err(timeout_error(effect))
+            }
+        }
     }
 
     pub async fn status(&self) -> Result<StatusInfo, String> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(EngineCmd::Status { reply })
+        self.request("status", Effect::Read, |reply| EngineCmd::Status { reply })
             .await
-            .map_err(|_| "engine stopped".to_string())?;
-        rx.await.map_err(|_| "engine dropped reply".to_string())
     }
 
     pub async fn list_channels(&self) -> Result<Vec<ChannelInfo>, String> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(EngineCmd::ListChannels { reply })
-            .await
-            .map_err(|_| "engine stopped".to_string())?;
-        rx.await.map_err(|_| "engine dropped reply".to_string())
+        self.request("list_channels", Effect::Read, |reply| {
+            EngineCmd::ListChannels { reply }
+        })
+        .await
     }
 
     pub async fn list_polls(&self) -> Result<Vec<PollInfo>, String> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(EngineCmd::ListPolls { reply })
-            .await
-            .map_err(|_| "engine stopped".to_string())?;
-        rx.await.map_err(|_| "engine dropped reply".to_string())
+        self.request("list_polls", Effect::Read, |reply| EngineCmd::ListPolls {
+            reply,
+        })
+        .await
     }
 
     pub async fn list_tables(&self) -> Result<Vec<String>, String> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(EngineCmd::ListTables { reply })
-            .await
-            .map_err(|_| "engine stopped".to_string())?;
-        rx.await.map_err(|_| "engine dropped reply".to_string())
+        self.request("list_tables", Effect::Read, |reply| EngineCmd::ListTables {
+            reply,
+        })
+        .await
     }
 
     pub async fn read_channel(&self, channel: u32) -> Result<ChannelValue, String> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(EngineCmd::ReadChannel { channel, reply })
-            .await
-            .map_err(|_| "engine stopped".to_string())?;
-        rx.await.map_err(|_| "engine dropped reply".to_string())?
+        self.request("read_channel", Effect::Read, |reply| {
+            EngineCmd::ReadChannel { channel, reply }
+        })
+        .await?
     }
 
     pub async fn write_channel(
@@ -204,58 +280,48 @@ impl EngineHandle {
         who: String,
         duration: f64,
     ) -> Result<(), String> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(EngineCmd::WriteChannel {
+        self.request("write_channel", Effect::Changes("write"), |reply| {
+            EngineCmd::WriteChannel {
                 channel,
                 value,
                 level,
                 who,
                 duration,
                 reply,
-            })
-            .await
-            .map_err(|_| "engine stopped".to_string())?;
-        rx.await.map_err(|_| "engine dropped reply".to_string())?
+            }
+        })
+        .await?
     }
 
     pub async fn get_write_levels(
         &self,
         channel: u32,
     ) -> Result<Vec<sandstar_ipc::types::WriteLevelInfo>, String> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(EngineCmd::GetWriteLevels { channel, reply })
-            .await
-            .map_err(|_| "engine stopped".to_string())?;
-        rx.await.map_err(|_| "engine dropped reply".to_string())?
+        self.request("get_write_levels", Effect::Read, |reply| {
+            EngineCmd::GetWriteLevels { channel, reply }
+        })
+        .await?
     }
 
     pub async fn poll_now(&self) -> Result<String, String> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(EngineCmd::PollNow { reply })
-            .await
-            .map_err(|_| "engine stopped".to_string())?;
-        rx.await.map_err(|_| "engine dropped reply".to_string())?
+        self.request("poll_now", Effect::Changes("command"), |reply| {
+            EngineCmd::PollNow { reply }
+        })
+        .await?
     }
 
     pub async fn reload_config(&self) -> Result<String, String> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(EngineCmd::ReloadConfig { reply })
-            .await
-            .map_err(|_| "engine stopped".to_string())?;
-        rx.await.map_err(|_| "engine dropped reply".to_string())?
+        self.request("reload_config", Effect::Changes("command"), |reply| {
+            EngineCmd::ReloadConfig { reply }
+        })
+        .await?
     }
 
     pub async fn about_info(&self) -> Result<(u64, u64), String> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(EngineCmd::AboutInfo { reply })
-            .await
-            .map_err(|_| "engine stopped".to_string())?;
-        rx.await.map_err(|_| "engine dropped reply".to_string())
+        self.request("about_info", Effect::Read, |reply| EngineCmd::AboutInfo {
+            reply,
+        })
+        .await
     }
 
     pub async fn watch_sub(
@@ -264,17 +330,15 @@ impl EngineHandle {
         display_name: Option<String>,
         channels: Vec<u32>,
     ) -> Result<WatchResponse, String> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(EngineCmd::WatchSub {
+        self.request("watch_sub", Effect::Changes("command"), |reply| {
+            EngineCmd::WatchSub {
                 watch_id,
                 display_name,
                 channels,
                 reply,
-            })
-            .await
-            .map_err(|_| "engine stopped".to_string())?;
-        rx.await.map_err(|_| "engine dropped reply".to_string())?
+            }
+        })
+        .await?
     }
 
     pub async fn watch_unsub(
@@ -283,17 +347,15 @@ impl EngineHandle {
         close: bool,
         channels: Vec<u32>,
     ) -> Result<(), String> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(EngineCmd::WatchUnsub {
+        self.request("watch_unsub", Effect::Changes("command"), |reply| {
+            EngineCmd::WatchUnsub {
                 watch_id,
                 close,
                 channels,
                 reply,
-            })
-            .await
-            .map_err(|_| "engine stopped".to_string())?;
-        rx.await.map_err(|_| "engine dropped reply".to_string())?
+            }
+        })
+        .await?
     }
 
     pub async fn watch_poll(
@@ -301,25 +363,19 @@ impl EngineHandle {
         watch_id: String,
         refresh: bool,
     ) -> Result<WatchResponse, String> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(EngineCmd::WatchPoll {
-                watch_id,
-                refresh,
-                reply,
-            })
-            .await
-            .map_err(|_| "engine stopped".to_string())?;
-        rx.await.map_err(|_| "engine dropped reply".to_string())?
+        self.request("watch_poll", Effect::Read, |reply| EngineCmd::WatchPoll {
+            watch_id,
+            refresh,
+            reply,
+        })
+        .await?
     }
 
     pub async fn diagnostics(&self) -> Result<sandstar_ipc::types::DiagnosticsInfo, String> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(EngineCmd::Diagnostics { reply })
-            .await
-            .map_err(|_| "engine stopped".to_string())?;
-        rx.await.map_err(|_| "engine dropped reply".to_string())
+        self.request("diagnostics", Effect::Read, |reply| {
+            EngineCmd::Diagnostics { reply }
+        })
+        .await
     }
 
     pub async fn get_history(
@@ -328,17 +384,92 @@ impl EngineHandle {
         since_unix: u64,
         limit: usize,
     ) -> Result<Vec<HistoryPoint>, String> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(EngineCmd::GetHistory {
-                channel,
-                since_unix,
-                limit,
-                reply,
-            })
+        self.request("get_history", Effect::Read, |reply| EngineCmd::GetHistory {
+            channel,
+            since_unix,
+            limit,
+            reply,
+        })
+        .await
+    }
+}
+
+#[cfg(test)]
+mod engine_handle_timeout_tests {
+    use super::*;
+
+    fn handle(capacity: usize) -> (EngineHandle, mpsc::Receiver<EngineCmd>) {
+        let (tx, rx) = mpsc::channel(capacity);
+        (EngineHandle::new(tx), rx)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn silent_engine_times_out() {
+        let (h, mut rx) = handle(4);
+        // Keep the command (and its reply sender) alive without answering.
+        let keep = tokio::spawn(async move {
+            let cmd = rx.recv().await;
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            drop(cmd);
+        });
+        let err = h.status().await.unwrap_err();
+        assert_eq!(err, ENGINE_TIMEOUT_ERR);
+        keep.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn full_channel_send_times_out() {
+        let (h, _rx) = handle(1);
+        let (reply, _keep) = oneshot::channel();
+        h.tx.send(EngineCmd::Status { reply }).await.unwrap();
+        // Channel is full and nobody receives: the send itself must time out.
+        let err = h.list_tables().await.unwrap_err();
+        assert_eq!(err, ENGINE_TIMEOUT_ERR);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn write_timeout_says_it_may_still_apply() {
+        let (h, mut rx) = handle(4);
+        let keep = tokio::spawn(async move {
+            let cmd = rx.recv().await;
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            drop(cmd);
+        });
+        let err = h
+            .write_channel(1, Some(1.0), 8, "test".into(), 0.0)
             .await
-            .map_err(|_| "engine stopped".to_string())?;
-        rx.await.map_err(|_| "engine dropped reply".to_string())
+            .unwrap_err();
+        assert_eq!(err, "engine timeout; write may still be applied");
+        assert!(err.starts_with(ENGINE_TIMEOUT_ERR));
+        keep.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn answer_within_timeout_passes() {
+        let (h, mut rx) = handle(4);
+        tokio::spawn(async move {
+            if let Some(EngineCmd::ListTables { reply }) = rx.recv().await {
+                tokio::time::sleep(Duration::from_secs(9)).await;
+                let _ = reply.send(vec!["t".to_string()]);
+            }
+        });
+        assert_eq!(h.list_tables().await.unwrap(), vec!["t".to_string()]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropped_reply_is_not_a_timeout() {
+        let (h, mut rx) = handle(4);
+        tokio::spawn(async move {
+            drop(rx.recv().await);
+        });
+        assert_eq!(h.status().await.unwrap_err(), "engine dropped reply");
+    }
+
+    #[tokio::test]
+    async fn stopped_engine_is_not_a_timeout() {
+        let (h, rx) = handle(4);
+        drop(rx);
+        assert_eq!(h.status().await.unwrap_err(), "engine stopped");
     }
 }
 
