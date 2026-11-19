@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use super::actor::DriverHandle;
 use super::async_driver::{AnyDriver, AsyncDriver};
-use super::{DriverId, DriverPointRef};
+use super::{DriverError, DriverId, DriverPointRef};
 use crate::rest::EngineHandle;
 
 /// Per-driver-type specialization knobs used by [`load_drivers`].
@@ -227,82 +227,179 @@ pub async fn load_drivers<L: DriverLoader>(handle: &DriverHandle, engine_handle:
                     continue;
                 }
             };
-            let (mut ok_count, mut err_count, mut write_err_count) = (0usize, 0usize, 0usize);
-            // After one engine timeout the remaining writes of this tick are
-            // skipped: each would wait another ENGINE_REPLY_TIMEOUT (R-28).
-            // Skipped writes are counted separately, not as write errors.
-            let mut engine_timed_out = false;
-            let mut skipped_count = 0usize;
-            for (driver_id, point_id, res) in &results {
-                match res {
-                    Ok(_) if engine_timed_out => {
-                        ok_count += 1;
-                        skipped_count += 1;
-                    }
-                    Ok(v) => {
-                        ok_count += 1;
-                        tracing::info!(
-                            driver = %driver_id,
-                            point_id,
-                            value = v,
-                            "{} sync_cur -> write_channel",
-                            L::LABEL
-                        );
-                        let who = format!("{}:{}", L::DRIVER_TYPE, driver_id);
-                        if let Err(e) = engine_tick
-                            .write_channel(
-                                *point_id,
-                                Some(*v),
-                                DRIVER_WRITE_LEVEL,
-                                who,
-                                DRIVER_WRITE_DURATION_SECS,
-                            )
-                            .await
-                        {
-                            write_err_count += 1;
-                            if crate::rest::is_engine_timeout(&e) {
-                                engine_timed_out = true;
-                                tracing::warn!(
-                                    driver = %driver_id,
-                                    point_id,
-                                    error = %e,
-                                    "{} engine did not answer write_channel; \
-                                     skipping the remaining writes of this tick",
-                                    L::LABEL
-                                );
-                            } else {
-                                tracing::warn!(
-                                    driver = %driver_id,
-                                    point_id,
-                                    error = %e,
-                                    "{} engine write_channel failed — \
-                                     is point_id a configured virtual channel?",
-                                    L::LABEL
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        err_count += 1;
-                        tracing::warn!(
-                            driver = %driver_id,
-                            point_id,
-                            error = %e,
-                            "{} sync_cur failed",
-                            L::LABEL
-                        );
-                    }
-                }
-            }
+            let counts = deliver_tick(&engine_tick, L::LABEL, L::DRIVER_TYPE, &results).await;
             tracing::info!(
-                ok = ok_count,
-                err = err_count,
-                write_err = write_err_count,
-                write_skipped = skipped_count,
+                ok = counts.ok,
+                err = counts.err,
+                write_err = counts.write_err,
+                write_skipped = counts.write_skipped,
                 "{} poll tick complete",
                 L::LABEL
             );
         }
     });
     tracing::info!("{} poll tick task spawned (5s interval)", L::LABEL);
+}
+
+/// Counts for one driver poll tick.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct TickCounts {
+    /// Points whose `sync_cur` returned a value.
+    ok: usize,
+    /// Points whose `sync_cur` failed (remote device error).
+    err: usize,
+    /// Values the engine rejected or did not answer.
+    write_err: usize,
+    /// Values not sent after an engine timeout in this tick.
+    write_skipped: usize,
+}
+
+/// Write one tick's `sync_cur` results into engine channels.
+///
+/// After one engine timeout the remaining writes of the tick are skipped:
+/// each would wait another `ENGINE_REPLY_TIMEOUT` (R-28). Skipped writes
+/// are counted separately, not as write errors.
+async fn deliver_tick(
+    engine: &EngineHandle,
+    label: &str,
+    driver_type: &str,
+    results: &[(DriverId, u32, Result<f64, DriverError>)],
+) -> TickCounts {
+    let mut counts = TickCounts::default();
+    let mut engine_timed_out = false;
+    for (driver_id, point_id, res) in results {
+        match res {
+            Ok(_) if engine_timed_out => {
+                counts.ok += 1;
+                counts.write_skipped += 1;
+            }
+            Ok(v) => {
+                counts.ok += 1;
+                tracing::info!(
+                    driver = %driver_id,
+                    point_id,
+                    value = v,
+                    "{} sync_cur -> write_channel",
+                    label
+                );
+                let who = format!("{}:{}", driver_type, driver_id);
+                if let Err(e) = engine
+                    .write_channel(
+                        *point_id,
+                        Some(*v),
+                        DRIVER_WRITE_LEVEL,
+                        who,
+                        DRIVER_WRITE_DURATION_SECS,
+                    )
+                    .await
+                {
+                    counts.write_err += 1;
+                    if crate::rest::is_engine_timeout(&e) {
+                        engine_timed_out = true;
+                        tracing::warn!(
+                            driver = %driver_id,
+                            point_id,
+                            error = %e,
+                            "{} engine did not answer write_channel; \
+                             skipping the remaining writes of this tick",
+                            label
+                        );
+                    } else {
+                        tracing::warn!(
+                            driver = %driver_id,
+                            point_id,
+                            error = %e,
+                            "{} engine write_channel failed — \
+                             is point_id a configured virtual channel?",
+                            label
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                counts.err += 1;
+                tracing::warn!(
+                    driver = %driver_id,
+                    point_id,
+                    error = %e,
+                    "{} sync_cur failed",
+                    label
+                );
+            }
+        }
+    }
+    counts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rest::EngineCmd;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// Engine that answers writes with `Ok`, or holds them (hung) when
+    /// `hang` is set. Returns the handle and a count of writes received.
+    fn engine(hang: bool) -> (EngineHandle, Arc<AtomicUsize>) {
+        let seen = Arc::new(AtomicUsize::new(0));
+        let counter = seen.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<EngineCmd>(16);
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Some(cmd) = rx.recv().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+                match cmd {
+                    EngineCmd::WriteChannel { reply, .. } if !hang => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    other => held.push(other),
+                }
+            }
+        });
+        (EngineHandle::new(tx), seen)
+    }
+
+    fn results() -> Vec<(DriverId, u32, Result<f64, DriverError>)> {
+        vec![
+            ("d".into(), 1, Ok(1.0)),
+            ("d".into(), 2, Err(DriverError::Timeout("remote".into()))),
+            ("d".into(), 3, Ok(3.0)),
+            ("d".into(), 4, Ok(4.0)),
+        ]
+    }
+
+    #[tokio::test]
+    async fn deliver_tick_writes_every_value() {
+        let (eh, seen) = engine(false);
+        let counts = deliver_tick(&eh, "T", "t", &results()).await;
+        assert_eq!(
+            counts,
+            TickCounts {
+                ok: 3,
+                err: 1,
+                write_err: 0,
+                write_skipped: 0
+            }
+        );
+        assert_eq!(seen.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deliver_tick_skips_the_rest_after_an_engine_timeout() {
+        let (eh, seen) = engine(true);
+        let start = tokio::time::Instant::now();
+        let counts = deliver_tick(&eh, "T", "t", &results()).await;
+        // One engine timeout for the tick, not one per value.
+        assert_eq!(start.elapsed(), crate::rest::ENGINE_REPLY_TIMEOUT);
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            counts,
+            TickCounts {
+                ok: 3,
+                err: 1,
+                write_err: 1,
+                write_skipped: 2
+            }
+        );
+    }
 }
