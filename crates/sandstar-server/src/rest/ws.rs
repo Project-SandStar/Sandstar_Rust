@@ -4,6 +4,8 @@
 //! to channels, and receive server-pushed value updates.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -12,11 +14,12 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
-use super::{is_engine_timeout, EngineHandle, WatchResponse};
+use super::engine_round::EngineRound;
+use super::{is_engine_timeout, EngineHandle, WatchResponse, ENGINE_REPLY_TIMEOUT};
 use crate::auth::AuthState;
 use crate::drivers::actor::DriverHandle;
 use crate::drivers::CovEvent;
@@ -28,6 +31,28 @@ const MIN_POLL_INTERVAL_MS: u64 = 200;
 const MAX_POLL_INTERVAL_MS: u64 = 60_000;
 const DEFAULT_POLL_INTERVAL_MS: u64 = 1000;
 const CLIENT_TIMEOUT_SECS: u64 = 120;
+
+/// Pause before the next push round of a connection after an engine
+/// timeout, so a hung engine does not get a new (queued) poll every tick.
+const PUSH_BACKOFF_AFTER_TIMEOUT: Duration = ENGINE_REPLY_TIMEOUT;
+
+/// Capacity of the shared watch cleanup queue (watch ids). The engine holds
+/// at most 64 watches (`cmd_handler.rs` `MAX_WATCHES`).
+const CLEANUP_QUEUE_CAPACITY: usize = 256;
+
+/// First pause before retrying a `watch_unsub` that timed out; doubles on
+/// each further timeout up to [`CLEANUP_RETRY_MAX_DELAY`].
+const CLEANUP_RETRY_DELAY: Duration = Duration::from_secs(10);
+
+/// Longest pause between two cleanup attempts for the same watch.
+const CLEANUP_RETRY_MAX_DELAY: Duration = Duration::from_secs(600);
+
+/// Give up on a queued watch after this long: the engine has expired it by
+/// then (`cmd_handler.rs` `WATCH_LEASE_SECS`).
+const CLEANUP_MAX_AGE: Duration = Duration::from_secs(3600);
+
+/// Minimum gap between two "cleanup queue full" warnings.
+const CLEANUP_FULL_WARN_INTERVAL_SECS: u64 = 60;
 
 // ── State ──────────────────────────────────────────
 
@@ -42,6 +67,120 @@ pub struct WsState {
     /// polls on change-of-value for sub-second push latency. `None`
     /// preserves legacy poll-only behavior (used by some older tests).
     pub driver_handle: Option<DriverHandle>,
+    /// Shared task that closes the watches of finished connections.
+    pub cleanup: WatchCleanup,
+}
+
+// ── Watch cleanup ──────────────────────────────────
+
+/// Handle to the single task that closes the engine watches of finished
+/// connections (R-28, S-22).
+///
+/// One task for all connections, with at most one `watch_unsub` in flight.
+/// A timed-out unsub stays queued in the engine, so each retry can leave one
+/// more stale command behind; retries therefore back off exponentially from
+/// [`CLEANUP_RETRY_DELAY`] to [`CLEANUP_RETRY_MAX_DELAY`] (about ten attempts
+/// per watch in the worst case). The watch is given up after
+/// [`CLEANUP_MAX_AGE`], when the engine's lease has expired it anyway. The
+/// task ends when every handle is dropped.
+#[derive(Clone)]
+pub struct WatchCleanup {
+    tx: mpsc::Sender<(String, Instant)>,
+    origin: Instant,
+    /// Seconds since `origin` at the last "queue full" warning, plus one
+    /// (0 = never).
+    last_full_warn: Arc<AtomicU64>,
+}
+
+impl WatchCleanup {
+    /// Start the cleanup task. Must be called inside a tokio runtime.
+    pub fn spawn(engine: EngineHandle) -> Self {
+        Self::spawn_with_capacity(engine, CLEANUP_QUEUE_CAPACITY)
+    }
+
+    fn spawn_with_capacity(engine: EngineHandle, capacity: usize) -> Self {
+        let (tx, rx) = mpsc::channel(capacity);
+        tokio::spawn(run_cleanup(engine, rx));
+        Self {
+            tx,
+            origin: Instant::now(),
+            last_full_warn: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Queue watches for closing. Never waits; returns how many could not be
+    /// queued (those expire with their lease).
+    fn enqueue(&self, watch_ids: Vec<String>) -> usize {
+        use tokio::sync::mpsc::error::TrySendError;
+        let now = Instant::now();
+        let (mut dropped, mut closed) = (0usize, 0usize);
+        for id in watch_ids {
+            match self.tx.try_send((id, now)) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => dropped += 1,
+                Err(TrySendError::Closed(_)) => closed += 1,
+            }
+        }
+        if closed > 0 {
+            // Only possible if the task has ended, which it does not while a
+            // handle exists; report it rather than calling it "full".
+            warn!(
+                count = closed,
+                "WS cleanup task is not running; these watches expire with their lease"
+            );
+        }
+        if dropped > 0 {
+            let secs = self.origin.elapsed().as_secs().saturating_add(1);
+            let last = self.last_full_warn.load(Ordering::Relaxed);
+            if (last == 0 || secs.saturating_sub(last) >= CLEANUP_FULL_WARN_INTERVAL_SECS)
+                && self
+                    .last_full_warn
+                    .compare_exchange(last, secs, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            {
+                warn!(
+                    dropped,
+                    "WS cleanup queue full; these watches expire with their lease"
+                );
+            } else {
+                debug!(dropped, "WS cleanup queue full");
+            }
+        }
+        dropped + closed
+    }
+}
+
+/// Body of the cleanup task: close queued watches one at a time.
+async fn run_cleanup(engine: EngineHandle, mut rx: mpsc::Receiver<(String, Instant)>) {
+    while let Some((watch_id, queued_at)) = rx.recv().await {
+        let mut delay = CLEANUP_RETRY_DELAY;
+        loop {
+            if queued_at.elapsed() >= CLEANUP_MAX_AGE {
+                warn!(
+                    watch_id = %watch_id,
+                    "WS cleanup: engine never confirmed the close; giving up (the lease has expired the watch)"
+                );
+                break;
+            }
+            match engine.watch_unsub(watch_id.clone(), true, vec![]).await {
+                Ok(()) => break,
+                // Unknown whether the engine ran the command (a timed-out
+                // unsub stays queued; a dropped reply may mean it did not).
+                // A retry after a successful close answers "not found".
+                Err(e) if is_engine_timeout(&e) || e == "engine dropped reply" => {
+                    debug!(watch_id = %watch_id, error = %e, retry_in_s = delay.as_secs(), "WS cleanup: retrying");
+                    tokio::time::sleep(delay).await;
+                    delay = delay.saturating_mul(2).min(CLEANUP_RETRY_MAX_DELAY);
+                }
+                // "not found" (already closed or expired), or the engine has
+                // stopped: nothing left to clean for this watch.
+                Err(e) => {
+                    debug!(watch_id = %watch_id, error = %e, "WS cleanup: watch_unsub finished with an error");
+                    break;
+                }
+            }
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -191,22 +330,139 @@ struct WatchMeta {
     /// run, moving the engine's change baseline without the reply reaching
     /// the client, so the next push poll asks for all values (`refresh`).
     resync: bool,
+    /// Changes when the client gets a newer full view of this watch
+    /// (subscribe, refresh). A push round result taken before that is older
+    /// than what the client has, and is dropped (see [`apply_round`]).
+    generation: u64,
 }
 
-/// Delta-poll one watch for the push loop, asking for all values after a
-/// timed-out poll (see [`WatchMeta::resync`]).
-async fn push_poll(
-    engine: &EngineHandle,
-    watch_id: &str,
-    meta: &mut WatchMeta,
-) -> Result<WatchResponse, String> {
-    let result = engine.watch_poll(watch_id.to_string(), meta.resync).await;
-    match &result {
-        Ok(_) => meta.resync = false,
-        Err(e) if is_engine_timeout(e) => meta.resync = true,
-        Err(_) => {}
+/// A fresh, never reused [`WatchMeta::generation`].
+fn next_generation() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+// ── Push round ─────────────────────────────────────
+
+/// One watch to poll in a push round.
+struct PollJob {
+    watch_id: String,
+    /// Ask for all values (after a timed-out poll, see [`WatchMeta::resync`]).
+    refresh: bool,
+    /// [`WatchMeta::generation`] when the job was taken.
+    generation: u64,
+}
+
+/// The outcome of one [`PollJob`], with the job's watch and generation.
+struct RoundItem {
+    watch_id: String,
+    generation: u64,
+    outcome: PollOutcome,
+}
+
+/// What happened to one [`PollJob`].
+enum PollOutcome {
+    Polled(Result<WatchResponse, String>),
+    /// Not sent: an earlier poll in the round timed out.
+    Skipped,
+}
+
+/// Pick the watches due now (interval elapsed or a pending CovEvent) and
+/// mark them as polled.
+fn due_jobs(watches: &mut HashMap<String, WatchMeta>, now: Instant) -> Vec<PollJob> {
+    let mut jobs = Vec::new();
+    for (watch_id, meta) in watches.iter_mut() {
+        let interval_elapsed = now.duration_since(meta.last_poll) >= meta.poll_interval;
+        if !interval_elapsed && !meta.cov_pending {
+            continue;
+        }
+        meta.cov_pending = false;
+        meta.last_poll = now;
+        jobs.push(PollJob {
+            watch_id: watch_id.clone(),
+            refresh: meta.resync,
+            generation: meta.generation,
+        });
     }
-    result
+    jobs
+}
+
+/// Poll the jobs in order, beside the connection's `select!` loop. After
+/// the first engine timeout the rest are skipped: each would wait another
+/// timeout.
+async fn run_push_round(engine: EngineHandle, jobs: Vec<PollJob>) -> Vec<RoundItem> {
+    let mut out = Vec::with_capacity(jobs.len());
+    let mut timed_out = false;
+    for job in jobs {
+        let outcome = if timed_out {
+            PollOutcome::Skipped
+        } else {
+            let result = engine.watch_poll(job.watch_id.clone(), job.refresh).await;
+            timed_out = matches!(&result, Err(e) if is_engine_timeout(e));
+            PollOutcome::Polled(result)
+        };
+        out.push(RoundItem {
+            watch_id: job.watch_id,
+            generation: job.generation,
+            outcome,
+        });
+    }
+    out
+}
+
+/// Apply a finished round to the connection's watches. Returns the
+/// responses to push and whether the engine timed out.
+fn apply_round(
+    watches: &mut HashMap<String, WatchMeta>,
+    items: Vec<RoundItem>,
+) -> (Vec<WatchResponse>, bool) {
+    let mut updates = Vec::new();
+    let mut timed_out = false;
+    for RoundItem {
+        watch_id,
+        generation,
+        outcome,
+    } in items
+    {
+        // A timeout counts for the back-off even if the watch is gone.
+        if let PollOutcome::Polled(Err(e)) = &outcome {
+            if is_engine_timeout(e) {
+                timed_out = true;
+                debug!(watch_id = %watch_id, error = %e, "watch poll timed out in WS push");
+                // The poll stays queued and may still run, moving the
+                // engine's change baseline without the reply reaching us:
+                // resync, and poll again in the next round. This applies to
+                // a re-subscribed watch with the same id as well.
+                if let Some(meta) = watches.get_mut(&watch_id) {
+                    meta.resync = true;
+                    meta.cov_pending = true;
+                }
+                continue;
+            }
+        }
+        // Closed, re-subscribed or refreshed by the client while the round
+        // was running: the client already has a newer view.
+        let Some(meta) = watches
+            .get_mut(&watch_id)
+            .filter(|m| m.generation == generation)
+        else {
+            continue;
+        };
+        match outcome {
+            PollOutcome::Polled(Ok(resp)) => {
+                meta.resync = false;
+                if !resp.rows.is_empty() {
+                    updates.push(resp);
+                }
+            }
+            PollOutcome::Polled(Err(e)) => {
+                warn!(watch_id = %watch_id, error = %e, "watch poll failed in WS push");
+            }
+            // Keep it due for the next round.
+            PollOutcome::Skipped => meta.cov_pending = true,
+        }
+    }
+    (updates, timed_out)
 }
 
 // ── Upgrade handler ────────────────────────────────
@@ -242,6 +498,7 @@ pub async fn ws_upgrade(
             state.auth_token,
             state.auth_state,
             state.driver_handle,
+            state.cleanup,
             pre_authed,
         )
     })
@@ -255,6 +512,7 @@ async fn ws_connection_task(
     auth_token: Option<String>,
     auth_state: Option<AuthState>,
     driver_handle: Option<DriverHandle>,
+    cleanup: WatchCleanup,
     pre_authed: bool,
 ) {
     let metrics = crate::metrics::metrics();
@@ -280,6 +538,10 @@ async fn ws_connection_task(
     // Rate limiting is therefore the push timer itself (200 ms).
     let mut cov_rx: Option<broadcast::Receiver<CovEvent>> =
         driver_handle.as_ref().map(|h| h.subscribe_cov());
+
+    // Watch polls run beside this loop, so pings, client messages and close
+    // are handled while the engine is slow (R-28, S-22).
+    let mut round: EngineRound<Vec<RoundItem>> = EngineRound::new();
 
     loop {
         tokio::select! {
@@ -344,48 +606,34 @@ async fn ws_connection_task(
                     break;
                 }
 
-                // Poll each watch whose interval has elapsed, OR any watch
-                // with a pending CovEvent (Phase 12.0D.WS).
-                if !authenticated { continue; }
-                let now = Instant::now();
+                // Start a round for each watch whose interval has elapsed, OR
+                // any watch with a pending CovEvent (Phase 12.0D.WS). The
+                // result arrives in the arm below.
+                if !authenticated || !round.is_idle() { continue; }
+                let jobs = due_jobs(&mut watches, Instant::now());
+                if !jobs.is_empty() {
+                    round.start(run_push_round(engine.clone(), jobs));
+                }
+            }
+            outcomes = round.next() => {
+                let (updates, timed_out) = apply_round(&mut watches, outcomes);
+                if timed_out {
+                    round.back_off(PUSH_BACKOFF_AFTER_TIMEOUT);
+                }
                 let ts = timestamp_now();
                 let mut disconnected = false;
-                for (watch_id, meta) in watches.iter_mut() {
-                    let interval_elapsed =
-                        now.duration_since(meta.last_poll) >= meta.poll_interval;
-                    if !interval_elapsed && !meta.cov_pending {
-                        continue;
-                    }
-                    meta.cov_pending = false;
-                    meta.last_poll = now;
-                    match push_poll(&engine, watch_id, meta).await {
-                        Ok(resp) if !resp.rows.is_empty() => {
-                            let msg = ServerMsg::Update {
-                                watch_id: &resp.watch_id,
-                                ts: &ts,
-                                rows: &resp.rows,
-                            };
-                            if let Ok(json) = serde_json::to_string(&msg) {
-                                metrics.ws_messages_out.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                if ws_tx.send(Message::Text(json.into())).await.is_err() {
-                                    disconnected = true;
-                                    break;
-                                }
-                            }
-                        }
-                        // The engine is busy or hung: polling the other
-                        // watches would block this connection (pings, client
-                        // messages, close) for another timeout each. They keep
-                        // their schedule and are polled on a later tick; this
-                        // one resyncs on its next poll (`push_poll`).
-                        Err(e) if is_engine_timeout(&e) => {
-                            debug!(watch_id = %watch_id, error = %e, "watch poll timed out in WS push; ending this round");
+                for resp in &updates {
+                    let msg = ServerMsg::Update {
+                        watch_id: &resp.watch_id,
+                        ts: &ts,
+                        rows: &resp.rows,
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        metrics.ws_messages_out.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if ws_tx.send(Message::Text(json.into())).await.is_err() {
+                            disconnected = true;
                             break;
                         }
-                        Err(e) => {
-                            warn!(watch_id = %watch_id, error = %e, "watch poll failed in WS push");
-                        }
-                        _ => {} // no changes
                     }
                 }
                 if disconnected { break; }
@@ -404,28 +652,7 @@ async fn ws_connection_task(
         watch_ids.len()
     );
     if !watch_ids.is_empty() {
-        tokio::spawn(close_watches(engine, watch_ids));
-    }
-}
-
-/// Close the watches of a finished connection. Runs as its own task so the
-/// connection task ends at once. Stops at the first engine timeout; the
-/// remaining watches expire with their lease (`WATCH_LEASE_SECS`).
-async fn close_watches(engine: EngineHandle, watch_ids: Vec<String>) {
-    let total = watch_ids.len();
-    for (done, watch_id) in watch_ids.into_iter().enumerate() {
-        match engine.watch_unsub(watch_id.clone(), true, vec![]).await {
-            Ok(()) => {}
-            Err(e) if is_engine_timeout(&e) => {
-                warn!(
-                    watch_id = %watch_id,
-                    left = total - done,
-                    "WS cleanup: engine timeout; remaining watches expire with their lease"
-                );
-                return;
-            }
-            Err(e) => debug!(watch_id = %watch_id, error = %e, "WS cleanup: watch_unsub failed"),
-        }
+        cleanup.enqueue(watch_ids);
     }
 }
 
@@ -662,6 +889,7 @@ async fn handle_client_msg(
                             subscribed_ids: subscribed_ids_set,
                             cov_pending: false,
                             resync: false,
+                            generation: next_generation(),
                         },
                     );
                     serde_json::to_string(&ServerMsg::Subscribed {
@@ -728,6 +956,12 @@ async fn handle_client_msg(
         ClientMsg::Refresh { id, watch_id } => {
             match engine.watch_poll(watch_id.clone(), true).await {
                 Ok(resp) => {
+                    // The snapshot is newer than any push round still
+                    // running for this watch.
+                    if let Some(meta) = watches.get_mut(&watch_id) {
+                        meta.generation = next_generation();
+                        meta.resync = false;
+                    }
                     let ts = timestamp_now();
                     serde_json::to_string(&ServerMsg::Snapshot {
                         id,
@@ -737,12 +971,21 @@ async fn handle_client_msg(
                     })
                     .ok()
                 }
-                Err(e) => serde_json::to_string(&ServerMsg::Error {
-                    id,
-                    code: engine_error_code(&e, "WATCH_NOT_FOUND"),
-                    message: &e,
-                })
-                .ok(),
+                Err(e) => {
+                    // A timed-out refresh may still run and move the change
+                    // baseline: the next push poll asks for all values.
+                    if is_engine_timeout(&e) {
+                        if let Some(meta) = watches.get_mut(&watch_id) {
+                            meta.resync = true;
+                        }
+                    }
+                    serde_json::to_string(&ServerMsg::Error {
+                        id,
+                        code: engine_error_code(&e, "WATCH_NOT_FOUND"),
+                        message: &e,
+                    })
+                    .ok()
+                }
             }
         }
     }
@@ -860,56 +1103,91 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn push_poll_resyncs_after_a_timeout() {
-        use super::super::{ChannelValue, EngineCmd};
-        let (flags_tx, mut flags_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
+    use super::super::{ChannelValue, EngineCmd};
+    use std::sync::atomic::AtomicUsize;
+
+    /// Engine that hands the n-th command (0-based) to `answer`. `answer`
+    /// replies and returns `None`, or returns the command to hold it
+    /// unanswered (a hung engine). Also counts the commands.
+    fn scripted_engine<F>(answer: F) -> (EngineHandle, Arc<AtomicUsize>)
+    where
+        F: Fn(usize, EngineCmd) -> Option<EngineCmd> + Send + 'static,
+    {
+        let seen = Arc::new(AtomicUsize::new(0));
+        let counter = seen.clone();
         let (tx, mut rx) = tokio::sync::mpsc::channel::<EngineCmd>(16);
         tokio::spawn(async move {
             let mut held = Vec::new();
-            let mut first = true;
             while let Some(cmd) = rx.recv().await {
-                if let EngineCmd::WatchPoll {
-                    watch_id,
-                    refresh,
-                    reply,
-                } = cmd
-                {
-                    if first {
-                        // Hung engine: keep the first poll unanswered.
-                        first = false;
-                        held.push(reply);
-                        continue;
-                    }
-                    let _ = flags_tx.send(refresh);
-                    let _ = reply.send(Ok(WatchResponse {
-                        watch_id,
-                        lease: 3600,
-                        rows: vec![ChannelValue {
-                            channel: 1,
-                            status: "ok".into(),
-                            raw: 1.0,
-                            cur: 1.0,
-                        }],
-                    }));
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                if let Some(cmd) = answer(n, cmd) {
+                    held.push(cmd);
                 }
             }
         });
-        let engine = EngineHandle::new(tx);
-        let mut meta = fake_watch(&[1]);
+        (EngineHandle::new(tx), seen)
+    }
 
-        let err = push_poll(&engine, "w", &mut meta).await.unwrap_err();
-        assert!(is_engine_timeout(&err));
-        assert!(meta.resync);
+    fn one_row(watch_id: String) -> WatchResponse {
+        WatchResponse {
+            watch_id,
+            lease: 3600,
+            rows: vec![ChannelValue {
+                channel: 1,
+                status: "ok".into(),
+                raw: 1.0,
+                cur: 1.0,
+            }],
+        }
+    }
 
-        push_poll(&engine, "w", &mut meta).await.unwrap();
+    #[tokio::test(start_paused = true)]
+    async fn push_round_resyncs_after_a_timeout() {
+        let (flags_tx, mut flags_rx) = mpsc::channel::<bool>(8);
+        let (engine, _) = scripted_engine(move |n, cmd| match cmd {
+            EngineCmd::WatchPoll {
+                watch_id,
+                refresh,
+                reply,
+            } if n > 0 => {
+                let _ = flags_tx.try_send(refresh);
+                let _ = reply.send(Ok(one_row(watch_id)));
+                None
+            }
+            // First poll: the engine hangs.
+            other => Some(other),
+        });
+        let mut watches = HashMap::new();
+        watches.insert("w".to_string(), fake_watch(&[1]));
+
+        // Round 1 times out: resync is set and the caller is told.
+        watches.get_mut("w").unwrap().cov_pending = true;
+        let jobs = due_jobs(&mut watches, Instant::now());
+        assert_eq!(jobs.len(), 1);
+        assert!(!jobs[0].refresh);
+        let (updates, timed_out) =
+            apply_round(&mut watches, run_push_round(engine.clone(), jobs).await);
+        assert!(updates.is_empty());
+        assert!(timed_out);
+        assert!(watches["w"].resync);
+
+        // Round 2 asks for all values and clears resync.
+        watches.get_mut("w").unwrap().cov_pending = true;
+        let jobs = due_jobs(&mut watches, Instant::now());
+        let (updates, timed_out) =
+            apply_round(&mut watches, run_push_round(engine.clone(), jobs).await);
         assert!(
             flags_rx.recv().await.unwrap(),
             "poll after a timeout must refresh"
         );
-        assert!(!meta.resync);
+        assert_eq!(updates.len(), 1);
+        assert!(!timed_out);
+        assert!(!watches["w"].resync);
 
-        push_poll(&engine, "w", &mut meta).await.unwrap();
+        // Round 3 is a delta poll again.
+        watches.get_mut("w").unwrap().cov_pending = true;
+        let jobs = due_jobs(&mut watches, Instant::now());
+        apply_round(&mut watches, run_push_round(engine, jobs).await);
         assert!(
             !flags_rx.recv().await.unwrap(),
             "later polls are deltas again"
@@ -917,22 +1195,237 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn close_watches_stops_at_first_timeout() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
-        let seen = Arc::new(AtomicUsize::new(0));
-        let counter = seen.clone();
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<super::super::EngineCmd>(16);
-        tokio::spawn(async move {
-            let mut held = Vec::new();
-            while let Some(cmd) = rx.recv().await {
-                counter.fetch_add(1, Ordering::SeqCst);
-                held.push(cmd);
-            }
-        });
-        let ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        close_watches(EngineHandle::new(tx), ids).await;
+    async fn push_round_skips_after_a_timeout_and_keeps_skipped_due() {
+        let (engine, seen) = scripted_engine(|_, cmd| Some(cmd));
+        let mut watches = HashMap::new();
+        watches.insert("a".to_string(), fake_watch(&[1]));
+        watches.insert("b".to_string(), fake_watch(&[2]));
+        let jobs = vec![
+            PollJob {
+                watch_id: "a".into(),
+                refresh: false,
+                generation: watches["a"].generation,
+            },
+            PollJob {
+                watch_id: "b".into(),
+                refresh: false,
+                generation: watches["b"].generation,
+            },
+        ];
+        let outcomes = run_push_round(engine, jobs).await;
+        // One engine command for the whole round.
         assert_eq!(seen.load(Ordering::SeqCst), 1);
+        assert!(matches!(outcomes[1].outcome, PollOutcome::Skipped));
+        let (_, timed_out) = apply_round(&mut watches, outcomes);
+        assert!(timed_out);
+        assert!(watches["a"].resync);
+        assert!(
+            watches["a"].cov_pending,
+            "timed-out watch is polled again next round"
+        );
+        assert!(!watches["b"].resync);
+        assert!(watches["b"].cov_pending, "skipped watch stays due");
+    }
+
+    fn item(watch_id: &str, generation: u64, outcome: PollOutcome) -> RoundItem {
+        RoundItem {
+            watch_id: watch_id.into(),
+            generation,
+            outcome,
+        }
+    }
+
+    #[test]
+    fn apply_round_backs_off_even_if_the_timed_out_watch_was_closed() {
+        let mut watches = HashMap::new();
+        watches.insert("b".to_string(), fake_watch(&[2]));
+        let gen_b = watches["b"].generation;
+        let items = vec![
+            item(
+                "a",
+                1,
+                PollOutcome::Polled(Err(super::super::ENGINE_TIMEOUT_ERR.into())),
+            ),
+            item("b", gen_b, PollOutcome::Skipped),
+        ];
+        let (updates, timed_out) = apply_round(&mut watches, items);
+        assert!(updates.is_empty());
+        assert!(
+            timed_out,
+            "the back-off must not depend on the closed watch"
+        );
+        assert!(watches["b"].cov_pending);
+    }
+
+    #[test]
+    fn apply_round_drops_a_result_older_than_the_clients_view() {
+        let mut watches = HashMap::new();
+        watches.insert("w".to_string(), fake_watch(&[1]));
+        let old = watches["w"].generation;
+        // The client refreshed (or re-subscribed) while the round ran.
+        watches.get_mut("w").unwrap().generation = next_generation();
+        let items = vec![item("w", old, PollOutcome::Polled(Ok(one_row("w".into()))))];
+        let (updates, _) = apply_round(&mut watches, items);
+        assert!(
+            updates.is_empty(),
+            "a stale update must not follow a newer snapshot"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn refresh_timeout_sets_resync() {
+        let (engine, _) = scripted_engine(|_, cmd| Some(cmd));
+        let mut watches = HashMap::new();
+        watches.insert("w".to_string(), fake_watch(&[1]));
+        let mut authenticated = true;
+        let reply = handle_client_msg(
+            r#"{"op":"refresh","id":"r","watchId":"w"}"#,
+            &engine,
+            &None,
+            &None,
+            &mut authenticated,
+            &mut watches,
+        )
+        .await
+        .unwrap();
+        assert!(reply.contains("ENGINE_TIMEOUT"), "{reply}");
+        assert!(watches["w"].resync);
+    }
+
+    #[tokio::test]
+    async fn refresh_success_starts_a_new_generation() {
+        let (engine, _) = scripted_engine(|_, cmd| match cmd {
+            EngineCmd::WatchPoll {
+                watch_id, reply, ..
+            } => {
+                let _ = reply.send(Ok(one_row(watch_id)));
+                None
+            }
+            other => Some(other),
+        });
+        let mut watches = HashMap::new();
+        watches.insert("w".to_string(), fake_watch(&[1]));
+        let before = watches["w"].generation;
+        let mut authenticated = true;
+        handle_client_msg(
+            r#"{"op":"refresh","id":"r","watchId":"w"}"#,
+            &engine,
+            &None,
+            &None,
+            &mut authenticated,
+            &mut watches,
+        )
+        .await
+        .unwrap();
+        assert_ne!(watches["w"].generation, before);
+    }
+
+    #[test]
+    fn apply_round_ignores_a_watch_closed_during_the_round() {
+        let mut watches: HashMap<String, WatchMeta> = HashMap::new();
+        let outcomes = vec![item(
+            "gone",
+            1,
+            PollOutcome::Polled(Ok(one_row("gone".to_string()))),
+        )];
+        let (updates, timed_out) = apply_round(&mut watches, outcomes);
+        assert!(updates.is_empty());
+        assert!(!timed_out);
+        assert!(watches.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn round_runs_beside_the_loop() {
+        // While a round waits on a hung engine, other select! arms still run.
+        let (engine, _) = scripted_engine(|_, cmd| Some(cmd));
+        let mut round: EngineRound<Vec<RoundItem>> = EngineRound::new();
+        round.start(run_push_round(
+            engine,
+            vec![PollJob {
+                watch_id: "w".into(),
+                refresh: false,
+                generation: 1,
+            }],
+        ));
+        let start = Instant::now();
+        tokio::select! {
+            _ = round.next() => panic!("round must still be waiting"),
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+        }
+        assert_eq!(start.elapsed(), Duration::from_millis(200));
+        // The round then ends with the engine timeout.
+        let outcomes = round.next().await;
+        assert!(
+            matches!(&outcomes[0].outcome, PollOutcome::Polled(Err(e)) if is_engine_timeout(e))
+        );
+    }
+
+    /// Wait (in paused time) until `seen` reaches `n`, at most `limit`.
+    async fn wait_for(seen: &AtomicUsize, n: usize, limit: Duration) {
+        let start = Instant::now();
+        while seen.load(Ordering::SeqCst) < n && start.elapsed() < limit {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cleanup_retries_a_timed_out_unsub() {
+        let (engine, seen) = scripted_engine(|n, cmd| match cmd {
+            EngineCmd::WatchUnsub { reply, .. } if n > 0 => {
+                let _ = reply.send(Ok(()));
+                None
+            }
+            other => Some(other),
+        });
+        let cleanup = WatchCleanup::spawn(engine);
+        assert_eq!(cleanup.enqueue(vec!["a".into()]), 0);
+        wait_for(&seen, 2, Duration::from_secs(120)).await;
+        assert_eq!(seen.load(Ordering::SeqCst), 2, "one timeout, one retry");
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            2,
+            "no more retries after success"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cleanup_treats_not_found_as_done() {
+        let (engine, seen) = scripted_engine(|_, cmd| match cmd {
+            EngineCmd::WatchUnsub {
+                watch_id, reply, ..
+            } => {
+                let _ = reply.send(Err(format!("watch {watch_id} not found")));
+                None
+            }
+            other => Some(other),
+        });
+        let cleanup = WatchCleanup::spawn(engine);
+        cleanup.enqueue(vec!["a".into(), "b".into()]);
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cleanup_gives_up_after_the_lease() {
+        let (engine, seen) = scripted_engine(|_, cmd| Some(cmd));
+        let cleanup = WatchCleanup::spawn(engine);
+        cleanup.enqueue(vec!["a".into()]);
+        tokio::time::sleep(CLEANUP_MAX_AGE + Duration::from_secs(60)).await;
+        let attempts = seen.load(Ordering::SeqCst);
+        // Exponential back-off: 10, 20, 40, ... 600 s between attempts, so
+        // about ten attempts within the hour (not one every 20 s), then stop.
+        assert!((5..=12).contains(&attempts), "attempts = {attempts}");
+        tokio::time::sleep(Duration::from_secs(600)).await;
+        assert_eq!(seen.load(Ordering::SeqCst), attempts);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cleanup_queue_full_reports_dropped_watches() {
+        let (engine, _) = scripted_engine(|_, cmd| Some(cmd));
+        let cleanup = WatchCleanup::spawn_with_capacity(engine, 1);
+        let dropped = cleanup.enqueue(vec!["a".into(), "b".into(), "c".into()]);
+        assert_eq!(dropped, 2);
     }
 
     fn fake_watch(ids: &[u32]) -> WatchMeta {
@@ -942,6 +1435,7 @@ mod tests {
             subscribed_ids: ids.iter().copied().collect(),
             cov_pending: false,
             resync: false,
+            generation: next_generation(),
         }
     }
 

@@ -8,6 +8,7 @@
 //! without requiring `Rc<RefCell<>>` or `Arc<Mutex<>>`.
 
 pub mod editor_assets;
+pub mod engine_round;
 mod error;
 pub mod file_ops;
 pub mod filter;
@@ -971,6 +972,8 @@ pub fn router_with_auth(
             auth_token,
             auth_state: Some(auth_state.clone()),
             driver_handle: Some(driver_handle.clone()),
+            // One shared task closes the watches of finished connections.
+            cleanup: ws::WatchCleanup::spawn(handle.clone()),
         });
 
     {
