@@ -81,14 +81,8 @@ pub async fn send_who_is(socket: &UdpSocket, broadcast: SocketAddr) -> Result<()
 ///
 /// Listens on `socket` for incoming UDP datagrams and attempts to decode
 /// each one as a BACnet I-Am service request. Packets that cannot be
-/// decoded (wrong protocol, malformed APDU) are silently ignored.
-///
-/// # Phase B2 note
-/// The current implementation returns an empty vector because
-/// `frame::decode_packet` is a stub that always returns an error.
-/// Phase B2 will implement the full APDU decoder, at which point this
-/// function will automatically start producing results without any
-/// structural changes.
+/// decoded (wrong protocol, malformed APDU) are dropped and logged
+/// (rate-limited, see [`super::decode_or_log`]).
 pub async fn collect_i_am(socket: &UdpSocket, timeout: Duration) -> Vec<DeviceInfo> {
     let mut devices = Vec::new();
     let deadline = tokio::time::Instant::now() + timeout;
@@ -104,8 +98,8 @@ pub async fn collect_i_am(socket: &UdpSocket, timeout: Duration) -> Vec<DeviceIn
             Ok(Ok((n, addr))) => {
                 let hex: String = buf[..n].iter().map(|b| format!("{:02x}", b)).collect();
                 tracing::info!(from = %addr, bytes = n, hex = %hex, "BACnet discovery: RX");
-                match super::frame::decode_packet(&buf[..n]) {
-                    Ok((
+                match super::decode_or_log(&buf[..n], addr, "discovery") {
+                    Some((
                         _,
                         super::frame::Apdu::IAm {
                             device_instance,
@@ -128,12 +122,11 @@ pub async fn collect_i_am(socket: &UdpSocket, timeout: Duration) -> Vec<DeviceIn
                             segmentation,
                         });
                     }
-                    Ok((_, other)) => {
+                    Some((_, other)) => {
                         tracing::debug!(apdu = ?other, "BACnet discovery: ignored non-IAm APDU");
                     }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "BACnet discovery: decode failed");
-                    }
+                    // Logged (rate-limited) by decode_or_log.
+                    None => {}
                 }
             }
             Ok(Err(e)) => {
