@@ -47,9 +47,11 @@ impl<T> EngineRound<T> {
     }
 
     /// Start a request. Replaces (and drops) a request still in flight, so
-    /// callers check [`is_idle`](Self::is_idle) first.
+    /// callers check [`is_running`](Self::is_running) or
+    /// [`is_idle`](Self::is_idle) first. A pending back-off is kept: a
+    /// request started during it (e.g. a client request in `/api/ws`, S-23)
+    /// does not let the next back-off-respecting start happen early.
     pub fn start(&mut self, fut: impl Future<Output = T> + Send + 'static) {
-        self.not_before = None;
         self.fut = Some(Box::pin(fut));
     }
 
@@ -101,6 +103,17 @@ mod tests {
         }
         assert!(r.is_running());
         assert_eq!(r.next().await, 7);
+        assert!(r.is_idle());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_request_started_during_a_back_off_keeps_it() {
+        let mut r = EngineRound::new();
+        r.back_off(Duration::from_secs(10));
+        r.start(async { 1u8 });
+        assert_eq!(r.next().await, 1);
+        assert!(!r.is_idle(), "the back-off must survive the request");
+        tokio::time::advance(Duration::from_secs(10)).await;
         assert!(r.is_idle());
     }
 

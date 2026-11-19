@@ -3,7 +3,7 @@
 //! Clients connect to `GET /api/ws`, optionally authenticate, subscribe
 //! to channels, and receive server-pushed value updates.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,6 +35,15 @@ const CLIENT_TIMEOUT_SECS: u64 = 120;
 /// Pause before the next push round of a connection after an engine
 /// timeout, so a hung engine does not get a new (queued) poll every tick.
 const PUSH_BACKOFF_AFTER_TIMEOUT: Duration = ENGINE_REPLY_TIMEOUT;
+
+/// Client engine requests a connection may have waiting for its engine
+/// slot. When full, the connection stops reading until one finishes.
+const CLIENT_QUEUE_CAPACITY: usize = 16;
+
+/// Largest client message (and frame) accepted. A subscribe with the
+/// maximum 256 ids is under 4 KiB; the library default (64 MiB) would let
+/// queued requests hold large id lists (S-23).
+const MAX_CLIENT_MESSAGE_BYTES: usize = 16 * 1024;
 
 /// Capacity of the shared watch cleanup queue (watch ids). The engine holds
 /// at most 64 watches (`cmd_handler.rs` `MAX_WATCHES`).
@@ -491,20 +500,28 @@ pub async fn ws_upgrade(
         _ => false,
     };
 
-    ws.on_upgrade(move |socket| {
-        ws_connection_task(
-            socket,
-            state.engine,
-            state.auth_token,
-            state.auth_state,
-            state.driver_handle,
-            state.cleanup,
-            pre_authed,
-        )
-    })
+    ws.max_message_size(MAX_CLIENT_MESSAGE_BYTES)
+        .max_frame_size(MAX_CLIENT_MESSAGE_BYTES)
+        .on_upgrade(move |socket| {
+            ws_connection_task(
+                socket,
+                state.engine,
+                state.auth_token,
+                state.auth_state,
+                state.driver_handle,
+                state.cleanup,
+                pre_authed,
+            )
+        })
 }
 
 // ── Connection task ────────────────────────────────
+
+/// What the connection's engine slot finished.
+enum SlotDone {
+    Push(Vec<RoundItem>),
+    Client(OpDone),
+}
 
 async fn ws_connection_task(
     ws: WebSocket,
@@ -539,22 +556,41 @@ async fn ws_connection_task(
     let mut cov_rx: Option<broadcast::Receiver<CovEvent>> =
         driver_handle.as_ref().map(|h| h.subscribe_cov());
 
-    // Watch polls run beside this loop, so pings, client messages and close
-    // are handled while the engine is slow (R-28, S-22).
-    let mut round: EngineRound<Vec<RoundItem>> = EngineRound::new();
+    // One engine slot per connection (R-28, S-23): client requests and
+    // push rounds share it, so a connection has at most one engine command
+    // in flight. It runs beside this loop, so pings, client messages and
+    // close are handled while the engine is slow (S-22).
+    let mut slot: EngineRound<SlotDone> = EngineRound::new();
+    // Client requests waiting for the slot, answered in order.
+    let mut pending: VecDeque<EngineOp> = VecDeque::new();
 
     loop {
+        // Client requests go first: they do not wait for a push round's
+        // back-off, only for the command in flight.
+        if !slot.is_running() {
+            if let Some(op) = pending.pop_front() {
+                let engine = engine.clone();
+                slot.start(async move { SlotDone::Client(run_engine_op(engine, op).await) });
+            }
+        }
+
         tokio::select! {
-            msg = ws_rx.next() => {
+            // Stop reading while the request queue is full (back-pressure).
+            msg = ws_rx.next(), if pending.len() < CLIENT_QUEUE_CAPACITY => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         last_client_msg = Instant::now();
                         metrics.ws_messages_in.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        // parse and handle
-                        let reply = handle_client_msg(
-                            &text, &engine, &auth_token, &auth_state,
-                            &mut authenticated, &mut watches,
-                        ).await;
+                        // Answer at once what needs no engine; queue the rest.
+                        let reply = match prepare_client_msg(
+                            &text, &auth_token, &auth_state, &mut authenticated,
+                        ) {
+                            Prepared::Reply(reply) => reply,
+                            Prepared::Engine(op) => {
+                                pending.push_back(op);
+                                None
+                            }
+                        };
                         if let Some(reply_json) = reply {
                             metrics.ws_messages_out.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             if ws_tx.send(Message::Text(reply_json.into())).await.is_err() {
@@ -567,6 +603,12 @@ async fn ws_connection_task(
                         if ws_tx.send(Message::Pong(data)).await.is_err() { break; }
                     }
                     Some(Ok(Message::Close(_))) | None => break,
+                    // A read error (e.g. a message over MAX_CLIENT_MESSAGE_BYTES)
+                    // ends the connection.
+                    Some(Err(e)) => {
+                        debug!(error = %e, "WebSocket read error; closing");
+                        break;
+                    }
                     _ => { last_client_msg = Instant::now(); }
                 }
             }
@@ -609,16 +651,32 @@ async fn ws_connection_task(
                 // Start a round for each watch whose interval has elapsed, OR
                 // any watch with a pending CovEvent (Phase 12.0D.WS). The
                 // result arrives in the arm below.
-                if !authenticated || !round.is_idle() { continue; }
+                if !authenticated || !slot.is_idle() || !pending.is_empty() { continue; }
                 let jobs = due_jobs(&mut watches, Instant::now());
                 if !jobs.is_empty() {
-                    round.start(run_push_round(engine.clone(), jobs));
+                    let engine = engine.clone();
+                    slot.start(async move { SlotDone::Push(run_push_round(engine, jobs).await) });
                 }
             }
-            outcomes = round.next() => {
+            done = slot.next() => {
+                let outcomes = match done {
+                    SlotDone::Push(outcomes) => outcomes,
+                    SlotDone::Client(op_done) => {
+                        if op_done.timed_out() {
+                            slot.back_off(PUSH_BACKOFF_AFTER_TIMEOUT);
+                        }
+                        if let Some(reply_json) = finish_engine_op(op_done, &mut watches) {
+                            metrics.ws_messages_out.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if ws_tx.send(Message::Text(reply_json.into())).await.is_err() {
+                                break; // client gone
+                            }
+                        }
+                        continue;
+                    }
+                };
                 let (updates, timed_out) = apply_round(&mut watches, outcomes);
                 if timed_out {
-                    round.back_off(PUSH_BACKOFF_AFTER_TIMEOUT);
+                    slot.back_off(PUSH_BACKOFF_AFTER_TIMEOUT);
                 }
                 let ts = timestamp_now();
                 let mut disconnected = false;
@@ -654,6 +712,20 @@ async fn ws_connection_task(
     if !watch_ids.is_empty() {
         cleanup.enqueue(watch_ids);
     }
+    // A command still in flight may be a subscribe the engine runs anyway:
+    // let it finish (bounded by the reply timeout) and close the watch it
+    // created. Requests still queued were never sent and need nothing.
+    if slot.is_running() {
+        tokio::spawn(async move {
+            if let SlotDone::Client(OpDone::Subscribe {
+                result: Ok(resp), ..
+            }) = slot.next().await
+            {
+                debug!(watch_id = %resp.watch_id, "WS subscribe finished after disconnect; closing its watch");
+                cleanup.enqueue(vec![resp.watch_id]);
+            }
+        });
+    }
 }
 
 /// WS error code for a failed engine command: `ENGINE_TIMEOUT` when the
@@ -668,26 +740,160 @@ fn engine_error_code(err: &str, fallback: &'static str) -> &'static str {
 
 // ── Client message handler ─────────────────────────
 
-async fn handle_client_msg(
+/// An engine request from the client. Runs in the connection's engine slot
+/// (see [`ws_connection_task`]), never inline in the `select!` loop.
+enum EngineOp {
+    Subscribe {
+        id: Option<String>,
+        watch_id: Option<String>,
+        dis: Option<String>,
+        ids: Vec<u32>,
+        interval_ms: u64,
+    },
+    Unsubscribe {
+        id: Option<String>,
+        watch_id: String,
+        ids: Vec<u32>,
+        close: bool,
+    },
+    Refresh {
+        id: Option<String>,
+        watch_id: String,
+    },
+}
+
+/// A finished [`EngineOp`]: what the reply and the watch update need.
+enum OpDone {
+    Subscribe {
+        id: Option<String>,
+        interval_ms: u64,
+        subscribed_ids: HashSet<u32>,
+        result: Result<WatchResponse, String>,
+    },
+    Unsubscribe {
+        id: Option<String>,
+        watch_id: String,
+        ids: Vec<u32>,
+        close: bool,
+        result: Result<(), String>,
+    },
+    Refresh {
+        id: Option<String>,
+        watch_id: String,
+        result: Result<WatchResponse, String>,
+    },
+}
+
+impl OpDone {
+    fn timed_out(&self) -> bool {
+        match self {
+            OpDone::Subscribe { result, .. } | OpDone::Refresh { result, .. } => {
+                matches!(result, Err(e) if is_engine_timeout(e))
+            }
+            OpDone::Unsubscribe { result, .. } => matches!(result, Err(e) if is_engine_timeout(e)),
+        }
+    }
+}
+
+/// What a client message needs: an immediate reply (or none), or an engine
+/// request.
+enum Prepared {
+    Reply(Option<String>),
+    Engine(EngineOp),
+}
+
+/// First half of a client message: parse, authenticate, answer what needs
+/// no engine (auth, SCRAM, ping, errors).
+fn prepare_client_msg(
     text: &str,
-    engine: &EngineHandle,
     auth_token: &Option<String>,
     auth_state: &Option<AuthState>,
     authenticated: &mut bool,
-    watches: &mut HashMap<String, WatchMeta>,
-) -> Option<String> {
+) -> Prepared {
     let msg: ClientMsg = match serde_json::from_str(text) {
         Ok(m) => m,
         Err(_) => {
-            return serde_json::to_string(&ServerMsg::Error {
-                id: None,
-                code: "INVALID_MESSAGE",
-                message: "invalid JSON or unknown op",
-            })
-            .ok();
+            return Prepared::Reply(
+                serde_json::to_string(&ServerMsg::Error {
+                    id: None,
+                    code: "INVALID_MESSAGE",
+                    message: "invalid JSON or unknown op",
+                })
+                .ok(),
+            );
         }
     };
 
+    match msg {
+        m @ (ClientMsg::Auth { .. } | ClientMsg::Hello { .. } | ClientMsg::Authenticate { .. }) => {
+            Prepared::Reply(handle_auth_msg(m, auth_token, auth_state, authenticated))
+        }
+        ClientMsg::Ping { id } => {
+            Prepared::Reply(serde_json::to_string(&ServerMsg::Pong { id }).ok())
+        }
+        _ if !*authenticated => Prepared::Reply(
+            serde_json::to_string(&ServerMsg::Error {
+                id: None,
+                code: "AUTH_REQUIRED",
+                message: "authenticate first",
+            })
+            .ok(),
+        ),
+        // Same answer as the engine gives, without queueing a large id list.
+        ClientMsg::Subscribe { id, ids, .. }
+            if ids.len() > crate::cmd_handler::MAX_CHANNELS_PER_WATCH =>
+        {
+            let message = format!(
+                "too many channels ({}, max {})",
+                ids.len(),
+                crate::cmd_handler::MAX_CHANNELS_PER_WATCH
+            );
+            Prepared::Reply(
+                serde_json::to_string(&ServerMsg::Error {
+                    id,
+                    code: "CHANNEL_LIMIT",
+                    message: &message,
+                })
+                .ok(),
+            )
+        }
+        ClientMsg::Subscribe {
+            id,
+            watch_id,
+            dis,
+            ids,
+            poll_interval,
+        } => Prepared::Engine(EngineOp::Subscribe {
+            id,
+            watch_id,
+            dis,
+            ids,
+            interval_ms: poll_interval
+                .unwrap_or(DEFAULT_POLL_INTERVAL_MS)
+                .clamp(MIN_POLL_INTERVAL_MS, MAX_POLL_INTERVAL_MS),
+        }),
+        ClientMsg::Unsubscribe {
+            id,
+            watch_id,
+            ids,
+            close,
+        } => Prepared::Engine(EngineOp::Unsubscribe {
+            id,
+            watch_id,
+            ids,
+            close,
+        }),
+        ClientMsg::Refresh { id, watch_id } => Prepared::Engine(EngineOp::Refresh { id, watch_id }),
+    }
+}
+
+/// Auth messages (`auth`, `hello`, `authenticate`); no engine involved.
+fn handle_auth_msg(
+    msg: ClientMsg,
+    auth_token: &Option<String>,
+    auth_state: &Option<AuthState>,
+    authenticated: &mut bool,
+) -> Option<String> {
     match msg {
         ClientMsg::Auth { token, id } => {
             // Legacy bearer token auth
@@ -859,135 +1065,198 @@ async fn handle_client_msg(
                 .ok(),
             }
         }
-        ClientMsg::Ping { id } => serde_json::to_string(&ServerMsg::Pong { id }).ok(),
-        _ if !*authenticated => serde_json::to_string(&ServerMsg::Error {
+        // Only called with the three auth messages above; answer rather
+        // than drop a message routed here by mistake.
+        _ => serde_json::to_string(&ServerMsg::Error {
             id: None,
-            code: "AUTH_REQUIRED",
-            message: "authenticate first",
+            code: "INVALID_MESSAGE",
+            message: "not an auth message",
         })
         .ok(),
-        ClientMsg::Subscribe {
+    }
+}
+
+/// Send an [`EngineOp`] to the engine.
+async fn run_engine_op(engine: EngineHandle, op: EngineOp) -> OpDone {
+    match op {
+        EngineOp::Subscribe {
             id,
             watch_id,
             dis,
             ids,
-            poll_interval,
+            interval_ms,
         } => {
-            let interval_ms = poll_interval
-                .unwrap_or(DEFAULT_POLL_INTERVAL_MS)
-                .clamp(MIN_POLL_INTERVAL_MS, MAX_POLL_INTERVAL_MS);
-
-            let subscribed_ids_set: HashSet<u32> = ids.iter().copied().collect();
-            match engine.watch_sub(watch_id, dis, ids).await {
-                Ok(resp) => {
-                    let wid = resp.watch_id.clone();
-                    watches.insert(
-                        wid,
-                        WatchMeta {
-                            poll_interval: Duration::from_millis(interval_ms),
-                            last_poll: Instant::now(),
-                            subscribed_ids: subscribed_ids_set,
-                            cov_pending: false,
-                            resync: false,
-                            generation: next_generation(),
-                        },
-                    );
-                    serde_json::to_string(&ServerMsg::Subscribed {
-                        id,
-                        watch_id: &resp.watch_id,
-                        lease: resp.lease,
-                        poll_interval: interval_ms,
-                        rows: &resp.rows,
-                    })
-                    .ok()
-                }
-                Err(e) => {
-                    let code = if is_engine_timeout(&e) {
-                        "ENGINE_TIMEOUT"
-                    } else if e.contains("limit") {
-                        "WATCH_LIMIT"
-                    } else if e.contains("channels") {
-                        "CHANNEL_LIMIT"
-                    } else {
-                        "ENGINE_ERROR"
-                    };
-                    serde_json::to_string(&ServerMsg::Error {
-                        id,
-                        code,
-                        message: &e,
-                    })
-                    .ok()
-                }
+            let subscribed_ids: HashSet<u32> = ids.iter().copied().collect();
+            let result = engine.watch_sub(watch_id, dis, ids).await;
+            OpDone::Subscribe {
+                id,
+                interval_ms,
+                subscribed_ids,
+                result,
             }
         }
-        ClientMsg::Unsubscribe {
+        EngineOp::Unsubscribe {
             id,
             watch_id,
             ids,
             close,
         } => {
-            // Capture ids before passing them to the engine (moved there).
-            let unsub_ids: Vec<u32> = ids.clone();
-            match engine.watch_unsub(watch_id.clone(), close, ids).await {
-                Ok(()) => {
-                    if close {
-                        watches.remove(&watch_id);
-                    } else if let Some(meta) = watches.get_mut(&watch_id) {
-                        // Remove partially-unsubscribed ids from the COV filter.
-                        for pid in &unsub_ids {
-                            meta.subscribed_ids.remove(pid);
-                        }
+            // Keep the ids for the COV filter update (moved to the engine).
+            let result = engine
+                .watch_unsub(watch_id.clone(), close, ids.clone())
+                .await;
+            OpDone::Unsubscribe {
+                id,
+                watch_id,
+                ids,
+                close,
+                result,
+            }
+        }
+        EngineOp::Refresh { id, watch_id } => {
+            let result = engine.watch_poll(watch_id.clone(), true).await;
+            OpDone::Refresh {
+                id,
+                watch_id,
+                result,
+            }
+        }
+    }
+}
+
+/// Second half of a client message: apply the engine answer to the
+/// connection's watches and build the reply.
+fn finish_engine_op(done: OpDone, watches: &mut HashMap<String, WatchMeta>) -> Option<String> {
+    match done {
+        OpDone::Subscribe {
+            id,
+            interval_ms,
+            subscribed_ids,
+            result,
+        } => match result {
+            Ok(resp) => {
+                watches.insert(
+                    resp.watch_id.clone(),
+                    WatchMeta {
+                        poll_interval: Duration::from_millis(interval_ms),
+                        last_poll: Instant::now(),
+                        subscribed_ids,
+                        cov_pending: false,
+                        resync: false,
+                        generation: next_generation(),
+                    },
+                );
+                serde_json::to_string(&ServerMsg::Subscribed {
+                    id,
+                    watch_id: &resp.watch_id,
+                    lease: resp.lease,
+                    poll_interval: interval_ms,
+                    rows: &resp.rows,
+                })
+                .ok()
+            }
+            Err(e) => {
+                let code = if is_engine_timeout(&e) {
+                    "ENGINE_TIMEOUT"
+                } else if e.contains("limit") {
+                    "WATCH_LIMIT"
+                } else if e.contains("channels") {
+                    "CHANNEL_LIMIT"
+                } else {
+                    "ENGINE_ERROR"
+                };
+                serde_json::to_string(&ServerMsg::Error {
+                    id,
+                    code,
+                    message: &e,
+                })
+                .ok()
+            }
+        },
+        OpDone::Unsubscribe {
+            id,
+            watch_id,
+            ids,
+            close,
+            result,
+        } => match result {
+            Ok(()) => {
+                if close {
+                    watches.remove(&watch_id);
+                } else if let Some(meta) = watches.get_mut(&watch_id) {
+                    // Remove partially-unsubscribed ids from the COV filter.
+                    for pid in &ids {
+                        meta.subscribed_ids.remove(pid);
                     }
-                    serde_json::to_string(&ServerMsg::Unsubscribed {
-                        id,
-                        watch_id: &watch_id,
-                        ok: true,
-                    })
-                    .ok()
                 }
-                Err(e) => serde_json::to_string(&ServerMsg::Error {
+                serde_json::to_string(&ServerMsg::Unsubscribed {
+                    id,
+                    watch_id: &watch_id,
+                    ok: true,
+                })
+                .ok()
+            }
+            Err(e) => serde_json::to_string(&ServerMsg::Error {
+                id,
+                code: engine_error_code(&e, "WATCH_NOT_FOUND"),
+                message: &e,
+            })
+            .ok(),
+        },
+        OpDone::Refresh {
+            id,
+            watch_id,
+            result,
+        } => match result {
+            Ok(resp) => {
+                // The snapshot is newer than any earlier push result.
+                if let Some(meta) = watches.get_mut(&watch_id) {
+                    meta.generation = next_generation();
+                    meta.resync = false;
+                }
+                let ts = timestamp_now();
+                serde_json::to_string(&ServerMsg::Snapshot {
+                    id,
+                    watch_id: &resp.watch_id,
+                    ts: &ts,
+                    rows: &resp.rows,
+                })
+                .ok()
+            }
+            Err(e) => {
+                // A timed-out refresh may still run and move the change
+                // baseline: the next push poll asks for all values.
+                if is_engine_timeout(&e) {
+                    if let Some(meta) = watches.get_mut(&watch_id) {
+                        meta.resync = true;
+                    }
+                }
+                serde_json::to_string(&ServerMsg::Error {
                     id,
                     code: engine_error_code(&e, "WATCH_NOT_FOUND"),
                     message: &e,
                 })
-                .ok(),
+                .ok()
             }
-        }
-        ClientMsg::Refresh { id, watch_id } => {
-            match engine.watch_poll(watch_id.clone(), true).await {
-                Ok(resp) => {
-                    // The snapshot is newer than any push round still
-                    // running for this watch.
-                    if let Some(meta) = watches.get_mut(&watch_id) {
-                        meta.generation = next_generation();
-                        meta.resync = false;
-                    }
-                    let ts = timestamp_now();
-                    serde_json::to_string(&ServerMsg::Snapshot {
-                        id,
-                        watch_id: &resp.watch_id,
-                        ts: &ts,
-                        rows: &resp.rows,
-                    })
-                    .ok()
-                }
-                Err(e) => {
-                    // A timed-out refresh may still run and move the change
-                    // baseline: the next push poll asks for all values.
-                    if is_engine_timeout(&e) {
-                        if let Some(meta) = watches.get_mut(&watch_id) {
-                            meta.resync = true;
-                        }
-                    }
-                    serde_json::to_string(&ServerMsg::Error {
-                        id,
-                        code: engine_error_code(&e, "WATCH_NOT_FOUND"),
-                        message: &e,
-                    })
-                    .ok()
-                }
-            }
-        }
+        },
+    }
+}
+
+/// Whole client message in one call (prepare, engine, finish). The
+/// connection task does not use it, because it runs the engine part in its
+/// slot; tests do.
+#[cfg(test)]
+async fn handle_client_msg(
+    text: &str,
+    engine: &EngineHandle,
+    auth_token: &Option<String>,
+    auth_state: &Option<AuthState>,
+    authenticated: &mut bool,
+    watches: &mut HashMap<String, WatchMeta>,
+) -> Option<String> {
+    match prepare_client_msg(text, auth_token, auth_state, authenticated) {
+        Prepared::Reply(reply) => reply,
+        Prepared::Engine(op) => finish_engine_op(run_engine_op(engine.clone(), op).await, watches),
     }
 }
 
@@ -1290,6 +1559,131 @@ mod tests {
         .unwrap();
         assert!(reply.contains("ENGINE_TIMEOUT"), "{reply}");
         assert!(watches["w"].resync);
+    }
+
+    #[test]
+    fn finish_unsubscribe_close_removes_the_watch() {
+        let mut watches = HashMap::new();
+        watches.insert("w".to_string(), fake_watch(&[1, 2]));
+        let reply = finish_engine_op(
+            OpDone::Unsubscribe {
+                id: Some("u".into()),
+                watch_id: "w".into(),
+                ids: vec![],
+                close: true,
+                result: Ok(()),
+            },
+            &mut watches,
+        )
+        .unwrap();
+        assert!(reply.contains("unsubscribed"), "{reply}");
+        assert!(watches.is_empty());
+    }
+
+    #[test]
+    fn finish_partial_unsubscribe_narrows_the_cov_filter() {
+        let mut watches = HashMap::new();
+        watches.insert("w".to_string(), fake_watch(&[1, 2]));
+        finish_engine_op(
+            OpDone::Unsubscribe {
+                id: None,
+                watch_id: "w".into(),
+                ids: vec![1],
+                close: false,
+                result: Ok(()),
+            },
+            &mut watches,
+        );
+        assert_eq!(watches["w"].subscribed_ids, HashSet::from([2]));
+    }
+
+    #[test]
+    fn finish_subscribe_timeout_adds_no_watch() {
+        let mut watches = HashMap::new();
+        let done = OpDone::Subscribe {
+            id: Some("s".into()),
+            interval_ms: 1000,
+            subscribed_ids: HashSet::from([1]),
+            result: Err(super::super::ENGINE_TIMEOUT_ERR.into()),
+        };
+        assert!(done.timed_out());
+        let reply = finish_engine_op(done, &mut watches).unwrap();
+        assert!(reply.contains("ENGINE_TIMEOUT"), "{reply}");
+        assert!(watches.is_empty());
+    }
+
+    #[test]
+    fn prepare_rejects_too_many_ids_like_the_engine() {
+        let mut authenticated = true;
+        let ids: Vec<u32> = (0..=256).collect();
+        let text = serde_json::json!({"op": "subscribe", "id": "s", "ids": ids}).to_string();
+        match prepare_client_msg(&text, &None, &None, &mut authenticated) {
+            Prepared::Reply(Some(r)) => {
+                assert!(r.contains("CHANNEL_LIMIT"), "{r}");
+                assert!(r.contains("too many channels (257, max 256)"), "{r}");
+            }
+            _ => panic!("expected an immediate CHANNEL_LIMIT reply"),
+        }
+        let ok: Vec<u32> = (0..256).collect();
+        let text = serde_json::json!({"op": "subscribe", "ids": ok}).to_string();
+        assert!(matches!(
+            prepare_client_msg(&text, &None, &None, &mut authenticated),
+            Prepared::Engine(EngineOp::Subscribe { .. })
+        ));
+    }
+
+    #[test]
+    fn prepare_handles_empty_short_and_multibyte_input() {
+        let mut authenticated = true;
+        for text in [
+            "",
+            "{",
+            "{\"op\":",
+            "\u{00d6}l\u{00e7}\u{00fc}m \u{6e29}\u{5ea6}",
+            "{\"op\":\"s\u{00fc}bscribe\"}",
+        ] {
+            match prepare_client_msg(text, &None, &None, &mut authenticated) {
+                Prepared::Reply(Some(r)) => assert!(r.contains("INVALID_MESSAGE"), "{text:?}: {r}"),
+                _ => panic!("{text:?}: expected INVALID_MESSAGE"),
+            }
+        }
+        // Multibyte values in a valid message reach the engine unchanged.
+        let text = r#"{"op":"subscribe","dis":"Ölçüm 温度","ids":[1]}"#;
+        match prepare_client_msg(text, &None, &None, &mut authenticated) {
+            Prepared::Engine(EngineOp::Subscribe { dis, .. }) => {
+                assert_eq!(
+                    dis.as_deref(),
+                    Some("\u{00d6}l\u{00e7}\u{00fc}m \u{6e29}\u{5ea6}")
+                );
+            }
+            _ => panic!("expected a subscribe"),
+        }
+    }
+
+    #[test]
+    fn prepare_answers_ping_and_auth_errors_without_the_engine() {
+        let mut authenticated = false;
+        let token = Some("t".to_string());
+        for (text, expect) in [
+            (r#"{"op":"ping","id":"p"}"#, "pong"),
+            ("not json", "INVALID_MESSAGE"),
+            (r#"{"op":"refresh","watchId":"w"}"#, "AUTH_REQUIRED"),
+        ] {
+            match prepare_client_msg(text, &token, &None, &mut authenticated) {
+                Prepared::Reply(Some(r)) => assert!(r.contains(expect), "{text}: {r}"),
+                _ => panic!("{text}: expected an immediate reply"),
+            }
+        }
+        authenticated = true;
+        assert!(matches!(
+            prepare_client_msg(
+                r#"{"op":"refresh","watchId":"w"}"#,
+                &token,
+                &None,
+                &mut authenticated
+            ),
+            Prepared::Engine(EngineOp::Refresh { .. })
+        ));
     }
 
     #[tokio::test]
