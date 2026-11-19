@@ -53,6 +53,23 @@ const MAX_LIVE_CONNECTIONS: i64 = 16;
 const COV_INTERVAL_MS: u64 = 500;
 const CLIENT_TIMEOUT_SECS: u64 = 120;
 
+/// Bytes of an inbound/outbound frame shown in the `/live` RX/TX log.
+const LOG_PREVIEW_BYTES: usize = 240;
+
+/// The first `max` bytes of `s`, cut back to a char boundary (R-6:
+/// `&s[..max]` panicked inside a multibyte character).
+/// `str::floor_char_boundary` needs Rust 1.91; the MSRV is 1.82.
+fn log_preview(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.get(..end).unwrap_or_default()
+}
+
 // ── Upgrade handler ────────────────────────────────
 
 pub async fn live_ws_handler(ws: WebSocketUpgrade, State(state): State<LiveState>) -> Response {
@@ -103,7 +120,7 @@ async fn handle_live_session(ws: WebSocket, state: LiveState) {
                         // without attaching a browser. Remove or demote to debug!
                         // once the editor bring-up is stable.
                         let t: &str = text.as_str();
-                        let preview = if t.len() > 240 { &t[..240] } else { t };
+                        let preview = log_preview(t, LOG_PREVIEW_BYTES);
                         info!(inbound = %preview, "/live RX");
                         let reply = handle_live_msg(
                             &text,
@@ -116,7 +133,7 @@ async fn handle_live_session(ws: WebSocket, state: LiveState) {
                         if let Some(reply_json) = reply {
                             metrics.rows_messages_out.fetch_add(1, Ordering::Relaxed);
                             let r: &str = reply_json.as_str();
-                            let rpreview = if r.len() > 240 { &r[..240] } else { r };
+                            let rpreview = log_preview(r, LOG_PREVIEW_BYTES);
                             info!(outbound = %rpreview, "/live TX");
                             if ws_tx.send(Message::Text(reply_json.into())).await.is_err() {
                                 break;
@@ -769,6 +786,27 @@ fn build_live_events(
 
 #[cfg(test)]
 mod tests {
+    // ── S-24: log preview on a char boundary (R-6) ──────────────
+
+    #[test]
+    fn log_preview_never_splits_a_character() {
+        use super::log_preview;
+        // A 2-, 3- and 4-byte character straddling the cut.
+        for ch in ["ö", "温", "😀"] {
+            for pad in 0..4 {
+                let s = format!("{}{}{}", "a".repeat(240 - pad), ch, "tail");
+                let p = log_preview(&s, 240);
+                assert!(p.len() <= 240, "{ch} pad {pad}");
+                // Cut back only as far as the character start.
+                assert!(p.len() > 240 - ch.len(), "{ch} pad {pad}: {}", p.len());
+                assert!(s.starts_with(p));
+            }
+        }
+        assert_eq!(log_preview("", 240), "");
+        assert_eq!(log_preview("short", 240), "short");
+        assert_eq!(log_preview("ö", 1), "");
+    }
+
     use super::*;
     use crate::sox::sox_handlers::{ComponentTree, ManifestDb, SlotValue};
     use std::sync::Arc;

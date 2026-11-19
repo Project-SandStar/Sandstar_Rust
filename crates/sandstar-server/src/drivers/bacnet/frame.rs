@@ -854,6 +854,13 @@ pub fn decode_bvll_header(data: &[u8]) -> Result<BvllHeader, BacnetError> {
         )));
     }
     let length = u16::from_be_bytes([data[2], data[3]]);
+    // The length covers the 4-byte header itself; less would make the
+    // payload slice `data[4..length]` invalid (R-5).
+    if length < 4 {
+        return Err(BacnetError::MalformedFrame(format!(
+            "BVLL length {length} < header size 4"
+        )));
+    }
     if (length as usize) > data.len() {
         return Err(BacnetError::MalformedFrame(format!(
             "BVLL length {} > buffer {}",
@@ -3643,5 +3650,192 @@ mod tests {
             Err(BacnetError::MalformedFrame(_)) => {}
             other => panic!("expected MalformedFrame error, got {other:?}"),
         }
+    }
+
+    // ── S-24: no panic on malformed input (R-5) ─────────────────
+
+    #[test]
+    fn bvll_length_below_header_is_rejected() {
+        let mut pkt = encode_who_is(None, None);
+        for len in 0u16..4 {
+            pkt[2..4].copy_from_slice(&len.to_be_bytes());
+            assert!(
+                matches!(
+                    decode_bvll_header(&pkt),
+                    Err(BacnetError::MalformedFrame(_))
+                ),
+                "BVLL length {len}"
+            );
+            assert!(decode_packet(&pkt).is_err(), "BVLL length {len}");
+        }
+    }
+
+    /// Valid packets of every kind the encoders produce.
+    fn sweep_corpus() -> Vec<Vec<u8>> {
+        let specs = vec![
+            RpmRequestSpec {
+                object_type: 0,
+                instance: 1,
+                property_id: 85,
+                array_index: None,
+            },
+            RpmRequestSpec {
+                object_type: 8,
+                instance: 1001,
+                property_id: 76,
+                array_index: Some(2),
+            },
+        ];
+        let results = vec![
+            RpmResult {
+                object_type: 0,
+                instance: 1,
+                property_id: 85,
+                array_index: None,
+                value: Ok(BacnetValue::Real(21.5)),
+            },
+            RpmResult {
+                object_type: 2,
+                instance: 3,
+                property_id: 85,
+                array_index: Some(1),
+                value: Err((2, 32)),
+            },
+        ];
+        vec![
+            encode_who_is(None, None),
+            encode_who_is(Some(1000), Some(4_194_302)),
+            make_i_am_packet(389001, 1476, 3, 260),
+            encode_read_property(7, 0, 42, 85, None),
+            encode_read_property(3, 8, 100, 76, Some(5)),
+            encode_read_property_ack(42, 0, 5, 85, &BacnetValue::Real(22.5)),
+            encode_read_property_ack(1, 3, 0, 85, &BacnetValue::Boolean(true)),
+            encode_read_property_ack(
+                2,
+                8,
+                1,
+                77,
+                &BacnetValue::CharacterString("Ölçüm 温度".into()),
+            ),
+            encode_read_property_ack_multi(
+                5,
+                2,
+                3,
+                85,
+                &[BacnetValue::Real(1.0), BacnetValue::Unsigned(7)],
+            ),
+            encode_read_property_multiple(5, &specs),
+            encode_read_property_multiple_ack(5, &results),
+            encode_write_property(5, 0, 1, 85, &BacnetValue::Real(72.5), None, Some(16)),
+            encode_subscribe_cov(9, 1, 0, 1, Some(true), Some(300)),
+            encode_simple_ack(4, 15),
+            encode_error_pdu(6, 12, 2, 32),
+            // COV notifications have no encoder; built from the decoder's layout.
+            with_bvll(
+                &[
+                    &[0x01, 0x00, 0x10, SVC_UNCONFIRMED_COV_NOTIFICATION],
+                    COV_PAYLOAD,
+                ]
+                .concat(),
+            ),
+            with_bvll(
+                &[
+                    &[0x01, 0x00, 0x00, 0x05, 0x07, SVC_CONFIRMED_COV_NOTIFICATION],
+                    COV_PAYLOAD,
+                ]
+                .concat(),
+            ),
+        ]
+    }
+
+    /// COV notification payload: process id 1, device 1001, AI 1, 60 s left,
+    /// present value Real 22.5 at priority 8, status flags.
+    const COV_PAYLOAD: &[u8] = &[
+        0x09, 0x01, // [0] subscriber process id = 1
+        0x1C, 0x02, 0x00, 0x03, 0xE9, // [1] device 1001
+        0x2C, 0x00, 0x00, 0x00, 0x01, // [2] analog-input 1
+        0x39, 0x3C, // [3] time remaining = 60
+        0x4E, // [4] open list-of-values
+        0x09, 0x55, // property 85
+        0x2E, 0x44, 0x41, 0xB4, 0x00, 0x00, 0x2F, // value Real 22.5
+        0x39, 0x08, // priority 8
+        0x09, 0x6F, // property 111
+        0x2E, 0x82, 0x04, 0x00, 0x2F, // value BitString
+        0x4F, // close list-of-values
+    ];
+
+    /// Prefix an NPDU+APDU with an original-unicast BVLL header.
+    fn with_bvll(npdu_apdu: &[u8]) -> Vec<u8> {
+        let len = (npdu_apdu.len() + 4) as u16;
+        let mut pkt = vec![0x81, 0x0A];
+        pkt.extend_from_slice(&len.to_be_bytes());
+        pkt.extend_from_slice(npdu_apdu);
+        pkt
+    }
+
+    #[test]
+    fn sweep_corpus_decodes() {
+        for (n, pkt) in sweep_corpus().iter().enumerate() {
+            assert!(decode_packet(pkt).is_ok(), "packet {n} must be valid");
+        }
+        let (_, apdu) = decode_packet(sweep_corpus().last().unwrap()).unwrap();
+        assert!(
+            matches!(apdu, Apdu::ConfirmedCovNotification { .. }),
+            "{apdu:?}"
+        );
+    }
+
+    /// Run `decode_packet` on `input`; describe it if it panics.
+    fn panics(input: &[u8]) -> bool {
+        let owned = input.to_vec();
+        std::panic::catch_unwind(move || {
+            let _ = decode_packet(&owned);
+        })
+        .is_err()
+    }
+
+    #[test]
+    fn decode_packet_never_panics_on_truncated_or_corrupted_input() {
+        let mut failures = Vec::new();
+        for (n, pkt) in sweep_corpus().iter().enumerate() {
+            // Every prefix, including empty and 1 byte.
+            for end in 0..=pkt.len() {
+                if panics(&pkt[..end]) {
+                    failures.push(format!("packet {n}: prefix {end}"));
+                }
+            }
+            // Every BVLL length field value, from 0 to beyond the buffer.
+            for len in 0..=(pkt.len() as u16 + 1) {
+                let mut p = pkt.clone();
+                p[2..4].copy_from_slice(&len.to_be_bytes());
+                if panics(&p) {
+                    failures.push(format!("packet {n}: BVLL length {len}"));
+                }
+            }
+            // Single-byte corruption with boundary values; the BVLL length is
+            // fixed up so that the corrupted byte reaches the NPDU/APDU code.
+            for pos in 4..pkt.len() {
+                for v in 0..=u8::MAX {
+                    let mut p = pkt.clone();
+                    p[pos] = v;
+                    if panics(&p) {
+                        failures.push(format!("packet {n}: byte {pos} = 0x{v:02X}"));
+                    }
+                    // Also with the packet cut right after the corrupted byte.
+                    let mut cut = p[..=pos].to_vec();
+                    let l = cut.len() as u16;
+                    cut[2..4].copy_from_slice(&l.to_be_bytes());
+                    if panics(&cut) {
+                        failures.push(format!("packet {n}: byte {pos} = 0x{v:02X}, cut"));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} panicking inputs, first: {:?}",
+            failures.len(),
+            &failures[..failures.len().min(20)]
+        );
     }
 }

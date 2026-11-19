@@ -73,6 +73,13 @@ impl ModbusFrame {
             )));
         }
         let length = u16::from_be_bytes([bytes[4], bytes[5]]) as usize;
+        // The length covers unit id and function code; less would make the
+        // data slice `bytes[8..6 + length]` invalid (R-8).
+        if length < 2 {
+            return Err(DriverError::CommFault(format!(
+                "modbus length {length} too small (need at least 2 for unit and function code)"
+            )));
+        }
         if bytes.len() < 6 + length {
             return Err(DriverError::CommFault(format!(
                 "modbus frame truncated: have {} bytes after header, need {length}",
@@ -708,20 +715,7 @@ impl AsyncDriver for ModbusDriver {
             let frame = self.build_read_frame(&reg);
             match self.transact(&frame) {
                 Ok(resp) => {
-                    let value = match reg.register_type {
-                        RegisterType::Coil | RegisterType::DiscreteInput => {
-                            resp.parse_coil_response(1).map(|bits| {
-                                if bits.first().copied().unwrap_or(false) {
-                                    1.0
-                                } else {
-                                    0.0
-                                }
-                            })
-                        }
-                        RegisterType::HoldingRegister | RegisterType::InputRegister => resp
-                            .parse_register_response()
-                            .map(|regs| reg.raw_to_eng(regs.first().copied().unwrap_or(0) as f64)),
-                    };
+                    let value = read_value(&reg, &resp);
                     match value {
                         Ok(v) => ctx.update_cur_ok(pt.point_id, v),
                         Err(e) => ctx.update_cur_err(pt.point_id, e),
@@ -771,6 +765,23 @@ impl AsyncDriver for ModbusDriver {
 }
 
 // ── Tests ──────────────────────────────────────────────────
+
+/// The engineering value of a read response for `reg`. A response
+/// without the bit or register asked for is an error, not 0 (R-35, S-24).
+fn read_value(reg: &ModbusRegister, resp: &ModbusFrame) -> Result<f64, DriverError> {
+    match reg.register_type {
+        RegisterType::Coil | RegisterType::DiscreteInput => resp
+            .parse_coil_response(1)?
+            .first()
+            .map(|&bit| if bit { 1.0 } else { 0.0 })
+            .ok_or_else(|| DriverError::CommFault("coil response has no bits".into())),
+        RegisterType::HoldingRegister | RegisterType::InputRegister => resp
+            .parse_register_response()?
+            .first()
+            .map(|&raw| reg.raw_to_eng(raw as f64))
+            .ok_or_else(|| DriverError::CommFault("register response has no registers".into())),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1282,5 +1293,118 @@ mod tests {
         let mut ctx = WriteContext::new();
         d.write(&[], &mut ctx).await;
         assert!(ctx.results().is_empty());
+    }
+
+    // ── S-24: no panic on malformed input (R-8) ─────────────────
+
+    #[test]
+    fn a_response_without_the_value_is_an_error_not_zero() {
+        let frame = |function_code, data| ModbusFrame {
+            transaction_id: 1,
+            unit_id: 1,
+            function_code,
+            data,
+        };
+        let holding = ModbusRegister::new(0, RegisterType::HoldingRegister);
+        let coil = ModbusRegister::new(0, RegisterType::Coil);
+        // byte_count 0: no register / no coil byte.
+        assert!(read_value(&holding, &frame(fc::READ_HOLDING_REGISTERS, vec![0])).is_err());
+        // One data byte: half a register.
+        assert!(read_value(&holding, &frame(fc::READ_HOLDING_REGISTERS, vec![1, 7])).is_err());
+        assert!(read_value(&coil, &frame(fc::READ_COILS, vec![0])).is_err());
+        // Valid responses still decode.
+        assert_eq!(
+            read_value(&holding, &frame(fc::READ_HOLDING_REGISTERS, vec![2, 0, 42])).unwrap(),
+            42.0
+        );
+        assert_eq!(
+            read_value(&coil, &frame(fc::READ_COILS, vec![1, 1])).unwrap(),
+            1.0
+        );
+    }
+
+    #[test]
+    fn decode_rejects_a_length_without_unit_and_function() {
+        for length in 0u16..2 {
+            let mut bytes = ModbusFrame {
+                transaction_id: 1,
+                unit_id: 1,
+                function_code: fc::READ_HOLDING_REGISTERS,
+                data: vec![2, 0, 7],
+            }
+            .encode();
+            bytes[4..6].copy_from_slice(&length.to_be_bytes());
+            assert!(
+                matches!(ModbusFrame::decode(&bytes), Err(DriverError::CommFault(_))),
+                "length {length}"
+            );
+        }
+    }
+
+    fn decode_and_parse_panics(input: &[u8]) -> bool {
+        let owned = input.to_vec();
+        std::panic::catch_unwind(move || {
+            if let Ok(frame) = ModbusFrame::decode(&owned) {
+                let _ = frame.parse_register_response();
+                for count in [0u16, 1, 8, 9, 16, 2000] {
+                    let _ = frame.parse_coil_response(count);
+                }
+            }
+        })
+        .is_err()
+    }
+
+    #[test]
+    fn decode_never_panics_on_truncated_or_corrupted_input() {
+        let corpus: Vec<Vec<u8>> = [
+            (fc::READ_HOLDING_REGISTERS, vec![4, 0, 1, 0, 2]),
+            (fc::READ_INPUT_REGISTERS, vec![2, 0xFF, 0xFF]),
+            (fc::READ_COILS, vec![2, 0b1010_0101, 0b0000_0011]),
+            (fc::WRITE_SINGLE_COIL, vec![0, 1, 0xFF, 0x00]),
+            (fc::WRITE_MULTIPLE_REGISTERS, vec![0, 1, 0, 2]),
+            (fc::READ_HOLDING_REGISTERS | 0x80, vec![2]),
+        ]
+        .into_iter()
+        .map(|(function_code, data)| {
+            ModbusFrame {
+                transaction_id: 7,
+                unit_id: 1,
+                function_code,
+                data,
+            }
+            .encode()
+        })
+        .collect();
+
+        let mut failures = Vec::new();
+        for (n, frame) in corpus.iter().enumerate() {
+            for end in 0..=frame.len() {
+                if decode_and_parse_panics(&frame[..end]) {
+                    failures.push(format!("frame {n}: prefix {end}"));
+                }
+            }
+            for length in 0..=(frame.len() as u16 + 1) {
+                let mut f = frame.clone();
+                f[4..6].copy_from_slice(&length.to_be_bytes());
+                if decode_and_parse_panics(&f) {
+                    failures.push(format!("frame {n}: length {length}"));
+                }
+            }
+            for pos in 6..frame.len() {
+                for v in 0..=u8::MAX {
+                    let mut f = frame.clone();
+                    f[pos] = v;
+                    if decode_and_parse_panics(&f) {
+                        failures.push(format!("frame {n}: byte {pos} = 0x{v:02X}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} panicking inputs, first: {:?}",
+            failures.len(),
+            &failures[..failures.len().min(20)]
+        );
     }
 }
