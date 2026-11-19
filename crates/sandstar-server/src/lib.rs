@@ -13,6 +13,7 @@ pub mod drivers;
 pub mod history;
 pub mod ipc;
 pub mod loader;
+pub mod lock;
 pub mod logging;
 pub mod metrics;
 pub mod pid;
