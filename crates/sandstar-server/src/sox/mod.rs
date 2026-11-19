@@ -36,6 +36,9 @@ pub const DEFAULT_MANIFESTS_DIR: &str = "/home/eacio/sandstar/etc/manifests";
 /// Minimum gap between two "failed to refresh channels" warnings.
 const REFRESH_WARN_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Pause before the next tree refresh after an engine timeout (R-28, S-22).
+const REFRESH_BACKOFF_AFTER_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Start the SOX/DASP server as a background tokio task.
 ///
 /// The server binds a UDP socket on `port`, runs the DASP handshake for
@@ -210,6 +213,11 @@ async fn run_sox_server(
     // Last refresh-failure warning; the refresh runs every second, so further
     // failures within REFRESH_WARN_INTERVAL are logged at debug.
     let mut last_refresh_warn: Option<tokio::time::Instant> = None;
+    // The channel list for the refresh is fetched beside the loop, so DASP
+    // packets keep flowing while the engine is slow (R-28, S-22).
+    let mut refresh: crate::rest::engine_round::EngineRound<
+        Result<Vec<sandstar_ipc::types::ChannelInfo>, String>,
+    > = crate::rest::engine_round::EngineRound::new();
 
     // Persistence save timer: check dirty flag every 5 seconds.
     let mut persist_interval = tokio::time::interval(Duration::from_secs(5));
@@ -496,9 +504,16 @@ async fn run_sox_server(
                 transport.cleanup_expired();
             }
             _ = tree_refresh_interval.tick() => {
-                // Refresh the component tree from engine channel data.
-                // Acquire channel list first (async), then lock tree for mutation.
-                match engine_handle.list_channels().await {
+                // Refresh the component tree from engine channel data. The
+                // channel list is fetched beside the loop; the tree is
+                // updated in the arm below when it arrives.
+                if refresh.is_idle() {
+                    let handle = engine_handle.clone();
+                    refresh.start(async move { handle.list_channels().await });
+                }
+            }
+            result = refresh.next() => {
+                match result {
                     Ok(channels) => {
                         // All tree operations below are synchronous — safe to hold std::sync::RwLock.
                         let mut tree = crate::lock::write_or_recover(&shared_tree, "SOX component tree");
@@ -629,9 +644,12 @@ async fn run_sox_server(
                             });
                         }
                     }
-                    // Timeouts are already reported (rate-limited) by EngineHandle.
+                    // Timeouts are already reported (rate-limited) by
+                    // EngineHandle. Back off so a hung engine does not get a
+                    // new (stale, queued) request every second.
                     Err(e) if crate::rest::is_engine_timeout(&e) => {
                         debug!("SOX: failed to refresh channels: {e}");
+                        refresh.back_off(REFRESH_BACKOFF_AFTER_TIMEOUT);
                     }
                     Err(e) => {
                         let now = tokio::time::Instant::now();

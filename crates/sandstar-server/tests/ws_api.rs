@@ -599,3 +599,80 @@ async fn ws_unsubscribe_nonexistent_watch() {
     assert_eq!(msg["op"], "error");
     assert_eq!(msg["code"], "WATCH_NOT_FOUND");
 }
+
+// ══════════════════════════════════════════════════════════════
+// Hung engine: the connection keeps answering (R-28, S-22)
+// ══════════════════════════════════════════════════════════════
+
+/// Engine that accepts subscriptions and unsubscriptions but never answers
+/// a watch poll, like an engine stuck in a long poll cycle. The `Notify`
+/// fires when the first watch poll arrives.
+fn spawn_poll_hung_engine() -> (
+    sandstar_server::rest::EngineHandle,
+    std::sync::Arc<tokio::sync::Notify>,
+) {
+    use sandstar_server::rest::{EngineCmd, EngineHandle, WatchResponse};
+    let polled = std::sync::Arc::new(tokio::sync::Notify::new());
+    let notify = polled.clone();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<EngineCmd>(64);
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Some(cmd) = rx.recv().await {
+            match cmd {
+                EngineCmd::WatchSub { reply, .. } => {
+                    let _ = reply.send(Ok(WatchResponse {
+                        watch_id: "w-hung".into(),
+                        lease: 3600,
+                        rows: vec![],
+                    }));
+                }
+                EngineCmd::WatchUnsub { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                poll @ EngineCmd::WatchPoll { .. } => {
+                    notify.notify_one();
+                    held.push(poll);
+                }
+                other => held.push(other),
+            }
+        }
+    });
+    (EngineHandle::new(tx), polled)
+}
+
+#[tokio::test]
+async fn ws_answers_ping_while_a_watch_poll_is_stuck() {
+    let (engine, polled) = spawn_poll_hung_engine();
+    let app = sandstar_server::rest::router(engine, None, 0);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let (ws, _) = connect_async(format!("ws://127.0.0.1:{port}/api/ws"))
+        .await
+        .expect("WS handshake failed");
+    let (mut ws_tx, mut ws_rx) = ws.split();
+
+    send_ws_json(
+        &mut ws_tx,
+        serde_json::json!({"op": "subscribe", "id": "s", "ids": [1], "pollInterval": 200}),
+    )
+    .await;
+    let msg = read_ws_json(&mut ws_rx).await;
+    assert_eq!(msg["op"], "subscribed", "{msg}");
+
+    // Wait until the push round has sent a poll that the engine never answers.
+    tokio::time::timeout(Duration::from_secs(3), polled.notified())
+        .await
+        .expect("the push round never polled the engine");
+
+    let start = std::time::Instant::now();
+    send_ws_json(&mut ws_tx, serde_json::json!({"op": "ping", "id": "p"})).await;
+    let msg = tokio::time::timeout(Duration::from_secs(1), read_ws_json(&mut ws_rx))
+        .await
+        .expect("no pong within 1 s while the engine is stuck in a watch poll");
+    assert_eq!(msg["op"], "pong", "{msg}");
+    assert!(start.elapsed() < Duration::from_secs(1));
+}

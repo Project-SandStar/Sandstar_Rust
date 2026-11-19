@@ -236,6 +236,8 @@ Router: `router_with_auth` in `crates/sandstar-server/src/rest/mod.rs`, plus rou
 - On an engine timeout (R-28, S-21):
   - `/health` waits at most 2 s and answers `503 {"healthy":false,"uptimeSecs":0}`; a healthy engine still gives 200.
   - `/api/ws` replies with error code `ENGINE_TIMEOUT` and ends the current push round; the timed-out watch asks for all values on its next poll, because the queued poll may still advance the change baseline.
+  - Since S-22, `/api/ws` push polls and the SOX tree refresh run beside their event loops, so pings, client messages and DASP packets are still handled while the engine is slow. The next round or refresh waits 10 s after a timeout. Client requests (`subscribe`, `unsubscribe`, `refresh`) still wait inline for their own reply.
+  - Watches of closed `/api/ws` connections are closed by one shared task that retries after a timeout (pauses growing from 10 s to 10 min) and gives up after the 1 h lease. A push result taken before a client `refresh` or re-subscribe is dropped, so an older `update` never follows a newer `snapshot`.
   - `localIo` marks the points `Down` (`RemoteDown`) instead of `Fault` and stops the round.
 - Only Ctrl+C (SIGINT) and SIGHUP are handled; `systemctl stop` (SIGTERM) ends the process without graceful shutdown.
 

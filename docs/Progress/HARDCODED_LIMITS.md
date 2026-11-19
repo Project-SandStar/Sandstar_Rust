@@ -3,7 +3,7 @@
 > **Status (2026-11-18)**: re-checked against `master` `b48484b`. Most values are unchanged, but many line numbers moved. Search by constant name rather than trusting the `file:line` below.
 >
 > **Moved (same value):**
-> - `MAX_PARSE_DEPTH` → `rest/filter.rs:115`; CORS max-age → `rest/mod.rs:748`; `ws.rs` constants → lines 26-30.
+> - `MAX_PARSE_DEPTH` → `rest/filter.rs:115`; CORS max-age → `rest/mod.rs:748`; `ws.rs` constants → lines 29-33 (S-22).
 > - `CONSECUTIVE_FAIL_THRESHOLD` → `engine.rs:42`. The code comment describes it as the count before the fail counter resets.
 > - `ERR_YIELD` / `ERR_RESTART` / `ERR_HIBERNATE` → `sandstar-svm/src/types.rs:72-74`.
 > - `args.rs`: rate limit line 75, port 53, bind 57.
@@ -60,6 +60,12 @@ Audited: 2026-03-10
 | `MAX_POLL_INTERVAL_MS` | 60,000ms (1min) | `sandstar-server/src/rest/ws.rs` | 25 | **Keep** — ceiling to ensure eventual delivery. |
 | `DEFAULT_POLL_INTERVAL_MS` | 1,000ms | `sandstar-server/src/rest/ws.rs` | 26 | **Document** — sensible default for building automation. |
 | `CLIENT_TIMEOUT_SECS` | 120s | `sandstar-server/src/rest/ws.rs` | 27 | **Document** — idle WS client disconnect timeout. |
+| `PUSH_BACKOFF_AFTER_TIMEOUT` | 10s (`ENGINE_REPLY_TIMEOUT`) | `sandstar-server/src/rest/ws.rs` | 37 | **Keep** — after an engine timeout a connection starts its next push round no earlier than this (R-28, S-22). |
+| `CLEANUP_QUEUE_CAPACITY` | 256 watch ids | `sandstar-server/src/rest/ws.rs` | 41 | **Keep** — shared queue of watches to close after disconnect; overflow is logged and left to the lease (S-22). |
+| `CLEANUP_RETRY_DELAY` | 10s | `sandstar-server/src/rest/ws.rs` | 45 | **Keep** — first pause before retrying a timed-out `watch_unsub`; doubles on each further timeout (S-22). |
+| `CLEANUP_RETRY_MAX_DELAY` | 600s | `sandstar-server/src/rest/ws.rs` | 48 | **Keep** — longest pause between cleanup attempts for one watch; about ten attempts within the hour (S-22). |
+| `CLEANUP_MAX_AGE` | 3600s | `sandstar-server/src/rest/ws.rs` | 52 | **Keep** — cleanup gives up on a watch after this; equals `WATCH_LEASE_SECS` (S-22). |
+| `CLEANUP_FULL_WARN_INTERVAL_SECS` | 60s | `sandstar-server/src/rest/ws.rs` | 55 | **Keep** — at most one "cleanup queue full" `warn` per interval (S-22). |
 
 ## Authentication (SCRAM-SHA-256)
 
@@ -118,6 +124,7 @@ Audited: 2026-03-10
 | `ENGINE_REPLY_TIMEOUT` | 10s | `sandstar-server/src/rest/mod.rs` | 146 | **Document** — max wait for an `EngineHandle` command (send + reply). On timeout the caller gets `engine timeout` (REST: 503); a state-changing command may still run later (R-28, S-20). |
 | Engine timeout warn interval | 60s | `sandstar-server/src/rest/mod.rs` | 160 | **Keep** — first timeout per 60 s logged at `warn`, the rest at `debug`. |
 | `HEALTH_ENGINE_TIMEOUT` | 2s | `sandstar-server/src/rest/handlers.rs` | 369 | **Document** — `/health` waits at most this long for the engine; otherwise 503 with `healthy:false` (R-28, S-21). |
+| `REFRESH_BACKOFF_AFTER_TIMEOUT` | 10s | `sandstar-server/src/sox/mod.rs` | 40 | **Keep** — pause before the next SOX tree refresh after an engine timeout (S-22). |
 | `REFRESH_WARN_INTERVAL` | 60s | `sandstar-server/src/sox/mod.rs` | 37 | **Keep** — SOX tree refresh runs every second; a non-timeout failure is logged at `warn` at most once per interval, the rest at `debug` (S-21). |
 | Command channel capacity | 64 | `sandstar-server/src/main.rs` | 423 | **Document** — mpsc channel buffer for REST commands. |
 
