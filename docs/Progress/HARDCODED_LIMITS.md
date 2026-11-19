@@ -61,11 +61,13 @@ Audited: 2026-03-10
 | `DEFAULT_POLL_INTERVAL_MS` | 1,000ms | `sandstar-server/src/rest/ws.rs` | 26 | **Document** — sensible default for building automation. |
 | `CLIENT_TIMEOUT_SECS` | 120s | `sandstar-server/src/rest/ws.rs` | 27 | **Document** — idle WS client disconnect timeout. |
 | `PUSH_BACKOFF_AFTER_TIMEOUT` | 10s (`ENGINE_REPLY_TIMEOUT`) | `sandstar-server/src/rest/ws.rs` | 37 | **Keep** — after an engine timeout a connection starts its next push round no earlier than this (R-28, S-22). |
-| `CLEANUP_QUEUE_CAPACITY` | 256 watch ids | `sandstar-server/src/rest/ws.rs` | 41 | **Keep** — shared queue of watches to close after disconnect; overflow is logged and left to the lease (S-22). |
-| `CLEANUP_RETRY_DELAY` | 10s | `sandstar-server/src/rest/ws.rs` | 45 | **Keep** — first pause before retrying a timed-out `watch_unsub`; doubles on each further timeout (S-22). |
-| `CLEANUP_RETRY_MAX_DELAY` | 600s | `sandstar-server/src/rest/ws.rs` | 48 | **Keep** — longest pause between cleanup attempts for one watch; about ten attempts within the hour (S-22). |
-| `CLEANUP_MAX_AGE` | 3600s | `sandstar-server/src/rest/ws.rs` | 52 | **Keep** — cleanup gives up on a watch after this; equals `WATCH_LEASE_SECS` (S-22). |
-| `CLEANUP_FULL_WARN_INTERVAL_SECS` | 60s | `sandstar-server/src/rest/ws.rs` | 55 | **Keep** — at most one "cleanup queue full" `warn` per interval (S-22). |
+| `CLIENT_QUEUE_CAPACITY` | 16 requests | `sandstar-server/src/rest/ws.rs` | 41 | **Keep** — client engine requests (`subscribe`, `unsubscribe`, `refresh`) a connection queues for its single engine slot; when full the connection stops reading until one finishes (R-28, S-23). |
+| `MAX_CLIENT_MESSAGE_BYTES` | 16 KiB | `sandstar-server/src/rest/ws.rs` | 46 | **Keep** — largest `/api/ws` client message and frame; larger closes the connection (library default 64 MiB). A subscribe with 256 ids is under 4 KiB (S-23). |
+| `CLEANUP_QUEUE_CAPACITY` | 256 watch ids | `sandstar-server/src/rest/ws.rs` | 50 | **Keep** — shared queue of watches to close after disconnect; overflow is logged and left to the lease (S-22). |
+| `CLEANUP_RETRY_DELAY` | 10s | `sandstar-server/src/rest/ws.rs` | 54 | **Keep** — first pause before retrying a timed-out `watch_unsub`; doubles on each further timeout (S-22). |
+| `CLEANUP_RETRY_MAX_DELAY` | 600s | `sandstar-server/src/rest/ws.rs` | 57 | **Keep** — longest pause between cleanup attempts for one watch; about ten attempts within the hour (S-22). |
+| `CLEANUP_MAX_AGE` | 3600s | `sandstar-server/src/rest/ws.rs` | 61 | **Keep** — cleanup gives up on a watch after this; equals `WATCH_LEASE_SECS` (S-22). |
+| `CLEANUP_FULL_WARN_INTERVAL_SECS` | 60s | `sandstar-server/src/rest/ws.rs` | 64 | **Keep** — at most one "cleanup queue full" `warn` per interval (S-22). |
 
 ## Authentication (SCRAM-SHA-256)
 

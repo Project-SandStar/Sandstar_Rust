@@ -676,3 +676,264 @@ async fn ws_answers_ping_while_a_watch_poll_is_stuck() {
     assert_eq!(msg["op"], "pong", "{msg}");
     assert!(start.elapsed() < Duration::from_secs(1));
 }
+
+// ── S-23: one engine slot per connection ───────────────────
+
+/// Serve `/api/ws` on a free port with `engine`; returns the WS URL.
+async fn serve_ws(engine: sandstar_server::rest::EngineHandle) -> String {
+    let app = sandstar_server::rest::router(engine, None, 0);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("ws://127.0.0.1:{port}/api/ws")
+}
+
+/// Engine that never answers anything, like an engine stuck in a long cycle.
+fn spawn_silent_engine() -> sandstar_server::rest::EngineHandle {
+    use sandstar_server::rest::{EngineCmd, EngineHandle};
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<EngineCmd>(64);
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Some(cmd) = rx.recv().await {
+            held.push(cmd);
+        }
+    });
+    EngineHandle::new(tx)
+}
+
+#[tokio::test]
+async fn ws_answers_ping_while_a_subscribe_is_stuck() {
+    let url = serve_ws(spawn_silent_engine()).await;
+    let (ws, _) = connect_async(url).await.expect("WS handshake failed");
+    let (mut ws_tx, mut ws_rx) = ws.split();
+
+    send_ws_json(
+        &mut ws_tx,
+        serde_json::json!({"op": "subscribe", "id": "s", "ids": [1]}),
+    )
+    .await;
+    send_ws_json(&mut ws_tx, serde_json::json!({"op": "ping", "id": "p"})).await;
+    let msg = tokio::time::timeout(Duration::from_secs(1), read_ws_json(&mut ws_rx))
+        .await
+        .expect("no pong within 1 s while the engine is stuck in a subscribe");
+    assert_eq!(msg["op"], "pong", "{msg}");
+    assert_eq!(msg["id"], "p", "{msg}");
+}
+
+#[tokio::test]
+async fn ws_sends_one_engine_command_at_a_time_and_answers_in_order() {
+    use sandstar_server::rest::{EngineCmd, EngineHandle, WatchResponse};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    // Subscribes are answered after 50 ms, polls after 300 ms; count how
+    // many commands overlap.
+    let polled = Arc::new(tokio::sync::Notify::new());
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let max_in_flight = Arc::new(AtomicUsize::new(0));
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<EngineCmd>(64);
+    {
+        let (in_flight, max_in_flight, polled) =
+            (in_flight.clone(), max_in_flight.clone(), polled.clone());
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                max_in_flight.fetch_max(now, Ordering::SeqCst);
+                let delay = if matches!(cmd, EngineCmd::WatchPoll { .. }) {
+                    polled.notify_one();
+                    300
+                } else {
+                    50
+                };
+                let in_flight = in_flight.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                    let resp = |id: String| WatchResponse {
+                        watch_id: id,
+                        lease: 3600,
+                        rows: vec![],
+                    };
+                    match cmd {
+                        EngineCmd::WatchSub {
+                            watch_id, reply, ..
+                        } => {
+                            let _ = reply.send(Ok(resp(watch_id.unwrap_or_default())));
+                        }
+                        EngineCmd::WatchPoll {
+                            watch_id, reply, ..
+                        } => {
+                            let _ = reply.send(Ok(resp(watch_id)));
+                        }
+                        EngineCmd::WatchUnsub { reply, .. } => {
+                            let _ = reply.send(Ok(()));
+                        }
+                        _ => {}
+                    }
+                });
+            }
+        });
+    }
+    let url = serve_ws(EngineHandle::new(tx)).await;
+    let (ws, _) = connect_async(url).await.expect("WS handshake failed");
+    let (mut ws_tx, mut ws_rx) = ws.split();
+
+    // Three requests at once, with push polls (200 ms) running in between.
+    for (id, wid) in [("a", "w-a"), ("b", "w-b"), ("c", "w-c")] {
+        send_ws_json(
+            &mut ws_tx,
+            serde_json::json!({"op": "subscribe", "id": id, "watchId": wid, "ids": [1], "pollInterval": 200}),
+        )
+        .await;
+    }
+    let mut ids = Vec::new();
+    while ids.len() < 3 {
+        let msg = read_ws_json(&mut ws_rx).await;
+        assert_eq!(msg["op"], "subscribed", "{msg}");
+        ids.push(msg["id"].as_str().unwrap_or_default().to_string());
+    }
+    assert_eq!(ids, ["a", "b", "c"], "replies must follow request order");
+
+    // A request sent while a push poll is in flight waits for the slot.
+    tokio::time::timeout(Duration::from_secs(3), polled.notified())
+        .await
+        .expect("the push round never polled the engine");
+    send_ws_json(
+        &mut ws_tx,
+        serde_json::json!({"op": "refresh", "id": "r", "watchId": "w-a"}),
+    )
+    .await;
+    loop {
+        let msg = read_ws_json(&mut ws_rx).await;
+        if msg["op"] == "snapshot" {
+            assert_eq!(msg["id"], "r", "{msg}");
+            break;
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(
+        max_in_flight.load(Ordering::SeqCst),
+        1,
+        "a connection must not have two engine commands in flight"
+    );
+}
+
+/// Client engine requests a connection queues before it stops reading
+/// (`CLIENT_QUEUE_CAPACITY` in `rest/ws.rs`), plus the one in the slot.
+const QUEUED_PLUS_SLOT: usize = 16 + 1;
+
+/// Send `n` subscribes to a silent engine, then a ping; true if the pong
+/// arrives within 500 ms.
+async fn pong_after_stuck_requests(n: usize) -> bool {
+    let url = serve_ws(spawn_silent_engine()).await;
+    let (ws, _) = connect_async(url).await.expect("WS handshake failed");
+    let (mut ws_tx, mut ws_rx) = ws.split();
+    for i in 0..n {
+        send_ws_json(
+            &mut ws_tx,
+            serde_json::json!({"op": "subscribe", "id": format!("s{i}"), "ids": [1]}),
+        )
+        .await;
+    }
+    send_ws_json(&mut ws_tx, serde_json::json!({"op": "ping", "id": "p"})).await;
+    matches!(
+        tokio::time::timeout(Duration::from_millis(500), read_ws_json(&mut ws_rx)).await,
+        Ok(msg) if msg["op"] == "pong"
+    )
+}
+
+#[tokio::test]
+async fn ws_stops_reading_while_its_request_queue_is_full() {
+    assert!(
+        pong_after_stuck_requests(QUEUED_PLUS_SLOT - 1).await,
+        "with room left in the queue, the ping must be read"
+    );
+    assert!(
+        !pong_after_stuck_requests(QUEUED_PLUS_SLOT).await,
+        "with the queue full, the connection must stop reading"
+    );
+}
+
+#[tokio::test]
+async fn ws_closes_the_watch_of_a_subscribe_answered_after_disconnect() {
+    use sandstar_server::rest::{EngineCmd, EngineHandle, WatchResponse};
+
+    // Subscribes are answered after 300 ms; closed watch ids are reported.
+    let (closed_tx, mut closed_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<EngineCmd>(64);
+    tokio::spawn(async move {
+        while let Some(cmd) = rx.recv().await {
+            match cmd {
+                EngineCmd::WatchSub { reply, .. } => {
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                        let _ = reply.send(Ok(WatchResponse {
+                            watch_id: "w-late".into(),
+                            lease: 3600,
+                            rows: vec![],
+                        }));
+                    });
+                }
+                EngineCmd::WatchUnsub {
+                    watch_id, reply, ..
+                } => {
+                    let _ = closed_tx.send(watch_id);
+                    let _ = reply.send(Ok(()));
+                }
+                _ => {}
+            }
+        }
+    });
+    let url = serve_ws(EngineHandle::new(tx)).await;
+    let (ws, _) = connect_async(url).await.expect("WS handshake failed");
+    let (mut ws_tx, _ws_rx) = ws.split();
+    send_ws_json(
+        &mut ws_tx,
+        serde_json::json!({"op": "subscribe", "id": "s", "ids": [1]}),
+    )
+    .await;
+    // Close while the subscribe is still in the engine.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    ws_tx
+        .send(Message::Close(None))
+        .await
+        .expect("WS close failed");
+
+    let closed = tokio::time::timeout(Duration::from_secs(3), closed_rx.recv())
+        .await
+        .expect("the watch created after disconnect was never closed");
+    assert_eq!(closed.as_deref(), Some("w-late"));
+}
+
+#[tokio::test]
+async fn ws_closes_a_connection_that_sends_an_oversized_message() {
+    let url = serve_ws(spawn_silent_engine()).await;
+    let (ws, _) = connect_async(url).await.expect("WS handshake failed");
+    let (mut ws_tx, mut ws_rx) = ws.split();
+    // 20 KiB of ids, above the 16 KiB limit.
+    let ids: Vec<u32> = vec![1; 10 * 1024];
+    let _ = ws_tx
+        .send(Message::Text(
+            serde_json::json!({"op": "subscribe", "id": "big", "ids": ids})
+                .to_string()
+                .into(),
+        ))
+        .await;
+    // The server drops the connection instead of reading the message.
+    let end = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match ws_rx.next().await {
+                None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
+                Some(Ok(Message::Text(t))) => panic!("unexpected reply: {t}"),
+                Some(Ok(_)) => {}
+            }
+        }
+    })
+    .await;
+    assert!(
+        end.is_ok(),
+        "the connection stayed open after an oversized message"
+    );
+}
