@@ -12,7 +12,8 @@ curl http://localhost:8085/
 # Visual DDC Editor
 curl http://localhost:8085/editor
 
-# Health check
+# Health check: 200 {"healthy":true,...}; 503 {"healthy":false,...} if the
+# engine does not answer within 2 s
 curl http://localhost:8085/health
 ```
 

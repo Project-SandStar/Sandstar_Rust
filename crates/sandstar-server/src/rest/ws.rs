@@ -16,7 +16,7 @@ use tokio::sync::broadcast;
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
-use super::EngineHandle;
+use super::{is_engine_timeout, EngineHandle, WatchResponse};
 use crate::auth::AuthState;
 use crate::drivers::actor::DriverHandle;
 use crate::drivers::CovEvent;
@@ -187,6 +187,26 @@ struct WatchMeta {
     /// latency bounded by the 200 ms push-timer resolution, while the
     /// engine's channel write (level 16) has already settled.
     cov_pending: bool,
+    /// Set after a push poll timed out. That poll stays queued and may still
+    /// run, moving the engine's change baseline without the reply reaching
+    /// the client, so the next push poll asks for all values (`refresh`).
+    resync: bool,
+}
+
+/// Delta-poll one watch for the push loop, asking for all values after a
+/// timed-out poll (see [`WatchMeta::resync`]).
+async fn push_poll(
+    engine: &EngineHandle,
+    watch_id: &str,
+    meta: &mut WatchMeta,
+) -> Result<WatchResponse, String> {
+    let result = engine.watch_poll(watch_id.to_string(), meta.resync).await;
+    match &result {
+        Ok(_) => meta.resync = false,
+        Err(e) if is_engine_timeout(e) => meta.resync = true,
+        Err(_) => {}
+    }
+    result
 }
 
 // ── Upgrade handler ────────────────────────────────
@@ -338,7 +358,7 @@ async fn ws_connection_task(
                     }
                     meta.cov_pending = false;
                     meta.last_poll = now;
-                    match engine.watch_poll(watch_id.clone(), false).await {
+                    match push_poll(&engine, watch_id, meta).await {
                         Ok(resp) if !resp.rows.is_empty() => {
                             let msg = ServerMsg::Update {
                                 watch_id: &resp.watch_id,
@@ -353,6 +373,15 @@ async fn ws_connection_task(
                                 }
                             }
                         }
+                        // The engine is busy or hung: polling the other
+                        // watches would block this connection (pings, client
+                        // messages, close) for another timeout each. They keep
+                        // their schedule and are polled on a later tick; this
+                        // one resyncs on its next poll (`push_poll`).
+                        Err(e) if is_engine_timeout(&e) => {
+                            debug!(watch_id = %watch_id, error = %e, "watch poll timed out in WS push; ending this round");
+                            break;
+                        }
                         Err(e) => {
                             warn!(watch_id = %watch_id, error = %e, "watch poll failed in WS push");
                         }
@@ -364,18 +393,50 @@ async fn ws_connection_task(
         }
     }
 
-    // Cleanup: close all watches
-    for watch_id in watches.keys() {
-        let _ = engine.watch_unsub(watch_id.clone(), true, vec![]).await;
-    }
-
+    // The connection is gone: release its slot before the (possibly slow)
+    // watch cleanup, so a hung engine does not hold connection slots.
     metrics
         .ws_active
         .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    let watch_ids: Vec<String> = watches.into_keys().collect();
     info!(
-        "WebSocket disconnected (watches cleaned: {})",
-        watches.len()
+        "WebSocket disconnected (watches to clean: {})",
+        watch_ids.len()
     );
+    if !watch_ids.is_empty() {
+        tokio::spawn(close_watches(engine, watch_ids));
+    }
+}
+
+/// Close the watches of a finished connection. Runs as its own task so the
+/// connection task ends at once. Stops at the first engine timeout; the
+/// remaining watches expire with their lease (`WATCH_LEASE_SECS`).
+async fn close_watches(engine: EngineHandle, watch_ids: Vec<String>) {
+    let total = watch_ids.len();
+    for (done, watch_id) in watch_ids.into_iter().enumerate() {
+        match engine.watch_unsub(watch_id.clone(), true, vec![]).await {
+            Ok(()) => {}
+            Err(e) if is_engine_timeout(&e) => {
+                warn!(
+                    watch_id = %watch_id,
+                    left = total - done,
+                    "WS cleanup: engine timeout; remaining watches expire with their lease"
+                );
+                return;
+            }
+            Err(e) => debug!(watch_id = %watch_id, error = %e, "WS cleanup: watch_unsub failed"),
+        }
+    }
+}
+
+/// WS error code for a failed engine command: `ENGINE_TIMEOUT` when the
+/// engine did not answer in time (retry later), otherwise `fallback`.
+fn engine_error_code(err: &str, fallback: &'static str) -> &'static str {
+    if is_engine_timeout(err) {
+        "ENGINE_TIMEOUT"
+    } else {
+        fallback
+    }
 }
 
 // ── Client message handler ─────────────────────────
@@ -600,6 +661,7 @@ async fn handle_client_msg(
                             last_poll: Instant::now(),
                             subscribed_ids: subscribed_ids_set,
                             cov_pending: false,
+                            resync: false,
                         },
                     );
                     serde_json::to_string(&ServerMsg::Subscribed {
@@ -612,7 +674,9 @@ async fn handle_client_msg(
                     .ok()
                 }
                 Err(e) => {
-                    let code = if e.contains("limit") {
+                    let code = if is_engine_timeout(&e) {
+                        "ENGINE_TIMEOUT"
+                    } else if e.contains("limit") {
                         "WATCH_LIMIT"
                     } else if e.contains("channels") {
                         "CHANNEL_LIMIT"
@@ -655,7 +719,7 @@ async fn handle_client_msg(
                 }
                 Err(e) => serde_json::to_string(&ServerMsg::Error {
                     id,
-                    code: "WATCH_NOT_FOUND",
+                    code: engine_error_code(&e, "WATCH_NOT_FOUND"),
                     message: &e,
                 })
                 .ok(),
@@ -675,7 +739,7 @@ async fn handle_client_msg(
                 }
                 Err(e) => serde_json::to_string(&ServerMsg::Error {
                     id,
-                    code: "WATCH_NOT_FOUND",
+                    code: engine_error_code(&e, "WATCH_NOT_FOUND"),
                     message: &e,
                 })
                 .ok(),
@@ -744,12 +808,140 @@ fn mark_all_cov_pending(watches: &mut HashMap<String, WatchMeta>) {
 mod tests {
     use super::*;
 
+    /// Engine that takes commands but never answers.
+    fn silent_engine() -> EngineHandle {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<super::super::EngineCmd>(16);
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Some(cmd) = rx.recv().await {
+                held.push(cmd);
+            }
+        });
+        EngineHandle::new(tx)
+    }
+
+    async fn reply_code(text: &str, engine: &EngineHandle) -> String {
+        let mut authenticated = true;
+        let mut watches = HashMap::new();
+        let reply = handle_client_msg(text, engine, &None, &None, &mut authenticated, &mut watches)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        v["code"].as_str().unwrap_or_default().to_string()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn engine_timeout_is_reported_as_engine_timeout() {
+        let engine = silent_engine();
+        let sub = r#"{"op":"subscribe","id":"1","ids":[1]}"#;
+        let unsub = r#"{"op":"unsubscribe","id":"2","watchId":"w","ids":[],"close":true}"#;
+        let refresh = r#"{"op":"refresh","id":"3","watchId":"w"}"#;
+        for msg in [sub, unsub, refresh] {
+            assert_eq!(reply_code(msg, &engine).await, "ENGINE_TIMEOUT", "{msg}");
+        }
+    }
+
+    #[test]
+    fn engine_error_code_keeps_fallback_for_other_errors() {
+        assert_eq!(
+            engine_error_code("watch w not found", "WATCH_NOT_FOUND"),
+            "WATCH_NOT_FOUND"
+        );
+        assert_eq!(
+            engine_error_code("engine stopped", "WATCH_NOT_FOUND"),
+            "WATCH_NOT_FOUND"
+        );
+        assert_eq!(
+            engine_error_code(
+                "engine timeout; command may still be applied",
+                "WATCH_NOT_FOUND"
+            ),
+            "ENGINE_TIMEOUT"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn push_poll_resyncs_after_a_timeout() {
+        use super::super::{ChannelValue, EngineCmd};
+        let (flags_tx, mut flags_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<EngineCmd>(16);
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            let mut first = true;
+            while let Some(cmd) = rx.recv().await {
+                if let EngineCmd::WatchPoll {
+                    watch_id,
+                    refresh,
+                    reply,
+                } = cmd
+                {
+                    if first {
+                        // Hung engine: keep the first poll unanswered.
+                        first = false;
+                        held.push(reply);
+                        continue;
+                    }
+                    let _ = flags_tx.send(refresh);
+                    let _ = reply.send(Ok(WatchResponse {
+                        watch_id,
+                        lease: 3600,
+                        rows: vec![ChannelValue {
+                            channel: 1,
+                            status: "ok".into(),
+                            raw: 1.0,
+                            cur: 1.0,
+                        }],
+                    }));
+                }
+            }
+        });
+        let engine = EngineHandle::new(tx);
+        let mut meta = fake_watch(&[1]);
+
+        let err = push_poll(&engine, "w", &mut meta).await.unwrap_err();
+        assert!(is_engine_timeout(&err));
+        assert!(meta.resync);
+
+        push_poll(&engine, "w", &mut meta).await.unwrap();
+        assert!(
+            flags_rx.recv().await.unwrap(),
+            "poll after a timeout must refresh"
+        );
+        assert!(!meta.resync);
+
+        push_poll(&engine, "w", &mut meta).await.unwrap();
+        assert!(
+            !flags_rx.recv().await.unwrap(),
+            "later polls are deltas again"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn close_watches_stops_at_first_timeout() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let seen = Arc::new(AtomicUsize::new(0));
+        let counter = seen.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<super::super::EngineCmd>(16);
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Some(cmd) = rx.recv().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+                held.push(cmd);
+            }
+        });
+        let ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        close_watches(EngineHandle::new(tx), ids).await;
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+    }
+
     fn fake_watch(ids: &[u32]) -> WatchMeta {
         WatchMeta {
             poll_interval: Duration::from_millis(1000),
             last_poll: Instant::now(),
             subscribed_ids: ids.iter().copied().collect(),
             cov_pending: false,
+            resync: false,
         }
     }
 

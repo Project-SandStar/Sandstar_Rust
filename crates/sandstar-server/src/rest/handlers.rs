@@ -365,17 +365,32 @@ pub async fn status(
     .into_response())
 }
 
+/// How long `/health` waits for the engine before reporting unhealthy.
+pub const HEALTH_ENGINE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// GET /health — lightweight health check for load balancers / systemd.
-pub async fn health(State(handle): State<EngineHandle>) -> Json<serde_json::Value> {
-    match handle.status().await {
+///
+/// 200 when the engine answers within [`HEALTH_ENGINE_TIMEOUT`], otherwise
+/// 503 with the same body shape (`healthy: false`), so checks that look only
+/// at the HTTP status (`curl -f`) see the failure (R-28, S-21).
+pub async fn health(State(handle): State<EngineHandle>) -> Response {
+    match handle.status_within(HEALTH_ENGINE_TIMEOUT).await {
         Ok(info) => Json(serde_json::json!({
             "healthy": true,
             "uptimeSecs": info.uptime_secs,
-        })),
-        Err(_) => Json(serde_json::json!({
-            "healthy": false,
-            "uptimeSecs": 0,
-        })),
+        }))
+        .into_response(),
+        Err(e) => {
+            tracing::debug!(error = %e, "/health: engine unavailable");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "healthy": false,
+                    "uptimeSecs": 0,
+                })),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -697,6 +712,58 @@ pub fn epoch_to_string(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn health_body(resp: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn health_is_503_when_engine_does_not_answer() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let keep = tokio::spawn(async move {
+            let cmd = rx.recv().await;
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            drop(cmd);
+        });
+        let start = tokio::time::Instant::now();
+        let resp = health(State(EngineHandle::new(tx))).await;
+        assert_eq!(start.elapsed(), HEALTH_ENGINE_TIMEOUT);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = health_body(resp).await;
+        assert_eq!(body["healthy"], false);
+        assert_eq!(body["uptimeSecs"], 0);
+        keep.abort();
+    }
+
+    #[tokio::test]
+    async fn health_is_503_when_engine_stopped() {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        drop(rx);
+        let resp = health(State(EngineHandle::new(tx))).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn health_is_200_when_engine_answers() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            if let Some(super::super::EngineCmd::Status { reply }) = rx.recv().await {
+                let _ = reply.send(sandstar_ipc::types::StatusInfo {
+                    uptime_secs: 42,
+                    channel_count: 0,
+                    poll_count: 0,
+                    table_count: 0,
+                    poll_interval_ms: 1000,
+                });
+            }
+        });
+        let resp = health(State(EngineHandle::new(tx))).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = health_body(resp).await;
+        assert_eq!(body["healthy"], true);
+        assert_eq!(body["uptimeSecs"], 42);
+    }
 
     #[test]
     fn parse_date_to_epoch_valid() {
