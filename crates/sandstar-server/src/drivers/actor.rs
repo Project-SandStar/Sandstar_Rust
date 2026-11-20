@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::async_driver::AnyDriver;
 use super::poll_scheduler::PollScheduler;
@@ -32,6 +32,17 @@ use super::{
     CovEvent, DriverError, DriverId, DriverMessage, DriverMeta, DriverPointRef, DriverStatus,
     DriverSummary, LearnGrid, PointStatus,
 };
+
+/// A driver read that is not a finite number is a fault, not a value (R-49).
+///
+/// Applied once for every driver in `DriverManagerInner::sync_all`, so no
+/// driver can mark a point healthy with NaN or ±inf.
+fn reject_non_finite(result: Result<f64, DriverError>) -> Result<f64, DriverError> {
+    match result {
+        Ok(v) if !v.is_finite() => Err(DriverError::RemoteStatus(format!("non-finite value {v}"))),
+        other => other,
+    }
+}
 
 /// Default capacity for the broadcast CovEvent channel.
 ///
@@ -663,6 +674,7 @@ impl DriverManagerInner {
         for (driver_id, points) in point_map {
             if let Some(driver) = self.drivers.get_mut(driver_id) {
                 for (point_id, result) in driver.sync_cur(points).await {
+                    let result = reject_non_finite(result);
                     match &result {
                         Err(e) => {
                             // Metric: count each per-point error.
@@ -670,6 +682,10 @@ impl DriverManagerInner {
                                 .driver_sync_errors_total
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             status_updates.push((point_id, PointStatus::from_driver_error(e)));
+                            // Forget the last emitted value so the next good
+                            // read is broadcast even if it equals the value
+                            // before the fault.
+                            self.last_emitted.remove(&point_id);
                         }
                         Ok(v) => {
                             // Successful read — clear any previous remote-error
@@ -692,10 +708,8 @@ impl DriverManagerInner {
             }
         }
         // Emit CovEvent for each point whose value differs from the last
-        // emitted one (or that has never emitted before). `bit_eq` style
-        // via `!=` on f64 is intentional: NaN != NaN means a NaN read will
-        // retrigger emission, which is the right behavior for "the value
-        // stopped being a real number".
+        // emitted one (or that has never emitted before). Values here are
+        // always finite: reject_non_finite turned NaN/±inf into errors.
         let now = Instant::now();
         for (pid, v) in cov_candidates {
             let changed = match self.last_emitted.get(&pid) {
@@ -749,7 +763,29 @@ impl DriverManagerInner {
             .drivers
             .get_mut(driver_id)
             .ok_or_else(|| DriverError::ConfigFault(format!("driver '{driver_id}' not found")))?;
-        Ok(driver.write(writes).await)
+        // A non-finite value never reaches the driver, and so never the
+        // equipment (R-49). The other points of the batch are still written.
+        let (finite, rejected): (Vec<_>, Vec<_>) =
+            writes.iter().copied().partition(|(_, v)| v.is_finite());
+        let mut results = if finite.is_empty() && !rejected.is_empty() {
+            Vec::new()
+        } else {
+            driver.write(&finite).await
+        };
+        for (point_id, v) in rejected {
+            warn!(
+                driver = %driver_id,
+                point_id,
+                "driver write rejected: non-finite value {v}"
+            );
+            results.push((
+                point_id,
+                Err(DriverError::ConfigFault(format!(
+                    "non-finite value {v} not written"
+                ))),
+            ));
+        }
+        Ok(results)
     }
 
     fn driver_ids(&self) -> Vec<String> {
@@ -1723,5 +1759,135 @@ mod tests {
 
         let res = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
         assert!(res.is_err(), "errored reads must not emit CovEvent");
+    }
+
+    // ── R-49: non-finite driver values (S-28) ──────────────
+
+    #[tokio::test]
+    async fn non_finite_read_is_a_point_fault_without_cov() {
+        let handle = spawn_driver_actor(16);
+        let value = Arc::new(Mutex::new(5.0f64));
+        handle
+            .register(value_driver("vd", value.clone()))
+            .await
+            .unwrap();
+        handle.open_all().await.unwrap();
+        handle.register_point(3, "vd").await.unwrap();
+        let mut rx = handle.subscribe_cov();
+
+        // A good read first, so there is a healthy state to lose.
+        handle.sync_all(sync_map("vd", 3)).await.unwrap();
+        let first = tokio::time::timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.value, 5.0);
+
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            *value.lock().unwrap() = bad;
+            let results = handle.sync_all(sync_map("vd", 3)).await.unwrap();
+            assert_eq!(results.len(), 1);
+            match &results[0].2 {
+                Err(DriverError::RemoteStatus(msg)) => {
+                    assert!(msg.contains("non-finite"), "{bad}: {msg}")
+                }
+                other => panic!("{bad}: expected RemoteStatus error, got {other:?}"),
+            }
+            let status = handle.effective_point_status(3).await.unwrap();
+            assert!(
+                matches!(status, Some(DriverStatus::Fault(_))),
+                "{bad}: point must show a fault, got {status:?}"
+            );
+            let res = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await;
+            assert!(res.is_err(), "{bad}: no CovEvent for a non-finite read");
+        }
+
+        // A finite read clears the fault and emits again, even with the
+        // same value as before the fault.
+        *value.lock().unwrap() = 5.0;
+        let results = handle.sync_all(sync_map("vd", 3)).await.unwrap();
+        assert_eq!(results[0].2.as_ref().ok(), Some(&5.0));
+        assert_eq!(
+            handle.effective_point_status(3).await.unwrap(),
+            Some(DriverStatus::Ok)
+        );
+        let evt = tokio::time::timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(evt.value, 5.0);
+    }
+
+    /// Driver that records every value handed to `write`.
+    struct RecordingDriver {
+        status: DriverStatus,
+        seen: Arc<Mutex<Vec<(u32, f64)>>>,
+    }
+
+    impl Driver for RecordingDriver {
+        fn driver_type(&self) -> &'static str {
+            "recording"
+        }
+        fn id(&self) -> &str {
+            "rec"
+        }
+        fn status(&self) -> &DriverStatus {
+            &self.status
+        }
+        fn open(&mut self) -> Result<DriverMeta, DriverError> {
+            self.status = DriverStatus::Ok;
+            Ok(DriverMeta::default())
+        }
+        fn close(&mut self) {}
+        fn ping(&mut self) -> Result<DriverMeta, DriverError> {
+            Ok(DriverMeta::default())
+        }
+        fn sync_cur(&mut self, _: &[DriverPointRef], _: &mut SyncContext) {}
+        fn write(&mut self, writes: &[(u32, f64)], ctx: &mut WriteContext) {
+            self.seen.lock().unwrap().extend_from_slice(writes);
+            for (id, _) in writes {
+                ctx.update_write_ok(*id);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn non_finite_write_never_reaches_the_driver() {
+        let handle = spawn_driver_actor(16);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        handle
+            .register(AnyDriver::Sync(Box::new(RecordingDriver {
+                status: DriverStatus::Pending,
+                seen: seen.clone(),
+            })))
+            .await
+            .unwrap();
+        handle.open_all().await.unwrap();
+
+        let results = handle
+            .write(
+                "rec",
+                vec![(1, 1.5), (2, f64::NAN), (3, f64::INFINITY), (4, -2.0)],
+            )
+            .await
+            .unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec![(1, 1.5), (4, -2.0)]);
+        assert_eq!(results.len(), 4);
+        for (id, res) in &results {
+            match id {
+                1 | 4 => assert!(res.is_ok(), "point {id}: {res:?}"),
+                _ => assert!(
+                    matches!(res, Err(DriverError::ConfigFault(m)) if m.contains("non-finite")),
+                    "point {id}: {res:?}"
+                ),
+            }
+        }
+
+        // Only non-finite values: the driver is not called at all.
+        seen.lock().unwrap().clear();
+        let results = handle.write("rec", vec![(9, f64::NAN)]).await.unwrap();
+        assert!(seen.lock().unwrap().is_empty());
+        assert_eq!(results.len(), 1);
+        assert!(results[0].1.is_err());
     }
 }
