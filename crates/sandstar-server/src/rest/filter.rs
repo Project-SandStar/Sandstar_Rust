@@ -213,8 +213,8 @@ fn parse_cmp(tokens: &[Token], pos: &mut usize) -> Result<Expr, String> {
 
     // Check for comparison operator
     if *pos >= tokens.len() {
-        if path.is_single() {
-            return Ok(Expr::Has(path.segments.into_iter().next().unwrap()));
+        if let [name] = path.segments.as_slice() {
+            return Ok(Expr::Has(name.clone()));
         }
         return Err("path expression requires a comparison operator".into());
     }
@@ -228,8 +228,8 @@ fn parse_cmp(tokens: &[Token], pos: &mut usize) -> Result<Expr, String> {
         Token::Ge => CmpOp::Ge,
         _ => {
             // No operator — only valid as marker check for single-segment paths
-            if path.is_single() {
-                return Ok(Expr::Has(path.segments.into_iter().next().unwrap()));
+            if let [name] = path.segments.as_slice() {
+                return Ok(Expr::Has(name.clone()));
             }
             return Err("path expression requires a comparison operator".into());
         }

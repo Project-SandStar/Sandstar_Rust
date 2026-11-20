@@ -145,7 +145,9 @@ fn with_handle_table<F, R>(f: F) -> R
 where
     F: FnOnce(&mut HandleTable) -> R,
 {
-    let mut guard = HANDLE_TABLE.lock().expect("handle table lock poisoned");
+    let mut guard = HANDLE_TABLE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let table = guard.get_or_insert_with(HandleTable::new);
     f(table)
 }
@@ -735,6 +737,22 @@ mod tests {
 
     fn test_ctx(mem: &mut Vec<u8>) -> NativeContext<'_> {
         NativeContext::new(mem)
+    }
+
+    #[test]
+    fn handle_table_survives_a_poisoned_lock() {
+        // Poisons the process-wide table for the rest of this test binary;
+        // with poison recovery every later caller keeps working (R-4). Any
+        // test that asserts the table is not poisoned, or locks it with a
+        // plain unwrap, would fail depending on test order. On 32-bit targets
+        // resolve_ptr does not use the table, so the last assert is weaker.
+        let _ = std::thread::spawn(|| {
+            with_handle_table(|_| panic!("poison the handle table"));
+        })
+        .join();
+        assert!(HANDLE_TABLE.is_poisoned());
+        let handle = with_handle_table(|t| t.register_static(b"x".as_ptr()));
+        assert!(resolve_ptr(handle).is_some());
     }
 
     // ── String formatting ────────────────────────────────────

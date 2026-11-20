@@ -165,10 +165,9 @@ pub fn decode_application_tag(data: &[u8]) -> Result<(BacnetValue, usize), Bacne
         // double-precision value immediately following the tag byte (9 bytes
         // total). The LVT field is treated as a don't-care for this tag.
         5 => {
-            if data.len() < 9 {
+            let Some(bytes) = data.get(1..9).and_then(|b| <[u8; 8]>::try_from(b).ok()) else {
                 return Err(BacnetError::MalformedFrame("Double value truncated".into()));
-            }
-            let bytes: [u8; 8] = data[1..9].try_into().unwrap();
+            };
             Ok((BacnetValue::Double(f64::from_be_bytes(bytes)), 9))
         }
 

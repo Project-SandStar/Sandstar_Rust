@@ -62,7 +62,9 @@ static FILE_HANDLES: Mutex<Option<FileStore>> = Mutex::new(None);
 
 /// Ensure the global store is initialized and run `f` with a mutable ref to it.
 fn with_store<R>(f: impl FnOnce(&mut FileStore) -> R) -> R {
-    let mut guard = FILE_HANDLES.lock().expect("FILE_HANDLES mutex poisoned");
+    let mut guard = FILE_HANDLES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let store = guard.get_or_insert_with(FileStore::new);
     f(store)
 }
@@ -433,7 +435,9 @@ pub fn register_kit0_file(table: &mut NativeTable) {
 #[cfg(test)]
 #[allow(dead_code)]
 fn reset_file_store() {
-    let mut guard = FILE_HANDLES.lock().expect("FILE_HANDLES mutex poisoned");
+    let mut guard = FILE_HANDLES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     *guard = None;
 }
 

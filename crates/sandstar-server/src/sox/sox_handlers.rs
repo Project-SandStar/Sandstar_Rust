@@ -11415,6 +11415,93 @@ mod tests {
         );
     }
 
+    /// Deterministic pseudo-random bytes (no extra dependency, same run every time).
+    fn sweep_rng(seed: &mut u64) -> u64 {
+        *seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *seed >> 33
+    }
+
+    /// A SOX request for `cmd` with a random payload. The first payload
+    /// bytes lean toward small component ids so handlers get past lookup.
+    fn sweep_request(cmd: u8, seed: &mut u64) -> Vec<u8> {
+        let len = (sweep_rng(seed) % 48) as usize;
+        let mut data = vec![cmd, (sweep_rng(seed) % 250) as u8];
+        for i in 0..len {
+            let r = sweep_rng(seed);
+            data.push(match (i, r % 6) {
+                (0, _) => 0,
+                (1, _) => (r % 24) as u8,
+                (_, 0) => 0,
+                (_, 1) => 0xFF,
+                _ => (r >> 8) as u8,
+            });
+        }
+        data
+    }
+
+    /// Commands swept for panics. File transfer (f/g/h/…) is left out: it
+    /// writes to disk and keeps global state (R-15).
+    const SWEPT_CMDS: &[u8] = b"vycrlsuwiadno";
+
+    #[test]
+    fn sox_handlers_never_panic_on_random_payloads() {
+        // R-4: a panic in a SOX handler aborts the process in release.
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let persist = dir.path().join("sweep.json").to_string_lossy().into_owned();
+        let channels = sample_channels();
+        let mut seed = 0x5EED_u64;
+        let mut failures = Vec::new();
+
+        // Fresh tree per request: every handler sees the same starting state.
+        for &cmd in SWEPT_CMDS {
+            for _ in 0..600 {
+                let data = sweep_request(cmd, &mut seed);
+                let Some(req) = SoxRequest::parse(&data) else {
+                    continue;
+                };
+                let (chans, path) = (channels.clone(), persist.clone());
+                let res = std::panic::catch_unwind(move || {
+                    let mut tree = ComponentTree::from_channels(&chans);
+                    tree.set_persist_path(path);
+                    let mut subs = SubscriptionManager::new();
+                    let _ = handle_sox_request(&req, &mut tree, &mut subs, 1);
+                });
+                if res.is_err() {
+                    failures.push(format!("fresh {data:02x?}"));
+                }
+            }
+        }
+
+        // One tree across all requests: adds, links and renames build up
+        // state that later requests run into.
+        let mut tree = ComponentTree::from_channels(&channels);
+        tree.set_persist_path(persist);
+        let mut subs = SubscriptionManager::new();
+        for _ in 0..12_000 {
+            let cmd = SWEPT_CMDS[(sweep_rng(&mut seed) % SWEPT_CMDS.len() as u64) as usize];
+            let data = sweep_request(cmd, &mut seed);
+            let Some(req) = SoxRequest::parse(&data) else {
+                continue;
+            };
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = handle_sox_request(&req, &mut tree, &mut subs, 1);
+            }));
+            if res.is_err() {
+                failures.push(format!("stateful {data:02x?}"));
+                break; // the tree may be half-updated after a panic
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{} panics, first: {:?}",
+            failures.len(),
+            failures.first()
+        );
+    }
+
     #[test]
     fn persist_writes_only_names_still_in_use() {
         // Renames used to leave every old name in the table and the

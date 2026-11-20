@@ -344,7 +344,12 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
             ChannelType::I2c => self.hal.read_i2c(device, address, &label),
             ChannelType::Uart => self.hal.read_uart(device, &label),
             // Virtuals handled above
-            ChannelType::VirtualAnalog | ChannelType::VirtualDigital => unreachable!(),
+            // Virtual channels return before the hardware read above; an
+            // error here keeps that a fault instead of an abort if it changes.
+            ChannelType::VirtualAnalog | ChannelType::VirtualDigital => Err(HalError::BusError(
+                device,
+                "virtual channel reached the hardware read path".into(),
+            )),
         };
 
         // 6. HAL error → failed=true, return Down
@@ -366,6 +371,16 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
             .channels
             .get_mut(id)
             .ok_or(EngineError::ChannelNotFound(id))?;
+        // A non-finite reading is a fault, not a value (numeric-output.md,
+        // R-9 read side). Checked before validate_i2c_raw, which would swap
+        // it for the last value or 0, and before the filters, which would
+        // take the kept cur as a new sample. raw and cur keep the last good
+        // values; status Fault tells consumers not to use them.
+        if !raw.is_finite() {
+            ch.value.status = EngineStatus::Fault;
+            ch.value.trigger = false;
+            return Ok(ch.value);
+        }
         ch.value.set_raw(raw);
 
         // 8. SDP810 garbage detection
@@ -623,10 +638,8 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
                 .channels
                 .get_mut(id)
                 .ok_or(EngineError::ChannelNotFound(id))?;
-            // priority_array is guaranteed Some by the lazy-init above
             ch.priority_array
-                .as_mut()
-                .expect("priority_array was just initialized")
+                .get_or_insert_with(priority::PriorityArray::default)
                 .set_level(level, value, who, duration)
         };
 
@@ -886,7 +899,12 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
                 }
             }
             ChannelType::Uart => self.hal.read_uart(device, &label),
-            ChannelType::VirtualAnalog | ChannelType::VirtualDigital => unreachable!(),
+            // Virtual channels return before the hardware read above; an
+            // error here keeps that a fault instead of an abort if it changes.
+            ChannelType::VirtualAnalog | ChannelType::VirtualDigital => Err(HalError::BusError(
+                device,
+                "virtual channel reached the hardware read path".into(),
+            )),
         };
 
         // 6-16: Identical to channel_read
@@ -907,6 +925,16 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
             .channels
             .get_mut(id)
             .ok_or(EngineError::ChannelNotFound(id))?;
+        // A non-finite reading is a fault, not a value (numeric-output.md,
+        // R-9 read side). Checked before validate_i2c_raw, which would swap
+        // it for the last value or 0, and before the filters, which would
+        // take the kept cur as a new sample. raw and cur keep the last good
+        // values; status Fault tells consumers not to use them.
+        if !raw.is_finite() {
+            ch.value.status = EngineStatus::Fault;
+            ch.value.trigger = false;
+            return Ok(ch.value);
+        }
         ch.value.set_raw(raw);
 
         let raw = ch.validate_i2c_raw(raw);
@@ -1288,6 +1316,50 @@ mod tests {
         engine.hal.set_analog(0, 0, Ok(2048.0));
         let value = engine.channel_read(1100).unwrap();
         assert_eq!(value.status, EngineStatus::Ok);
+    }
+
+    #[test]
+    fn non_finite_hal_reading_is_a_fault_on_both_read_paths() {
+        for raw in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            // Analog, uncached path.
+            let mut engine = make_engine();
+            engine.channels.add(analog_channel(1100)).unwrap();
+            engine.hal.set_analog(0, 0, Ok(2048.0));
+            let good = engine.channel_read(1100).unwrap();
+            engine.hal.set_analog(0, 0, Ok(raw));
+            let v = engine.channel_read(1100).unwrap();
+            assert_eq!(v.status, EngineStatus::Fault, "analog {raw}");
+            assert_eq!(v.cur, good.cur, "analog {raw}: cur kept");
+            assert_eq!(v.raw, good.raw, "analog {raw}: raw kept");
+
+            // SDP810: validate_i2c_raw used to turn NaN into the last value
+            // (or 0) and report Ok.
+            let mut engine = make_engine();
+            let mut ch = i2c_channel(612);
+            ch.last_valid_value = 50.0;
+            engine.channels.add(ch).unwrap();
+            engine.hal.set_i2c(2, 0x40, "sdp810", Ok(raw));
+            let v = engine.channel_read(612).unwrap();
+            assert_eq!(v.status, EngineStatus::Fault, "sdp810 {raw}");
+
+            // Cached path (poll cycle).
+            let cache = I2cReadCache::new();
+            let v = engine.channel_read_cached(612, &cache).unwrap();
+            assert_eq!(v.status, EngineStatus::Fault, "sdp810 cached {raw}");
+        }
+
+        // A good reading after a fault recovers.
+        let mut engine = make_engine();
+        engine.channels.add(analog_channel(1100)).unwrap();
+        engine.hal.set_analog(0, 0, Ok(f64::NAN));
+        assert_eq!(
+            engine.channel_read(1100).unwrap().status,
+            EngineStatus::Fault
+        );
+        engine.hal.set_analog(0, 0, Ok(2048.0));
+        let v = engine.channel_read(1100).unwrap();
+        assert_eq!(v.status, EngineStatus::Ok);
+        assert!((v.cur - 0.5).abs() < 0.01);
     }
 
     #[test]

@@ -146,7 +146,7 @@ impl TableStore {
             )));
         }
 
-        let direction = if values.last().unwrap() > values.first().unwrap() {
+        let direction = if values.last() > values.first() {
             TableDirection::Increasing
         } else {
             TableDirection::Decreasing
@@ -182,8 +182,16 @@ impl TableStore {
         if values.is_empty() {
             return Err(EngineError::InvalidTableFile("empty values".to_string()));
         }
+        // The server loader (loader::load_tables) comes in here; it skips
+        // the table with a warning and keeps loading the others.
+        if let Some(pos) = values.iter().position(|v| !v.is_finite()) {
+            return Err(EngineError::InvalidTableFile(format!(
+                "value {} of table {tag} is not finite",
+                pos + 1
+            )));
+        }
 
-        let direction = if values.last().unwrap() > values.first().unwrap() {
+        let direction = if values.last() > values.first() {
             TableDirection::Increasing
         } else {
             TableDirection::Decreasing
@@ -415,6 +423,15 @@ impl TableStore {
                 path
             )));
         }
+        // "nan" and "inf" parse as f64; a non-finite entry would flip the
+        // table direction (NaN compares false) and break interpolation.
+        if let Some(pos) = values.iter().position(|v| !v.is_finite()) {
+            return Err(EngineError::InvalidTableFile(format!(
+                "value {} in {} is not finite",
+                pos + 1,
+                path
+            )));
+        }
 
         Ok(values)
     }
@@ -434,6 +451,37 @@ pub fn lerp(a: f64, b: f64, f: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn table_file_with_a_non_finite_value_is_rejected() {
+        // "nan" parses as f64; it used to load and flip the table direction.
+        let dir = std::env::temp_dir().join(format!("s27_table_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let load = |name: &str, body: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, body).unwrap();
+            TableStore::load_values(path.to_str().unwrap())
+        };
+        let nan_first = load("nan_first.txt", "nan\n2\n3\n");
+        let inf_mid = load("inf_mid.txt", "1\ninf\n3\n");
+        let ok = load("ok.txt", "1\n2\n3\n");
+        // Clean up before asserting so a failing run leaves nothing behind.
+        let _ = std::fs::remove_dir_all(&dir);
+
+        for (name, res) in [("nan_first", nan_first), ("inf_mid", inf_mid)] {
+            let err = res.unwrap_err();
+            assert!(err.to_string().contains("not finite"), "{name}: {err}");
+        }
+        assert_eq!(ok.unwrap(), vec![1.0, 2.0, 3.0]);
+
+        // The path the server loader uses (loader::load_tables).
+        let mut store = TableStore::new();
+        let err = store
+            .add_with_values("t", "F", vec![1.0, f64::NAN, 3.0], TableRanges::default())
+            .unwrap_err();
+        assert!(err.to_string().contains("not finite"), "{err}");
+        assert!(store.find_by_tag("t").is_none());
+    }
 
     fn make_increasing_table() -> TableStore {
         let mut store = TableStore::new();

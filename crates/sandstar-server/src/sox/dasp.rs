@@ -246,8 +246,9 @@ pub fn parse_header(data: &[u8]) -> Option<DaspHeader> {
                     _ => { /* unknown STR field — skip */ }
                 }
             }
-            3 => {
-                // BYTES (length-prefixed)
+            _ => {
+                // 3 = BYTES (length-prefixed); field_type is two bits, so
+                // this arm covers the last value.
                 if pos >= data.len() {
                     return None;
                 }
@@ -265,7 +266,6 @@ pub fn parse_header(data: &[u8]) -> Option<DaspHeader> {
                     _ => { /* unknown BYTES field — skip */ }
                 }
             }
-            _ => unreachable!(),
         }
     }
 
@@ -909,10 +909,11 @@ impl DaspTransport {
         }
 
         // Authentication succeeded
-        let session = self
-            .sessions
-            .get_mut(&session_id)
-            .expect("session must exist");
+        // Looked up at the top of this function and not removed on this path.
+        let Some(session) = self.sessions.get_mut(&session_id) else {
+            warn!("DASP: session 0x{session_id:04x} vanished during authentication");
+            return Ok(());
+        };
         session.authenticated = true;
         session.touch();
 
@@ -1121,6 +1122,32 @@ pub fn empty_header(msg_type: DaspMsgType, session_id: u16, seq_num: u16) -> Das
 mod tests {
     use super::*;
     use std::net::UdpSocket;
+
+    #[test]
+    fn parse_header_never_panics_on_random_input() {
+        // R-4: DASP headers arrive unauthenticated over UDP.
+        let mut seed = 0xDA5D_u64;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) as u8
+        };
+        for n in 0..40_000 {
+            let len = usize::from(next()) % 40;
+            let mut data: Vec<u8> = (0..len).map(|_| next()).collect();
+            // Every other input gets a known message type in the high nibble so
+            // parsing reaches the field loop; the low nibble is the field count.
+            if n % 2 == 0 && data.len() > 4 {
+                data[4] = ((next() % 8) << 4) | (next() & 0x0f);
+            }
+            let input = data.clone();
+            let res = std::panic::catch_unwind(move || {
+                let _ = parse_header(&input);
+            });
+            assert!(res.is_ok(), "parse_header panicked on {data:02x?}");
+        }
+    }
 
     /// Bind a DaspTransport to 127.0.0.1:0 for testing (avoids Windows
     /// issues with sending to 0.0.0.0).

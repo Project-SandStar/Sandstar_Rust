@@ -201,8 +201,13 @@ fn handle_live_msg(
         .and_then(|v| v.as_u64())
         .map(|v| v as u8)
         .unwrap_or(0xFF);
-    let msg_type = match msg.get("msgType").and_then(|v| v.as_str()) {
-        Some(s) if s.len() == 1 => s.chars().next().unwrap(),
+    // Exactly one byte, which in a str is always ASCII.
+    let msg_type = match msg
+        .get("msgType")
+        .and_then(|v| v.as_str())
+        .map(str::as_bytes)
+    {
+        Some(&[b]) => char::from(b),
         _ => return render_error(reply_num, "missing or invalid 'msgType'"),
     };
 
