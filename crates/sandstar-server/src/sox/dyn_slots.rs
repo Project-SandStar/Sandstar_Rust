@@ -66,14 +66,29 @@ const COMMON_TAG_NAMES: &[&str] = &[
 pub struct TagNameInterner {
     names: Vec<String>,
     lookup: HashMap<String, u16>,
+    /// Most names held; at most [`MAX_INTERNED_TAG_NAMES`].
+    limit: usize,
+    /// Set once the interner first refuses a name, so the warning fires once.
+    full_warned: bool,
 }
+
+/// Most tag names the interner holds: IDs 0..=65 535, the whole `u16` space.
+pub const MAX_INTERNED_TAG_NAMES: usize = u16::MAX as usize + 1;
 
 impl TagNameInterner {
     /// Create a new interner pre-populated with common Haystack/protocol tag names.
     pub fn new() -> Self {
+        Self::with_limit(MAX_INTERNED_TAG_NAMES)
+    }
+
+    /// Interner that holds at most `limit` names (capped at
+    /// [`MAX_INTERNED_TAG_NAMES`]). Lets tests fill it quickly.
+    pub(crate) fn with_limit(limit: usize) -> Self {
         let mut interner = Self {
             names: Vec::with_capacity(256),
             lookup: HashMap::with_capacity(256),
+            limit: limit.min(MAX_INTERNED_TAG_NAMES),
+            full_warned: false,
         };
         for &name in COMMON_TAG_NAMES {
             interner.intern(name);
@@ -83,20 +98,31 @@ impl TagNameInterner {
 
     /// Intern a tag name, returning its stable u16 ID.
     ///
-    /// If the name was already interned, returns the existing ID.
-    /// Panics (in debug) if more than 65535 unique names are interned.
-    pub fn intern(&mut self, name: &str) -> u16 {
+    /// If the name was already interned, returns the existing ID. When the
+    /// interner is full a new name is not stored and `None` is returned;
+    /// the old `as u16` wrapped in release and handed out duplicate IDs
+    /// (R-47). The tag itself is unaffected, the interner only keeps stats.
+    pub fn intern(&mut self, name: &str) -> Option<u16> {
         if let Some(&id) = self.lookup.get(name) {
-            return id;
+            return Some(id);
         }
-        let id = self.names.len() as u16;
-        debug_assert!(
-            (self.names.len()) < u16::MAX as usize,
-            "tag name interner overflow"
-        );
+        let next = self.names.len();
+        let id = match u16::try_from(next) {
+            Ok(id) if next < self.limit => id,
+            _ => {
+                if !self.full_warned {
+                    self.full_warned = true;
+                    warn!(
+                        limit = self.limit,
+                        "dyn_slots: tag name interner full, new names are not interned"
+                    );
+                }
+                return None;
+            }
+        };
         self.names.push(name.to_string());
         self.lookup.insert(name.to_string(), id);
-        id
+        Some(id)
     }
 
     /// Resolve an interned ID back to the tag name string.
@@ -325,9 +351,6 @@ impl DynSlotStore {
         key: String,
         value: DynValue,
     ) -> Result<Option<DynValue>, String> {
-        // Intern the tag name for dedup stats / future wire optimization.
-        self.interner.intern(&key);
-
         let tags = self.slots.entry(comp_id).or_default();
         let current_len = tags.len();
 
@@ -354,6 +377,9 @@ impl DynSlotStore {
                         self.total, self.max_total
                     ));
                 }
+                // Intern only accepted keys (dedup stats / future wire
+                // optimization); a rejected request must not grow it.
+                self.interner.intern(e.key());
                 e.insert(value);
                 self.total += 1;
                 self.dirty = true;
@@ -1070,7 +1096,7 @@ mod tests {
     #[test]
     fn interner_intern_and_resolve() {
         let mut interner = TagNameInterner::new();
-        let id = interner.intern("customTag");
+        let id = interner.intern("customTag").unwrap();
         assert_eq!(interner.resolve(id), Some("customTag"));
     }
 
@@ -1100,6 +1126,40 @@ mod tests {
         let (count_after, bytes_after) = interner.stats();
         assert_eq!(count_after, count_before + 1);
         assert_eq!(bytes_after, bytes_before + 5); // "extra" = 5 bytes
+    }
+
+    #[test]
+    fn full_interner_stops_without_reusing_ids() {
+        let common = COMMON_TAG_NAMES.len();
+        let mut interner = TagNameInterner::with_limit(common + 2);
+        let a = interner.intern("extraA").unwrap();
+        let b = interner.intern("extraB").unwrap();
+        assert_eq!(interner.intern("extraC"), None);
+        assert_eq!(interner.len(), common + 2);
+        // Existing IDs still resolve to their own names.
+        assert_eq!(interner.intern("extraA"), Some(a));
+        assert_eq!(interner.resolve(b), Some("extraB"));
+        assert_eq!(interner.resolve(0), Some(COMMON_TAG_NAMES[0]));
+    }
+
+    #[test]
+    fn interner_limit_covers_the_whole_id_space() {
+        // IDs 0..=u16::MAX; the old code wrapped the next ID back to 0.
+        let interner = TagNameInterner::with_limit(usize::MAX);
+        assert_eq!(interner.limit, MAX_INTERNED_TAG_NAMES);
+        assert_eq!(u16::try_from(MAX_INTERNED_TAG_NAMES - 1), Ok(u16::MAX));
+    }
+
+    #[test]
+    fn rejected_set_does_not_intern_the_key() {
+        let mut store = DynSlotStore::new(1, 10);
+        store.set(1, "first".into(), DynValue::Bool(true)).unwrap();
+        let before = store.interner().len();
+        assert!(store
+            .set(1, "rejectedKey".into(), DynValue::Bool(true))
+            .is_err());
+        assert_eq!(store.interner().len(), before);
+        assert!(store.interner().get_id("rejectedKey").is_none());
     }
 
     #[test]

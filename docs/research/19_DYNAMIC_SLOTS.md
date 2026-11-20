@@ -3,7 +3,7 @@
 > **Status (2026-11-18)**: audited against `master` `b48484b`. The design below is kept as rationale; this block records what shipped. Doc-by-doc report: [PROGRESS_REPORT_2026_11_18.md](PROGRESS_REPORT_2026_11_18.md).
 >
 > **Verdict:** about 55%. Phase 1 is done; the SOX extension was done differently; driver integration and ROX propagation are open.
-> - **Implemented:** side-car `DynSlotStore` with per-component and total limits, an interner and computed slots (`crates/sandstar-server/src/sox/dyn_slots.rs`); REST `/api/tags*` (`rest/tags.rs`); persistence, saved every 5 s when dirty; Haystack filter matching on dynamic tags.
+> - **Implemented:** side-car `DynSlotStore` with per-component and total limits, an interner (bounded at the `u16` id space, interns only accepted keys; S-26) and computed slots (`crates/sandstar-server/src/sox/dyn_slots.rs`); REST `/api/tags*` (`rest/tags.rs`); persistence, saved every 5 s when dirty; Haystack filter matching on dynamic tags.
 > - **Done differently:** own `DynValue` enum instead of a libhaystack `Dict`; u16 interner ids; JSON file `dyn_slots.json` in the config directory instead of Zinc/MessagePack; routes are `/api/tags/*`, not `/api/dynslots/*`. SOX uses a new readComp `what='d'` instead of virtual slot ids 200-255.
 > - **Not done / open:** `ComponentProxy`; `LearnItem.dynamic_tags` and auto-population from drivers; LoRaWAN driver; ROX/roxWarp propagation; debounced and shutdown saves; a name-collision check against static slots. `/api/tags` PUT/DELETE are outside the auth layer (R-2).
 >
