@@ -1,7 +1,7 @@
 use crate::conversion::filters::{RateLimitConfig, SmoothingConfig, SpikeConfig};
 use crate::conversion::sdp610;
 use crate::table::TableStore;
-use crate::{ChannelId, EngineStatus, EngineValue, Result, ValueFlags};
+use crate::{ChannelId, EngineError, EngineStatus, EngineValue, Result, ValueFlags};
 
 /// Conversion function tag (replaces C function pointer dispatch).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +101,42 @@ pub struct ValueConv {
 }
 
 impl ValueConv {
+    /// Why this conversion cannot be applied, if it cannot (R-10).
+    ///
+    /// `f64::clamp` panics when its lower bound is above the upper one or
+    /// either is NaN, and a non-finite scale or offset makes every output
+    /// non-finite. The limits come from config (Zinc), so they are checked
+    /// here instead of trusted. Only limits that are both set are compared;
+    /// `convert` also checks its defaults for a half-set range, which
+    /// `revert` does not clamp.
+    pub fn limits_error(&self) -> Option<String> {
+        for (name, v) in [
+            ("low", self.low),
+            ("high", self.high),
+            ("min", self.min),
+            ("max", self.max),
+            ("offset", self.offset),
+            ("scale", self.scale),
+        ] {
+            if let Some(v) = v {
+                if !v.is_finite() {
+                    return Some(format!("{name} is not finite"));
+                }
+            }
+        }
+        if let (Some(low), Some(high)) = (self.low, self.high) {
+            if low > high {
+                return Some(format!("low {low} is above high {high}"));
+            }
+        }
+        if let (Some(min), Some(max)) = (self.min, self.max) {
+            if min > max {
+                return Some(format!("min {min} is above max {max}"));
+            }
+        }
+        None
+    }
+
     /// Convert raw value to engineering units (maps C `value_convert`).
     ///
     /// Three conversion paths:
@@ -121,6 +157,15 @@ impl ValueConv {
         channel: ChannelId,
         flow_detected: &mut Option<bool>,
     ) -> Result<()> {
+        // Invalid limits would panic in clamp below; fault the channel instead.
+        // The range path clamps against defaults for an unset bound, so a
+        // half-set range is compared against them too.
+        if self.limits_error().is_some() || self.low.unwrap_or(0.0) > self.high.unwrap_or(4096.0) {
+            value.status = EngineStatus::Fault;
+            value.trigger = false;
+            return Ok(());
+        }
+
         let mut raw = value.raw;
 
         if let Some(conv_func) = self.conv_func {
@@ -183,7 +228,22 @@ impl ValueConv {
     ///
     /// After reversion, sets status=Ok and trigger=false (matches C behavior).
     /// Writes back both raw and (clamped) cur values.
-    pub fn revert(&self, value: &mut EngineValue, tables: &TableStore) -> Result<()> {
+    ///
+    /// The result goes to hardware, so a non-finite value or invalid limits
+    /// are an error and nothing is written back (numeric-output.md, R-9):
+    /// `f64::min` would turn NaN into `max`.
+    pub fn revert(
+        &self,
+        value: &mut EngineValue,
+        tables: &TableStore,
+        channel: ChannelId,
+    ) -> Result<()> {
+        if let Some(reason) = self.limits_error() {
+            return Err(EngineError::ConversionFault(channel, reason));
+        }
+        if !value.cur.is_finite() {
+            return Err(EngineError::NonFiniteValue(channel));
+        }
         let mut cur = value.cur;
 
         // Clamp to [min, max]
@@ -204,6 +264,14 @@ impl ValueConv {
         // Reverse offset
         if let Some(offset) = self.offset {
             cur -= offset;
+        }
+        // A huge cur over a tiny scale overflows; checked before any clamp
+        // below can turn infinity into an end position (R-9).
+        if !cur.is_finite() {
+            return Err(EngineError::ConversionFault(
+                channel,
+                format!("reverted value {cur} is not finite"),
+            ));
         }
 
         let raw = if self.adc_mode {
@@ -229,7 +297,15 @@ impl ValueConv {
             cur * (high - low)
         };
 
-        // Clamp to [low, high]
+        // The range un-scaling can still overflow; check before the clamp.
+        if !raw.is_finite() {
+            return Err(EngineError::ConversionFault(
+                channel,
+                format!("reverted raw value {raw} is not finite"),
+            ));
+        }
+
+        // Clamp to [low, high]; limits_error() above guarantees low <= high.
         let raw = if let (Some(low), Some(high)) = (self.low, self.high) {
             raw.clamp(low, high)
         } else {
@@ -579,7 +655,7 @@ mod tests {
         value.set_cur(0.5);
 
         let tables = TableStore::new();
-        conv.revert(&mut value, &tables).unwrap();
+        conv.revert(&mut value, &tables, 0).unwrap();
 
         assert!((value.raw - 2048.0).abs() < 0.01);
     }
@@ -598,13 +674,13 @@ mod tests {
         // cur <= 0 -> low
         let mut value = EngineValue::default();
         value.set_cur(0.0);
-        conv.revert(&mut value, &tables).unwrap();
+        conv.revert(&mut value, &tables, 0).unwrap();
         assert_eq!(value.raw, 0.0);
 
         // cur > 0 -> high
         let mut value = EngineValue::default();
         value.set_cur(1.0);
-        conv.revert(&mut value, &tables).unwrap();
+        conv.revert(&mut value, &tables, 0).unwrap();
         assert_eq!(value.raw, 4096.0);
     }
 
@@ -719,7 +795,7 @@ mod tests {
 
         value.set_cur(0.5);
         let tables = TableStore::new();
-        conv.revert(&mut value, &tables).unwrap();
+        conv.revert(&mut value, &tables, 0).unwrap();
 
         assert_eq!(value.status, crate::EngineStatus::Ok);
         assert!(!value.trigger);
@@ -738,7 +814,7 @@ mod tests {
         assert_eq!(value.flags, crate::ValueFlags::CUR);
 
         let tables = TableStore::new();
-        conv.revert(&mut value, &tables).unwrap();
+        conv.revert(&mut value, &tables, 0).unwrap();
 
         // After revert, flags should be CUR | RAW (OR'd)
         assert!(value.flags.contains(crate::ValueFlags::RAW));
@@ -929,5 +1005,127 @@ mod tests {
         conv.convert(&mut value, &tables, 0, &mut flow).unwrap();
 
         assert_eq!(value.status, crate::EngineStatus::Ok);
+    }
+
+    // --- S-25: invalid limits and non-finite values (R-9, R-10) ---
+
+    #[test]
+    fn limits_error_reports_unusable_limits() {
+        assert_eq!(ValueConv::default().limits_error(), None);
+        let cases: [fn(&mut ValueConv); 5] = [
+            |c| {
+                c.low = Some(10.0);
+                c.high = Some(0.0);
+            },
+            |c| {
+                c.min = Some(5.0);
+                c.max = Some(1.0);
+            },
+            |c| c.low = Some(f64::NAN),
+            |c| c.max = Some(f64::INFINITY),
+            |c| c.scale = Some(f64::NAN),
+        ];
+        for (i, set) in cases.iter().enumerate() {
+            let mut conv = ValueConv::default();
+            set(&mut conv);
+            assert!(conv.limits_error().is_some(), "case {i}");
+        }
+    }
+
+    #[test]
+    fn convert_faults_on_inverted_range_instead_of_panicking() {
+        let tables = TableStore::new();
+        let conv = ValueConv {
+            low: Some(4096.0),
+            high: Some(0.0),
+            ..Default::default()
+        };
+        let mut value = EngineValue::default();
+        value.raw = 100.0;
+        let mut flow = None;
+        conv.convert(&mut value, &tables, 0, &mut flow).unwrap();
+        assert_eq!(value.status, crate::EngineStatus::Fault);
+    }
+
+    #[test]
+    fn revert_rejects_non_finite_cur_instead_of_returning_max() {
+        let tables = TableStore::new();
+        let conv = ValueConv {
+            min: Some(0.0),
+            max: Some(100.0),
+            ..Default::default()
+        };
+        for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut value = EngineValue::default();
+            value.cur = v;
+            let raw_before = value.raw;
+            let err = conv.revert(&mut value, &tables, 9).unwrap_err();
+            assert!(
+                matches!(err, EngineError::NonFiniteValue(9)),
+                "{v}: got {err:?}"
+            );
+            assert_eq!(value.raw, raw_before, "{v} changed raw");
+        }
+    }
+
+    #[test]
+    fn revert_rejects_inverted_limits_and_overflow() {
+        let tables = TableStore::new();
+        let inverted = ValueConv {
+            low: Some(10.0),
+            high: Some(0.0),
+            ..Default::default()
+        };
+        let mut value = EngineValue::default();
+        value.cur = 5.0;
+        assert!(matches!(
+            inverted.revert(&mut value, &tables, 3),
+            Err(EngineError::ConversionFault(3, _))
+        ));
+
+        // A tiny scale overflows a finite cur to infinity. With low/high set
+        // the clamp used to turn that into high, the end position.
+        for (low, high) in [(None, None), (Some(0.0), Some(4096.0))] {
+            let tiny_scale = ValueConv {
+                low,
+                high,
+                scale: Some(1e-300),
+                ..Default::default()
+            };
+            let mut value = EngineValue::default();
+            value.cur = 1e300;
+            let raw_before = value.raw;
+            assert!(
+                matches!(
+                    tiny_scale.revert(&mut value, &tables, 3),
+                    Err(EngineError::ConversionFault(3, _))
+                ),
+                "low {low:?} high {high:?}"
+            );
+            assert_eq!(value.raw, raw_before);
+        }
+    }
+
+    #[test]
+    fn half_set_range_faults_reads_but_still_reverts() {
+        // low above the convert default high (4096) with no high set: the
+        // read path compares against the default and faults; writes, which
+        // never clamped a half-set range, keep working.
+        let tables = TableStore::new();
+        let conv = ValueConv {
+            low: Some(5000.0),
+            ..Default::default()
+        };
+        assert_eq!(conv.limits_error(), None);
+        let mut value = EngineValue::default();
+        value.raw = 100.0;
+        let mut flow = None;
+        conv.convert(&mut value, &tables, 0, &mut flow).unwrap();
+        assert_eq!(value.status, crate::EngineStatus::Fault);
+
+        let mut value = EngineValue::default();
+        value.cur = 0.5;
+        conv.revert(&mut value, &tables, 0).unwrap();
+        assert!(value.raw.is_finite());
     }
 }

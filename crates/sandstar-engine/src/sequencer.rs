@@ -45,22 +45,33 @@ impl LeadSequencer {
     /// bands. Each stage turns on when the input reaches its band threshold,
     /// and turns off when the input drops below the threshold minus the
     /// hysteresis dead-band.
+    ///
+    /// A non-finite input, range or hysteresis holds every stage: NaN
+    /// thresholds would never switch a stage off (R-9). The loop runs over
+    /// `stages`, so a `num_stages` set above it cannot index out of
+    /// bounds (R-10).
     pub fn execute(&mut self, input: f64) -> &[bool] {
         let range = self.in_max - self.in_min;
-        if range <= 0.0 || self.num_stages == 0 {
+        let n = self.num_stages.min(self.stages.len());
+        if !input.is_finite()
+            || !range.is_finite()
+            || !self.hysteresis.is_finite()
+            || range <= 0.0
+            || n == 0
+        {
             return &self.stages;
         }
 
-        let band_width = range / self.num_stages as f64;
+        let band_width = range / n as f64;
 
-        for i in 0..self.num_stages {
+        for (i, stage) in self.stages.iter_mut().take(n).enumerate() {
             let threshold_on = self.in_min + band_width * i as f64;
             let threshold_off = threshold_on - (band_width * self.hysteresis);
 
             if input > threshold_on {
-                self.stages[i] = true;
+                *stage = true;
             } else if input < threshold_off {
-                self.stages[i] = false;
+                *stage = false;
             }
             // else: hold current state (inside hysteresis band)
         }
@@ -281,5 +292,32 @@ mod tests {
         // Just above: 25.1 > 25.0 -> stage 1 on.
         seq.execute(25.1);
         assert!(seq.stages()[1], "should turn on just above threshold");
+    }
+
+    #[test]
+    fn num_stages_above_stage_count_does_not_panic() {
+        let mut seq = LeadSequencer::new(2);
+        seq.num_stages = 8; // pub field; used to index past stages (R-10)
+        seq.execute(100.0);
+        assert_eq!(seq.stages().len(), 2);
+        assert!(seq.stages().iter().all(|&s| s));
+    }
+
+    #[test]
+    fn non_finite_input_or_hysteresis_holds_stages() {
+        let mut seq = LeadSequencer::new(4);
+        seq.execute(100.0);
+        let on = seq.stages().to_vec();
+        for v in [f64::NAN, f64::NEG_INFINITY, f64::INFINITY] {
+            seq.execute(v);
+            assert_eq!(seq.stages(), on.as_slice(), "input {v}");
+        }
+
+        // NaN hysteresis: stages hold (control.toml rejects it at load).
+        let mut seq = LeadSequencer::new(4);
+        seq.execute(100.0);
+        seq.hysteresis = f64::NAN;
+        seq.execute(0.0);
+        assert_eq!(seq.stages(), on.as_slice());
     }
 }

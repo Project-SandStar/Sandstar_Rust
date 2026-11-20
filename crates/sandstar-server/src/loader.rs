@@ -268,6 +268,15 @@ pub fn load_database<H: HalRead + HalWrite + HalDiagnostics>(
 
         // 3. Build ValueConv from zinc tags
         let conv = build_value_conv(&grid, row, engine);
+        // Loaded anyway so the channel stays visible; the engine faults it
+        // instead of panicking in clamp (R-10).
+        if let Some(reason) = conv.limits_error() {
+            warn!(
+                channel = channel_id,
+                %reason,
+                "invalid conversion limits: channel reads as fault and rejects writes"
+            );
+        }
 
         // 4. Get display label
         let label = grid.string(row, "navName", "");
@@ -434,6 +443,15 @@ pub fn load_database_granular<H: HalRead + HalWrite + HalDiagnostics>(
 
         // 3. Build ValueConv from zinc tags
         let conv = build_value_conv(&grid, row, engine);
+        // Loaded anyway so the channel stays visible; the engine faults it
+        // instead of panicking in clamp (R-10).
+        if let Some(reason) = conv.limits_error() {
+            warn!(
+                channel = channel_id,
+                %reason,
+                "invalid conversion limits: channel reads as fault and rejects writes"
+            );
+        }
 
         // 4. Get display label
         let label = grid.string(row, "navName", "");

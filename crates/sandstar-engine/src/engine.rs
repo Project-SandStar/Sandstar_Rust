@@ -486,16 +486,31 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
                 .channels
                 .get(id)
                 .ok_or(EngineError::ChannelNotFound(id))?;
+            // convert() only faults the value on invalid limits; a write
+            // must not reach hardware at all (R-10).
+            if let Some(reason) = ch.conv.limits_error() {
+                return Err(EngineError::ConversionFault(id, reason));
+            }
             if value.flags.contains(ValueFlags::RAW) && !value.flags.contains(ValueFlags::CUR) {
-                // RAW only → convert to get cur
+                // RAW only → convert to get cur. The raw value goes to
+                // hardware as given, so it must be finite (R-9).
+                if !value.raw.is_finite() {
+                    return Err(EngineError::NonFiniteValue(id));
+                }
                 let mut flow = None;
                 ch.conv.convert(value, &self.tables, id, &mut flow)?;
             } else if value.flags.contains(ValueFlags::CUR)
                 && !value.flags.contains(ValueFlags::RAW)
             {
-                // CUR only → revert to get raw
-                ch.conv.revert(value, &self.tables)?;
+                // CUR only → revert to get raw (rejects non-finite cur)
+                ch.conv.revert(value, &self.tables, id)?;
             }
+        }
+
+        // Last line before hardware: whatever flags or conversion path led
+        // here, a non-finite value is never dispatched (R-9).
+        if !value.raw.is_finite() || !value.cur.is_finite() {
+            return Err(EngineError::NonFiniteValue(id));
         }
 
         // Snapshot fields for HAL dispatch
@@ -578,17 +593,29 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
         if !(1..=17).contains(&level) {
             return Err(EngineError::InvalidWriteLevel(level));
         }
+        // Every writer (REST, WS, IPC, Sedona VM, control loops) comes through
+        // here. A NaN would become the max in revert and drive the output
+        // fully open (R-9); it is rejected before it reaches the array.
+        if value.is_some_and(|v| !v.is_finite()) {
+            return Err(EngineError::NonFiniteValue(id));
+        }
+        if !duration.is_finite() || duration > priority::MAX_WRITE_DURATION_SECS {
+            return Err(EngineError::InvalidWriteDuration(id, duration));
+        }
 
-        // Lazy-init priority array
-        {
+        // Lazy-init priority array. The previous state is kept so a write
+        // the hardware path rejects is not left in the array as if applied.
+        let previous_array = {
             let ch = self
                 .channels
                 .get_mut(id)
                 .ok_or(EngineError::ChannelNotFound(id))?;
+            let previous = ch.priority_array.clone();
             if ch.priority_array.is_none() {
                 ch.priority_array = Some(priority::PriorityArray::default());
             }
-        }
+            previous
+        };
 
         // Set the level and get effective value
         let write_result = {
@@ -608,7 +635,21 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
             let mut ev = EngineValue::default();
             ev.set_cur(effective_val);
             ev.flags = ValueFlags::CUR;
-            self.channel_write(id, &mut ev)?;
+            if let Err(e) = self.channel_write(id, &mut ev) {
+                // A value the conversion rejects never reached hardware, so
+                // it is rolled back out of the array. Other errors keep the
+                // old behaviour: e.g. WriteNotSupported on an Analog output
+                // still stores the level, which configs may rely on.
+                if matches!(
+                    e,
+                    EngineError::NonFiniteValue(_) | EngineError::ConversionFault(..)
+                ) {
+                    if let Some(ch) = self.channels.get_mut(id) {
+                        ch.priority_array = previous_array;
+                    }
+                }
+                return Err(e);
+            }
         }
         // If no effective value (all levels empty), do NOT write — retain last value.
 
@@ -639,7 +680,7 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
             let mut flow = None;
             ch.conv.convert(value, &self.tables, id, &mut flow)?;
         } else if value.flags.contains(ValueFlags::CUR) && !value.flags.contains(ValueFlags::RAW) {
-            ch.conv.revert(value, &self.tables)?;
+            ch.conv.revert(value, &self.tables, id)?;
         }
 
         Ok(())
@@ -688,7 +729,16 @@ impl<H: HalRead + HalWrite + HalDiagnostics> Engine<H> {
                     let mut ev = EngineValue::default();
                     ev.set_cur(val);
                     ev.flags = ValueFlags::CUR;
-                    let _ = self.channel_write(id, &mut ev);
+                    // Fires once per expiry, so warn does not flood. The
+                    // output keeps the expired value until the next write.
+                    if let Err(e) = self.channel_write(id, &mut ev) {
+                        warn!(
+                            channel = id,
+                            value = val,
+                            error = %e,
+                            "timed write expired but the next effective value could not be written"
+                        );
+                    }
                 }
                 // If no effective value (all expired), retain last hardware value.
             }
@@ -2540,5 +2590,142 @@ mod tests {
             EngineStatus::Down,
             "channel 611 should still be in cooldown (60 > 31)"
         );
+    }
+
+    // --- S-25: numeric hardening of the write path (R-9, R-10) ---
+
+    /// PWM output whose conversion clamps to [0, 100]: the old revert turned
+    /// NaN into the max (100) and wrote it to the duty cycle.
+    fn pwm_channel_with_max(id: ChannelId) -> Channel {
+        let mut ch = pwm_channel(id);
+        ch.conv.min = Some(0.0);
+        ch.conv.max = Some(100.0);
+        ch
+    }
+
+    #[test]
+    fn write_level_rejects_non_finite_values_before_hardware() {
+        for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut engine = make_engine();
+            engine.channels.add(pwm_channel_with_max(7)).unwrap();
+
+            let err = engine
+                .channel_write_level(7, 8, Some(v), "test", 0.0)
+                .unwrap_err();
+            assert!(
+                matches!(err, EngineError::NonFiniteValue(7)),
+                "{v}: got {err:?}"
+            );
+            assert!(engine.hal.pwm_writes().is_empty(), "{v} reached the PWM");
+            let levels = engine.get_write_levels(7).unwrap();
+            assert!(
+                levels.is_none_or(|pa| pa.levels()[7].value.is_none()),
+                "{v} was stored in the priority array"
+            );
+        }
+    }
+
+    #[test]
+    fn write_level_rejects_durations_that_cannot_be_timed() {
+        let max = priority::MAX_WRITE_DURATION_SECS;
+        for d in [1e300, max + 1.0, f64::INFINITY, f64::NAN] {
+            let mut engine = make_engine();
+            engine.channels.add(digital_out_channel(5)).unwrap();
+            let err = engine
+                .channel_write_level(5, 8, Some(1.0), "test", d)
+                .unwrap_err();
+            assert!(
+                matches!(err, EngineError::InvalidWriteDuration(5, _)),
+                "{d}: got {err:?}"
+            );
+            assert!(engine.hal.digital_writes().is_empty(), "{d}");
+        }
+
+        // The bound itself is a timed write; a negative duration stays
+        // permanent as before.
+        let mut engine = make_engine();
+        engine.channels.add(digital_out_channel(5)).unwrap();
+        engine
+            .channel_write_level(5, 8, Some(1.0), "test", max)
+            .unwrap();
+        engine
+            .channel_write_level(5, 9, Some(1.0), "test", -5.0)
+            .unwrap();
+        let pa = engine.get_write_levels(5).unwrap().unwrap();
+        assert!(pa.levels()[7].expires_at.is_some());
+        assert!(pa.levels()[8].expires_at.is_none());
+    }
+
+    #[test]
+    fn write_to_channel_with_inverted_limits_errors_without_panic() {
+        let mut engine = make_engine();
+        let mut ch = pwm_channel(7);
+        ch.conv.low = Some(10.0);
+        ch.conv.high = Some(0.0);
+        engine.channels.add(ch).unwrap();
+
+        let err = engine
+            .channel_write_level(7, 8, Some(5.0), "test", 0.0)
+            .unwrap_err();
+        assert!(
+            matches!(err, EngineError::ConversionFault(7, _)),
+            "got {err:?}"
+        );
+        assert!(engine.hal.pwm_writes().is_empty());
+        assert!(
+            engine.get_write_levels(7).unwrap().is_none(),
+            "rejected write left in the priority array"
+        );
+    }
+
+    #[test]
+    fn rejected_write_restores_the_previous_levels() {
+        // Level 8 is applied; a level-1 write whose revert overflows is
+        // rejected and must not take over the array (silent mismatch with
+        // the hardware otherwise).
+        let mut engine = make_engine();
+        let mut ch = pwm_channel(7);
+        ch.conv.scale = Some(1e-300);
+        engine.channels.add(ch).unwrap();
+        engine
+            .channel_write_level(7, 8, Some(1e-310), "base", 0.0)
+            .unwrap();
+        let writes_before = engine.hal.pwm_writes().len();
+
+        let err = engine
+            .channel_write_level(7, 1, Some(1e300), "override", 0.0)
+            .unwrap_err();
+        assert!(
+            matches!(err, EngineError::ConversionFault(7, _)),
+            "got {err:?}"
+        );
+        assert_eq!(engine.hal.pwm_writes().len(), writes_before);
+        let pa = engine.get_write_levels(7).unwrap().unwrap();
+        assert!(pa.levels()[0].value.is_none());
+        assert_eq!(pa.effective().1, 8);
+    }
+
+    #[test]
+    fn raw_write_rejects_non_finite_raw() {
+        let mut engine = make_engine();
+        engine.channels.add(pwm_channel(7)).unwrap();
+        let mut value = EngineValue::default();
+        value.set_raw(f64::NAN);
+        let err = engine.channel_write(7, &mut value).unwrap_err();
+        assert!(matches!(err, EngineError::NonFiniteValue(7)), "got {err:?}");
+        assert!(engine.hal.pwm_writes().is_empty());
+    }
+
+    #[test]
+    fn finite_write_still_reaches_hardware() {
+        let mut engine = make_engine();
+        engine.channels.add(pwm_channel_with_max(7)).unwrap();
+        engine
+            .channel_write_level(7, 8, Some(250.0), "test", 30.0)
+            .unwrap();
+        // 250 clamps to max 100; the default range (0..1) leaves it at 100.
+        let writes = engine.hal.pwm_writes();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].duty, 100.0);
     }
 }

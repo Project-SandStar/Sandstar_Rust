@@ -164,6 +164,11 @@ pub fn parse_ascii_value(buf: &[u8]) -> Option<f64> {
     }
 
     let val: f64 = s.parse().ok()?;
+    // `parse` accepts "nan" and "inf"; a sensor reading must be a number
+    // (R-9). Without this, NaN passes the clamp below unchanged.
+    if !val.is_finite() {
+        return None;
+    }
 
     // Clamp to unsigned-short range like the C code does.
     let clamped = val.clamp(0.0, 65535.0);
@@ -434,6 +439,21 @@ mod tests {
     }
 
     // -- ASCII parsing --------------------------------------------------------
+
+    #[test]
+    fn parse_rejects_non_finite_text() {
+        // f64::from_str accepts these; a reading must be a number (R-9).
+        for s in [
+            &b"nan
+"[..],
+            b"NaN",
+            b"inf",
+            b"-inf",
+            b"infinity",
+        ] {
+            assert_eq!(parse_ascii_value(s), None, "{:?}", s);
+        }
+    }
 
     #[test]
     fn parse_simple_integer() {

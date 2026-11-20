@@ -42,6 +42,13 @@ impl From<String> for AppError {
             Self::NotFound(s)
         } else if s.contains("read-only") {
             Self::Forbidden(s)
+        } else if s.starts_with("invalid write level")
+            || s.starts_with("invalid value for channel")
+            || s.starts_with("invalid write duration")
+        {
+            // Engine input validation (EngineError Display): the request is
+            // wrong, not the server (R-10).
+            Self::BadRequest(s)
         } else {
             Self::Internal(s)
         }
@@ -76,5 +83,23 @@ mod tests {
         );
         assert_eq!(status_of("channel 9 not found"), StatusCode::NOT_FOUND);
         assert_eq!(status_of("read-only mode"), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn engine_input_validation_maps_to_400() {
+        use sandstar_engine::EngineError;
+        for e in [
+            EngineError::InvalidWriteLevel(0),
+            EngineError::NonFiniteValue(7),
+            EngineError::InvalidWriteDuration(7, 1e300),
+        ] {
+            assert_eq!(status_of(&e.to_string()), StatusCode::BAD_REQUEST, "{e}");
+        }
+        // A config problem on the channel is the server's, not the request's.
+        let fault = EngineError::ConversionFault(7, "low 10 is above high 0".into());
+        assert_eq!(
+            status_of(&fault.to_string()),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }
