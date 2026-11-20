@@ -230,6 +230,17 @@ impl PidController {
         self.output
     }
 
+    /// Restart execution timing at `now`, keeping the integral and output.
+    ///
+    /// Called when a loop resumes after being held (an input was unusable):
+    /// the held time is not a control interval, and using it as one would
+    /// add the whole outage to the integral in a single step (R-35).
+    pub fn restart_timing(&mut self, now: Instant) {
+        if self.initialized {
+            self.last_exec = Some(now);
+        }
+    }
+
     /// Reset the controller state (integral, derivative, timing).
     pub fn reset(&mut self) {
         self.output = 0.0;
@@ -319,6 +330,35 @@ mod tests {
         // Output = integral = 0.8333
         assert!(out > 0.5, "integral should grow, got {out}");
         assert!(out < 2.0, "integral should be moderate, got {out}");
+    }
+
+    #[test]
+    fn restart_timing_keeps_a_long_hold_out_of_the_integral() {
+        let run = |restart: bool| {
+            let mut pid = PidController::new();
+            pid.kp = 0.0;
+            pid.ki = 1.0;
+            pid.kd = 0.0;
+            pid.out_max = 1000.0;
+            let t0 = Instant::now();
+            pid.execute(75.0, 70.0, t0);
+            pid.execute(75.0, 70.0, advance(t0, 1000));
+            // Held for 10 minutes, then resumed.
+            let resume = advance(t0, 601_000);
+            if restart {
+                pid.restart_timing(resume);
+            }
+            pid.execute(75.0, 70.0, resume);
+            pid.execute(75.0, 70.0, advance(t0, 602_000))
+        };
+        let with_restart = run(true);
+        let without = run(false);
+        // Two one-second steps of 5/60 each, vs. one 600 s step (50.0).
+        assert!(with_restart < 0.2, "integral after restart: {with_restart}");
+        assert!(
+            without > 40.0,
+            "without restart the hold lands in the integral: {without}"
+        );
     }
 
     #[test]
