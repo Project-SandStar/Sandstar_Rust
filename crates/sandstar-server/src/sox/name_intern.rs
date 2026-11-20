@@ -14,10 +14,15 @@
 //! deduplication statistics.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 
 /// Maximum component name length for Sedona editor compatibility.
 pub const MAX_NAME_LEN: usize = 31;
+
+/// Most names the table holds: IDs 1..=65 534 (0 is the sentinel and
+/// `u16::MAX` is never handed out).
+pub const MAX_INTERNED_NAMES: usize = u16::MAX as usize - 1;
 
 // ── NameId ───────────────────────────────────────────
 
@@ -56,16 +61,28 @@ pub struct NameInternTable {
     names: RwLock<Vec<String>>,
     /// Reverse lookup: name string → intern ID.
     lookup: RwLock<HashMap<String, u16>>,
+    /// Most names held; at most [`MAX_INTERNED_NAMES`].
+    limit: usize,
+    /// Set once the table first refuses a name, so the warning fires once.
+    full_warned: AtomicBool,
 }
 
 impl NameInternTable {
     /// Create a new, empty intern table with index 0 reserved.
     pub fn new() -> Self {
+        Self::with_limit(MAX_INTERNED_NAMES)
+    }
+
+    /// Table that holds at most `limit` names (capped at
+    /// [`MAX_INTERNED_NAMES`]). Lets tests fill the table quickly.
+    pub(crate) fn with_limit(limit: usize) -> Self {
         let mut names = Vec::with_capacity(512);
         names.push(String::new()); // ID 0 = invalid/empty
         Self {
             names: RwLock::new(names),
             lookup: RwLock::new(HashMap::with_capacity(512)),
+            limit: limit.min(MAX_INTERNED_NAMES),
+            full_warned: AtomicBool::new(false),
         }
     }
 
@@ -74,9 +91,12 @@ impl NameInternTable {
     /// If the name is already interned the existing ID is returned without
     /// allocation. Thread-safe via double-checked locking.
     ///
-    /// # Panics
-    ///
-    /// Panics if the table exceeds 65 534 unique names (u16::MAX - 1).
+    /// When the table is full a new name is not stored and
+    /// [`NameId::INVALID`] is returned (R-47: the old `assert!` aborted the
+    /// process). The component keeps its name either way; the table is only
+    /// a lookup and statistics layer. The caller decides what to do about a
+    /// full table: [`Self::retain`] drops names no longer in use, and
+    /// [`Self::warn_full_once`] reports it.
     pub fn intern(&self, name: &str) -> NameId {
         // Fast path: read lock only.
         {
@@ -91,11 +111,42 @@ impl NameInternTable {
         if let Some(&id) = lookup.get(name) {
             return NameId(id);
         }
-        let id = names.len() as u16;
-        assert!(id < u16::MAX, "name intern table exhausted (65535 names)");
+        // names[0] is the sentinel, so the next ID is names.len().
+        let next = names.len();
+        let id = match u16::try_from(next) {
+            Ok(id) if next <= self.limit => id,
+            _ => return NameId::INVALID,
+        };
         names.push(name.to_string());
         lookup.insert(name.to_string(), id);
         NameId(id)
+    }
+
+    /// Keep only the names `keep` accepts and renumber them in their
+    /// current order. IDs change, which is safe because nothing outside the
+    /// table stores a [`NameId`]; anything that does must re-intern.
+    pub fn retain(&self, keep: impl Fn(&str) -> bool) {
+        let mut names = crate::lock::write_or_recover(&self.names, "SOX name table");
+        let mut lookup = crate::lock::write_or_recover(&self.lookup, "SOX name table");
+        names.retain(|n| n.is_empty() || keep(n));
+        lookup.clear();
+        for (i, n) in names.iter().enumerate().skip(1) {
+            // INVARIANT: retain only removes, so len stays <= limit + 1 and
+            // every index fits in u16; try_from keeps it checked anyway.
+            if let Ok(id) = u16::try_from(i) {
+                lookup.insert(n.clone(), id);
+            }
+        }
+    }
+
+    /// Log once per table that it is full even with unused names dropped.
+    pub fn warn_full_once(&self) {
+        if !self.full_warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                limit = self.limit,
+                "SOX name table full of names in use: new names are not interned (components keep their names)"
+            );
+        }
     }
 
     /// Resolve a [`NameId`] to its string.
@@ -178,7 +229,7 @@ impl NameInternTable {
             .iter()
             .enumerate()
             .skip(1)
-            .map(|(i, n)| (NameId(i as u16), n.clone()))
+            .filter_map(|(i, n)| u16::try_from(i).ok().map(|id| (NameId(id), n.clone())))
             .collect()
     }
 }
@@ -363,6 +414,63 @@ mod tests {
         assert_eq!(all.len(), 2);
         assert!(all.contains(&(id_a, "alpha".to_string())));
         assert!(all.contains(&(id_b, "beta".to_string())));
+    }
+
+    // -- Full table (R-47) --
+
+    #[test]
+    fn full_table_refuses_new_names_without_panicking() {
+        let table = NameInternTable::with_limit(3);
+        let ids: Vec<NameId> = ["a", "b", "c"].iter().map(|n| table.intern(n)).collect();
+        assert!(ids.iter().all(NameId::is_valid));
+
+        // The old code asserted here once the table ran out of IDs.
+        assert_eq!(table.intern("d"), NameId::INVALID);
+        assert_eq!(table.intern("e"), NameId::INVALID);
+        assert_eq!(table.len(), 3);
+        assert!(!table.contains("d"));
+
+        // Names already in the table keep resolving.
+        assert_eq!(table.intern("b"), ids[1]);
+        assert_eq!(table.resolve(ids[2]), "c");
+    }
+
+    #[test]
+    fn interning_past_the_id_space_does_not_panic() {
+        // Real size: the old assert! fired on the 65 535th distinct name.
+        let table = NameInternTable::new();
+        for i in 0..MAX_INTERNED_NAMES {
+            assert!(table.intern(&format!("n{i}")).is_valid());
+        }
+        assert_eq!(table.intern("oneTooMany"), NameId::INVALID);
+        assert_eq!(table.len(), MAX_INTERNED_NAMES);
+    }
+
+    #[test]
+    fn retain_drops_unused_names_and_frees_room() {
+        let table = NameInternTable::with_limit(3);
+        for n in ["a", "b", "c"] {
+            table.intern(n);
+        }
+        assert_eq!(table.intern("d"), NameId::INVALID);
+
+        table.retain(|n| n != "b");
+        assert_eq!(table.len(), 2);
+        assert!(!table.contains("b"));
+        // Renumbered in order, lookup and resolve agree.
+        for n in ["a", "c"] {
+            let id = table.get_id(n).unwrap();
+            assert_eq!(table.resolve(id), n);
+        }
+        assert!(table.intern("d").is_valid());
+        assert_eq!(table.intern("e"), NameId::INVALID);
+    }
+
+    #[test]
+    fn limit_is_capped_at_the_id_space() {
+        let table = NameInternTable::with_limit(usize::MAX);
+        assert_eq!(table.limit, MAX_INTERNED_NAMES);
+        assert_eq!(MAX_INTERNED_NAMES, 65_534);
     }
 
     // -- Thread safety --

@@ -26,6 +26,8 @@
 > - roxWarp `MAX_FILTER_DEPTH` = 32 (`roxwarp/handler.rs:611`, S-24): deepest `and`/`or` nesting evaluated in a point filter (REST cluster query, roxWarp `query`); terms past it do not match. Without it a long chain overflowed the stack and killed the process. Keep hardcoded.
 > - BACnet `MALFORMED_WARN_INTERVAL_SECS` = 60 s (`drivers/bacnet/mod.rs:79`, S-24): at most one `warn` per minute for frames that fail to decode; the rest go to `debug`. Keep hardcoded.
 > - `MAX_WRITE_DURATION_SECS` = 31,536,000 s (1 year) (`sandstar-engine/src/priority.rs:25`, R-10/S-25): longest timed priority write. `channel_write_level` rejects a longer, NaN or infinite duration (REST `pointWrite` answers 400); a negative duration is still a permanent write. Without it a huge `duration` panicked in `Duration::from_secs_f64` and killed the process. Keep hardcoded.
+> - `MAX_INTERNED_NAMES` = 65,534 (`sandstar-server/src/sox/name_intern.rs:25`, R-47/S-26): most SOX component names the intern table holds. When full, names no component carries any more (left by renames and removals) are dropped and the new name is interned; only a table full of names in use refuses it (one `warn`), and components keep their names either way. Persistence writes only names still in use. Before S-26 the 65,535th name hit an `assert!` and killed the process.
+> - `MAX_INTERNED_TAG_NAMES` = 65,536 (`sandstar-server/src/sox/dyn_slots.rs:76`, R-47/S-26): most dynamic tag names the interner holds (the whole `u16` id space). When full, new names are not interned (one `warn`); only accepted keys are interned. Before S-26 the id wrapped to 0 in release.
 > - `/live` `LOG_PREVIEW_BYTES` = 240 (`rest/live.rs:57`, R-6/S-24): RX/TX log preview, cut back to a UTF-8 character boundary.
 > - GPIO60 retry every 20 watchdog kicks, at most 30 retries (`watchdog.rs`).
 > - systemd unit: `WatchdogSec=10`, `MemoryLimit=128M`.
@@ -133,6 +135,8 @@ Audited: 2026-03-10
 | `HEALTH_ENGINE_TIMEOUT` | 2s | `sandstar-server/src/rest/handlers.rs` | 369 | **Document** — `/health` waits at most this long for the engine; otherwise 503 with `healthy:false` (R-28, S-21). |
 | `REFRESH_BACKOFF_AFTER_TIMEOUT` | 10s | `sandstar-server/src/sox/mod.rs` | 40 | **Keep** — pause before the next SOX tree refresh after an engine timeout (S-22). |
 | `REFRESH_WARN_INTERVAL` | 60s | `sandstar-server/src/sox/mod.rs` | 37 | **Keep** — SOX tree refresh runs every second; a non-timeout failure is logged at `warn` at most once per interval, the rest at `debug` (S-21). |
+| `MAX_INTERNED_NAMES` | 65,534 | `sandstar-server/src/sox/name_intern.rs` | 25 | **Keep** — SOX name intern table size; a full table drops unused names, never panics (S-26). |
+| `MAX_INTERNED_TAG_NAMES` | 65,536 | `sandstar-server/src/sox/dyn_slots.rs` | 76 | **Keep** — dynamic tag name interner size (whole `u16` space); full interner stops interning (S-26). |
 | Command channel capacity | 64 | `sandstar-server/src/main.rs` | 423 | **Document** — mpsc channel buffer for REST commands. |
 
 ## Sedona VM (SVM)
