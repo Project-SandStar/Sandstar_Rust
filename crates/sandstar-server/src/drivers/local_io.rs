@@ -57,6 +57,15 @@ fn engine_error(msg: String) -> DriverError {
 
 /// Error for the points left in a round after the engine timed out. They are
 /// not sent, so one hung engine costs one timeout per round, not one per point.
+/// Driver error for an engine channel that is not `Ok` (R-35).
+fn channel_status_error(status: &str) -> DriverError {
+    match status {
+        "Down" => DriverError::CommFault("channel down".into()),
+        "Disabled" => DriverError::ConfigFault("channel disabled".into()),
+        other => DriverError::RemoteStatus(format!("channel status {other}")),
+    }
+}
+
 fn skipped_after_timeout() -> DriverError {
     DriverError::Timeout(format!(
         "{}; skipped after an earlier timeout in this round",
@@ -297,7 +306,12 @@ impl AsyncDriver for LocalIoDriver {
                     continue;
                 }
                 match engine.read_channel(p.point_id).await {
-                    Ok(cv) => ctx.update_cur_ok(p.point_id, cv.cur),
+                    Ok(cv) if cv.status.eq_ignore_ascii_case("ok") => {
+                        ctx.update_cur_ok(p.point_id, cv.cur)
+                    }
+                    // A Down/Disabled channel reads cur = 0.0; it is not a
+                    // healthy value (R-35).
+                    Ok(cv) => ctx.update_cur_err(p.point_id, channel_status_error(&cv.status)),
                     Err(msg) => {
                         timed_out = is_engine_timeout(&msg);
                         ctx.update_cur_err(p.point_id, engine_error(msg));
@@ -583,6 +597,48 @@ mod tests {
         assert!(LocalIoChannel::new(3, "x", "PWM", "pwm", "P").is_output());
         assert!(!LocalIoChannel::new(4, "x", "AI", "analog", "A").is_output());
         assert!(!LocalIoChannel::new(5, "x", "DI", "digital", "G").is_output());
+    }
+
+    #[tokio::test]
+    async fn sync_cur_engine_backed_maps_channel_status_to_errors() {
+        use crate::rest::{ChannelValue, EngineCmd};
+        use tokio::sync::mpsc;
+
+        let (tx, mut rx) = mpsc::channel::<EngineCmd>(16);
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                if let EngineCmd::ReadChannel { channel, reply } = cmd {
+                    let status = match channel {
+                        1 => "Down",
+                        2 => "Disabled",
+                        3 => "Fault",
+                        _ => "Ok",
+                    };
+                    let _ = reply.send(Ok(ChannelValue {
+                        channel,
+                        status: status.into(),
+                        raw: 0.0,
+                        cur: 0.0,
+                    }));
+                }
+            }
+        });
+        let mut d = LocalIoDriver::with_engine("eng-status", EngineHandle::new(tx));
+        d.open().await.unwrap();
+        let refs: Vec<DriverPointRef> = (1..=4)
+            .map(|id| DriverPointRef {
+                point_id: id,
+                address: String::new(),
+            })
+            .collect();
+        let mut ctx = SyncContext::new();
+        d.sync_cur(&refs, &mut ctx).await;
+        let results = ctx.into_results();
+
+        assert!(matches!(results[0].1, Err(DriverError::CommFault(_))));
+        assert!(matches!(results[1].1, Err(DriverError::ConfigFault(_))));
+        assert!(matches!(&results[2].1, Err(DriverError::RemoteStatus(m)) if m.contains("Fault")));
+        assert_eq!(results[3].1.as_ref().ok(), Some(&0.0));
     }
 
     // ── Engine-backed delegation tests (Phase 12.0F) ──────
