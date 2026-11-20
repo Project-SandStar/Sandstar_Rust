@@ -84,6 +84,8 @@ Audited: 2026-03-10
 | `HANDSHAKE_TIMEOUT_SECS` | 30s | `sandstar-server/src/auth.rs` | 33 | **Keep** — prevents hanging auth handshakes. |
 | `SESSION_LIFETIME_SECS` | 86,400 (24h) | `sandstar-server/src/auth.rs` | 34 | **Consider** — operators may want shorter sessions for security. |
 | `MAX_SESSIONS` | 256 | `sandstar-server/src/auth.rs` | 35 | **Consider** — may need tuning for high-traffic deployments. |
+| `SESSION_COOKIE` | `sandstar_session` | `sandstar-server/src/rest/mod.rs` | — | **Keep** — set by `POST /api/auth` on SCRAM success (`HttpOnly; SameSite=Strict; Path=/`, no `Secure` because the device serves plain HTTP). Accepted on `/live`, `/live/sedonaState`, `/api/rows`, `/api/ws` (S-32). |
+| WS allowed origins | empty (same host only) | `sandstar-server/src/args.rs` | — | **Configurable** — `--ws-allowed-origins` / `SANDSTAR_WS_ALLOWED_ORIGINS` (comma separated). Only checked when auth is on (S-32). |
 
 ## Engine Core
 

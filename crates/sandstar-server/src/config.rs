@@ -49,6 +49,7 @@ impl ServerConfig {
         if let Some(ref token) = args.auth_token {
             auth_store.set_bearer_token(token.clone());
         }
+        auth_store.set_allowed_origins(args.ws_allowed_origins.clone());
 
         // SCRAM auth: --auth-user + --auth-pass
         match (&args.auth_user, &args.auth_pass) {
