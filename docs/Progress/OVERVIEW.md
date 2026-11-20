@@ -232,6 +232,13 @@ Router: `router_with_auth` in `crates/sandstar-server/src/rest/mod.rs`, plus rou
 - REST TLS is behind the `tls` cargo feature; the release alias `arm-build-svm` does not enable it.
 - Filter depth cap 32, watch cap 64, max channels per watch 256, body limit 1 MB, rate limit on by default (100 req/s).
 - CORS: any origin, with an explicit method and header list.
+- Engine calls from REST, the `/api/ws` WebSocket, SOX, roxWarp and drivers wait at most 10 s (`ENGINE_REPLY_TIMEOUT`). REST then answers `503 {"err":"engine timeout"}`; for writes and other state-changing commands the text adds "may still be applied" (R-28, S-20).
+- On an engine timeout (R-28, S-21):
+  - `/health` waits at most 2 s and answers `503 {"healthy":false,"uptimeSecs":0}`; a healthy engine still gives 200.
+  - `/api/ws` replies with error code `ENGINE_TIMEOUT` and ends the current push round; the timed-out watch asks for all values on its next poll, because the queued poll may still advance the change baseline.
+  - Since S-22, `/api/ws` push polls and the SOX tree refresh run beside their event loops, so pings, client messages and DASP packets are still handled while the engine is slow. The next round or refresh waits 10 s after a timeout. Since S-23 each `/api/ws` connection has a single engine slot: client requests (`subscribe`, `unsubscribe`, `refresh`) and push rounds share it, so a connection has at most one engine command in flight. Client requests wait in a per-connection queue of 16 and are answered in order; replies that need no engine (`pong`, auth, errors) are sent at once and may overtake them. Client messages over 16 KiB close the connection, and a `subscribe` with more than 256 ids gets `CHANNEL_LIMIT` at once.
+  - Watches of closed `/api/ws` connections are closed by one shared task that retries after a timeout (pauses growing from 10 s to 10 min) and gives up after the 1 h lease. A push result taken before a client `refresh` or re-subscribe is dropped, so an older `update` never follows a newer `snapshot`.
+  - `localIo` marks the points `Down` (`RemoteDown`) instead of `Fault` and stops the round.
 - Only Ctrl+C (SIGINT) and SIGHUP are handled; `systemctl stop` (SIGTERM) ends the process without graceful shutdown.
 
 ---

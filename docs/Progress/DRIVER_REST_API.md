@@ -105,6 +105,8 @@ Response:
 
 When the remote device is down, a point's status will be `"Down"` (RemoteDown) or `"Disabled"` (RemoteDisabled) or `{"Fault": "<reason>"}` (RemoteFault) — see research doc 18 for the full `PointStatus` semantic.
 
+For `localIo`, an engine that does not answer within 10 s marks the point `"Down"` (`Timeout` → RemoteDown), not `Fault`. The rest of that round is skipped with the same status. Other engine errors (for example an unknown channel) stay `{"Fault": ...}` (R-28, S-21).
+
 ### `GET /api/drivers/{id}/learn`
 
 Ask the driver to discover its points. Returns a Haystack-style grid. Drivers that don't implement learn return `501 Not Implemented`.

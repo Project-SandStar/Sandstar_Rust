@@ -110,6 +110,9 @@ Each entry in `SANDSTAR_MQTT_CONFIGS` is a JSON object describing one MQTT drive
 - **`value_path` is `None`** — payload is parsed directly as an `f64`. For example: `"42.5"`, `"72"`, `"0"`. Whitespace is trimmed.
 - **`value_path` is `Some(pointer)`** — payload is parsed as JSON, and the pointer is resolved via RFC 6901. Number / integer / boolean / numeric-string values are all coerced to `f64`.
   - Example: `value_path = "/value"` matches payload `{"value": 42.5}`.
+- **Rejected payloads (S-28):**
+  - A payload that is not a number, or is `nan`/`inf`/`infinity` in either form, is rejected with `MQTT value parse failed`.
+  - The rejection replaces the cached value, so the point reports a fault (`last payload rejected: …`) instead of the last good value. The next valid payload clears the fault.
   - Example: `value_path = "/data/reading"` matches `{"data":{"reading":42.5}}`.
 
 For **writes**: if `value_path` is set (any read-side JSON path), Sandstar publishes a flat `{"value": <N>}` envelope. If `value_path` is unset, Sandstar publishes the raw number via Rust's `f64::Display` (so `42.0` serializes as `"42"`, not `"42.0"`).
@@ -241,7 +244,7 @@ Key log lines to look for:
 - `MQTT poll tick task spawned (5s interval)` — tick task alive
 - `MQTT poll tick complete ok=N err=0` — every 5 s, one per tick
 - `MQTT sync_cur -> write_channel driver=... point_id=... value=...` — a cached value flowed into the engine
-- `MQTT sync_cur failed driver=... point_id=... error=...` — per-point failure (usually stale cache)
+- `MQTT sync_cur failed driver=... point_id=... error=...` — per-point failure (usually stale cache, or `last payload rejected` after an unusable payload)
 
 ---
 

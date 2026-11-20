@@ -33,6 +33,12 @@ use tracing::{debug, error, info, warn};
 /// Default manifest directory on the BeagleBone device.
 pub const DEFAULT_MANIFESTS_DIR: &str = "/home/eacio/sandstar/etc/manifests";
 
+/// Minimum gap between two "failed to refresh channels" warnings.
+const REFRESH_WARN_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Pause before the next tree refresh after an engine timeout (R-28, S-22).
+const REFRESH_BACKOFF_AFTER_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Start the SOX/DASP server as a background tokio task.
 ///
 /// The server binds a UDP socket on `port`, runs the DASP handshake for
@@ -132,19 +138,34 @@ async fn run_sox_server(
     // Build initial component tree from current channel data.
     // Values will be corrected on the first `update_from_channels` tick.
     {
-        let initial_tree = match engine_handle.list_channels().await {
-            Ok(channels) => {
-                let t = ComponentTree::from_channels_with_manifest(&channels, manifest_db.clone());
-                info!(
-                    components = t.len(),
-                    manifest_types = manifest_db.type_count(),
-                    "SOX component tree built"
-                );
-                t
-            }
-            Err(e) => {
-                warn!("SOX: failed to get initial channels: {e}, starting with empty tree");
-                ComponentTree::new_with_manifest(manifest_db.clone())
+        // `update_from_channels` only refreshes components that already
+        // exist, so an empty start would stay empty. Retry while the engine
+        // is merely slow (each attempt is bounded by ENGINE_REPLY_TIMEOUT,
+        // R-28); start empty only if the engine is gone.
+        let mut attempt: u32 = 0;
+        let initial_tree = loop {
+            attempt = attempt.saturating_add(1);
+            match engine_handle.list_channels().await {
+                Ok(channels) => {
+                    let t =
+                        ComponentTree::from_channels_with_manifest(&channels, manifest_db.clone());
+                    info!(
+                        components = t.len(),
+                        manifest_types = manifest_db.type_count(),
+                        "SOX component tree built"
+                    );
+                    break t;
+                }
+                Err(e) if crate::rest::is_engine_timeout(&e) => {
+                    warn!(
+                        attempt,
+                        "SOX: engine did not answer for the initial channel list; retrying"
+                    );
+                }
+                Err(e) => {
+                    warn!("SOX: failed to get initial channels: {e}, starting with empty tree");
+                    break ComponentTree::new_with_manifest(manifest_db.clone());
+                }
             }
         };
         // Replace the empty shared tree with the fully initialized one.
@@ -189,6 +210,14 @@ async fn run_sox_server(
 
     let mut tree_refresh_interval = tokio::time::interval(Duration::from_secs(1));
     tree_refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Last refresh-failure warning; the refresh runs every second, so further
+    // failures within REFRESH_WARN_INTERVAL are logged at debug.
+    let mut last_refresh_warn: Option<tokio::time::Instant> = None;
+    // The channel list for the refresh is fetched beside the loop, so DASP
+    // packets keep flowing while the engine is slow (R-28, S-22).
+    let mut refresh: crate::rest::engine_round::EngineRound<
+        Result<Vec<sandstar_ipc::types::ChannelInfo>, String>,
+    > = crate::rest::engine_round::EngineRound::new();
 
     // Persistence save timer: check dirty flag every 5 seconds.
     let mut persist_interval = tokio::time::interval(Duration::from_secs(5));
@@ -475,9 +504,16 @@ async fn run_sox_server(
                 transport.cleanup_expired();
             }
             _ = tree_refresh_interval.tick() => {
-                // Refresh the component tree from engine channel data.
-                // Acquire channel list first (async), then lock tree for mutation.
-                match engine_handle.list_channels().await {
+                // Refresh the component tree from engine channel data. The
+                // channel list is fetched beside the loop; the tree is
+                // updated in the arm below when it arrives.
+                if refresh.is_idle() {
+                    let handle = engine_handle.clone();
+                    refresh.start(async move { handle.list_channels().await });
+                }
+            }
+            result = refresh.next() => {
+                match result {
                     Ok(channels) => {
                         // All tree operations below are synchronous — safe to hold std::sync::RwLock.
                         let mut tree = crate::lock::write_or_recover(&shared_tree, "SOX component tree");
@@ -608,8 +644,23 @@ async fn run_sox_server(
                             });
                         }
                     }
-                    Err(e) => {
+                    // Timeouts are already reported (rate-limited) by
+                    // EngineHandle. Back off so a hung engine does not get a
+                    // new (stale, queued) request every second.
+                    Err(e) if crate::rest::is_engine_timeout(&e) => {
                         debug!("SOX: failed to refresh channels: {e}");
+                        refresh.back_off(REFRESH_BACKOFF_AFTER_TIMEOUT);
+                    }
+                    Err(e) => {
+                        let now = tokio::time::Instant::now();
+                        if last_refresh_warn
+                            .is_none_or(|t| now.duration_since(t) >= REFRESH_WARN_INTERVAL)
+                        {
+                            last_refresh_warn = Some(now);
+                            warn!("SOX: failed to refresh channels: {e} (repeats within 60 s logged at debug)");
+                        } else {
+                            debug!("SOX: failed to refresh channels: {e}");
+                        }
                     }
                 }
             }

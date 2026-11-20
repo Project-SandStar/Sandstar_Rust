@@ -87,15 +87,17 @@ impl LinuxGpio {
     /// If the pin is not tracked, exports it and sets direction.
     /// If it is tracked but direction differs, updates the direction.
     fn ensure_exported(&mut self, address: u32, output: bool) -> Result<(), HalError> {
-        if let Some(pin) = self.pins.get(&address) {
-            if pin.is_output == output {
+        if let Some(is_output) = self.pins.get(&address).map(|p| p.is_output) {
+            if is_output == output {
                 return Ok(());
             }
             // Direction changed, update it
             let direction = if output { "out" } else { "in" };
             sysfs::write(&self.direction_path(address), direction)?;
             // Update cached state — need to drop read/write FDs since direction changed
-            let pin = self.pins.get_mut(&address).unwrap();
+            let Some(pin) = self.pins.get_mut(&address) else {
+                return Ok(());
+            };
             pin.is_output = output;
             pin.value_read_fd = None;
             pin.value_write_fd = None;
@@ -145,7 +147,14 @@ impl LinuxGpio {
         self.ensure_exported(address, true)?;
 
         let path = self.value_path(address);
-        let pin = self.pins.get_mut(&address).unwrap();
+        let pin = self
+            .pins
+            .get_mut(&address)
+            .ok_or_else(|| HalError::DeviceError {
+                device: 0,
+                address,
+                message: "gpio pin not exported".into(),
+            })?;
         let val = if value { "1" } else { "0" };
 
         sysfs::write_cached(&mut pin.value_write_fd, &path, val).map_err(|e| {

@@ -5,6 +5,7 @@
 //! against the engine's channel store. Also supports standalone components
 //! (arithmetic, logic, timing, HVAC, scheduling) via `[[component]]` sections.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::Instant;
 
@@ -205,6 +206,10 @@ pub struct ComponentInstance {
 pub struct ControlRunner {
     pub loops: Vec<ControlLoop>,
     pub components: Vec<ComponentInstance>,
+    /// Indexes of loops / components currently held because an input is
+    /// unusable. Used to log the transition once, not every cycle (R-35).
+    held_loops: HashSet<usize>,
+    held_components: HashSet<usize>,
 }
 
 impl ControlRunner {
@@ -213,6 +218,8 @@ impl ControlRunner {
         Self {
             loops: Vec::new(),
             components: Vec::new(),
+            held_loops: HashSet::new(),
+            held_components: HashSet::new(),
         }
     }
 
@@ -247,6 +254,19 @@ impl ControlRunner {
             pid.max_delta = lc.pid.max_delta;
             pid.direct = lc.pid.direct;
             pid.exec_interval_ms = lc.pid.exec_interval_ms;
+            // A NaN gain or min > max would make the loop drive its outputs
+            // with NaN or panic in clamp (R-9, R-10); reject like write_level.
+            if let Some(reason) = pid.config_error() {
+                return Err(format!("loop '{}': pid {}", lc.name, reason));
+            }
+            if let Some(sc) = &lc.sequencer {
+                if !sc.hysteresis.is_finite() || sc.hysteresis < 0.0 {
+                    return Err(format!(
+                        "loop '{}': sequencer hysteresis {} must be finite and >= 0",
+                        lc.name, sc.hysteresis
+                    ));
+                }
+            }
 
             // Build optional sequencer.
             let sequencer = lc.sequencer.map(|sc| {
@@ -262,6 +282,14 @@ impl ControlRunner {
                     "control loop has no output channels, skipping"
                 );
                 continue;
+            }
+
+            if let Some(query) = &lc.enable_query {
+                warn!(
+                    loop_name = %lc.name,
+                    enable_query = %query,
+                    "enable_query is not supported; the loop runs unconditionally"
+                );
             }
 
             loops.push(ControlLoop {
@@ -307,7 +335,11 @@ impl ControlRunner {
             "control configuration loaded"
         );
 
-        Ok(Self { loops, components })
+        Ok(Self {
+            loops,
+            components,
+            ..Self::new()
+        })
     }
 
     /// Execute one control cycle against the engine.
@@ -318,43 +350,39 @@ impl ControlRunner {
         now: Instant,
     ) {
         // Execute control loops.
-        for ctrl_loop in &mut self.loops {
+        for (idx, ctrl_loop) in self.loops.iter_mut().enumerate() {
             if !ctrl_loop.enabled {
                 continue;
             }
 
-            // 1. Read feedback (process variable) from engine.
-            let pv = match engine.channel_read(ctrl_loop.feedback_channel) {
-                Ok(val) if val.status == EngineStatus::Ok => val.cur,
-                Ok(_) => {
-                    debug!(
-                        loop_name = %ctrl_loop.name,
-                        channel = ctrl_loop.feedback_channel,
-                        "feedback channel not ok, skipping cycle"
-                    );
-                    continue;
+            // 1-2. Read feedback (process variable) and setpoint. Either one
+            // not Ok holds the loop: a Down/Disabled channel reads
+            // cur = 0.0, which must not become the target or the measurement
+            // (R-35). The output keeps its last written value.
+            let inputs =
+                read_loop_input(engine, ctrl_loop.feedback_channel, "feedback").and_then(|pv| {
+                    read_loop_input(engine, ctrl_loop.setpoint_channel, "setpoint")
+                        .map(|sp| (sp, pv))
+                });
+            let (sp, pv) = match inputs {
+                Ok(values) => {
+                    if self.held_loops.remove(&idx) {
+                        info!(loop_name = %ctrl_loop.name, "control loop inputs usable again, resuming");
+                        // The held time is not a control interval.
+                        ctrl_loop.pid.restart_timing(now);
+                    }
+                    values
                 }
-                Err(e) => {
-                    debug!(
-                        loop_name = %ctrl_loop.name,
-                        channel = ctrl_loop.feedback_channel,
-                        error = %e,
-                        "failed to read feedback channel"
-                    );
-                    continue;
-                }
-            };
-
-            // 2. Read setpoint from engine.
-            let sp = match engine.channel_read(ctrl_loop.setpoint_channel) {
-                Ok(val) => val.cur,
-                Err(e) => {
-                    debug!(
-                        loop_name = %ctrl_loop.name,
-                        channel = ctrl_loop.setpoint_channel,
-                        error = %e,
-                        "failed to read setpoint channel"
-                    );
+                Err(reason) => {
+                    if self.held_loops.insert(idx) {
+                        warn!(
+                            loop_name = %ctrl_loop.name,
+                            reason = %reason,
+                            "control loop input unusable; holding outputs at their last value"
+                        );
+                    } else {
+                        debug!(loop_name = %ctrl_loop.name, reason = %reason, "control loop still held");
+                    }
                     continue;
                 }
             };
@@ -414,13 +442,33 @@ impl ControlRunner {
         }
 
         // Execute standalone components.
-        for comp in &mut self.components {
+        for (idx, comp) in self.components.iter_mut().enumerate() {
             if !comp.enabled {
                 continue;
             }
 
-            // Read input channels.
-            let inputs = read_input_channels(engine, &comp.input_channels, &comp.name);
+            // Read input channels. Any unusable input holds the output at
+            // its last written value for this cycle (R-35).
+            let inputs = match read_input_channels(engine, &comp.input_channels) {
+                Ok(inputs) => {
+                    if self.held_components.remove(&idx) {
+                        info!(component = %comp.name, "component inputs usable again, resuming");
+                    }
+                    inputs
+                }
+                Err(reason) => {
+                    if self.held_components.insert(idx) {
+                        warn!(
+                            component = %comp.name,
+                            reason = %reason,
+                            "component input unusable; holding output at its last value"
+                        );
+                    } else {
+                        debug!(component = %comp.name, reason = %reason, "component still held");
+                    }
+                    continue;
+                }
+            };
 
             let output = execute_component(&mut comp.kind, &inputs, now);
 
@@ -484,28 +532,50 @@ impl Default for ControlRunner {
 
 // ── Helper functions ────────────────────────────────────────
 
-/// Read input channel values from the engine, returning them as a Vec<f64>.
-/// Missing or errored channels yield 0.0.
+/// Read one control-loop input. Anything but a finite `Ok` value is an
+/// error naming the channel: a Down/Disabled channel reads cur = 0.0 and a
+/// Fault channel only holds its last good value (R-35).
+fn read_loop_input<H: HalRead + HalWrite + HalDiagnostics>(
+    engine: &mut Engine<H>,
+    channel: u32,
+    role: &str,
+) -> Result<f64, String> {
+    match engine.channel_read(channel) {
+        Ok(val) if val.status == EngineStatus::Ok && val.cur.is_finite() => Ok(val.cur),
+        Ok(val) if val.status == EngineStatus::Ok => {
+            Err(format!("{role} channel {channel} is not finite"))
+        }
+        Ok(val) => Err(format!(
+            "{role} channel {channel} status {}",
+            val.status.as_str()
+        )),
+        Err(e) => Err(format!("{role} channel {channel} read failed: {e}")),
+    }
+}
+
+/// Read component input values from the engine.
+///
+/// Fails if any input is not a finite `Ok` value (see [`read_loop_input`]).
+/// Every channel is still read, so the number of engine reads per cycle
+/// does not change; the first failure is reported.
 fn read_input_channels<H: HalRead + HalWrite + HalDiagnostics>(
     engine: &mut Engine<H>,
     channels: &[u32],
-    comp_name: &str,
-) -> Vec<f64> {
-    channels
-        .iter()
-        .map(|&ch| match engine.channel_read(ch) {
-            Ok(val) => val.cur,
+) -> Result<Vec<f64>, String> {
+    let mut values = Vec::with_capacity(channels.len());
+    let mut first_error = None;
+    for &ch in channels {
+        match read_loop_input(engine, ch, "input") {
+            Ok(v) => values.push(v),
             Err(e) => {
-                debug!(
-                    component = %comp_name,
-                    channel = ch,
-                    error = %e,
-                    "failed to read component input channel"
-                );
-                0.0
+                first_error.get_or_insert(e);
             }
-        })
-        .collect()
+        }
+    }
+    match first_error {
+        None => Ok(values),
+        Some(e) => Err(e),
+    }
 }
 
 /// Execute a component and return the output value (as f64).
@@ -906,6 +976,62 @@ kp = 1.0
         let result = ControlRunner::load(&path);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("write_level"));
+    }
+
+    #[test]
+    fn test_load_rejects_unusable_pid_and_sequencer_values() {
+        // min > max panicked in clamp, NaN gains drove outputs with NaN
+        // (R-9, R-10). TOML accepts nan and inf literals.
+        let cases = [
+            (
+                "min = 100.0
+max = 0.0",
+                "min is above max",
+            ),
+            ("kp = nan", "kp is not finite"),
+            ("ki = inf", "ki is not finite"),
+            ("bias = -inf", "bias is not finite"),
+        ];
+        for (pid, want) in cases {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("control.toml");
+            let toml = format!(
+                "[[loop]]
+name = \"bad\"
+feedback_channel = 1
+setpoint_channel = 2
+output_channels = [3]
+
+[loop.pid]
+{pid}
+"
+            );
+            fs::write(&path, toml).unwrap();
+            let err = ControlRunner::load(&path).err().expect(want);
+            assert!(err.contains(want), "{pid}: {err}");
+        }
+
+        for hysteresis in ["nan", "-0.5"] {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("control.toml");
+            let toml = format!(
+                "[[loop]]
+name = \"bad\"
+feedback_channel = 1
+setpoint_channel = 2
+output_channels = [3, 4]
+
+[loop.pid]
+kp = 1.0
+
+[loop.sequencer]
+hysteresis = {hysteresis}
+"
+            );
+            fs::write(&path, toml).unwrap();
+            let err = ControlRunner::load(&path).err().expect(hysteresis);
+            assert!(err.contains("hysteresis"), "{hysteresis}: {err}");
+        }
     }
 
     #[test]
@@ -1428,6 +1554,166 @@ output_channel = 1
             "Div2 output should be 25.0, got {}",
             val
         );
+    }
+
+    /// Level-8 value of a channel's priority array, if written.
+    fn level8(engine: &Engine<MockHal>, id: u32) -> Option<f64> {
+        engine
+            .channels
+            .get(id)
+            .unwrap()
+            .priority_array
+            .as_ref()
+            .and_then(|pa| pa.levels()[7].value)
+    }
+
+    fn single_output_loop(setpoint_channel: u32) -> ControlLoop {
+        let mut pid = PidController::new();
+        pid.kp = 1.0;
+        pid.out_min = 0.0;
+        pid.out_max = 100.0;
+        ControlLoop {
+            name: "sp_test".to_string(),
+            feedback_channel: 4,
+            setpoint_channel,
+            output_channels: vec![35],
+            write_level: 8,
+            pid,
+            sequencer: None,
+            enable_query: None,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn setpoint_down_or_disabled_holds_the_loop_output() {
+        let mut engine = make_engine(&[
+            (4, ChannelDirection::In),
+            (75, ChannelDirection::In),
+            (35, ChannelDirection::Out),
+        ]);
+        seed_hal_value(&engine, 4, 70.0);
+        engine.hal.set_analog(
+            0,
+            75,
+            Err(sandstar_hal::HalError::Timeout {
+                device: 0,
+                address: 75,
+            }),
+        );
+
+        let mut runner = ControlRunner::new();
+        runner.loops.push(single_output_loop(75));
+        let t0 = Instant::now();
+        runner.execute(&mut engine, t0);
+        runner.execute(&mut engine, t0 + Duration::from_millis(1000));
+        // A Down setpoint reads cur = 0.0; it must not drive the output.
+        assert_eq!(level8(&engine, 35), None, "Down setpoint must not write");
+        assert!(runner.held_loops.contains(&0));
+
+        // Disabled setpoint: same rule.
+        engine.channels.get_mut(75).unwrap().enabled = false;
+        runner.execute(&mut engine, t0 + Duration::from_millis(2000));
+        assert_eq!(
+            level8(&engine, 35),
+            None,
+            "Disabled setpoint must not write"
+        );
+
+        // A healthy setpoint on another channel: the loop writes again.
+        engine
+            .channels
+            .add(Channel::new(
+                76,
+                ChannelType::Analog,
+                ChannelDirection::In,
+                0,
+                76,
+                false,
+                ValueConv::default(),
+                "ch76",
+            ))
+            .unwrap();
+        engine.channels.get_mut(76).unwrap().enabled = true;
+        seed_hal_value(&engine, 76, 72.0);
+        runner.loops[0].setpoint_channel = 76;
+        runner.execute(&mut engine, t0 + Duration::from_millis(3000));
+        runner.execute(&mut engine, t0 + Duration::from_millis(4000));
+        assert!(level8(&engine, 35).is_some(), "Ok setpoint must write");
+        assert!(runner.held_loops.is_empty());
+    }
+
+    fn thermostat_component(input: u32) -> ComponentInstance {
+        ComponentInstance {
+            name: "tstat".to_string(),
+            input_channels: vec![input],
+            output_channel: 22,
+            write_level: 8,
+            kind: ComponentKind::Thermostat(Thermostat::new()),
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn component_input_down_or_fault_holds_the_output() {
+        let mut engine = make_engine(&[
+            (16, ChannelDirection::In),
+            (17, ChannelDirection::In),
+            (22, ChannelDirection::Out),
+        ]);
+        // Down: HAL read error (cur = 0.0 would mean "very cold" -> heat on).
+        engine.hal.set_analog(
+            0,
+            16,
+            Err(sandstar_hal::HalError::Timeout {
+                device: 0,
+                address: 16,
+            }),
+        );
+        // Fault: non-finite reading.
+        seed_hal_value(&engine, 17, f64::NAN);
+
+        let mut runner = ControlRunner::new();
+        runner.components.push(thermostat_component(16));
+        runner.components.push(thermostat_component(17));
+        runner.execute(&mut engine, Instant::now());
+        assert_eq!(level8(&engine, 22), None, "unusable input must not write");
+
+        assert_eq!(runner.held_components.len(), 2);
+
+        // A good input: the thermostat writes and is no longer held.
+        seed_hal_value(&engine, 17, 60.0);
+        runner.execute(&mut engine, Instant::now());
+        assert_eq!(
+            level8(&engine, 22),
+            Some(1.0),
+            "60F is below setpoint: heat on"
+        );
+        assert!(!runner.held_components.contains(&1));
+        assert!(runner.held_components.contains(&0), "Down input still held");
+    }
+
+    #[test]
+    fn enable_query_still_loads_and_runs() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("control.toml");
+        fs::write(
+            &path,
+            r#"
+[[loop]]
+name = "q"
+feedback_channel = 4
+setpoint_channel = 75
+output_channels = [35]
+enable_query = "ahu and cooling"
+[loop.pid]
+kp = 1.0
+"#,
+        )
+        .unwrap();
+        let runner = ControlRunner::load(&path).unwrap();
+        assert_eq!(runner.loop_count(), 1);
+        assert!(runner.loops[0].enabled);
     }
 
     #[test]

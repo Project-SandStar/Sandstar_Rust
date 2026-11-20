@@ -149,7 +149,18 @@ impl LinuxPwm {
     /// on every poll cycle (~100ms).
     ///
     /// Matches C: `pwmio_set_duty(chip, channel, value)` with `io_write_cached`.
+    ///
+    /// `as u64` would turn NaN and negatives into 0 and saturate huge values,
+    /// so anything outside 0..=u32::MAX ns (over 4 s) is an error instead
+    /// (numeric-output.md).
     pub fn write_duty(&mut self, chip: u32, channel: u32, duty_ns: f64) -> Result<(), HalError> {
+        if !(0.0..=u32::MAX as f64).contains(&duty_ns) {
+            return Err(HalError::DeviceError {
+                device: chip,
+                address: channel,
+                message: format!("pwm duty {duty_ns} ns out of range"),
+            });
+        }
         let path = self.duty_path(chip, channel);
         let val = (duty_ns as u64).to_string();
 
@@ -323,6 +334,16 @@ mod tests {
 
         let pwm = LinuxPwm::with_sysfs_root(root);
         assert!(pwm.read_duty(99, 0).is_err());
+    }
+
+    #[test]
+    fn write_duty_rejects_out_of_range_before_sysfs() {
+        let dir = TempDir::new().unwrap();
+        let mut pwm = LinuxPwm::with_sysfs_root(dir.path().to_path_buf());
+        for d in [f64::NAN, f64::INFINITY, -1.0, 1e300] {
+            let err = pwm.write_duty(0, 0, d).unwrap_err().to_string();
+            assert!(err.contains("out of range"), "{d}: {err}");
+        }
     }
 
     #[test]

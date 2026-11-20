@@ -34,7 +34,7 @@ use super::{
     WriteContext,
 };
 
-use crate::rest::EngineHandle;
+use crate::rest::{is_engine_timeout, EngineHandle};
 
 /// Write level used by `LocalIoDriver::write` when delegating to the
 /// engine. Level 16 is the lowest-priority driver write (same as BACnet
@@ -42,6 +42,36 @@ use crate::rest::EngineHandle;
 const LOCAL_IO_WRITE_LEVEL: u8 = 16;
 /// Duration of engine writes from `LocalIoDriver::write`, in seconds.
 const LOCAL_IO_WRITE_DURATION_SECS: f64 = 30.0;
+
+/// Map an `EngineHandle` error to a driver error. A timeout means the engine
+/// is busy or hung, not that the point is misconfigured, so it becomes
+/// `Timeout` (point status `RemoteDown`); everything else (e.g. "channel N
+/// not found") stays `ConfigFault`.
+fn engine_error(msg: String) -> DriverError {
+    if is_engine_timeout(&msg) {
+        DriverError::Timeout(msg)
+    } else {
+        DriverError::ConfigFault(msg)
+    }
+}
+
+/// Error for the points left in a round after the engine timed out. They are
+/// not sent, so one hung engine costs one timeout per round, not one per point.
+/// Driver error for an engine channel that is not `Ok` (R-35).
+fn channel_status_error(status: &str) -> DriverError {
+    match status {
+        "Down" => DriverError::CommFault("channel down".into()),
+        "Disabled" => DriverError::ConfigFault("channel disabled".into()),
+        other => DriverError::RemoteStatus(format!("channel status {other}")),
+    }
+}
+
+fn skipped_after_timeout() -> DriverError {
+    DriverError::Timeout(format!(
+        "{}; skipped after an earlier timeout in this round",
+        crate::rest::ENGINE_TIMEOUT_ERR
+    ))
+}
 
 // ── LocalIoChannel ─────────────────────────────────────────
 
@@ -269,15 +299,23 @@ impl AsyncDriver for LocalIoDriver {
     async fn sync_cur(&mut self, points: &[DriverPointRef], ctx: &mut SyncContext) {
         // Engine-backed path: delegate to engine.read_channel per point.
         if let Some(engine) = self.engine.clone() {
+            let mut timed_out = false;
             for p in points {
+                if timed_out {
+                    ctx.update_cur_err(p.point_id, skipped_after_timeout());
+                    continue;
+                }
                 match engine.read_channel(p.point_id).await {
-                    Ok(cv) => ctx.update_cur_ok(p.point_id, cv.cur),
-                    Err(msg) => ctx.update_cur_err(
-                        p.point_id,
-                        // Engine returns "channel N not found" or similar;
-                        // ConfigFault surfaces that up to the caller.
-                        DriverError::ConfigFault(msg),
-                    ),
+                    Ok(cv) if cv.status.eq_ignore_ascii_case("ok") => {
+                        ctx.update_cur_ok(p.point_id, cv.cur)
+                    }
+                    // A Down/Disabled channel reads cur = 0.0; it is not a
+                    // healthy value (R-35).
+                    Ok(cv) => ctx.update_cur_err(p.point_id, channel_status_error(&cv.status)),
+                    Err(msg) => {
+                        timed_out = is_engine_timeout(&msg);
+                        ctx.update_cur_err(p.point_id, engine_error(msg));
+                    }
                 }
             }
             return;
@@ -303,7 +341,12 @@ impl AsyncDriver for LocalIoDriver {
         // Engine-backed path: write through `EngineHandle` at level 16.
         if let Some(engine) = self.engine.clone() {
             let who = format!("localIo:{}", self.id);
+            let mut timed_out = false;
             for &(id, val) in writes {
+                if timed_out {
+                    ctx.update_write_err(id, skipped_after_timeout());
+                    continue;
+                }
                 match engine
                     .write_channel(
                         id,
@@ -315,7 +358,10 @@ impl AsyncDriver for LocalIoDriver {
                     .await
                 {
                     Ok(()) => ctx.update_write_ok(id),
-                    Err(msg) => ctx.update_write_err(id, DriverError::ConfigFault(msg)),
+                    Err(msg) => {
+                        timed_out = is_engine_timeout(&msg);
+                        ctx.update_write_err(id, engine_error(msg));
+                    }
                 }
             }
             return;
@@ -553,6 +599,48 @@ mod tests {
         assert!(!LocalIoChannel::new(5, "x", "DI", "digital", "G").is_output());
     }
 
+    #[tokio::test]
+    async fn sync_cur_engine_backed_maps_channel_status_to_errors() {
+        use crate::rest::{ChannelValue, EngineCmd};
+        use tokio::sync::mpsc;
+
+        let (tx, mut rx) = mpsc::channel::<EngineCmd>(16);
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                if let EngineCmd::ReadChannel { channel, reply } = cmd {
+                    let status = match channel {
+                        1 => "Down",
+                        2 => "Disabled",
+                        3 => "Fault",
+                        _ => "Ok",
+                    };
+                    let _ = reply.send(Ok(ChannelValue {
+                        channel,
+                        status: status.into(),
+                        raw: 0.0,
+                        cur: 0.0,
+                    }));
+                }
+            }
+        });
+        let mut d = LocalIoDriver::with_engine("eng-status", EngineHandle::new(tx));
+        d.open().await.unwrap();
+        let refs: Vec<DriverPointRef> = (1..=4)
+            .map(|id| DriverPointRef {
+                point_id: id,
+                address: String::new(),
+            })
+            .collect();
+        let mut ctx = SyncContext::new();
+        d.sync_cur(&refs, &mut ctx).await;
+        let results = ctx.into_results();
+
+        assert!(matches!(results[0].1, Err(DriverError::CommFault(_))));
+        assert!(matches!(results[1].1, Err(DriverError::ConfigFault(_))));
+        assert!(matches!(&results[2].1, Err(DriverError::RemoteStatus(m)) if m.contains("Fault")));
+        assert_eq!(results[3].1.as_ref().ok(), Some(&0.0));
+    }
+
     // ── Engine-backed delegation tests (Phase 12.0F) ──────
 
     /// Spawn a mock engine-cmd responder that answers `ReadChannel` with
@@ -624,6 +712,106 @@ mod tests {
         assert!((results[0].1.as_ref().unwrap() - 100.5).abs() < f64::EPSILON);
         assert_eq!(results[1].0, 42);
         assert!((results[1].1.as_ref().unwrap() - 42.5).abs() < f64::EPSILON);
+    }
+
+    /// Engine that takes every command but never answers (a hung poll).
+    /// Returns the handle and a counter of commands received.
+    fn spawn_silent_engine() -> (EngineHandle, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use crate::rest::EngineCmd;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::sync::mpsc;
+
+        let seen = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = seen.clone();
+        let (tx, mut rx) = mpsc::channel::<EngineCmd>(16);
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Some(cmd) = rx.recv().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+                held.push(cmd); // keep the reply sender alive, never answer
+            }
+        });
+        (EngineHandle::new(tx), seen)
+    }
+
+    fn refs(ids: &[u32]) -> Vec<DriverPointRef> {
+        ids.iter()
+            .map(|&id| DriverPointRef {
+                point_id: id,
+                address: "AIN0".into(),
+            })
+            .collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sync_cur_engine_timeout_is_timeout_and_stops_the_round() {
+        use std::sync::atomic::Ordering;
+        let (eh, seen) = spawn_silent_engine();
+        let mut d = LocalIoDriver::with_engine("eng-hung", eh);
+        d.open().await.unwrap();
+
+        let start = tokio::time::Instant::now();
+        let mut ctx = SyncContext::new();
+        d.sync_cur(&refs(&[1, 2, 3]), &mut ctx).await;
+        // One engine timeout for the whole round, not one per point.
+        assert_eq!(start.elapsed(), crate::rest::ENGINE_REPLY_TIMEOUT);
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+
+        let results = ctx.into_results();
+        assert_eq!(results.len(), 3);
+        for (_, r) in &results {
+            let err = r.as_ref().unwrap_err();
+            assert!(matches!(err, DriverError::Timeout(_)), "got {err}");
+            assert!(matches!(
+                super::super::PointStatus::from_driver_error(err),
+                super::super::PointStatus::RemoteDown
+            ));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn write_engine_timeout_is_timeout_and_stops_the_round() {
+        use std::sync::atomic::Ordering;
+        let (eh, seen) = spawn_silent_engine();
+        let mut d = LocalIoDriver::with_engine("eng-hung-w", eh);
+        d.open().await.unwrap();
+
+        let mut ctx = WriteContext::new();
+        d.write(&[(500, 1.0), (600, 2.0)], &mut ctx).await;
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+        let results = ctx.into_results();
+        assert_eq!(results.len(), 2);
+        let first = results[0].1.as_ref().unwrap_err();
+        assert!(matches!(first, DriverError::Timeout(m) if m.contains("may still be applied")));
+        assert!(matches!(
+            results[1].1.as_ref().unwrap_err(),
+            DriverError::Timeout(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn sync_cur_engine_not_found_stays_config_fault() {
+        use crate::rest::EngineCmd;
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<EngineCmd>(16);
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                if let EngineCmd::ReadChannel { channel, reply } = cmd {
+                    let _ = reply.send(Err(format!("channel {channel} not found")));
+                }
+            }
+        });
+        let mut d = LocalIoDriver::with_engine("eng-nf", EngineHandle::new(tx));
+        d.open().await.unwrap();
+        let mut ctx = SyncContext::new();
+        d.sync_cur(&refs(&[7, 8]), &mut ctx).await;
+        let results = ctx.into_results();
+        assert_eq!(results.len(), 2);
+        for (_, r) in &results {
+            assert!(matches!(
+                r.as_ref().unwrap_err(),
+                DriverError::ConfigFault(_)
+            ));
+        }
     }
 
     #[tokio::test]

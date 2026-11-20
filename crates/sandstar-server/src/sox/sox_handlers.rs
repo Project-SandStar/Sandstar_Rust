@@ -230,7 +230,7 @@ impl ComponentTree {
         // Update name index and intern table.
         if !comp.name.is_empty() {
             self.name_to_comp.insert(comp.name.clone(), comp_id);
-            self.name_table.intern(&comp.name);
+            self.intern_name(&comp.name);
         }
         self.components.insert(comp_id, comp);
         // Register as child of parent (if parent exists and is not self).
@@ -291,6 +291,29 @@ impl ComponentTree {
         Some(comp)
     }
 
+    /// Names some component in the tree still carries.
+    fn live_names(&self) -> HashSet<&str> {
+        self.components
+            .values()
+            .map(|c| c.name.as_str())
+            .filter(|n| !n.is_empty())
+            .collect()
+    }
+
+    /// Intern a component name. Renames and removals leave old names in the
+    /// table, so a full table first drops names no component carries (R-47);
+    /// only a table full of names in use refuses the new one.
+    fn intern_name(&self, name: &str) {
+        if self.name_table.intern(name).is_valid() {
+            return;
+        }
+        let live = self.live_names();
+        self.name_table.retain(|n| live.contains(n));
+        if !self.name_table.intern(name).is_valid() {
+            self.name_table.warn_full_once();
+        }
+    }
+
     /// Rename a component. Returns true if found and renamed.
     ///
     /// Updates the name-to-comp reverse index and interns the new name.
@@ -306,7 +329,7 @@ impl ComponentTree {
             // Index and intern the new name.
             if !new_name.is_empty() {
                 self.name_to_comp.insert(new_name.clone(), comp_id);
-                self.name_table.intern(&new_name);
+                self.intern_name(&new_name);
             }
             true
         } else {
@@ -712,12 +735,17 @@ impl ComponentTree {
         // Also collect all links that involve user-added components
         // (already stored on the components themselves, so they serialize with the comp)
 
-        // Serialize the name table for fast restore on startup.
+        // Serialize the name table for fast restore on startup. Only names a
+        // component still carries are written: the table keeps every name
+        // ever used (renames add, nothing removes), and persisting all of it
+        // carried a full table across restarts (R-47).
+        let live_names = self.live_names();
         let name_entries: Vec<String> = self
             .name_table
             .all_names()
             .into_iter()
             .map(|(_, name)| name)
+            .filter(|name| live_names.contains(name.as_str()))
             .collect();
 
         let data = PersistData {
@@ -764,7 +792,9 @@ impl ComponentTree {
 
         let count = data.components.len();
 
-        // Restore interned name table entries (from persistence).
+        // Restore interned name table entries (from persistence). A full
+        // table is fine here: component names below go through intern_name,
+        // which drops whatever the file listed but nothing uses.
         for name in &data.name_table {
             self.name_table.intern(name);
         }
@@ -781,7 +811,7 @@ impl ComponentTree {
             // Update name index and intern table.
             if !comp.name.is_empty() {
                 self.name_to_comp.insert(comp.name.clone(), comp_id);
-                self.name_table.intern(&comp.name);
+                self.intern_name(&comp.name);
             }
             // Insert the component
             self.components.insert(comp_id, comp);
@@ -11383,6 +11413,239 @@ mod tests {
             changed.contains(&tgt_id),
             "target should be in changed list after link exec"
         );
+    }
+
+    /// Deterministic pseudo-random bytes (no extra dependency, same run every time).
+    fn sweep_rng(seed: &mut u64) -> u64 {
+        *seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *seed >> 33
+    }
+
+    /// A SOX request for `cmd` with a random payload. The first payload
+    /// bytes lean toward small component ids so handlers get past lookup.
+    fn sweep_request(cmd: u8, seed: &mut u64) -> Vec<u8> {
+        let len = (sweep_rng(seed) % 48) as usize;
+        let mut data = vec![cmd, (sweep_rng(seed) % 250) as u8];
+        for i in 0..len {
+            let r = sweep_rng(seed);
+            data.push(match (i, r % 6) {
+                (0, _) => 0,
+                (1, _) => (r % 24) as u8,
+                (_, 0) => 0,
+                (_, 1) => 0xFF,
+                _ => (r >> 8) as u8,
+            });
+        }
+        data
+    }
+
+    /// Commands swept for panics. File transfer (f/g/h/…) is left out: it
+    /// writes to disk and keeps global state (R-15).
+    const SWEPT_CMDS: &[u8] = b"vycrlsuwiadno";
+
+    #[test]
+    fn sox_handlers_never_panic_on_random_payloads() {
+        // R-4: a panic in a SOX handler aborts the process in release.
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let persist = dir.path().join("sweep.json").to_string_lossy().into_owned();
+        let channels = sample_channels();
+        let mut seed = 0x5EED_u64;
+        let mut failures = Vec::new();
+
+        // Fresh tree per request: every handler sees the same starting state.
+        for &cmd in SWEPT_CMDS {
+            for _ in 0..600 {
+                let data = sweep_request(cmd, &mut seed);
+                let Some(req) = SoxRequest::parse(&data) else {
+                    continue;
+                };
+                let (chans, path) = (channels.clone(), persist.clone());
+                let res = std::panic::catch_unwind(move || {
+                    let mut tree = ComponentTree::from_channels(&chans);
+                    tree.set_persist_path(path);
+                    let mut subs = SubscriptionManager::new();
+                    let _ = handle_sox_request(&req, &mut tree, &mut subs, 1);
+                });
+                if res.is_err() {
+                    failures.push(format!("fresh {data:02x?}"));
+                }
+            }
+        }
+
+        // One tree across all requests: adds, links and renames build up
+        // state that later requests run into.
+        let mut tree = ComponentTree::from_channels(&channels);
+        tree.set_persist_path(persist);
+        let mut subs = SubscriptionManager::new();
+        for _ in 0..12_000 {
+            let cmd = SWEPT_CMDS[(sweep_rng(&mut seed) % SWEPT_CMDS.len() as u64) as usize];
+            let data = sweep_request(cmd, &mut seed);
+            let Some(req) = SoxRequest::parse(&data) else {
+                continue;
+            };
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = handle_sox_request(&req, &mut tree, &mut subs, 1);
+            }));
+            if res.is_err() {
+                failures.push(format!("stateful {data:02x?}"));
+                break; // the tree may be half-updated after a panic
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{} panics, first: {:?}",
+            failures.len(),
+            failures.first()
+        );
+    }
+
+    #[test]
+    fn persist_writes_only_names_still_in_use() {
+        // Renames used to leave every old name in the table and the
+        // persistence file, so a full table survived restarts (R-47).
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let persist_path = dir.path().join("sox_names.json");
+        let persist_str = persist_path.to_str().unwrap().to_string();
+
+        let channels = sample_channels();
+        let mut tree = ComponentTree::from_channels(&channels);
+        tree.set_persist_path(persist_str.clone());
+        let id = tree.next_comp_id();
+        tree.add(VirtualComponent {
+            comp_id: id,
+            parent_id: 6,
+            name: "oldName".into(),
+            type_name: "Test".into(),
+            kit_id: 2,
+            type_id: 14,
+            children: Vec::new(),
+            slots: Vec::new(),
+            links: Vec::new(),
+        });
+        tree.mark_user_added(id);
+        for n in ["tmpA", "tmpB", "newName"] {
+            assert!(tree.rename(id, n.into()));
+        }
+        assert!(tree.name_table.contains("oldName"));
+        tree.save_user_components().expect("save");
+
+        let json = std::fs::read_to_string(&persist_path).expect("read persist file");
+        let data: PersistData = serde_json::from_str(&json).expect("parse");
+        assert!(data.name_table.contains(&"newName".to_string()));
+        for stale in ["oldName", "tmpA", "tmpB"] {
+            assert!(!data.name_table.contains(&stale.to_string()), "{stale}");
+        }
+
+        let mut tree2 = ComponentTree::from_channels(&channels);
+        tree2.set_persist_path(persist_str);
+        tree2.load_user_components().expect("load");
+        assert!(tree2.name_table.contains("newName"));
+        assert!(!tree2.name_table.contains("oldName"));
+    }
+
+    #[test]
+    fn full_name_table_does_not_block_rename_or_add() {
+        let channels = sample_channels();
+        let mut tree = ComponentTree::from_channels(&channels);
+        // A one-name table: intern one name to fill it, then every new
+        // name is refused.
+        tree.name_table = super::super::name_intern::NameInternTable::with_limit(1);
+        assert!(tree.name_table.intern("filler").is_valid());
+
+        let id = tree.next_comp_id();
+        tree.add(VirtualComponent {
+            comp_id: id,
+            parent_id: 6,
+            name: "addedWhenFull".into(),
+            type_name: "Test".into(),
+            kit_id: 2,
+            type_id: 14,
+            children: Vec::new(),
+            slots: Vec::new(),
+            links: Vec::new(),
+        });
+        assert!(tree.rename(id, "renamedWhenFull".into()));
+        assert_eq!(
+            tree.get(id).map(|c| c.name.as_str()),
+            Some("renamedWhenFull")
+        );
+        // The filler belongs to no component, so it was dropped for the new name.
+        assert!(tree.name_table.contains("renamedWhenFull"));
+        assert!(!tree.name_table.contains("filler"));
+        assert_eq!(tree.name_table.len(), 1);
+    }
+
+    #[test]
+    fn rename_flood_keeps_the_table_to_names_in_use() {
+        let channels = sample_channels();
+        let mut tree = ComponentTree::from_channels(&channels);
+        let id = tree.next_comp_id();
+        tree.add(VirtualComponent {
+            comp_id: id,
+            parent_id: 6,
+            name: "flood".into(),
+            type_name: "Test".into(),
+            kit_id: 2,
+            type_id: 14,
+            children: Vec::new(),
+            slots: Vec::new(),
+            links: Vec::new(),
+        });
+        let live = tree.live_names().len();
+        tree.name_table = super::super::name_intern::NameInternTable::with_limit(live + 5);
+        for comp in tree.components.values() {
+            tree.name_table.intern(&comp.name);
+        }
+        for i in 0..100 {
+            assert!(tree.rename(id, format!("flood{i}")));
+        }
+        assert!(tree.name_table.contains("flood99"));
+        assert!(tree.name_table.len() <= live + 5);
+    }
+
+    #[test]
+    fn loading_an_old_full_name_table_keeps_component_names() {
+        // Files saved before S-26 list every name ever used. Loading one
+        // into a full table must not crowd out the live components.
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let persist_path = dir.path().join("sox_names.json");
+        let persist_str = persist_path.to_str().unwrap().to_string();
+        let channels = sample_channels();
+
+        let mut tree = ComponentTree::from_channels(&channels);
+        tree.set_persist_path(persist_str.clone());
+        let id = tree.next_comp_id();
+        tree.add(VirtualComponent {
+            comp_id: id,
+            parent_id: 6,
+            name: "liveComp".into(),
+            type_name: "Test".into(),
+            kit_id: 2,
+            type_id: 14,
+            children: Vec::new(),
+            slots: Vec::new(),
+            links: Vec::new(),
+        });
+        tree.mark_user_added(id);
+        tree.save_user_components().expect("save");
+        let json = std::fs::read_to_string(&persist_path).expect("read");
+        let mut data: PersistData = serde_json::from_str(&json).expect("parse");
+        data.name_table = (0..200).map(|i| format!("stale{i}")).collect();
+        std::fs::write(&persist_path, serde_json::to_string(&data).unwrap()).unwrap();
+
+        let mut tree2 = ComponentTree::from_channels(&channels);
+        let builtin = tree2.live_names().len();
+        tree2.name_table = super::super::name_intern::NameInternTable::with_limit(builtin + 50);
+        for comp in tree2.components.values() {
+            tree2.name_table.intern(&comp.name);
+        }
+        tree2.set_persist_path(persist_str);
+        tree2.load_user_components().expect("load");
+        assert!(tree2.name_table.contains("liveComp"));
+        assert_eq!(tree2.get(id).map(|c| c.name.as_str()), Some("liveComp"));
     }
 
     #[test]

@@ -6,7 +6,7 @@
 > - The renewal log line is `COV subscription renewed` (no "BACnet" prefix). A write to a missing channel logs `BACnet engine write_channel failed — is point_id a configured virtual channel?` with `error=channel N not found`.
 > - Logs: on the field device the systemd journal needs `sudo` and keeps well under an hour. The durable log is `/var/log/sandstar/sandstar-engine.log.YYYY-MM-DD` (newest 14 kept); read it instead of `journalctl` for anything older.
 > - A systemd drop-in that sets `SANDSTAR_BACNET_CONFIGS` is not owned by the `.deb`; include it in the pre-deploy backup ([DEPLOYMENT_CHECKLIST.md](DEPLOYMENT_CHECKLIST.md)).
-> - Known gaps: COV subscriptions never start in production (no production caller of `add_watch`; values arrive by the 5 s poll); drivers created via REST get no poll tick; replies are not checked against the source address; a BVLL frame shorter than 4 bytes panics (release builds abort).
+> - Known gaps: COV subscriptions never start in production (no production caller of `add_watch`; values arrive by the 5 s poll); drivers created via REST get no poll tick; replies are not checked against the source address. Since S-24 (R-5) a BVLL frame whose length field is below the 4-byte header is dropped as malformed instead of panicking; frames shorter than 4 bytes or with a length beyond the buffer were already dropped.
 
 Sandstar v2.6.0+ supports BACnet/IP as a network driver: discovery (Who-Is / I-Am), ReadProperty, WriteProperty, ReadPropertyMultiple batching, SubscribeCOV notifications with 240s renewal, and BBMD foreign-device registration for multi-subnet deployments.
 

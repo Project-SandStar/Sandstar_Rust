@@ -101,6 +101,7 @@ Do **not** run a recursive `chmod`/`chown` of your own; `postinst` already sets 
 Read the journal soon after the start: it is volatile and holds well under an hour.
 
 1. **Build:** `curl -s http://localhost:8085/api/about` shows `2.9.x` with the new `<hash>`.
+   - `curl -sf http://localhost:8085/health` must succeed. Since S-21 it returns 503 (and `curl -f` fails) when the engine does not answer within 2 s; `tools/deploy-baha.sh` relies on this.
 2. **Unit:** `systemctl status sandstar-engine` is `active (running)`. The device's systemd has no `NRestarts` property, so use `systemctl show -p ActiveEnterTimestamp` instead.
 3. **`initialize.sh` output** (`journalctl -u sandstar-engine -b`, needs `sudo`): one GPIO60 line: `already exported`, `exported (attempt n)` or `export failed … ; pinmux`. It never fails the start.
 4. **Engine log** `/var/log/sandstar/sandstar-engine.log.<UTC-date>`:

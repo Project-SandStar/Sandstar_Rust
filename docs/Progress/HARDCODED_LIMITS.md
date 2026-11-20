@@ -3,7 +3,7 @@
 > **Status (2026-11-18)**: re-checked against `master` `b48484b`. Most values are unchanged, but many line numbers moved. Search by constant name rather than trusting the `file:line` below.
 >
 > **Moved (same value):**
-> - `MAX_PARSE_DEPTH` → `rest/filter.rs:115`; CORS max-age → `rest/mod.rs:748`; `ws.rs` constants → lines 26-30.
+> - `MAX_PARSE_DEPTH` → `rest/filter.rs:115`; CORS max-age → `rest/mod.rs:748`; `ws.rs` constants → lines 29-33 (S-22).
 > - `CONSECUTIVE_FAIL_THRESHOLD` → `engine.rs:42`. The code comment describes it as the count before the fail counter resets.
 > - `ERR_YIELD` / `ERR_RESTART` / `ERR_HIBERNATE` → `sandstar-svm/src/types.rs:72-74`.
 > - `args.rs`: rate limit line 75, port 53, bind 57.
@@ -23,6 +23,12 @@
 > - roxWarp timer bounds: 1..=86400 s (`roxwarp/cluster.rs`).
 > - roxWarp `PEER_ANOMALY_WARN_INTERVAL_MS` = 60,000 ms (`roxwarp/cluster.rs:225`, R-45/R-27, 2026-11-19): at most one `warn` per minute about bad peer points (NaN/inf value, future timestamp); the rest go to `debug`. Keep hardcoded.
 > - roxWarp `MAX_PEER_FUTURE_SKEW_MS` = 300,000 ms (5 min) (`roxwarp/cluster.rs:230`, R-27, 2026-11-19): a peer point whose timestamp is further ahead of the local clock is rejected (logged, rate-limited), so a peer cannot pin a channel under last-writer-wins. **Consider** making it configurable if field clocks drift more.
+> - roxWarp `MAX_FILTER_DEPTH` = 32 (`roxwarp/handler.rs:611`, S-24): deepest `and`/`or` nesting evaluated in a point filter (REST cluster query, roxWarp `query`); terms past it do not match. Without it a long chain overflowed the stack and killed the process. Keep hardcoded.
+> - BACnet `MALFORMED_WARN_INTERVAL_SECS` = 60 s (`drivers/bacnet/mod.rs:79`, S-24): at most one `warn` per minute for frames that fail to decode; the rest go to `debug`. Keep hardcoded.
+> - `MAX_WRITE_DURATION_SECS` = 31,536,000 s (1 year) (`sandstar-engine/src/priority.rs:25`, R-10/S-25): longest timed priority write. `channel_write_level` rejects a longer, NaN or infinite duration (REST `pointWrite` answers 400); a negative duration is still a permanent write. Without it a huge `duration` panicked in `Duration::from_secs_f64` and killed the process. Keep hardcoded.
+> - `MAX_INTERNED_NAMES` = 65,534 (`sandstar-server/src/sox/name_intern.rs:25`, R-47/S-26): most SOX component names the intern table holds. When full, names no component carries any more (left by renames and removals) are dropped and the new name is interned; only a table full of names in use refuses it (one `warn`), and components keep their names either way. Persistence writes only names still in use. Before S-26 the 65,535th name hit an `assert!` and killed the process.
+> - `MAX_INTERNED_TAG_NAMES` = 65,536 (`sandstar-server/src/sox/dyn_slots.rs:76`, R-47/S-26): most dynamic tag names the interner holds (the whole `u16` id space). When full, new names are not interned (one `warn`); only accepted keys are interned. Before S-26 the id wrapped to 0 in release.
+> - `/live` `LOG_PREVIEW_BYTES` = 240 (`rest/live.rs:57`, R-6/S-24): RX/TX log preview, cut back to a UTF-8 character boundary.
 > - GPIO60 retry every 20 watchdog kicks, at most 30 retries (`watchdog.rs`).
 > - systemd unit: `WatchdogSec=10`, `MemoryLimit=128M`.
 
@@ -60,6 +66,14 @@ Audited: 2026-03-10
 | `MAX_POLL_INTERVAL_MS` | 60,000ms (1min) | `sandstar-server/src/rest/ws.rs` | 25 | **Keep** — ceiling to ensure eventual delivery. |
 | `DEFAULT_POLL_INTERVAL_MS` | 1,000ms | `sandstar-server/src/rest/ws.rs` | 26 | **Document** — sensible default for building automation. |
 | `CLIENT_TIMEOUT_SECS` | 120s | `sandstar-server/src/rest/ws.rs` | 27 | **Document** — idle WS client disconnect timeout. |
+| `PUSH_BACKOFF_AFTER_TIMEOUT` | 10s (`ENGINE_REPLY_TIMEOUT`) | `sandstar-server/src/rest/ws.rs` | 37 | **Keep** — after an engine timeout a connection starts its next push round no earlier than this (R-28, S-22). |
+| `CLIENT_QUEUE_CAPACITY` | 16 requests | `sandstar-server/src/rest/ws.rs` | 41 | **Keep** — client engine requests (`subscribe`, `unsubscribe`, `refresh`) a connection queues for its single engine slot; when full the connection stops reading until one finishes (R-28, S-23). |
+| `MAX_CLIENT_MESSAGE_BYTES` | 16 KiB | `sandstar-server/src/rest/ws.rs` | 46 | **Keep** — largest `/api/ws` client message and frame; larger closes the connection (library default 64 MiB). A subscribe with 256 ids is under 4 KiB (S-23). |
+| `CLEANUP_QUEUE_CAPACITY` | 256 watch ids | `sandstar-server/src/rest/ws.rs` | 50 | **Keep** — shared queue of watches to close after disconnect; overflow is logged and left to the lease (S-22). |
+| `CLEANUP_RETRY_DELAY` | 10s | `sandstar-server/src/rest/ws.rs` | 54 | **Keep** — first pause before retrying a timed-out `watch_unsub`; doubles on each further timeout (S-22). |
+| `CLEANUP_RETRY_MAX_DELAY` | 600s | `sandstar-server/src/rest/ws.rs` | 57 | **Keep** — longest pause between cleanup attempts for one watch; about ten attempts within the hour (S-22). |
+| `CLEANUP_MAX_AGE` | 3600s | `sandstar-server/src/rest/ws.rs` | 61 | **Keep** — cleanup gives up on a watch after this; equals `WATCH_LEASE_SECS` (S-22). |
+| `CLEANUP_FULL_WARN_INTERVAL_SECS` | 60s | `sandstar-server/src/rest/ws.rs` | 64 | **Keep** — at most one "cleanup queue full" `warn` per interval (S-22). |
 
 ## Authentication (SCRAM-SHA-256)
 
@@ -76,6 +90,7 @@ Audited: 2026-03-10
 | Constant | Value | File | Line | Recommendation |
 |----------|-------|------|------|----------------|
 | `MAX_LEVELS` | 17 | `sandstar-engine/src/priority.rs` | 15 | **Keep** — matches BACnet priority array (levels 1-17). Protocol constant. |
+| `MAX_WRITE_DURATION_SECS` | 31,536,000 (1 year) | `sandstar-engine/src/priority.rs` | 25 | **Keep** — longest timed write; longer, NaN or infinite durations are rejected (S-25). |
 | `MAX_WHO_LEN` | 16 | `sandstar-engine/src/priority.rs` | 18 | **Keep** — writer identity string cap. Sufficient for identifiers. |
 | `MAX_STAGES` | 16 | `sandstar-engine/src/sequencer.rs` | 8 | **Keep** — max stages in a lead sequencer. 16 matches typical HVAC systems. |
 | `RETRY_COOLDOWN` | 30 polls | `sandstar-engine/src/engine.rs` | 33 | **Document** — polls before retrying a failed channel. |
@@ -115,7 +130,14 @@ Audited: 2026-03-10
 |----------|-------|------|------|----------------|
 | `MAX_FRAME_SIZE` | 1,048,576 (1MB) | `sandstar-ipc/src/protocol.rs` | 11 | **Document** — max IPC message size. Prevents unbounded allocation. |
 | IPC read timeout | 5s | `sandstar-server/src/ipc.rs` | 58,68 | **Document** — prevents blocking IPC reads indefinitely. |
-| Command channel capacity | 64 | `sandstar-server/src/main.rs` | 344 | **Document** — mpsc channel buffer for REST commands. |
+| `ENGINE_REPLY_TIMEOUT` | 10s | `sandstar-server/src/rest/mod.rs` | 146 | **Document** — max wait for an `EngineHandle` command (send + reply). On timeout the caller gets `engine timeout` (REST: 503); a state-changing command may still run later (R-28, S-20). |
+| Engine timeout warn interval | 60s | `sandstar-server/src/rest/mod.rs` | 160 | **Keep** — first timeout per 60 s logged at `warn`, the rest at `debug`. |
+| `HEALTH_ENGINE_TIMEOUT` | 2s | `sandstar-server/src/rest/handlers.rs` | 369 | **Document** — `/health` waits at most this long for the engine; otherwise 503 with `healthy:false` (R-28, S-21). |
+| `REFRESH_BACKOFF_AFTER_TIMEOUT` | 10s | `sandstar-server/src/sox/mod.rs` | 40 | **Keep** — pause before the next SOX tree refresh after an engine timeout (S-22). |
+| `REFRESH_WARN_INTERVAL` | 60s | `sandstar-server/src/sox/mod.rs` | 37 | **Keep** — SOX tree refresh runs every second; a non-timeout failure is logged at `warn` at most once per interval, the rest at `debug` (S-21). |
+| `MAX_INTERNED_NAMES` | 65,534 | `sandstar-server/src/sox/name_intern.rs` | 25 | **Keep** — SOX name intern table size; a full table drops unused names, never panics (S-26). |
+| `MAX_INTERNED_TAG_NAMES` | 65,536 | `sandstar-server/src/sox/dyn_slots.rs` | 76 | **Keep** — dynamic tag name interner size (whole `u16` space); full interner stops interning (S-26). |
+| Command channel capacity | 64 | `sandstar-server/src/main.rs` | 423 | **Document** — mpsc channel buffer for REST commands. |
 
 ## Sedona VM (SVM)
 

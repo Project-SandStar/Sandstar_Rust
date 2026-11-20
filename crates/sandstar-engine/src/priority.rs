@@ -17,6 +17,13 @@ pub const MAX_LEVELS: usize = 17;
 /// Maximum length of "who" identifier.
 pub const MAX_WHO_LEN: usize = 16;
 
+/// Longest timed write accepted, in seconds (one year).
+///
+/// `Engine::channel_write_level` rejects longer, negative-infinite or NaN
+/// durations; without a bound `Duration::from_secs_f64` and `Instant + d`
+/// panic on a huge value from REST (R-10).
+pub const MAX_WRITE_DURATION_SECS: f64 = 365.0 * 24.0 * 3600.0;
+
 /// A single priority level entry.
 #[derive(Debug, Clone)]
 pub struct WriteLevel {
@@ -92,7 +99,16 @@ impl PriorityArray {
         let idx = (level - 1) as usize;
 
         let expires_at = if duration > 0.0 && value.is_some() {
-            Some(Instant::now() + Duration::from_secs_f64(duration))
+            // Callers validate the duration; capping and checked arithmetic
+            // keep this panic-free anyway. If the deadline still cannot be
+            // computed the write expires at once rather than becoming
+            // permanent.
+            let now = Instant::now();
+            let secs = duration.min(MAX_WRITE_DURATION_SECS);
+            Duration::try_from_secs_f64(secs)
+                .ok()
+                .and_then(|d| now.checked_add(d))
+                .or(Some(now))
         } else {
             None
         };
@@ -592,5 +608,23 @@ mod tests {
         let (val, level) = pa.effective();
         assert_eq!(val, Some(20.0));
         assert_eq!(level, 8);
+    }
+
+    #[test]
+    fn set_level_with_huge_duration_does_not_panic() {
+        // Engine::channel_write_level rejects these; the array itself must
+        // still not panic in Duration::from_secs_f64 or Instant + d (R-10).
+        let mut pa = PriorityArray::default();
+        for d in [1e300, f64::MAX, f64::INFINITY] {
+            let r = pa.set_level(1, Some(1.0), "t", d);
+            assert_eq!(r.effective_value, Some(1.0));
+            // Capped at the bound, not expired at once.
+            let deadline = pa.levels()[0].expires_at.expect("timed write");
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                left.as_secs_f64() > MAX_WRITE_DURATION_SECS - 60.0,
+                "{d}: expires in {left:?}"
+            );
+        }
     }
 }

@@ -268,6 +268,15 @@ pub fn load_database<H: HalRead + HalWrite + HalDiagnostics>(
 
         // 3. Build ValueConv from zinc tags
         let conv = build_value_conv(&grid, row, engine);
+        // Loaded anyway so the channel stays visible; the engine faults it
+        // instead of panicking in clamp (R-10).
+        if let Some(reason) = conv.limits_error() {
+            warn!(
+                channel = channel_id,
+                %reason,
+                "invalid conversion limits: channel reads as fault and rejects writes"
+            );
+        }
 
         // 4. Get display label
         let label = grid.string(row, "navName", "");
@@ -434,6 +443,15 @@ pub fn load_database_granular<H: HalRead + HalWrite + HalDiagnostics>(
 
         // 3. Build ValueConv from zinc tags
         let conv = build_value_conv(&grid, row, engine);
+        // Loaded anyway so the channel stays visible; the engine faults it
+        // instead of panicking in clamp (R-10).
+        if let Some(reason) = conv.limits_error() {
+            warn!(
+                channel = channel_id,
+                %reason,
+                "invalid conversion limits: channel reads as fault and rejects writes"
+            );
+        }
 
         // 4. Get display label
         let label = grid.string(row, "navName", "");
@@ -891,6 +909,28 @@ mod tests {
             "{name},desc,{},temp,-40,257,-40,125,233.15,398.15,{tag}",
             path.display()
         )
+    }
+
+    #[test]
+    fn load_tables_skips_a_table_with_non_finite_values() {
+        // One bad table must not stop the others (S-27).
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        std::fs::write(dir.join("bad.txt"), "1\nnan\n3\n").unwrap();
+        std::fs::write(dir.join("good.txt"), "1\n2\n3\n").unwrap();
+        let csv = dir.join("tables.csv");
+        let body = [
+            TABLES_HEADER.to_string(),
+            table_row("Bad", &dir.join("bad.txt"), "bad"),
+            table_row("Good", &dir.join("good.txt"), "good"),
+        ]
+        .join("\n");
+        std::fs::write(&csv, body).unwrap();
+
+        let mut tables = TableStore::new();
+        assert_eq!(load_tables(&mut tables, &csv, dir).unwrap(), 1);
+        assert!(tables.find_by_tag("bad").is_none());
+        assert!(tables.find_by_tag("good").is_some());
     }
 
     #[test]

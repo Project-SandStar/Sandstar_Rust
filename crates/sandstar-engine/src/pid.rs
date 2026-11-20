@@ -83,9 +83,18 @@ impl PidController {
     ///
     /// `setpoint` is the desired value, `process_variable` is the measured value.
     /// `now` is the current instant (for deterministic testing).
+    ///
+    /// The output goes to equipment, so it never becomes non-finite: a
+    /// NaN/inf setpoint or process variable, an invalid configuration
+    /// (`config_error`) or an overflowing cycle holds the last output and
+    /// leaves the integral untouched (R-9, R-10).
     pub fn execute(&mut self, setpoint: f64, process_variable: f64, now: Instant) -> f64 {
         // Disabled: return current output unchanged.
         if !self.enabled {
+            return self.output;
+        }
+
+        if self.config_error().is_some() || !setpoint.is_finite() || !process_variable.is_finite() {
             return self.output;
         }
 
@@ -122,10 +131,18 @@ impl PidController {
         // Proportional term.
         let p = self.kp * error;
 
-        // Integral term with anti-windup.
+        // Integral term with anti-windup. Kept aside so an overflowing cycle
+        // can be discarded below without poisoning the integral.
+        let prev_integral = self.integral;
         if self.ki != 0.0 {
             // ki is "resets per minute", so scale by dt/60.
-            self.integral += self.ki * error * dt_secs / 60.0;
+            let next = self.integral + self.ki * error * dt_secs / 60.0;
+            // Checked before the anti-windup clamp, which would turn an
+            // overflow into an end position.
+            if !next.is_finite() {
+                return self.output;
+            }
+            self.integral = next;
 
             // Anti-windup: clamp integral to output range.
             // When ki > 0, the integral alone must stay within [out_min, out_max].
@@ -163,6 +180,17 @@ impl PidController {
             }
         }
 
+        // An overflowing cycle (huge but finite inputs or gains) is dropped,
+        // not clamped: clamp would turn +inf into out_max (R-9).
+        if !error.is_finite()
+            || !raw.is_finite()
+            || !new_output.is_finite()
+            || !self.integral.is_finite()
+        {
+            self.integral = prev_integral;
+            return self.output;
+        }
+
         // Update state.
         self.last_error = error;
         self.last_exec = Some(now);
@@ -171,9 +199,46 @@ impl PidController {
         self.output
     }
 
+    /// Why this configuration cannot run, if it cannot.
+    ///
+    /// `f64::clamp` panics when `out_min > out_max` or either is NaN
+    /// (R-10), and a non-finite gain makes every output non-finite.
+    /// `execute` holds its output while this returns `Some`; loaders use
+    /// it to reject the configuration.
+    pub fn config_error(&self) -> Option<&'static str> {
+        for (reason, v) in [
+            ("kp is not finite", self.kp),
+            ("ki is not finite", self.ki),
+            ("kd is not finite", self.kd),
+            ("min is not finite", self.out_min),
+            ("max is not finite", self.out_max),
+            ("bias is not finite", self.bias),
+            ("max_delta is not finite", self.max_delta),
+        ] {
+            if !v.is_finite() {
+                return Some(reason);
+            }
+        }
+        if self.out_min > self.out_max {
+            return Some("min is above max");
+        }
+        None
+    }
+
     /// Get the current output value.
     pub fn output(&self) -> f64 {
         self.output
+    }
+
+    /// Restart execution timing at `now`, keeping the integral and output.
+    ///
+    /// Called when a loop resumes after being held (an input was unusable):
+    /// the held time is not a control interval, and using it as one would
+    /// add the whole outage to the integral in a single step (R-35).
+    pub fn restart_timing(&mut self, now: Instant) {
+        if self.initialized {
+            self.last_exec = Some(now);
+        }
     }
 
     /// Reset the controller state (integral, derivative, timing).
@@ -265,6 +330,35 @@ mod tests {
         // Output = integral = 0.8333
         assert!(out > 0.5, "integral should grow, got {out}");
         assert!(out < 2.0, "integral should be moderate, got {out}");
+    }
+
+    #[test]
+    fn restart_timing_keeps_a_long_hold_out_of_the_integral() {
+        let run = |restart: bool| {
+            let mut pid = PidController::new();
+            pid.kp = 0.0;
+            pid.ki = 1.0;
+            pid.kd = 0.0;
+            pid.out_max = 1000.0;
+            let t0 = Instant::now();
+            pid.execute(75.0, 70.0, t0);
+            pid.execute(75.0, 70.0, advance(t0, 1000));
+            // Held for 10 minutes, then resumed.
+            let resume = advance(t0, 601_000);
+            if restart {
+                pid.restart_timing(resume);
+            }
+            pid.execute(75.0, 70.0, resume);
+            pid.execute(75.0, 70.0, advance(t0, 602_000))
+        };
+        let with_restart = run(true);
+        let without = run(false);
+        // Two one-second steps of 5/60 each, vs. one 600 s step (50.0).
+        assert!(with_restart < 0.2, "integral after restart: {with_restart}");
+        assert!(
+            without > 40.0,
+            "without restart the hold lands in the integral: {without}"
+        );
     }
 
     #[test]
@@ -540,7 +634,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pid_nan_input() {
+    fn test_pid_nan_input_holds_output_and_integral() {
         let mut pid = PidController::new();
         pid.kp = 5.0;
         pid.ki = 1.0;
@@ -548,26 +642,24 @@ mod tests {
 
         let t0 = Instant::now();
         pid.execute(72.0, 70.0, t0); // init
+        let before = pid.execute(72.0, 70.0, advance(t0, 1000));
+        let integral_before = pid.integral;
 
-        // Pass NaN as process_variable.
-        let out = pid.execute(72.0, f64::NAN, advance(t0, 1000));
-        // NaN propagates through arithmetic: error = 72 - NaN = NaN.
-        // The f64::clamp function returns NaN when the input is NaN.
-        // This documents the current behavior: NaN input produces NaN output.
-        assert!(
-            out.is_nan(),
-            "NaN input propagates to NaN output, got {out}"
-        );
+        // NaN process variable and NaN setpoint: the output is held, never
+        // NaN, and the integral is not poisoned (R-9).
+        let out = pid.execute(72.0, f64::NAN, advance(t0, 2000));
+        assert_eq!(out, before, "NaN PV must hold the output");
+        let out = pid.execute(f64::NAN, 70.0, advance(t0, 3000));
+        assert_eq!(out, before, "NaN SP must hold the output");
+        assert_eq!(pid.integral, integral_before);
 
-        // Verify the controller can recover after reset.
-        pid.reset();
-        pid.execute(72.0, 70.0, t0);
-        let out = pid.execute(72.0, 70.0, advance(t0, 1000));
-        assert!(!out.is_nan(), "after reset, output should be valid");
+        // Valid input afterwards still computes a finite output.
+        let out = pid.execute(72.0, 70.0, advance(t0, 4000));
+        assert!(out.is_finite(), "recovers after NaN, got {out}");
     }
 
     #[test]
-    fn test_pid_infinity_input() {
+    fn test_pid_infinity_input_holds_output() {
         let mut pid = PidController::new();
         pid.kp = 5.0;
         pid.ki = 0.0;
@@ -576,24 +668,68 @@ mod tests {
 
         let t0 = Instant::now();
         pid.execute(72.0, 70.0, t0); // init
+        let before = pid.execute(72.0, 70.0, advance(t0, 1000));
 
-        // Pass +INFINITY as process_variable.
-        // error = 72 - INF = -INF, p = 5 * -INF = -INF
-        // raw = -INF + 50 = -INF, clamp(-INF, 0, 100) = 0.0
-        let out = pid.execute(72.0, f64::INFINITY, advance(t0, 1000));
-        assert!(
-            (out - 0.0).abs() < 0.001,
-            "infinity input should clamp to out_min, got {out}"
-        );
+        // ±inf used to drive the output to out_min / out_max (R-9); a
+        // broken reading must not move equipment to an end position.
+        let out = pid.execute(72.0, f64::INFINITY, advance(t0, 2000));
+        assert_eq!(out, before, "+inf PV must hold the output");
+        let out = pid.execute(72.0, f64::NEG_INFINITY, advance(t0, 3000));
+        assert_eq!(out, before, "-inf PV must hold the output");
+    }
 
-        // Pass -INFINITY as process_variable.
-        // error = 72 - (-INF) = +INF, p = 5 * INF = INF
-        // raw = INF + 50 = INF, clamp(INF, 0, 100) = 100.0
-        let out = pid.execute(72.0, f64::NEG_INFINITY, advance(t0, 2000));
-        assert!(
-            (out - 100.0).abs() < 0.001,
-            "neg infinity input should clamp to out_max, got {out}"
-        );
+    #[test]
+    fn test_pid_invalid_config_holds_output_without_panic() {
+        let t0 = Instant::now();
+        // min > max panicked in f64::clamp (R-10).
+        let mut pid = PidController::new();
+        pid.kp = 1.0;
+        pid.out_min = 100.0;
+        pid.out_max = 0.0;
+        assert_eq!(pid.config_error(), Some("min is above max"));
+        let out = pid.execute(72.0, 70.0, t0);
+        let out2 = pid.execute(72.0, 70.0, advance(t0, 1000));
+        assert_eq!(out, out2);
+        assert!(out.is_finite());
+
+        // A NaN gain or bound is reported and never produces NaN.
+        for field in 0..7 {
+            let mut pid = PidController::new();
+            match field {
+                0 => pid.kp = f64::NAN,
+                1 => pid.ki = f64::INFINITY,
+                2 => pid.kd = f64::NAN,
+                3 => pid.out_min = f64::NAN,
+                4 => pid.out_max = f64::NAN,
+                5 => pid.bias = f64::NAN,
+                _ => pid.max_delta = f64::NAN,
+            }
+            assert!(pid.config_error().is_some(), "field {field}");
+            pid.execute(72.0, 70.0, t0);
+            let out = pid.execute(72.0, 70.0, advance(t0, 1000));
+            assert!(out.is_finite(), "field {field}: got {out}");
+        }
+        assert_eq!(PidController::new().config_error(), None);
+    }
+
+    #[test]
+    fn test_pid_overflowing_cycle_is_discarded() {
+        let mut pid = PidController::new();
+        pid.kp = 1.0;
+        pid.ki = 1.0;
+        pid.kd = 1.0;
+
+        let t0 = Instant::now();
+        pid.execute(0.0, 0.0, t0); // init
+        let before = pid.execute(0.0, 0.0, advance(t0, 1000));
+        let integral_before = pid.integral;
+        // Finite inputs whose difference overflows to inf: clamp used to
+        // turn that into out_max and store inf in last_error.
+        let out = pid.execute(f64::MAX, -f64::MAX, advance(t0, 2000));
+        assert!(out.is_finite(), "got {out}");
+        assert_eq!(out, before);
+        assert_eq!(pid.integral, integral_before);
+        assert!(pid.last_error.is_finite());
     }
 
     #[test]

@@ -112,7 +112,9 @@ static SOCKET_STORE: Mutex<Option<SocketStore>> = Mutex::new(None);
 
 /// Ensure the global store is initialized and run `f` with a mutable ref.
 fn with_sockets<R>(f: impl FnOnce(&mut SocketStore) -> R) -> R {
-    let mut guard = SOCKET_STORE.lock().expect("SOCKET_STORE mutex poisoned");
+    let mut guard = SOCKET_STORE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let store = guard.get_or_insert_with(SocketStore::new);
     f(store)
 }
@@ -222,17 +224,14 @@ pub fn tcp_finish_connect(ctx: &mut NativeContext<'_>, params: &[i32]) -> VmResu
                     set_closed(ctx.memory, self_ptr, false);
                     Ok(1)
                 }
-                TcpSocketState::Connecting(_) => {
+                TcpSocketState::Connecting(stream) => {
                     // Try a peek_read or write to check if connection finished.
                     // We can check by attempting a zero-length read.
                     // If we get WouldBlock, connection is established.
                     // If we get an error, connection failed.
                     // If we get NotConnected, still connecting.
-                    let stream = match &store.tcp_sockets[&handle] {
-                        TcpSocketState::Connecting(s) => s,
-                        _ => unreachable!(),
-                    };
-                    match stream.peer_addr() {
+                    let peer = stream.peer_addr();
+                    match peer {
                         Ok(_) => {
                             // peer_addr succeeds means we're connected
                             set_closed(ctx.memory, self_ptr, false);
@@ -829,8 +828,8 @@ fn sha1_compute(data: &[u8]) -> [u8; 20] {
                 0..=19 => ((b & c) | ((!b) & d), 0x5A827999u32),
                 20..=39 => (b ^ c ^ d, 0x6ED9EBA1u32),
                 40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1BBCDCu32),
-                60..=79 => (b ^ c ^ d, 0xCA62C1D6u32),
-                _ => unreachable!(),
+                // 60..=79: w has 80 words, so this is the last range.
+                _ => (b ^ c ^ d, 0xCA62C1D6u32),
             };
 
             let temp = a
@@ -986,7 +985,9 @@ pub fn register_kit2(table: &mut NativeTable) {
 /// Used in tests to clean up between test runs.
 #[cfg(test)]
 fn reset_socket_store() {
-    let mut guard = SOCKET_STORE.lock().expect("SOCKET_STORE mutex poisoned");
+    let mut guard = SOCKET_STORE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     *guard = None;
 }
 

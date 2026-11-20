@@ -231,7 +231,10 @@ pub mod simulator {
 
     impl HalRead for SimulatorHal {
         fn read_analog(&self, device: u32, address: u32) -> Result<f64, HalError> {
-            let s = self.state.read().expect("SimulatorState RwLock poisoned");
+            let s = self
+                .state
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             Ok(*s
                 .reads
                 .get(&ReadKey::Analog { device, address })
@@ -239,12 +242,18 @@ pub mod simulator {
         }
 
         fn read_digital(&self, address: u32) -> Result<bool, HalError> {
-            let s = self.state.read().expect("SimulatorState RwLock poisoned");
+            let s = self
+                .state
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             Ok(*s.digital_reads.get(&address).unwrap_or(&false))
         }
 
         fn read_i2c(&self, device: u32, address: u32, label: &str) -> Result<f64, HalError> {
-            let s = self.state.read().expect("SimulatorState RwLock poisoned");
+            let s = self
+                .state
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             Ok(*s
                 .reads
                 .get(&ReadKey::I2c {
@@ -256,12 +265,18 @@ pub mod simulator {
         }
 
         fn read_pwm(&self, chip: u32, channel: u32) -> Result<f64, HalError> {
-            let s = self.state.read().expect("SimulatorState RwLock poisoned");
+            let s = self
+                .state
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             Ok(*s.reads.get(&ReadKey::Pwm { chip, channel }).unwrap_or(&0.0))
         }
 
         fn read_uart(&self, device: u32, label: &str) -> Result<f64, HalError> {
-            let s = self.state.read().expect("SimulatorState RwLock poisoned");
+            let s = self
+                .state
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             Ok(*s
                 .reads
                 .get(&ReadKey::Uart {
@@ -274,7 +289,10 @@ pub mod simulator {
 
     impl HalWrite for SimulatorHal {
         fn write_digital(&self, address: u32, value: bool) -> Result<(), HalError> {
-            let mut s = self.state.write().expect("SimulatorState RwLock poisoned");
+            let mut s = self
+                .state
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             s.writes
                 .insert(WriteKey::Digital { address }, if value { 1.0 } else { 0.0 });
             // Mirror write to digital_reads so read_digital reflects the output state
@@ -284,7 +302,10 @@ pub mod simulator {
         }
 
         fn write_pwm(&self, chip: u32, channel: u32, duty: f64) -> Result<(), HalError> {
-            let mut s = self.state.write().expect("SimulatorState RwLock poisoned");
+            let mut s = self
+                .state
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             s.writes.insert(WriteKey::Pwm { chip, channel }, duty);
             Ok(())
         }
@@ -297,6 +318,25 @@ pub mod simulator {
     mod tests {
         use super::*;
         use std::thread;
+
+        #[test]
+        fn poisoned_state_lock_still_reads_and_writes() {
+            // A panic while holding the lock poisons it; the old expect()
+            // then turned every later read into another panic (R-4).
+            let state = new_shared_state();
+            let held = state.clone();
+            let _ = thread::spawn(move || {
+                let _guard = held.write().unwrap();
+                panic!("poison the simulator state");
+            })
+            .join();
+            assert!(state.is_poisoned());
+
+            let hal = SimulatorHal::new(state.clone());
+            assert_eq!(hal.read_analog(0, 0).unwrap(), 0.0);
+            hal.write_digital(3, true).unwrap();
+            assert!(hal.read_digital(3).unwrap());
+        }
 
         #[test]
         fn test_read_analog_default_zero() {

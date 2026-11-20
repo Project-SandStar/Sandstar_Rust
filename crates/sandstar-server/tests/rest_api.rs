@@ -1594,11 +1594,35 @@ async fn point_write_out_of_range_level_zero() {
         .send()
         .await
         .unwrap();
-    assert!(
-        resp.status().as_u16() >= 400,
-        "level 0 should be rejected, got {}",
-        resp.status()
-    );
+    assert_eq!(resp.status(), 400, "level 0 is a bad request");
+}
+
+#[tokio::test]
+async fn point_write_rejects_untimeable_duration_with_400() {
+    // 1e300 s panicked in Duration::from_secs_f64 and aborted the process
+    // (R-10); the server must answer and stay up.
+    let server = TestServer::start().await;
+    let client = reqwest::Client::new();
+    for duration in [serde_json::json!(1e300), serde_json::json!(31_536_001.0)] {
+        let resp = client
+            .post(server.url("/api/pointWrite"))
+            .json(&serde_json::json!({
+                "channel": 2001,
+                "value": 1.0,
+                "level": 8,
+                "duration": duration,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400, "duration {duration}");
+    }
+    let resp = reqwest::get(server.url("/api/pointWrite?channel=2001"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "server still answers");
+    let body: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert!(body[7]["val"].is_null(), "rejected write was not stored");
 }
 
 #[tokio::test]

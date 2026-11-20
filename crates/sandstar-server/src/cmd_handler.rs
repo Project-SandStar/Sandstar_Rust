@@ -31,7 +31,7 @@ const MAX_WATCHES: usize = 64;
 
 /// Maximum channels allowed in a single watch subscription.
 /// Prevents a malicious client from subscribing to millions of IDs.
-const MAX_CHANNELS_PER_WATCH: usize = 256;
+pub(crate) const MAX_CHANNELS_PER_WATCH: usize = 256;
 
 /// Context needed to process engine commands.
 pub struct CmdContext<'a> {

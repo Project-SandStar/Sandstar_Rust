@@ -322,7 +322,9 @@ impl LinuxI2c {
         // Open the FD first (idempotent), then lock for the I2C transaction.
         let fd = Self::ensure_bus_fd(&mut buses, device)?;
 
-        let bus = buses.get(&device).expect("just inserted");
+        let bus = buses
+            .get(&device)
+            .ok_or_else(|| HalError::BusError(device, "bus state missing".into()))?;
         let _guard = bus
             .lock
             .lock()
@@ -488,7 +490,9 @@ impl LinuxI2c {
 
         let fd = Self::ensure_bus_fd(&mut buses, device)?;
 
-        let bus = buses.get(&device).expect("just inserted");
+        let bus = buses
+            .get(&device)
+            .ok_or_else(|| HalError::BusError(device, "bus state missing".into()))?;
         let _guard = bus
             .lock
             .lock()
@@ -550,9 +554,12 @@ impl LinuxI2c {
                 format!("reinit: failed to reopen {}: errno {}", path, errno()),
             ));
         }
-        buses.get_mut(&device).expect("just inserted").fd = Some(fd);
+        // entry() cannot miss, so the fd just opened is always stored.
+        buses.entry(device).or_insert_with(BusState::new).fd = Some(fd);
 
-        let bus = buses.get(&device).expect("just inserted");
+        let bus = buses
+            .get(&device)
+            .ok_or_else(|| HalError::BusError(device, "bus state missing".into()))?;
         let _guard = bus
             .lock
             .lock()
