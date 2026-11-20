@@ -45,7 +45,7 @@ This is the single-read status tracker for the Sandstar Rust project. It consoli
 | BACnet/IP driver (read + write + COV + RPM + BBMD) | ✅ Complete — Project B, 11 phases, live-validated | [IMPLEMENTATION_PLAN_FILTER_AND_BACNET.md](IMPLEMENTATION_PLAN_FILTER_AND_BACNET.md), [BACNET_SETUP.md](BACNET_SETUP.md) |
 | MQTT driver | ✅ Complete — Project C, 4 phases, live-validated | [IMPLEMENTATION_PLAN_MQTT.md](IMPLEMENTATION_PLAN_MQTT.md), [MQTT_SETUP.md](MQTT_SETUP.md) |
 | Poll integration (driver → engine channels) | ✅ Complete — shared tick task in rest/mod.rs | [IMPLEMENTATION_PLAN_FILTER_AND_BACNET.md](IMPLEMENTATION_PLAN_FILTER_AND_BACNET.md) Stage 1/2 |
-| REST API + WebSocket | ✅ 30+ routes (see §3), bearer + SCRAM auth, rate limit, WS push. Since S-31 every HTTP write route is behind the auth layer; ⚠ the editor WebSockets (`/live`, `/api/rows`) and `/roxwarp` are not | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 1, [DRIVER_REST_API.md](DRIVER_REST_API.md) |
+| REST API + WebSocket | ✅ 30+ routes (see §3), bearer + SCRAM auth, rate limit, WS push. Since S-31 every HTTP write route is behind the auth layer and since S-32 the editor endpoints (`/live`, `/api/rows`, `/live/sedonaState`) are too (bearer header or session cookie, plus an Origin check); ⚠ `/roxwarp` is not | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 1, [DRIVER_REST_API.md](DRIVER_REST_API.md) |
 | Security hardening | 🟡 Partial. Open: the field service binds `0.0.0.0` with no auth configured; editor WebSockets and `/roxwarp` outside `check_auth` (§3, S-32); SIGTERM not handled (no graceful shutdown) | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 5.7, §Phase 6.5 |
 | Visual DDC editor | 🟡 14.0A REST complete. 14.0B–F were superseded by 14.0G (native backend for the external Vue editor): about 75%, G-6 open, G-7/G-8 partial | [IMPLEMENTATION_PLAN_NATIVE_EDITOR_BACKEND.md](IMPLEMENTATION_PLAN_NATIVE_EDITOR_BACKEND.md) |
 | Driver Framework v2 (Phase 12) | ✅ All sub-phases complete (12.0A–G + 12.0D.WS). Caveats: MQTT never reconnects; BACnet COV subscriptions never start in production; REST-created drivers get no poll tick; Modbus is not loadable | [IMPLEMENTATION_PLAN_DRIVER_FRAMEWORK.md](IMPLEMENTATION_PLAN_DRIVER_FRAMEWORK.md) |
@@ -215,12 +215,12 @@ Router: `router_with_auth` in `crates/sandstar-server/src/rest/mod.rs`, plus rou
 | `GET /api/about`, `/api/ops`, `/api/formats`, `/api/read`, `/api/status`, `/health`, `/api/metrics`, `/metrics`, `/api/diagnostics`, `/api/channels`, `/api/polls`, `/api/tables`, `/api/history/{channel}`, `GET /api/pointWrite` | no | Read-only metadata, data and observability (`/metrics` is Prometheus text) |
 | `POST /api/auth` | — | SCRAM handshake |
 | `POST /api/pointWrite`, `/api/pollNow`, `/api/reload`, `/api/watchSub`, `/api/watchUnsub`, `/api/watchPoll`, `/api/hisRead`, `/api/nav`, `/api/invokeAction` | **yes** | Haystack ops and engine writes |
-| `GET /api/ws` | handshake | Haystack-over-WebSocket (JSON) with SCRAM inside the socket |
+| `GET /api/ws` | handshake | Haystack-over-WebSocket (JSON) with SCRAM inside the socket. With auth on (S-32): a foreign browser `Origin` gets 403; a bearer header, session cookie or the deprecated legacy `?token=` pre-authenticates, otherwise the client must send an `auth` message |
 | `GET /api/drivers`, `/api/drivers/{id}/status`, `/api/drivers/{id}/learn` | no | Driver listing |
 | `POST /api/drivers`, `DELETE /api/drivers/{id}`, `POST /api/drivers/{id}/open\|close\|ping\|message\|write`, `POST /api/syncCur` | **yes** | Driver lifecycle ([DRIVER_REST_API.md](DRIVER_REST_API.md)) |
 | `GET /api/sox/tree`, `/api/sox/comp/{id}`, `/api/sox/palette`, `/api/sox/names` | no | SOX component tree (with `--sox`) |
 | `POST/DELETE/PUT /api/sox/comp*`, `/api/sox/link` | **yes** (S-31) | SOX component edits (with `--sox`) |
-| `GET /api/rows`, `GET /live`, `GET /live/sedonaState` | **no** ⚠ | Editor WebSockets (with `--sox`). Browsers cannot send a header on the upgrade and tokens may not go in the URL, so these need their own auth design (S-32). They expose the same SOX edits as `/api/sox/*` |
+| `GET /api/rows`, `GET /live`, `GET /live/sedonaState` | **yes** (S-32, `check_upgrade_auth`) | Editor endpoints (with `--sox`). Accept `Authorization: Bearer` or the `sandstar_session` cookie from `POST /api/auth`; with auth on a browser `Origin` must be the same host or in `--ws-allowed-origins` (else 403). The editor does not log in yet (S-32b), so it cannot connect while auth is on |
 | `GET /file/*`, `/library/`, `GET /tags` | no | File download and editor library stubs (with `--sox`) |
 | `PUT /file/*` | **yes** (S-31) | File upload (with `--sox`) |
 | `GET /api/tags`, `/api/tags/stats`, `/api/tags/{comp_id}` | no | Dynamic tags (read) |
@@ -312,7 +312,7 @@ Host addresses, SSH details and site names are deliberately not written in this 
 Rewritten 2026-11-18. Ranked by risk first, then value.
 
 ### 🔴 Security and robustness (field device affected)
-1. **Auth in the field configuration.** The unit binds `0.0.0.0` with no auth; and even with auth on, the editor WebSockets (`/live`, `/api/rows`) and `/roxwarp` bypass `check_auth` (§3). HTTP write routes are behind it since S-31.
+1. **Auth in the field configuration.** The unit binds `0.0.0.0` with no auth; and even with auth on, `/roxwarp` bypasses auth (§3). HTTP write routes are behind it since S-31, the editor endpoints since S-32; the editor itself cannot log in yet (S-32b).
 2. **Panic paths on network input.** Release builds abort on panic; known cases include a short BACnet BVLL frame and some lock-poison `unwrap`s on REST paths.
 3. **Graceful shutdown.** Handle SIGTERM and wire `with_graceful_shutdown`.
 4. **Numeric output guards.** Not every value leaving the process is checked with `is_finite` (engine outputs, roxWarp feed).
