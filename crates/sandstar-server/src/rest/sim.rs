@@ -299,18 +299,27 @@ fn apply_inject_point(s: &mut sandstar_hal::simulator::SimState, point: InjectPo
 /// - `GET  /api/sim/outputs` — drain engine writes
 /// - `GET  /api/sim/state` — read state summary
 /// - `POST /api/sim/scenario` — run timed injection sequence
-pub fn router(state: SharedSimState) -> Router {
-    Router::new()
-        .route("/api/sim/inject", post(inject_handler))
-        .route("/api/sim/outputs", get(outputs_handler))
+///
+/// `inject` and `scenario` change engine inputs, and `outputs` drains the
+/// recorded writes; all three sit behind the auth layer (R-2).
+pub fn router(state: SharedSimState, auth_state: crate::auth::AuthState) -> Router {
+    let read = Router::new()
         .route("/api/sim/state", get(state_handler))
+        .with_state(state.clone());
+    let write = Router::new()
+        .route("/api/sim/outputs", get(outputs_handler))
+        .route("/api/sim/inject", post(inject_handler))
         .route("/api/sim/scenario", post(scenario_handler))
-        .with_state(state)
+        .with_state(state);
+    read.merge(super::require_auth(write, auth_state))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn no_auth() -> crate::auth::AuthState {
+        crate::auth::AuthState::new(crate::auth::AuthStore::new())
+    }
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use sandstar_hal::simulator::SimState;
@@ -324,7 +333,7 @@ mod tests {
     #[tokio::test]
     async fn test_inject_analog() {
         let state = test_state();
-        let app = router(state.clone());
+        let app = router(state.clone(), no_auth());
 
         let body = serde_json::json!({
             "points": [
@@ -367,7 +376,7 @@ mod tests {
     #[tokio::test]
     async fn test_inject_digital() {
         let state = test_state();
-        let app = router(state.clone());
+        let app = router(state.clone(), no_auth());
 
         let body = serde_json::json!({
             "points": [
@@ -395,7 +404,7 @@ mod tests {
     #[tokio::test]
     async fn test_inject_i2c() {
         let state = test_state();
-        let app = router(state.clone());
+        let app = router(state.clone(), no_auth());
 
         let body = serde_json::json!({
             "points": [
@@ -428,7 +437,7 @@ mod tests {
     #[tokio::test]
     async fn test_inject_mixed_types() {
         let state = test_state();
-        let app = router(state.clone());
+        let app = router(state.clone(), no_auth());
 
         let body = serde_json::json!({
             "points": [
@@ -484,7 +493,7 @@ mod tests {
             s.digital_reads.insert(45, true);
         }
 
-        let app = router(state.clone());
+        let app = router(state.clone(), no_auth());
         let resp = app
             .oneshot(
                 Request::builder()
@@ -519,7 +528,7 @@ mod tests {
             );
         }
 
-        let app = router(state.clone());
+        let app = router(state.clone(), no_auth());
         let resp = app
             .oneshot(
                 Request::builder()
@@ -555,7 +564,7 @@ mod tests {
             );
         }
 
-        let app = router(state.clone());
+        let app = router(state.clone(), no_auth());
         let body = serde_json::json!({
             "points": [
                 {"type": "analog", "device": 0, "address": 0, "value": 2000.0}
@@ -590,7 +599,7 @@ mod tests {
     #[tokio::test]
     async fn test_inject_empty_points() {
         let state = test_state();
-        let app = router(state.clone());
+        let app = router(state.clone(), no_auth());
 
         let body = serde_json::json!({ "points": [] });
         let resp = app
@@ -614,7 +623,7 @@ mod tests {
     #[tokio::test]
     async fn test_scenario_returns_started() {
         let state = test_state();
-        let app = router(state.clone());
+        let app = router(state.clone(), no_auth());
 
         let body = serde_json::json!({
             "steps": [
@@ -651,7 +660,7 @@ mod tests {
     #[tokio::test]
     async fn test_scenario_executes_steps() {
         let state = test_state();
-        let app = router(state.clone());
+        let app = router(state.clone(), no_auth());
 
         let body = serde_json::json!({
             "steps": [
@@ -697,7 +706,7 @@ mod tests {
     #[tokio::test]
     async fn test_bad_json_returns_error() {
         let state = test_state();
-        let app = router(state.clone());
+        let app = router(state.clone(), no_auth());
 
         let resp = app
             .oneshot(

@@ -526,6 +526,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             use axum::routing::get;
             use axum::Router;
 
+            // Outside the REST auth layer (R-2): peers authenticate with mTLS
+            // on this port when certificates are configured. Without them, or
+            // if the mTLS config fails to build, this serves plain WS with no
+            // peer auth (known gap, see 06).
             let cluster_app = Router::new()
                 .route(
                     "/roxwarp",
@@ -596,21 +600,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         #[allow(unused_mut)]
         let mut app = rest::router_with_auth(
             handle,
-            auth_state,
+            auth_state.clone(),
             config.auth_token.clone(),
             config.rate_limit,
             sox_api_state,
         );
 
         // Merge dynamic tags REST endpoints
-        app = app.merge(rest::tags::router(dyn_store.clone()));
+        app = app.merge(rest::tags::router(dyn_store.clone(), auth_state.clone()));
 
         // Merge alert management REST endpoints
-        app = app.merge(alerts::alert_router(alert_manager.clone()));
+        app = app.merge(alerts::alert_router(
+            alert_manager.clone(),
+            auth_state.clone(),
+        ));
 
         // Merge roxWarp cluster endpoints (WebSocket + status API)
         if let Some(ref rw_state) = roxwarp_state {
-            app = app.merge(rest::roxwarp_router(rw_state.clone()));
+            app = app.merge(rest::roxwarp_router(rw_state.clone(), auth_state.clone()));
         } else {
             // Always provide /api/cluster/status even when clustering is off
             app = app.merge(rest::cluster_disabled_router());
@@ -619,7 +626,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Merge simulator REST endpoints when built with simulator-hal
         #[cfg(feature = "simulator-hal")]
         {
-            app = app.merge(rest::sim::router(sim_state.clone()));
+            app = app.merge(rest::sim::router(sim_state.clone(), auth_state.clone()));
         }
 
         let addr: std::net::SocketAddr =
