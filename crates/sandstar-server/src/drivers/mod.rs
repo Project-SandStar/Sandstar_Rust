@@ -509,7 +509,6 @@ pub fn driver_router(
     handle: crate::drivers::actor::DriverHandle,
     auth_state: crate::auth::AuthState,
 ) -> axum::Router {
-    use axum::middleware;
     use axum::routing::{delete, get, post};
 
     let public = axum::Router::new()
@@ -527,11 +526,8 @@ pub fn driver_router(
         .route("/api/drivers/{id}/message", post(driver_message_async))
         .route("/api/drivers/{id}/write", post(driver_write_async))
         .route("/api/syncCur", post(sync_cur_async))
-        .route_layer(middleware::from_fn_with_state(
-            auth_state,
-            crate::rest::check_auth,
-        ))
         .with_state(handle);
+    let protected = crate::rest::require_auth(protected, auth_state);
 
     public.merge(protected)
 }

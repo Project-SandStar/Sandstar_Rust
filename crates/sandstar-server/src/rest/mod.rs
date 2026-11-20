@@ -574,6 +574,15 @@ pub(crate) async fn check_auth(
     Err(StatusCode::UNAUTHORIZED)
 }
 
+/// Wrap every route already in `router` with [`check_auth`].
+///
+/// `route_layer` only covers routes added before it, so build the router
+/// first and wrap it last. With no auth configured, `check_auth` lets every
+/// request through, so behavior is unchanged until auth is turned on (R-2).
+pub fn require_auth(router: Router, auth_state: AuthState) -> Router {
+    router.route_layer(middleware::from_fn_with_state(auth_state, check_auth))
+}
+
 // ── SCRAM Auth Endpoint ─────────────────────────────────────
 
 /// JSON request/response types for the /api/auth SCRAM endpoint.
@@ -912,11 +921,8 @@ pub fn router_with_auth(
         .route("/api/hisRead", post(handlers::his_read))
         .route("/api/nav", post(handlers::nav))
         .route("/api/invokeAction", post(handlers::invoke_action))
-        .route_layer(middleware::from_fn_with_state(
-            auth_state.clone(),
-            check_auth,
-        ))
         .with_state(handle.clone());
+    let protected = require_auth(protected, auth_state.clone());
 
     // CORS policy: allow any origin (embedded device accessed by various IPs)
     // but restrict methods and headers to only what we actually use.
@@ -1037,11 +1043,14 @@ pub fn router_with_auth(
             app = app.layer(axum::Extension(ds.clone()));
         }
         // Phase 14.0G-4: file transfer (GET/PUT /file/*path).
-        let file_route = file_ops::router(live::LiveState {
-            tree: sox.tree.clone(),
-            manifest_db: sox.manifest_db.clone(),
-            dyn_store: sox.dyn_store.clone(),
-        });
+        let file_route = file_ops::router(
+            live::LiveState {
+                tree: sox.tree.clone(),
+                manifest_db: sox.manifest_db.clone(),
+                dyn_store: sox.dyn_store.clone(),
+            },
+            auth_state.clone(),
+        );
         // Phase 14.0G-5: editor `/library/` + `/tags` compatibility stubs.
         let library_route = library::router(live::LiveState {
             tree: sox.tree.clone(),
@@ -1050,7 +1059,14 @@ pub fn router_with_auth(
         });
         app = app
             .merge(sox_api::public_router(sox.clone()))
-            .merge(sox_api::protected_router(sox))
+            .merge(require_auth(
+                sox_api::protected_router(sox),
+                auth_state.clone(),
+            ))
+            // Outside the auth layer (R-2, S-32): browsers cannot send an
+            // Authorization header on a WebSocket upgrade and tokens may not
+            // go in the query string (R-14). `/live` and `/api/rows` need
+            // their own auth design. `/library/` and `/tags` are read-only.
             .merge(rows_route)
             .merge(live_route)
             .merge(file_route)
@@ -1102,19 +1118,26 @@ async fn cluster_disabled_handler() -> impl IntoResponse {
 /// - `GET /roxwarp` — WebSocket upgrade for peer gossip
 /// - `GET /api/cluster/status` — cluster overview (JSON)
 /// - `POST /api/cluster/query` — distributed Haystack filter query
-pub fn roxwarp_router(state: crate::roxwarp::RoxWarpState) -> Router {
+pub fn roxwarp_router(state: crate::roxwarp::RoxWarpState, auth_state: AuthState) -> Router {
     use crate::roxwarp::handler;
 
+    // Outside the auth layer (R-2): cluster peers connect here without a
+    // bearer token; gating it needs a peer-auth decision first.
     let ws_route = Router::new()
         .route("/roxwarp", get(handler::roxwarp_upgrade))
         .with_state(state.clone());
 
-    let api_routes = Router::new()
+    let status_route = Router::new()
         .route("/api/cluster/status", get(cluster_status_handler))
-        .route("/api/cluster/query", post(cluster_query_handler))
-        .with_state(state);
+        .with_state(state.clone());
+    let query_route = require_auth(
+        Router::new()
+            .route("/api/cluster/query", post(cluster_query_handler))
+            .with_state(state),
+        auth_state,
+    );
 
-    ws_route.merge(api_routes)
+    ws_route.merge(status_route).merge(query_route)
 }
 
 /// GET /api/cluster/status — return cluster status as JSON.

@@ -539,17 +539,23 @@ use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 
 /// Build the alert management router.
-pub fn alert_router(manager: SharedAlertManager) -> Router {
-    Router::new()
+///
+/// Reads are public (the SMTP password is masked); config changes, recipient
+/// changes and the test e-mail sit behind the auth layer (R-2).
+pub fn alert_router(manager: SharedAlertManager, auth_state: crate::auth::AuthState) -> Router {
+    let read = Router::new()
         .route("/api/alerts/config", get(get_config))
-        .route("/api/alerts/config", put(put_config))
         .route("/api/alerts/recipients", get(get_recipients))
-        .route("/api/alerts/recipients", post(add_recipient))
-        .route("/api/alerts/recipients/{email}", delete(remove_recipient))
         .route("/api/alerts/active", get(get_active))
         .route("/api/alerts/history", get(get_history))
+        .with_state(manager.clone());
+    let write = Router::new()
+        .route("/api/alerts/config", put(put_config))
+        .route("/api/alerts/recipients", post(add_recipient))
+        .route("/api/alerts/recipients/{email}", delete(remove_recipient))
         .route("/api/alerts/test", post(send_test))
-        .with_state(manager)
+        .with_state(manager);
+    read.merge(crate::rest::require_auth(write, auth_state))
 }
 
 /// GET /api/alerts/config — view current alert config (password masked).

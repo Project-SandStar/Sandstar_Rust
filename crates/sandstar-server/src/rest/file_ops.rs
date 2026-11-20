@@ -28,7 +28,7 @@ use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, put};
 use axum::Router;
 use tokio::fs;
 use tracing::{debug, warn};
@@ -60,10 +60,15 @@ pub fn resolve_file_root() -> Option<PathBuf> {
     None
 }
 
-pub fn router(state: SoxState) -> Router {
-    Router::new()
-        .route("/file/{*path}", get(get_file).put(put_file))
-        .with_state(state)
+/// `GET` stays public; `PUT` writes files and sits behind the auth layer (R-2).
+pub fn router(state: SoxState, auth_state: crate::auth::AuthState) -> Router {
+    let read = Router::new()
+        .route("/file/{*path}", get(get_file))
+        .with_state(state.clone());
+    let write = Router::new()
+        .route("/file/{*path}", put(put_file))
+        .with_state(state);
+    read.merge(super::require_auth(write, auth_state))
 }
 
 // ── Handlers ───────────────────────────────────────

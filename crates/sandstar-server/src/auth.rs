@@ -83,6 +83,17 @@ impl StoredCredential {
 
 // ── Auth Store ─────────────────────────────────────────────
 
+/// Compare two byte strings without an early exit on the first mismatch.
+///
+/// The length is not hidden (a length mismatch returns at once), only the
+/// position of the first differing byte.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 /// Auth store holding all credentials and the legacy bearer token.
 #[derive(Debug, Clone, Default)]
 pub struct AuthStore {
@@ -123,7 +134,13 @@ impl AuthStore {
 
     /// Check if a bearer token matches.
     pub fn check_bearer(&self, token: &str) -> bool {
-        self.bearer_token.as_deref() == Some(token)
+        match self.bearer_token.as_deref() {
+            // An empty configured token never matches: auth stays closed
+            // instead of accepting `Authorization: Bearer `.
+            Some("") => false,
+            Some(expected) => constant_time_eq(expected.as_bytes(), token.as_bytes()),
+            None => false,
+        }
     }
 
     /// Returns true if any auth mechanism is configured (bearer or SCRAM).
