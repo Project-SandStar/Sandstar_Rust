@@ -166,6 +166,16 @@ impl ValueConv {
             return Ok(());
         }
 
+        // A non-finite reading is a fault, not a value: f64::max/min in the
+        // clamps below would turn NaN into min (numeric-output.md, R-9 read
+        // side). cur keeps the last good value.
+        if !value.raw.is_finite() {
+            value.status = EngineStatus::Fault;
+            value.trigger = false;
+            return Ok(());
+        }
+        let previous_cur = value.cur;
+
         let mut raw = value.raw;
 
         if let Some(conv_func) = self.conv_func {
@@ -219,6 +229,14 @@ impl ValueConv {
         } else {
             // Path 2/3: Table or range-based conversion
             self.convert_table_or_range(value, tables, channel)?;
+        }
+
+        // A finite raw can still convert to a non-finite cur (a "nan" line
+        // in a table file, an overflowing scale); same rule as above.
+        if !value.cur.is_finite() {
+            value.cur = previous_cur;
+            value.status = EngineStatus::Fault;
+            value.trigger = false;
         }
 
         Ok(())
@@ -1104,6 +1122,77 @@ mod tests {
             );
             assert_eq!(value.raw, raw_before);
         }
+    }
+
+    #[test]
+    fn non_finite_raw_reads_as_fault_not_min() {
+        // The old code reported status Ok with cur = min (f64::max drops NaN).
+        let tables = TableStore::new();
+        let convs = [
+            ValueConv {
+                min: Some(0.0),
+                max: Some(100.0),
+                ..Default::default()
+            },
+            ValueConv {
+                low: Some(0.0),
+                high: Some(4095.0),
+                min: Some(0.0),
+                max: Some(100.0),
+                scale: Some(1.0),
+                offset: Some(0.0),
+                ..Default::default()
+            },
+            ValueConv {
+                conv_func: Some(ConversionFn::Sdp610ToPa),
+                min: Some(0.0),
+                max: Some(100.0),
+                ..Default::default()
+            },
+        ];
+        for (i, conv) in convs.iter().enumerate() {
+            for raw in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                let mut value = EngineValue::default();
+                value.cur = 42.0;
+                value.raw = raw;
+                let mut flow = None;
+                conv.convert(&mut value, &tables, 0, &mut flow).unwrap();
+                assert_eq!(
+                    value.status,
+                    crate::EngineStatus::Fault,
+                    "conv {i} raw {raw}"
+                );
+                assert_eq!(value.cur, 42.0, "conv {i} raw {raw}: cur kept");
+            }
+        }
+    }
+
+    #[test]
+    fn non_finite_conversion_result_reads_as_fault() {
+        // Finite raw, but the scale overflows cur to infinity.
+        let tables = TableStore::new();
+        let conv = ValueConv {
+            scale: Some(f64::MAX),
+            ..Default::default()
+        };
+        let mut value = EngineValue::default();
+        value.cur = 7.0;
+        value.raw = 4000.0;
+        let mut flow = None;
+        conv.convert(&mut value, &tables, 0, &mut flow).unwrap();
+        assert_eq!(value.status, crate::EngineStatus::Fault);
+        assert_eq!(value.cur, 7.0);
+
+        // A finite result still converts normally.
+        let conv = ValueConv {
+            scale: Some(2.0),
+            ..Default::default()
+        };
+        let mut value = EngineValue::default();
+        value.raw = 3.0;
+        conv.convert(&mut value, &tables, 0, &mut flow).unwrap();
+        assert_eq!(value.status, crate::EngineStatus::Ok);
+        assert_eq!(value.cur, 6.0);
     }
 
     #[test]

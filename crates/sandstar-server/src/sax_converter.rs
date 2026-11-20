@@ -115,11 +115,9 @@ impl SaxConverter {
                         let id: u32 = attrs.get("id").and_then(|v| v.parse().ok()).unwrap_or(0);
                         let comp_type = attrs.get("type").cloned().unwrap_or_default();
 
-                        let full_path = if path_stack.is_empty() {
-                            format!("/{comp_name}")
-                        } else {
-                            let parent = path_stack.last().unwrap();
-                            format!("{parent}/{comp_name}")
+                        let full_path = match path_stack.last() {
+                            None => format!("/{comp_name}"),
+                            Some(parent) => format!("{parent}/{comp_name}"),
                         };
 
                         path_stack.push(full_path.clone());
@@ -168,11 +166,9 @@ impl SaxConverter {
                         let id: u32 = attrs.get("id").and_then(|v| v.parse().ok()).unwrap_or(0);
                         let comp_type = attrs.get("type").cloned().unwrap_or_default();
 
-                        let full_path = if path_stack.is_empty() {
-                            format!("/{comp_name}")
-                        } else {
-                            let parent = path_stack.last().unwrap();
-                            format!("{parent}/{comp_name}")
+                        let full_path = match path_stack.last() {
+                            None => format!("/{comp_name}"),
+                            Some(parent) => format!("{parent}/{comp_name}"),
                         };
 
                         conv.components.insert(

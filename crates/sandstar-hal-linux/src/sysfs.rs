@@ -70,8 +70,7 @@ pub fn write_cached(fd: &mut Option<File>, path: &Path, value: &str) -> io::Resu
         Some(ref mut f) => f,
         None => {
             let f = OpenOptions::new().write(true).open(path)?;
-            *fd = Some(f);
-            fd.as_mut().unwrap()
+            fd.insert(f)
         }
     };
 
@@ -103,8 +102,7 @@ pub fn read_cached(fd: &mut Option<File>, path: &Path) -> io::Result<String> {
         Some(ref mut f) => f,
         None => {
             let f = OpenOptions::new().read(true).open(path)?;
-            *fd = Some(f);
-            fd.as_mut().unwrap()
+            fd.insert(f)
         }
     };
 
