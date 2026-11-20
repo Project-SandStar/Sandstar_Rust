@@ -247,6 +247,19 @@ impl ControlRunner {
             pid.max_delta = lc.pid.max_delta;
             pid.direct = lc.pid.direct;
             pid.exec_interval_ms = lc.pid.exec_interval_ms;
+            // A NaN gain or min > max would make the loop drive its outputs
+            // with NaN or panic in clamp (R-9, R-10); reject like write_level.
+            if let Some(reason) = pid.config_error() {
+                return Err(format!("loop '{}': pid {}", lc.name, reason));
+            }
+            if let Some(sc) = &lc.sequencer {
+                if !sc.hysteresis.is_finite() || sc.hysteresis < 0.0 {
+                    return Err(format!(
+                        "loop '{}': sequencer hysteresis {} must be finite and >= 0",
+                        lc.name, sc.hysteresis
+                    ));
+                }
+            }
 
             // Build optional sequencer.
             let sequencer = lc.sequencer.map(|sc| {
@@ -358,6 +371,17 @@ impl ControlRunner {
                     continue;
                 }
             };
+
+            // PID holds its output on a non-finite input; say why here.
+            if !sp.is_finite() || !pv.is_finite() {
+                debug!(
+                    loop_name = %ctrl_loop.name,
+                    setpoint = sp,
+                    feedback = pv,
+                    "non-finite setpoint or feedback, skipping cycle"
+                );
+                continue;
+            }
 
             // 3. Execute PID.
             let pid_out = ctrl_loop.pid.execute(sp, pv, now);
@@ -906,6 +930,62 @@ kp = 1.0
         let result = ControlRunner::load(&path);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("write_level"));
+    }
+
+    #[test]
+    fn test_load_rejects_unusable_pid_and_sequencer_values() {
+        // min > max panicked in clamp, NaN gains drove outputs with NaN
+        // (R-9, R-10). TOML accepts nan and inf literals.
+        let cases = [
+            (
+                "min = 100.0
+max = 0.0",
+                "min is above max",
+            ),
+            ("kp = nan", "kp is not finite"),
+            ("ki = inf", "ki is not finite"),
+            ("bias = -inf", "bias is not finite"),
+        ];
+        for (pid, want) in cases {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("control.toml");
+            let toml = format!(
+                "[[loop]]
+name = \"bad\"
+feedback_channel = 1
+setpoint_channel = 2
+output_channels = [3]
+
+[loop.pid]
+{pid}
+"
+            );
+            fs::write(&path, toml).unwrap();
+            let err = ControlRunner::load(&path).err().expect(want);
+            assert!(err.contains(want), "{pid}: {err}");
+        }
+
+        for hysteresis in ["nan", "-0.5"] {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("control.toml");
+            let toml = format!(
+                "[[loop]]
+name = \"bad\"
+feedback_channel = 1
+setpoint_channel = 2
+output_channels = [3, 4]
+
+[loop.pid]
+kp = 1.0
+
+[loop.sequencer]
+hysteresis = {hysteresis}
+"
+            );
+            fs::write(&path, toml).unwrap();
+            let err = ControlRunner::load(&path).err().expect(hysteresis);
+            assert!(err.contains("hysteresis"), "{hysteresis}: {err}");
+        }
     }
 
     #[test]

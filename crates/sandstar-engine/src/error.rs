@@ -26,6 +26,12 @@ pub enum EngineError {
     #[error("invalid write level {0} (must be 1-17)")]
     InvalidWriteLevel(u8),
 
+    #[error("invalid value for channel {0}: not finite")]
+    NonFiniteValue(u32),
+
+    #[error("invalid write duration {1} for channel {0} (must be finite and at most {max} s)", max = crate::priority::MAX_WRITE_DURATION_SECS)]
+    InvalidWriteDuration(u32, f64),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 

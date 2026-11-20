@@ -25,6 +25,7 @@
 > - roxWarp `MAX_PEER_FUTURE_SKEW_MS` = 300,000 ms (5 min) (`roxwarp/cluster.rs:230`, R-27, 2026-11-19): a peer point whose timestamp is further ahead of the local clock is rejected (logged, rate-limited), so a peer cannot pin a channel under last-writer-wins. **Consider** making it configurable if field clocks drift more.
 > - roxWarp `MAX_FILTER_DEPTH` = 32 (`roxwarp/handler.rs:611`, S-24): deepest `and`/`or` nesting evaluated in a point filter (REST cluster query, roxWarp `query`); terms past it do not match. Without it a long chain overflowed the stack and killed the process. Keep hardcoded.
 > - BACnet `MALFORMED_WARN_INTERVAL_SECS` = 60 s (`drivers/bacnet/mod.rs:79`, S-24): at most one `warn` per minute for frames that fail to decode; the rest go to `debug`. Keep hardcoded.
+> - `MAX_WRITE_DURATION_SECS` = 31,536,000 s (1 year) (`sandstar-engine/src/priority.rs:25`, R-10/S-25): longest timed priority write. `channel_write_level` rejects a longer, NaN or infinite duration (REST `pointWrite` answers 400); a negative duration is still a permanent write. Without it a huge `duration` panicked in `Duration::from_secs_f64` and killed the process. Keep hardcoded.
 > - `/live` `LOG_PREVIEW_BYTES` = 240 (`rest/live.rs:57`, R-6/S-24): RX/TX log preview, cut back to a UTF-8 character boundary.
 > - GPIO60 retry every 20 watchdog kicks, at most 30 retries (`watchdog.rs`).
 > - systemd unit: `WatchdogSec=10`, `MemoryLimit=128M`.
@@ -87,6 +88,7 @@ Audited: 2026-03-10
 | Constant | Value | File | Line | Recommendation |
 |----------|-------|------|------|----------------|
 | `MAX_LEVELS` | 17 | `sandstar-engine/src/priority.rs` | 15 | **Keep** — matches BACnet priority array (levels 1-17). Protocol constant. |
+| `MAX_WRITE_DURATION_SECS` | 31,536,000 (1 year) | `sandstar-engine/src/priority.rs` | 25 | **Keep** — longest timed write; longer, NaN or infinite durations are rejected (S-25). |
 | `MAX_WHO_LEN` | 16 | `sandstar-engine/src/priority.rs` | 18 | **Keep** — writer identity string cap. Sufficient for identifiers. |
 | `MAX_STAGES` | 16 | `sandstar-engine/src/sequencer.rs` | 8 | **Keep** — max stages in a lead sequencer. 16 matches typical HVAC systems. |
 | `RETRY_COOLDOWN` | 30 polls | `sandstar-engine/src/engine.rs` | 33 | **Document** — polls before retrying a failed channel. |
