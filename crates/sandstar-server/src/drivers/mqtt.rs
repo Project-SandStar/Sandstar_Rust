@@ -110,10 +110,14 @@ const MQTT_CACHE_MAX_AGE: Duration = Duration::from_secs(600);
 
 // ── Value cache ────────────────────────────────────────────
 
-/// A single cached value with the timestamp of the last update.
+/// The latest payload of a topic with the time it arrived.
+///
+/// `value` is `Err` when that payload was not a usable reading (not a
+/// number, or NaN/±inf). The point then reports a fault instead of the
+/// last good value (R-49).
 #[derive(Debug, Clone)]
 struct MqttCacheEntry {
-    value: f64,
+    value: Result<f64, String>,
     updated_at: Instant,
 }
 
@@ -133,8 +137,17 @@ impl MqttValueCache {
     }
 
     fn update(&mut self, topic: impl Into<String>, value: f64) {
+        self.insert(topic.into(), Ok(value));
+    }
+
+    /// Record that the latest payload of a topic was rejected.
+    fn reject(&mut self, topic: impl Into<String>, reason: String) {
+        self.insert(topic.into(), Err(reason));
+    }
+
+    fn insert(&mut self, topic: String, value: Result<f64, String>) {
         self.entries.insert(
-            topic.into(),
+            topic,
             MqttCacheEntry {
                 value,
                 updated_at: Instant::now(),
@@ -175,6 +188,17 @@ impl MqttValueCache {
 /// Extracted as a free function so it can be unit-tested independently of the
 /// event-loop task.
 fn extract_value(payload_str: &str, value_path: Option<&str>) -> Result<f64, String> {
+    // `str::parse::<f64>` accepts "nan", "inf" and "infinity"; a payload
+    // like that is not a reading (R-49).
+    let value = extract_raw_value(payload_str, value_path)?;
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(format!("value {value} is not finite"))
+    }
+}
+
+fn extract_raw_value(payload_str: &str, value_path: Option<&str>) -> Result<f64, String> {
     match value_path {
         None => payload_str.trim().parse::<f64>().map_err(|e| e.to_string()),
         Some(pointer) => {
@@ -420,6 +444,11 @@ impl AsyncDriver for MqttDriver {
                                     error = %e,
                                     "MQTT value parse failed"
                                 );
+                                // The last good value must not stand in
+                                // for a payload we could not use.
+                                if let Ok(mut guard) = cache.lock() {
+                                    guard.reject(p.topic.clone(), e);
+                                }
                             }
                         }
                     }
@@ -546,8 +575,12 @@ impl AsyncDriver for MqttDriver {
                 guard.get(topic, MQTT_CACHE_MAX_AGE)
             };
 
-            match cached {
-                Some(entry) => ctx.update_cur_ok(point.point_id, entry.value),
+            match cached.map(|e| e.value) {
+                Some(Ok(value)) => ctx.update_cur_ok(point.point_id, value),
+                Some(Err(reason)) => ctx.update_cur_err(
+                    point.point_id,
+                    DriverError::RemoteStatus(format!("last payload rejected: {reason}")),
+                ),
                 None => ctx.update_cur_err(
                     point.point_id,
                     DriverError::CommFault("no cached value or stale".into()),
@@ -830,8 +863,43 @@ mod tests {
         let entry = cache
             .get("a/b", Duration::from_secs(60))
             .expect("should find entry");
-        assert_eq!(entry.value, 42.5);
+        assert_eq!(entry.value, Ok(42.5));
         assert_eq!(cache.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn rejected_payload_replaces_the_last_good_value() {
+        let config = MqttConfig {
+            id: "mq".into(),
+            host: "h".into(),
+            port: 1883,
+            client_id: "cid".into(),
+            username: None,
+            password: None,
+            tls: false,
+            keep_alive_secs: 60,
+            objects: vec![sample_object(12, "t/12")],
+        };
+        let mut d = MqttDriver::from_config(config);
+        let refs = vec![DriverPointRef {
+            point_id: 12,
+            address: "12".into(),
+        }];
+        d.cache.lock().unwrap().update("t/12", 21.5);
+        assert_eq!(d.sync_cur_vec(&refs).await[0].1.as_ref().ok(), Some(&21.5));
+
+        // A "nan" payload arrives: the point must not keep reporting 21.5.
+        let reason = extract_value("nan", None).unwrap_err();
+        d.cache.lock().unwrap().reject("t/12", reason);
+        let results = d.sync_cur_vec(&refs).await;
+        match &results[0].1 {
+            Err(DriverError::RemoteStatus(msg)) => assert!(msg.contains("not finite"), "{msg}"),
+            other => panic!("expected RemoteStatus, got {other:?}"),
+        }
+
+        // The next good payload is used again.
+        d.cache.lock().unwrap().update("t/12", 22.0);
+        assert_eq!(d.sync_cur_vec(&refs).await[0].1.as_ref().ok(), Some(&22.0));
     }
 
     #[tokio::test]
@@ -866,6 +934,31 @@ mod tests {
     #[test]
     fn extract_value_plain_number_invalid() {
         assert!(extract_value("hello", None).is_err());
+    }
+
+    #[test]
+    fn extract_value_rejects_non_finite_payloads() {
+        for payload in [
+            "nan",
+            "NaN",
+            "inf",
+            "-inf",
+            "Infinity",
+            "-Infinity",
+            "1e999",
+        ] {
+            let err = extract_value(payload, None).unwrap_err();
+            assert!(err.contains("not finite"), "{payload}: {err}");
+        }
+        for payload in [r#"{"v":"nan"}"#, r#"{"v":"-inf"}"#] {
+            let err = extract_value(payload, Some("/v")).unwrap_err();
+            assert!(err.contains("not finite"), "{payload}: {err}");
+        }
+        // serde_json refuses an out-of-range number itself.
+        let err = extract_value(r#"{"v":1e999}"#, Some("/v")).unwrap_err();
+        assert!(err.contains("json parse"), "{err}");
+        assert_eq!(extract_value("1.5", None).unwrap(), 1.5);
+        assert_eq!(extract_value(r#"{"v":"2.5"}"#, Some("/v")).unwrap(), 2.5);
     }
 
     #[test]
