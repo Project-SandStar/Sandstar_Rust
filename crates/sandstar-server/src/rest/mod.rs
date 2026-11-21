@@ -636,7 +636,8 @@ pub(crate) fn has_valid_credential(
 }
 
 /// Gate for the editor endpoints (`/live`, `/live/sedonaState`,
-/// `/api/rows`), run before the WebSocket upgrade (R-52, S-32).
+/// `/api/rows`), run before the WebSocket upgrade (R-52, S-32). It also
+/// gates the SOX tree reads and `GET /file/*` (R-55, S-33).
 ///
 /// Browsers cannot send an `Authorization` header on an upgrade, so a
 /// session cookie from `POST /api/auth` is accepted too. With auth on, a
@@ -1158,13 +1159,20 @@ pub fn router_with_auth(
             auth_state.clone(),
         );
         // Phase 14.0G-5: editor `/library/` + `/tags` compatibility stubs.
+        // Left outside the gates on purpose: read-only stubs that return
+        // `[]` or library names, no device data (S-33).
         let library_route = library::router(live::LiveState {
             tree: sox.tree.clone(),
             manifest_db: sox.manifest_db.clone(),
             dyn_store: sox.dyn_store.clone(),
         });
         app = app
-            .merge(sox_api::public_router(sox.clone()))
+            // Tree reads carry the same data as `/live/sedonaState`, so they
+            // sit behind the same gate (R-55, S-33).
+            .merge(require_upgrade_auth(
+                sox_api::public_router(sox.clone()),
+                auth_state.clone(),
+            ))
             .merge(require_auth(
                 sox_api::protected_router(sox),
                 auth_state.clone(),

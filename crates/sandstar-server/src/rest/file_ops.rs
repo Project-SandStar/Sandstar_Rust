@@ -60,7 +60,10 @@ pub fn resolve_file_root() -> Option<PathBuf> {
     None
 }
 
-/// `GET` stays public; `PUT` writes files and sits behind the auth layer (R-2).
+/// `GET` sits behind the editor gate (bearer or session cookie, plus Origin;
+/// R-55, S-33): the browser editor fetches kit files same-origin with its
+/// cookie. `PUT` writes files and sits behind the bearer auth layer (R-2).
+/// With no auth configured both pass every request.
 pub fn router(state: SoxState, auth_state: crate::auth::AuthState) -> Router {
     let read = Router::new()
         .route("/file/{*path}", get(get_file))
@@ -68,7 +71,8 @@ pub fn router(state: SoxState, auth_state: crate::auth::AuthState) -> Router {
     let write = Router::new()
         .route("/file/{*path}", put(put_file))
         .with_state(state);
-    read.merge(super::require_auth(write, auth_state))
+    super::require_upgrade_auth(read, auth_state.clone())
+        .merge(super::require_auth(write, auth_state))
 }
 
 // ── Handlers ───────────────────────────────────────

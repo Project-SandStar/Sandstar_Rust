@@ -6,6 +6,8 @@
 //! - with the right token the request reaches the handler (not 401);
 //! - with no auth configured nothing gets 401 (field behavior unchanged).
 //!
+//! The SOX tree and `/file/*` reads sit behind the editor gate (R-55, S-33).
+//!
 //! Limitation: the route list is maintained by hand. A new write route that
 //! is not added to `WRITE_ROUTES` is not covered by this test.
 
@@ -84,7 +86,6 @@ const READ_ROUTES: &[&str] = &[
     "/api/about",
     "/api/read?filter=point",
     "/api/drivers",
-    "/api/sox/tree",
     "/api/tags",
     "/api/alerts/config",
     "/api/cluster/status",
@@ -235,6 +236,121 @@ async fn an_empty_configured_token_does_not_open_write_routes() {
             let s = status(&app, m, p, b, token).await;
             assert_eq!(s, StatusCode::UNAUTHORIZED, "{m} {p} token={token:?}");
         }
+    }
+}
+
+// ── SOX tree and file reads (R-55, S-33) ────────────────────
+
+/// Reads that carry the component tree or device files: behind the editor
+/// gate (bearer or session cookie, plus Origin).
+/// Each entry is (path, status once the gate lets the request through);
+/// exact so a route that is not mounted (404) cannot pass. `build_app`
+/// unsets the file root, so `/file/*` answers 503 behind the gate.
+const GATED_READS: &[(&str, StatusCode)] = &[
+    ("/api/sox/tree", StatusCode::OK),
+    // The test tree is empty: the handler answers 404 for comp 0.
+    ("/api/sox/comp/0", StatusCode::NOT_FOUND),
+    ("/api/sox/palette", StatusCode::OK),
+    ("/api/sox/names", StatusCode::OK),
+    (
+        "/file/sedona/manifests/x/x.xml",
+        StatusCode::SERVICE_UNAVAILABLE,
+    ),
+];
+
+async fn head_with(app: &Router, path: &str, headers: &[(&str, String)]) -> StatusCode {
+    let mut req = Request::builder().method("HEAD").uri(path);
+    for (k, v) in headers {
+        req = req.header(*k, v.as_str());
+    }
+    let req = req.body(Body::empty()).unwrap();
+    app.clone().oneshot(req).await.unwrap().status()
+}
+
+async fn get_with(app: &Router, path: &str, headers: &[(&str, String)]) -> StatusCode {
+    let mut req = Request::builder().method("GET").uri(path);
+    for (k, v) in headers {
+        req = req.header(*k, v.as_str());
+    }
+    let req = req.body(Body::empty()).unwrap();
+    app.clone().oneshot(req).await.unwrap().status()
+}
+
+#[tokio::test]
+async fn tree_and_file_reads_need_a_credential_when_auth_is_configured() {
+    let (app, _task) = build_app(AuthStore::with_bearer_token(TOKEN.to_string()));
+    let cookie = || ("cookie", format!("a=b; sandstar_session={TOKEN}"));
+    for &(p, want) in GATED_READS {
+        assert_eq!(
+            head_with(&app, p, &[]).await,
+            StatusCode::UNAUTHORIZED,
+            "HEAD {p} none"
+        );
+        assert_eq!(
+            get_with(&app, p, &[]).await,
+            StatusCode::UNAUTHORIZED,
+            "{p} none"
+        );
+        let bad = [("cookie", "sandstar_session=nope".to_string())];
+        assert_eq!(
+            get_with(&app, p, &bad).await,
+            StatusCode::UNAUTHORIZED,
+            "{p} bad cookie"
+        );
+        let wrong = [("authorization", "Bearer nope".to_string())];
+        assert_eq!(
+            get_with(&app, p, &wrong).await,
+            StatusCode::UNAUTHORIZED,
+            "{p} wrong"
+        );
+        // Same-origin editor fetch: the browser may send an Origin equal to Host.
+        let same = vec![
+            cookie(),
+            ("host", "dev.local:8091".to_string()),
+            ("origin", "http://dev.local:8091".to_string()),
+        ];
+        for ok in [vec![cookie()], vec![bearer()], same] {
+            assert_eq!(get_with(&app, p, &ok).await, want, "{p} {ok:?}");
+        }
+        for cred in [bearer(), cookie()] {
+            let evil = [cred, ("origin", "http://evil.example".to_string())];
+            assert_eq!(
+                get_with(&app, p, &evil).await,
+                StatusCode::FORBIDDEN,
+                "{p} {evil:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn file_upload_stays_bearer_only() {
+    // The read gate accepts the session cookie; the write layer must not.
+    let (app, _task) = build_app(AuthStore::with_bearer_token(TOKEN.to_string()));
+    let req = Request::builder()
+        .method("PUT")
+        .uri("/file/s33-probe.txt")
+        .header("cookie", format!("sandstar_session={TOKEN}"))
+        .body(Body::from("x"))
+        .unwrap();
+    let s = app.clone().oneshot(req).await.unwrap().status();
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn library_stubs_stay_open_when_auth_is_configured() {
+    let (app, _task) = build_app(AuthStore::with_bearer_token(TOKEN.to_string()));
+    for p in ["/library/", "/tags"] {
+        assert_eq!(get_with(&app, p, &[]).await, StatusCode::OK, "{p}");
+    }
+}
+
+#[tokio::test]
+async fn tree_and_file_reads_stay_open_when_auth_is_not_configured() {
+    let (app, _task) = build_app(AuthStore::new());
+    for &(p, want) in GATED_READS {
+        let evil = [("origin", "http://evil.example".to_string())];
+        assert_eq!(get_with(&app, p, &evil).await, want, "{p}");
     }
 }
 
