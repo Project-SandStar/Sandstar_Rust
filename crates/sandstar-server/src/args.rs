@@ -71,6 +71,12 @@ pub struct ServerArgs {
     #[arg(long, env = "SANDSTAR_AUTH_PASS")]
     pub auth_pass: Option<String>,
 
+    /// Extra browser origins allowed to open the editor WebSockets
+    /// (`/live`, `/api/rows`, `/api/ws`) when auth is on, comma separated,
+    /// e.g. `http://editor.local:8080`. Same-host origins are always allowed.
+    #[arg(long, env = "SANDSTAR_WS_ALLOWED_ORIGINS", value_delimiter = ',')]
+    pub ws_allowed_origins: Vec<String>,
+
     /// Maximum REST API requests per second (0 = unlimited).
     #[arg(long, env = "SANDSTAR_RATE_LIMIT", default_value_t = 100)]
     pub rate_limit: u64,

@@ -480,6 +480,7 @@ pub async fn ws_upgrade(
     ws: WebSocketUpgrade,
     Query(params): Query<WsParams>,
     State(state): State<WsState>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
     // Check connection limit
     let current = crate::metrics::metrics()
@@ -493,11 +494,30 @@ pub async fn ws_upgrade(
             .into_response();
     }
 
-    // Check query-param auth
-    let pre_authed = match (&state.auth_token, &params.token) {
-        (None, _) => true,
-        (Some(required), Some(provided)) => provided == required,
-        _ => false,
+    // Pre-auth before the upgrade (S-32). Without auth every connection is
+    // authenticated. With auth on, a foreign browser Origin is refused, and
+    // a bearer header, session cookie or the deprecated `?token=` marks the
+    // connection authenticated; otherwise it must send an `auth` message.
+    let pre_authed = match &state.auth_state {
+        Some(auth) if auth.store.is_auth_required() => {
+            if !super::origin_allowed(&headers, auth) {
+                return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
+            }
+            if params.token.is_some() {
+                warn!("/api/ws ?token= is deprecated (token in URL, R-14); use a header, cookie or auth message");
+            }
+            super::has_valid_credential(&headers, auth)
+                // Legacy bearer only: session tokens do not go in URLs (R-14).
+                || params.token.as_deref().is_some_and(|t| auth.store.check_bearer(t))
+        }
+        Some(_) => true,
+        None => match (&state.auth_token, &params.token) {
+            (None, _) => true,
+            (Some(required), Some(provided)) => {
+                crate::auth::constant_time_eq(required.as_bytes(), provided.as_bytes())
+            }
+            _ => false,
+        },
     };
 
     ws.max_message_size(MAX_CLIENT_MESSAGE_BYTES)
@@ -936,7 +956,9 @@ fn handle_auth_msg(
                         .ok()
                     }
                 }
-                Some(required) if token == *required => {
+                Some(required)
+                    if crate::auth::constant_time_eq(required.as_bytes(), token.as_bytes()) =>
+                {
                     *authenticated = true;
                     serde_json::to_string(&ServerMsg::AuthOk {
                         id,

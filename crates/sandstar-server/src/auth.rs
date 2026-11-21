@@ -83,12 +83,26 @@ impl StoredCredential {
 
 // ── Auth Store ─────────────────────────────────────────────
 
+/// Compare two byte strings without an early exit on the first mismatch.
+///
+/// The length is not hidden (a length mismatch returns at once), only the
+/// position of the first differing byte.
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 /// Auth store holding all credentials and the legacy bearer token.
 #[derive(Debug, Clone, Default)]
 pub struct AuthStore {
     credentials: HashMap<String, StoredCredential>,
     /// Legacy bearer token (backward compat with --auth-token).
     bearer_token: Option<String>,
+    /// Extra browser origins allowed on WebSocket upgrades (R-52, S-32).
+    /// Same-host origins are always allowed.
+    allowed_origins: Vec<String>,
 }
 
 impl AuthStore {
@@ -102,7 +116,24 @@ impl AuthStore {
         Self {
             credentials: HashMap::new(),
             bearer_token: Some(token),
+            allowed_origins: Vec::new(),
         }
+    }
+
+    /// Set the extra origins allowed on WebSocket upgrades (`--ws-allowed-origins`).
+    /// Entries are compared case-insensitively, without a trailing slash.
+    pub fn set_allowed_origins(&mut self, origins: Vec<String>) {
+        self.allowed_origins = origins
+            .into_iter()
+            .map(|o| o.trim().trim_end_matches('/').to_ascii_lowercase())
+            .filter(|o| !o.is_empty())
+            .collect();
+    }
+
+    /// Whether `origin` is in the configured allowlist.
+    pub fn is_origin_allowed(&self, origin: &str) -> bool {
+        let o = origin.trim().trim_end_matches('/').to_ascii_lowercase();
+        self.allowed_origins.contains(&o)
     }
 
     /// Add a SCRAM user credential.
@@ -123,7 +154,13 @@ impl AuthStore {
 
     /// Check if a bearer token matches.
     pub fn check_bearer(&self, token: &str) -> bool {
-        self.bearer_token.as_deref() == Some(token)
+        match self.bearer_token.as_deref() {
+            // An empty configured token never matches: auth stays closed
+            // instead of accepting `Authorization: Bearer `.
+            Some("") => false,
+            Some(expected) => constant_time_eq(expected.as_bytes(), token.as_bytes()),
+            None => false,
+        }
     }
 
     /// Returns true if any auth mechanism is configured (bearer or SCRAM).

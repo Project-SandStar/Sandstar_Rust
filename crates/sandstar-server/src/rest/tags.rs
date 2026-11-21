@@ -12,7 +12,7 @@
 use axum::extract::{Json, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get};
+use axum::routing::{delete, get, put};
 use axum::Router;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -48,16 +48,18 @@ pub fn json_to_dynvalue(val: &serde_json::Value) -> DynValue {
 
 /// Build the tags sub-router.
 ///
-/// All routes are public (read) or protected (write) depending on how they
-/// are merged into the main app. The caller is responsible for applying
-/// auth middleware.
-pub fn router(store: DynSlotStoreHandle) -> Router {
-    Router::new()
+/// Reads are public; `PUT` and `DELETE` sit behind the auth layer (R-2).
+pub fn router(store: DynSlotStoreHandle, auth_state: crate::auth::AuthState) -> Router {
+    let read = Router::new()
         .route("/api/tags", get(list_tags))
         .route("/api/tags/stats", get(get_stats))
-        .route("/api/tags/{comp_id}", get(get_tags).put(set_tags))
+        .route("/api/tags/{comp_id}", get(get_tags))
+        .with_state(store.clone());
+    let write = Router::new()
+        .route("/api/tags/{comp_id}", put(set_tags))
         .route("/api/tags/{comp_id}/{key}", delete(delete_tag))
-        .with_state(store)
+        .with_state(store);
+    read.merge(super::require_auth(write, auth_state))
 }
 
 /// GET /api/tags — list all components that have dynamic tags.
@@ -238,6 +240,10 @@ mod tests {
     use std::sync::{Arc, RwLock};
     use tower::ServiceExt;
 
+    fn no_auth() -> crate::auth::AuthState {
+        crate::auth::AuthState::new(crate::auth::AuthStore::new())
+    }
+
     fn test_store() -> DynSlotStoreHandle {
         Arc::new(RwLock::new(
             crate::sox::dyn_slots::DynSlotStore::with_defaults(),
@@ -246,7 +252,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_tags_empty() {
-        let app = router(test_store());
+        let app = router(test_store(), no_auth());
         let resp = app
             .oneshot(Request::get("/api/tags").body(Body::empty()).unwrap())
             .await
@@ -265,7 +271,7 @@ mod tests {
     #[tokio::test]
     async fn put_and_get_tags() {
         let store = test_store();
-        let app = router(store.clone());
+        let app = router(store.clone(), no_auth());
 
         // PUT tags
         let body = serde_json::json!({
@@ -318,7 +324,7 @@ mod tests {
             s.set(10, "foo".into(), DynValue::Marker).unwrap();
             s.set(10, "bar".into(), DynValue::Int(42)).unwrap();
         }
-        let app = router(store.clone());
+        let app = router(store.clone(), no_auth());
 
         let resp = app
             .clone()
@@ -347,7 +353,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_nonexistent_tag() {
-        let app = router(test_store());
+        let app = router(test_store(), no_auth());
         let resp = app
             .oneshot(
                 Request::delete("/api/tags/10/nope")
@@ -373,7 +379,7 @@ mod tests {
             let mut s = store.write().unwrap();
             s.set(10, "old".into(), DynValue::Marker).unwrap();
         }
-        let app = router(store.clone());
+        let app = router(store.clone(), no_auth());
 
         let body = serde_json::json!({
             "_replace": true,
@@ -398,7 +404,7 @@ mod tests {
     #[tokio::test]
     async fn put_tags_plain_json_auto_converts() {
         let store = test_store();
-        let app = router(store.clone());
+        let app = router(store.clone(), no_auth());
         // Plain JSON values auto-convert: string→Str, number→Int/Float, bool→Bool
         let body = serde_json::json!({
             "name": "Wall Temp",
@@ -432,7 +438,7 @@ mod tests {
             s.set(20, "b".into(), DynValue::Marker).unwrap();
             s.set(20, "c".into(), DynValue::Int(1)).unwrap();
         }
-        let app = router(store);
+        let app = router(store, no_auth());
 
         let resp = app
             .oneshot(Request::get("/api/tags").body(Body::empty()).unwrap())
@@ -452,7 +458,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_tags_nonexistent_comp() {
-        let app = router(test_store());
+        let app = router(test_store(), no_auth());
         let resp = app
             .oneshot(Request::get("/api/tags/999").body(Body::empty()).unwrap())
             .await
@@ -483,7 +489,7 @@ mod tests {
                 },
             );
         }
-        let app = router(store);
+        let app = router(store, no_auth());
         let resp = app
             .oneshot(Request::get("/api/tags/10").body(Body::empty()).unwrap())
             .await
@@ -517,7 +523,7 @@ mod tests {
                 },
             );
         }
-        let app = router(store);
+        let app = router(store, no_auth());
         let resp = app
             .oneshot(
                 Request::get("/api/tags/10?computed=false")
@@ -549,7 +555,7 @@ mod tests {
             s.set(20, "unit".into(), DynValue::Str("degF".into()))
                 .unwrap();
         }
-        let app = router(store);
+        let app = router(store, no_auth());
         let resp = app
             .oneshot(Request::get("/api/tags/stats").body(Body::empty()).unwrap())
             .await

@@ -574,6 +574,108 @@ pub(crate) async fn check_auth(
     Err(StatusCode::UNAUTHORIZED)
 }
 
+/// Name of the session cookie set after a successful SCRAM login (S-32).
+pub const SESSION_COOKIE: &str = "sandstar_session";
+
+/// Every `sandstar_session` value in the `Cookie` header(s).
+///
+/// All values are returned, not only the first: a stale or planted cookie
+/// with the same name must not hide a valid one.
+fn session_cookies(headers: &axum::http::HeaderMap) -> impl Iterator<Item = &str> {
+    headers
+        .get_all(axum::http::header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .filter_map(|kv| {
+            let (k, v) = kv.trim().split_once('=')?;
+            (k == SESSION_COOKIE).then_some(v)
+        })
+}
+
+/// Whether the request's `Origin` may open a WebSocket.
+///
+/// No `Origin` header means a non-browser client: allowed (it still needs
+/// a credential). A browser origin must match the `Host` header or the
+/// configured allowlist; this blocks cross-site WebSocket hijacking.
+pub(crate) fn origin_allowed(headers: &axum::http::HeaderMap, auth_state: &AuthState) -> bool {
+    let Some(origin) = headers.get(axum::http::header::ORIGIN) else {
+        return true;
+    };
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    if auth_state.store.is_origin_allowed(origin) {
+        return true;
+    }
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok());
+    let origin_host = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"));
+    match (origin_host, host) {
+        (Some(o), Some(h)) => o.trim_end_matches('/').eq_ignore_ascii_case(h),
+        _ => false,
+    }
+}
+
+/// Whether the request carries a valid bearer header or session cookie.
+pub(crate) fn has_valid_credential(
+    headers: &axum::http::HeaderMap,
+    auth_state: &AuthState,
+) -> bool {
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    if bearer.is_some_and(|t| auth_state.check_token(t)) {
+        return true;
+    }
+    session_cookies(headers).any(|t| auth_state.check_token(t))
+}
+
+/// Gate for the editor endpoints (`/live`, `/live/sedonaState`,
+/// `/api/rows`), run before the WebSocket upgrade (R-52, S-32).
+///
+/// Browsers cannot send an `Authorization` header on an upgrade, so a
+/// session cookie from `POST /api/auth` is accepted too. With auth on, a
+/// foreign `Origin` gets 403 and a missing or bad credential gets 401.
+/// With no auth configured every request passes (field default).
+pub(crate) async fn check_upgrade_auth(
+    axum::extract::State(auth_state): axum::extract::State<AuthState>,
+    request: Request,
+    next: middleware::Next,
+) -> Result<Response, StatusCode> {
+    if !auth_state.store.is_auth_required() {
+        return Ok(next.run(request).await);
+    }
+    if !origin_allowed(request.headers(), &auth_state) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if has_valid_credential(request.headers(), &auth_state) {
+        return Ok(next.run(request).await);
+    }
+    Err(StatusCode::UNAUTHORIZED)
+}
+
+/// Wrap every route already in `router` with [`check_upgrade_auth`].
+pub fn require_upgrade_auth(router: Router, auth_state: AuthState) -> Router {
+    router.route_layer(middleware::from_fn_with_state(
+        auth_state,
+        check_upgrade_auth,
+    ))
+}
+
+/// Wrap every route already in `router` with [`check_auth`].
+///
+/// `route_layer` only covers routes added before it, so build the router
+/// first and wrap it last. With no auth configured, `check_auth` lets every
+/// request through, so behavior is unchanged until auth is turned on (R-2).
+pub fn require_auth(router: Router, auth_state: AuthState) -> Router {
+    router.route_layer(middleware::from_fn_with_state(auth_state, check_auth))
+}
+
 // ── SCRAM Auth Endpoint ─────────────────────────────────────
 
 /// JSON request/response types for the /api/auth SCRAM endpoint.
@@ -749,14 +851,25 @@ fn handle_scram_final(auth_state: &AuthState, handshake_token: &str, data_b64: &
         };
 
     match auth_state.complete_scram(handshake_token, &client_final) {
-        Ok((session_token, server_sig)) => (
-            StatusCode::OK,
-            Json(AuthTokenResponse {
-                auth_token: session_token,
-                data: server_sig,
-            }),
-        )
-            .into_response(),
+        Ok((session_token, server_sig)) => {
+            // Browsers cannot send a header on a WebSocket upgrade; the
+            // cookie carries the session to /live and /api/rows (S-32).
+            // No `Secure` flag: the device serves plain HTTP (R-14).
+            let cookie =
+                format!("{SESSION_COOKIE}={session_token}; HttpOnly; SameSite=Strict; Path=/");
+            let mut resp = (
+                StatusCode::OK,
+                Json(AuthTokenResponse {
+                    auth_token: session_token,
+                    data: server_sig,
+                }),
+            )
+                .into_response();
+            if let Ok(v) = axum::http::HeaderValue::from_str(&cookie) {
+                resp.headers_mut().insert(axum::http::header::SET_COOKIE, v);
+            }
+            resp
+        }
         Err(e) => (
             StatusCode::UNAUTHORIZED,
             Json(AuthErrorResponse { error: e }),
@@ -912,11 +1025,8 @@ pub fn router_with_auth(
         .route("/api/hisRead", post(handlers::his_read))
         .route("/api/nav", post(handlers::nav))
         .route("/api/invokeAction", post(handlers::invoke_action))
-        .route_layer(middleware::from_fn_with_state(
-            auth_state.clone(),
-            check_auth,
-        ))
         .with_state(handle.clone());
+    let protected = require_auth(protected, auth_state.clone());
 
     // CORS policy: allow any origin (embedded device accessed by various IPs)
     // but restrict methods and headers to only what we actually use.
@@ -1018,6 +1128,7 @@ pub fn router_with_auth(
                 manifest_db: sox.manifest_db.clone(),
                 dyn_store: sox.dyn_store.clone(),
             });
+        let rows_route = require_upgrade_auth(rows_route, auth_state.clone());
         // Phase 14.0G-2c: Fantom-dialect SOX over WebSocket for the
         // Vue web editor. Shares state with /api/rows; both endpoints
         // dispatch through crate::sox::sox_ops.
@@ -1031,17 +1142,21 @@ pub fn router_with_auth(
                 manifest_db: sox.manifest_db.clone(),
                 dyn_store: sox.dyn_store.clone(),
             });
+        let live_route = require_upgrade_auth(live_route, auth_state.clone());
         // Make the DynSlotStore available as an Extension so that the
         // Haystack filter evaluator in /api/read can check dynamic tags.
         if let Some(ref ds) = sox.dyn_store {
             app = app.layer(axum::Extension(ds.clone()));
         }
         // Phase 14.0G-4: file transfer (GET/PUT /file/*path).
-        let file_route = file_ops::router(live::LiveState {
-            tree: sox.tree.clone(),
-            manifest_db: sox.manifest_db.clone(),
-            dyn_store: sox.dyn_store.clone(),
-        });
+        let file_route = file_ops::router(
+            live::LiveState {
+                tree: sox.tree.clone(),
+                manifest_db: sox.manifest_db.clone(),
+                dyn_store: sox.dyn_store.clone(),
+            },
+            auth_state.clone(),
+        );
         // Phase 14.0G-5: editor `/library/` + `/tags` compatibility stubs.
         let library_route = library::router(live::LiveState {
             tree: sox.tree.clone(),
@@ -1050,7 +1165,13 @@ pub fn router_with_auth(
         });
         app = app
             .merge(sox_api::public_router(sox.clone()))
-            .merge(sox_api::protected_router(sox))
+            .merge(require_auth(
+                sox_api::protected_router(sox),
+                auth_state.clone(),
+            ))
+            // `/live`, `/live/sedonaState` and `/api/rows` sit behind
+            // `check_upgrade_auth` (bearer header or session cookie, plus an
+            // Origin check; S-32). `/library/` and `/tags` are read-only.
             .merge(rows_route)
             .merge(live_route)
             .merge(file_route)
@@ -1102,19 +1223,26 @@ async fn cluster_disabled_handler() -> impl IntoResponse {
 /// - `GET /roxwarp` — WebSocket upgrade for peer gossip
 /// - `GET /api/cluster/status` — cluster overview (JSON)
 /// - `POST /api/cluster/query` — distributed Haystack filter query
-pub fn roxwarp_router(state: crate::roxwarp::RoxWarpState) -> Router {
+pub fn roxwarp_router(state: crate::roxwarp::RoxWarpState, auth_state: AuthState) -> Router {
     use crate::roxwarp::handler;
 
+    // Outside the auth layer (R-2): cluster peers connect here without a
+    // bearer token; gating it needs a peer-auth decision first.
     let ws_route = Router::new()
         .route("/roxwarp", get(handler::roxwarp_upgrade))
         .with_state(state.clone());
 
-    let api_routes = Router::new()
+    let status_route = Router::new()
         .route("/api/cluster/status", get(cluster_status_handler))
-        .route("/api/cluster/query", post(cluster_query_handler))
-        .with_state(state);
+        .with_state(state.clone());
+    let query_route = require_auth(
+        Router::new()
+            .route("/api/cluster/query", post(cluster_query_handler))
+            .with_state(state),
+        auth_state,
+    );
 
-    ws_route.merge(api_routes)
+    ws_route.merge(status_route).merge(query_route)
 }
 
 /// GET /api/cluster/status — return cluster status as JSON.
