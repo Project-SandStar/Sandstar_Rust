@@ -218,10 +218,11 @@ Router: `router_with_auth` in `crates/sandstar-server/src/rest/mod.rs`, plus rou
 | `GET /api/ws` | handshake | Haystack-over-WebSocket (JSON) with SCRAM inside the socket. With auth on (S-32): a foreign browser `Origin` gets 403; a bearer header, session cookie or the deprecated legacy `?token=` pre-authenticates, otherwise the client must send an `auth` message |
 | `GET /api/drivers`, `/api/drivers/{id}/status`, `/api/drivers/{id}/learn` | no | Driver listing |
 | `POST /api/drivers`, `DELETE /api/drivers/{id}`, `POST /api/drivers/{id}/open\|close\|ping\|message\|write`, `POST /api/syncCur` | **yes** | Driver lifecycle ([DRIVER_REST_API.md](DRIVER_REST_API.md)) |
-| `GET /api/sox/tree`, `/api/sox/comp/{id}`, `/api/sox/palette`, `/api/sox/names` | no | SOX component tree (with `--sox`) |
+| `GET /api/sox/tree`, `/api/sox/comp/{id}`, `/api/sox/palette`, `/api/sox/names` | **yes** (S-33, `check_upgrade_auth`) | SOX component tree (with `--sox`). Bearer or `sandstar_session` cookie, plus Origin check |
 | `POST/DELETE/PUT /api/sox/comp*`, `/api/sox/link` | **yes** (S-31) | SOX component edits (with `--sox`) |
 | `GET /api/rows`, `GET /live`, `GET /live/sedonaState` | **yes** (S-32, `check_upgrade_auth`) | Editor endpoints (with `--sox`). Accept `Authorization: Bearer` or the `sandstar_session` cookie from `POST /api/auth`; with auth on a browser `Origin` must be the same host or in `--ws-allowed-origins` (else 403). The editor does not log in yet (S-32b), so it cannot connect while auth is on |
-| `GET /file/*`, `/library/`, `GET /tags` | no | File download and editor library stubs (with `--sox`) |
+| `GET /file/*` | **yes** (S-33, `check_upgrade_auth`) | File download (with `--sox`); the editor fetches kit files same-origin with the session cookie |
+| `/library/`, `GET /tags` | no | Editor library stubs (with `--sox`) |
 | `PUT /file/*` | **yes** (S-31) | File upload (with `--sox`) |
 | `GET /api/tags`, `/api/tags/stats`, `/api/tags/{comp_id}` | no | Dynamic tags (read) |
 | `PUT /api/tags/{comp_id}`, `DELETE /api/tags/{comp_id}/{key}` | **yes** (S-31) | Dynamic tags (write) |

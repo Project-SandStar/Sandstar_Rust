@@ -835,10 +835,10 @@ pub async fn get_names(State(state): State<SoxApiState>) -> Response {
     .into_response()
 }
 
-/// Build the SOX API sub-router (public read + protected write routes).
+/// Build the SOX API read sub-router.
 ///
-/// The caller is responsible for merging these into the main app
-/// and applying auth middleware to the write routes.
+/// The caller wraps it with `require_upgrade_auth` (bearer or session
+/// cookie; R-55, S-33) and the write routes with `require_auth`.
 pub fn public_router(state: SoxApiState) -> axum::Router {
     use axum::routing::get;
     axum::Router::new()
