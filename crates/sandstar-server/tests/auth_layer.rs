@@ -132,11 +132,12 @@ fn build_app(auth: AuthStore) -> (Router, tokio::task::JoinHandle<()>) {
         sox_tree: None,
     };
 
-    let app = rest::router_with_auth(handle, auth_state.clone(), None, 0, Some(sox_state))
+    // Same order as `main.rs`: every router first, global layers last.
+    let app = rest::api_routes(handle, auth_state.clone(), None, Some(sox_state))
         .merge(rest::tags::router(dyn_store, auth_state.clone()))
         .merge(alert_router(alerts, auth_state.clone()))
         .merge(rest::roxwarp_router(rw_state, auth_state));
-    (app, cmd_task)
+    (rest::with_global_layers(app, 0), cmd_task)
 }
 
 async fn status(

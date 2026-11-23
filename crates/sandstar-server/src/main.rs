@@ -597,12 +597,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !args.no_rest {
         let handle = EngineHandle::new(cmd_tx.clone());
         let auth_state = sandstar_server::auth::AuthState::new(config.auth_store.clone());
-        #[allow(unused_mut)]
-        let mut app = rest::router_with_auth(
+        // Core routes without the global layers; every router below is
+        // merged first and `with_global_layers` wraps them all (R-53, S-35).
+        let mut app = rest::api_routes(
             handle,
             auth_state.clone(),
             config.auth_token.clone(),
-            config.rate_limit,
             sox_api_state,
         );
 
@@ -628,6 +628,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             app = app.merge(rest::sim::router(sim_state.clone(), auth_state.clone()));
         }
+
+        // Request counter, rate limit, body limit and CORS. Last step: a
+        // router merged after this line is outside those layers.
+        let app = rest::with_global_layers(app, config.rate_limit);
 
         let addr: std::net::SocketAddr =
             format!("{}:{}", args.http_bind, args.http_port)

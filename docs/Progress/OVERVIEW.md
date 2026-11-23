@@ -238,7 +238,8 @@ Router: `router_with_auth` in `crates/sandstar-server/src/rest/mod.rs`, plus rou
 - `--http-bind` defaults to `127.0.0.1`. ⚠ The packaged systemd unit passes `--http-bind 0.0.0.0` and configures no auth, so on the field device every route above is reachable on the LAN without credentials.
 - Bearer token (`--auth-token` / `SANDSTAR_AUTH_TOKEN`) and SCRAM-SHA-256 (`--auth-user` / `--auth-pass`, `SANDSTAR_AUTH_USER` / `SANDSTAR_AUTH_PASS`).
 - REST TLS is behind the `tls` cargo feature; the release alias `arm-build-svm` does not enable it.
-- Filter depth cap 32, watch cap 64, max channels per watch 256, body limit 1 MB, rate limit on by default (100 req/s).
+- Filter depth cap 32, watch cap 64, max channels per watch 256, body limit 1 MB, rate limit on by default (100 req/s, one counter shared by all clients).
+- The request counter, rate limit, body limit and CORS wrap every route on the REST port, including the tags, alerts, roxWarp/cluster and simulator routers merged in `main.rs` (`rest::with_global_layers`, applied last; R-53, S-35). Before S-35 those routers were outside these layers.
 - CORS: any origin, with an explicit method and header list.
 - Engine calls from REST, the `/api/ws` WebSocket, SOX, roxWarp and drivers wait at most 10 s (`ENGINE_REPLY_TIMEOUT`). REST then answers `503 {"err":"engine timeout"}`; for writes and other state-changing commands the text adds "may still be applied" (R-28, S-20).
 - On an engine timeout (R-28, S-21):
