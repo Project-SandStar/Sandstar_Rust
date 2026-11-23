@@ -95,6 +95,7 @@ Set via `--config-dir` or `SANDSTAR_CONFIG_DIR`; contains:
 | `--no-control` | | false | Disable PID/sequencer engine |
 | `--cluster` | | false | Enable roxWarp gossip clustering (see `--cluster-config`) |
 | `--cluster-config` | | (none) | Path to `ClusterConfig` JSON (peers, mTLS, mDNS) |
+| `--cluster-insecure` | | false | Allow the cluster over plain WebSocket, no peer auth, when no mTLS certificates are given. Without it the cluster network stays off |
 | `--tls-cert` | `SANDSTAR_TLS_CERT` | (none) | TLS certificate (PEM) |
 | `--tls-key` | `SANDSTAR_TLS_KEY` | (none) | TLS private key (PEM) |
 | `--sedona` | | false | Enable Sedona VM |
@@ -175,7 +176,7 @@ Cluster + SOX WebSocket:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/rows` | GET | RoWS (SOX-over-WebSocket) session — tree, slot, link, readTags/setTags/deleteTag |
-| `/roxwarp` | GET | roxWarp cluster peer WebSocket (when `--cluster` is set) |
+| `/roxwarp` | GET | roxWarp cluster peer WebSocket (only with `--cluster --cluster-insecure`; with mTLS peers use the cluster port) |
 
 All endpoints support JSON by default; `Accept: text/zinc` returns Haystack Zinc. Per-endpoint details in [`docs/Progress/DRIVER_REST_API.md`](docs/Progress/DRIVER_REST_API.md).
 

@@ -49,6 +49,8 @@ fn test_config(node_id: &str, port: u16) -> ClusterConfig {
         key_path: None,
         ca_path: None,
         enable_mdns: false,
+        // These tests run peers over plain WS (`--cluster-insecure`).
+        allow_plain: true,
     }
 }
 
@@ -284,4 +286,69 @@ async fn mdns_two_nodes_discover_each_other() {
         found_by_a.lock().unwrap(),
         found_by_b.lock().unwrap()
     );
+}
+
+// ── `/roxwarp` on the REST port (R-54, S-36) ───────────────
+
+/// Status of a WebSocket upgrade request for `/roxwarp` on the REST-port
+/// router built from `config`. 404 means the route is not mounted.
+async fn rest_roxwarp_status(config: ClusterConfig) -> axum::http::StatusCode {
+    use sandstar_server::auth::{AuthState, AuthStore};
+    use tower::ServiceExt;
+    let state = RoxWarpState {
+        delta_engine: Arc::new(DeltaEngine::new(config.node_id.clone())),
+        config,
+        sox_tree: None,
+    };
+    let app = sandstar_server::rest::roxwarp_router(state, AuthState::new(AuthStore::new()));
+    let req = axum::http::Request::builder()
+        .uri("/roxwarp")
+        .header("connection", "upgrade")
+        .header("upgrade", "websocket")
+        .header("sec-websocket-version", "13")
+        .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    app.oneshot(req).await.unwrap().status()
+}
+
+#[tokio::test]
+async fn rest_port_roxwarp_is_mounted_only_in_plain_mode() {
+    use axum::http::StatusCode;
+
+    // --cluster-insecure, no mTLS: peers may use the REST port.
+    let plain = test_config("plain", 0);
+    assert_ne!(rest_roxwarp_status(plain).await, StatusCode::NOT_FOUND);
+
+    // No mTLS and no flag: the cluster network is off.
+    let mut off = test_config("off", 0);
+    off.allow_plain = false;
+    assert_eq!(rest_roxwarp_status(off).await, StatusCode::NOT_FOUND);
+
+    // mTLS configured: peers must use the cluster port, even with the flag.
+    let mut mtls = test_config("mtls", 0);
+    mtls.cert_path = Some("/etc/c.pem".into());
+    mtls.key_path = Some("/etc/k.pem".into());
+    mtls.ca_path = Some("/etc/ca.pem".into());
+    assert_eq!(rest_roxwarp_status(mtls).await, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn rest_port_cluster_status_stays_mounted() {
+    use axum::http::StatusCode;
+    use sandstar_server::auth::{AuthState, AuthStore};
+    use tower::ServiceExt;
+    let mut off = test_config("off", 0);
+    off.allow_plain = false;
+    let state = RoxWarpState {
+        delta_engine: Arc::new(DeltaEngine::new("off".into())),
+        config: off,
+        sox_tree: None,
+    };
+    let app = sandstar_server::rest::roxwarp_router(state, AuthState::new(AuthStore::new()));
+    let req = axum::http::Request::builder()
+        .uri("/api/cluster/status")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
 }

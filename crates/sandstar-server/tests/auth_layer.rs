@@ -128,6 +128,7 @@ fn build_app(auth: AuthStore) -> (Router, tokio::task::JoinHandle<()>) {
             key_path: None,
             ca_path: None,
             enable_mdns: false,
+            allow_plain: false,
         },
         sox_tree: None,
     };

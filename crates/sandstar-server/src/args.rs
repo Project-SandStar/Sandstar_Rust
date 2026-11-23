@@ -166,6 +166,12 @@ pub struct ServerArgs {
     /// Path to CA certificate (PEM) for verifying roxWarp peer certificates.
     #[arg(long, env = "SANDSTAR_CLUSTER_CA")]
     pub cluster_ca: Option<String>,
+
+    /// Allow the roxWarp cluster over plain WebSocket with no peer auth when
+    /// no mTLS certificates are given. Without it and without certificates,
+    /// the cluster listener and outbound peer connections stay off (R-54).
+    #[arg(long, default_value_t = false)]
+    pub cluster_insecure: bool,
 }
 
 fn default_socket() -> String {
@@ -378,6 +384,14 @@ mod tests {
         assert!(args.cluster_cert.is_none());
         assert!(args.cluster_key.is_none());
         assert!(args.cluster_ca.is_none());
+        assert!(!args.cluster_insecure);
+    }
+
+    #[test]
+    fn test_cluster_insecure_flag() {
+        let args =
+            ServerArgs::parse_from(["sandstar-engine-server", "--cluster", "--cluster-insecure"]);
+        assert!(args.cluster_insecure);
     }
 
     #[test]

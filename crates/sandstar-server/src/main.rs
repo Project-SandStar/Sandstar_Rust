@@ -481,6 +481,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Override port from CLI
         cluster_config.port = args.cluster_port;
+        // Plain WS without peer auth only on explicit request (R-54, S-36).
+        cluster_config.allow_plain = args.cluster_insecure;
 
         // Set mTLS paths from CLI args
         if args.cluster_cert.is_some() || args.cluster_key.is_some() || args.cluster_ca.is_some() {
@@ -504,7 +506,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             node_id = %cluster_config.node_id,
             port = cluster_config.port,
             peers = cluster_config.peers.len(),
-            mtls = cluster_config.cert_path.is_some(),
+            // Paths only; whether mTLS builds is logged by `roxwarp::transport`.
+            mtls_paths = cluster_config.cert_path.is_some(),
             "roxWarp cluster mode enabled"
         );
 
@@ -519,17 +522,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             sox_tree: sox_api_state.as_ref().map(|s| s.tree.clone()),
         };
 
-        // Start separate roxWarp listener on cluster port (default 7443)
+        // Separate roxWarp listener on the cluster port (default 7443).
+        // Fail-closed (R-54, S-36): mTLS, or plain WS only with
+        // --cluster-insecure; a broken mTLS setup keeps the port closed.
+        // `server_transport` logs why the listener is off.
         let cluster_port = cluster_config.port;
+        let transport = sandstar_server::roxwarp::transport::server_transport(&cluster_config);
         let rw_state_for_listener = rw_state.clone();
         tokio::spawn(async move {
             use axum::routing::get;
             use axum::Router;
+            use sandstar_server::roxwarp::transport::Transport;
 
             // Outside the REST auth layer (R-2): peers authenticate with mTLS
-            // on this port when certificates are configured. Without them, or
-            // if the mTLS config fails to build, this serves plain WS with no
-            // peer auth (known gap, see 06).
+            // on this port; plain WS (no peer auth) only with --cluster-insecure.
             let cluster_app = Router::new()
                 .route(
                     "/roxwarp",
@@ -537,55 +543,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .with_state(rw_state_for_listener);
 
-            let bind_addr: std::net::SocketAddr = format!("0.0.0.0:{cluster_port}")
-                .parse()
-                .expect("valid cluster bind address");
+            let bind_addr = std::net::SocketAddr::from(([0, 0, 0, 0], cluster_port));
 
-            // Build mTLS server config if certificates are configured
-            if let (Some(ref cert), Some(ref key), Some(ref ca)) = (
-                &cluster_config.cert_path,
-                &cluster_config.key_path,
-                &cluster_config.ca_path,
-            ) {
-                match sandstar_server::roxwarp::mtls::build_mtls_server_config(cert, key, ca) {
-                    Ok(server_tls_config) => {
-                        info!(port = cluster_port, "roxWarp: starting mTLS listener");
-                        let rustls_config =
-                            axum_server::tls_rustls::RustlsConfig::from_config(server_tls_config);
-                        if let Err(e) = axum_server::bind_rustls(bind_addr, rustls_config)
-                            .serve(cluster_app.into_make_service())
-                            .await
-                        {
-                            error!(port = cluster_port, error = %e, "roxWarp: mTLS listener failed");
-                        }
-                    }
-                    Err(e) => {
-                        error!(error = %e, "roxWarp: failed to build mTLS server config, falling back to plain WS");
-                        let listener = match tokio::net::TcpListener::bind(&bind_addr).await {
-                            Ok(l) => l,
-                            Err(e) => {
-                                error!(port = cluster_port, error = %e, "roxWarp: failed to bind cluster port");
-                                return;
-                            }
-                        };
-                        info!(
-                            port = cluster_port,
-                            "roxWarp: listening (plain WS, mTLS config failed)"
-                        );
-                        axum::serve(listener, cluster_app).await.ok();
+            match transport {
+                Transport::Mtls(server_tls_config) => {
+                    info!(port = cluster_port, "roxWarp: starting mTLS listener");
+                    let rustls_config =
+                        axum_server::tls_rustls::RustlsConfig::from_config(server_tls_config);
+                    if let Err(e) = axum_server::bind_rustls(bind_addr, rustls_config)
+                        .serve(cluster_app.into_make_service())
+                        .await
+                    {
+                        error!(port = cluster_port, error = %e, "roxWarp: mTLS listener failed");
                     }
                 }
-            } else {
-                // No mTLS configured — plain WebSocket listener
-                let listener = match tokio::net::TcpListener::bind(&bind_addr).await {
-                    Ok(l) => l,
-                    Err(e) => {
-                        error!(port = cluster_port, error = %e, "roxWarp: failed to bind cluster port");
-                        return;
+                Transport::Plain => {
+                    let listener = match tokio::net::TcpListener::bind(&bind_addr).await {
+                        Ok(l) => l,
+                        Err(e) => {
+                            error!(port = cluster_port, error = %e, "roxWarp: failed to bind cluster port");
+                            return;
+                        }
+                    };
+                    info!(
+                        port = cluster_port,
+                        "roxWarp: listening (plain WS, --cluster-insecure)"
+                    );
+                    if let Err(e) = axum::serve(listener, cluster_app).await {
+                        error!(port = cluster_port, error = %e, "roxWarp: plain WS listener failed");
                     }
-                };
-                info!(port = cluster_port, "roxWarp: listening (plain WS)");
-                axum::serve(listener, cluster_app).await.ok();
+                }
+                Transport::Off => {
+                    info!(port = cluster_port, "roxWarp: cluster listener not started");
+                }
             }
         });
 

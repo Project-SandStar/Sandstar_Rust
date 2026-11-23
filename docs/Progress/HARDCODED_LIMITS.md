@@ -21,6 +21,7 @@
 > - Request body limit 1 MB (`rest/mod.rs:1231`, `with_global_layers`); since S-35 it also covers the tags, alerts, roxWarp and simulator routes, which had axum's 2 MB `Json` default before. Driver actor channel capacity 64.
 > - Log files kept: 14 by default (`--log-max-files`, `logging.rs`).
 > - roxWarp timer bounds: 1..=86400 s (`roxwarp/cluster.rs`).
+> - `--cluster-insecure` default off (`args.rs`, R-54, S-36): without it and without mTLS certificates the cluster listener and peer connections stay off. CLI only; the cluster JSON config cannot set it (`ClusterConfig.allow_plain` is `serde(skip)`).
 > - roxWarp `PEER_ANOMALY_WARN_INTERVAL_MS` = 60,000 ms (`roxwarp/cluster.rs:225`, R-45/R-27, 2026-11-19): at most one `warn` per minute about bad peer points (NaN/inf value, future timestamp); the rest go to `debug`. Keep hardcoded.
 > - roxWarp `MAX_PEER_FUTURE_SKEW_MS` = 300,000 ms (5 min) (`roxwarp/cluster.rs:230`, R-27, 2026-11-19): a peer point whose timestamp is further ahead of the local clock is rejected (logged, rate-limited), so a peer cannot pin a channel under last-writer-wins. **Consider** making it configurable if field clocks drift more.
 > - roxWarp `MAX_FILTER_DEPTH` = 32 (`roxwarp/handler.rs:611`, S-24): deepest `and`/`or` nesting evaluated in a point filter (REST cluster query, roxWarp `query`); terms past it do not match. Without it a long chain overflowed the stack and killed the process. Keep hardcoded.
