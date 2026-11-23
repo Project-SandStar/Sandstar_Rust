@@ -660,6 +660,52 @@ pub(crate) async fn check_upgrade_auth(
     Err(StatusCode::UNAUTHORIZED)
 }
 
+/// Gate for browser writes that cannot carry a bearer header: today only
+/// `PUT /file/*`, used by the editor to upload kits (R-56, S-37).
+///
+/// - auth not configured: every request passes (field default);
+/// - valid bearer header: passes, `Origin` is not checked (same as
+///   [`check_auth`]);
+/// - valid session cookie: passes only with an `Origin` header that matches
+///   the `Host` or the allowlist. A missing or foreign `Origin` gets 403.
+///   Browsers always send `Origin` on `PUT`, so a cookie write without one
+///   is not the editor. This backs up the cookie's `SameSite=Strict`
+///   against cross-site request forgery;
+/// - otherwise 401.
+pub(crate) async fn check_write_auth(
+    axum::extract::State(auth_state): axum::extract::State<AuthState>,
+    request: Request,
+    next: middleware::Next,
+) -> Result<Response, StatusCode> {
+    if !auth_state.store.is_auth_required() {
+        return Ok(next.run(request).await);
+    }
+    let headers = request.headers();
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    if bearer.is_some_and(|t| auth_state.check_token(t)) {
+        return Ok(next.run(request).await);
+    }
+    if session_cookies(headers).any(|t| auth_state.check_token(t)) {
+        // `origin_allowed` lets a request without `Origin` through (it is
+        // built for WebSocket clients); a cookie write must have one, so
+        // this check stays here and must not be dropped.
+        let has_origin = headers.contains_key(axum::http::header::ORIGIN);
+        if has_origin && origin_allowed(headers, &auth_state) {
+            return Ok(next.run(request).await);
+        }
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Err(StatusCode::UNAUTHORIZED)
+}
+
+/// Wrap every route already in `router` with [`check_write_auth`].
+pub fn require_write_auth(router: Router, auth_state: AuthState) -> Router {
+    router.route_layer(middleware::from_fn_with_state(auth_state, check_write_auth))
+}
+
 /// Wrap every route already in `router` with [`check_upgrade_auth`].
 pub fn require_upgrade_auth(router: Router, auth_state: AuthState) -> Router {
     router.route_layer(middleware::from_fn_with_state(
