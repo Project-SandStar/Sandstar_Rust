@@ -223,7 +223,7 @@ Router: `router_with_auth` in `crates/sandstar-server/src/rest/mod.rs`, plus rou
 | `GET /api/rows`, `GET /live`, `GET /live/sedonaState` | **yes** (S-32, `check_upgrade_auth`) | Editor endpoints (with `--sox`). Accept `Authorization: Bearer` or the `sandstar_session` cookie from `POST /api/auth`; with auth on a browser `Origin` must be the same host or in `--ws-allowed-origins` (else 403). The editor does not log in yet (S-32b), so it cannot connect while auth is on |
 | `GET /file/*` | **yes** (S-33, `check_upgrade_auth`) | File download (with `--sox`); the editor fetches kit files same-origin with the session cookie |
 | `/library/`, `GET /tags` | no | Editor library stubs (with `--sox`) |
-| `PUT /file/*` | **yes** (S-31) | File upload (with `--sox`) |
+| `PUT /file/*` | **yes** (S-31; `check_write_auth` since S-37) | File upload (with `--sox`). Bearer, or the session cookie with a required `Origin` that matches the `Host` or `--ws-allowed-origins` (missing or foreign `Origin`: 403); the editor uploads kits with its cookie. The other write routes stay bearer-only |
 | `GET /api/tags`, `/api/tags/stats`, `/api/tags/{comp_id}` | no | Dynamic tags (read) |
 | `PUT /api/tags/{comp_id}`, `DELETE /api/tags/{comp_id}/{key}` | **yes** (S-31) | Dynamic tags (write) |
 | `GET /api/alerts/config` (password masked), `/recipients`, `/active`, `/history` | no | Alert management (read) |

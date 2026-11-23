@@ -19,7 +19,9 @@ bash tools/editor-dev.sh [device[:port]]
 The script checks the device (`/api/about`, whether the editor gate asks for
 a login) and starts the editor at `http://localhost:8091/`. Add a connection
 with the device user; leave `peer` empty (it defaults to the page origin).
-With auth on, the device needs `--ws-allowed-origins http://localhost:8091`.
+With auth on, the device needs `--ws-allowed-origins http://localhost:8091`:
+the editor's WebSockets, tree and file reads, and kit uploads (`PUT /file/*`)
+use the session cookie from the login and are checked against the page origin.
 Edits in the editor go to the running app on the device.
 
 ## Layout
