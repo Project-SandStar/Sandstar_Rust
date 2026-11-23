@@ -46,7 +46,7 @@ This is the single-read status tracker for the Sandstar Rust project. It consoli
 | MQTT driver | ✅ Complete — Project C, 4 phases, live-validated | [IMPLEMENTATION_PLAN_MQTT.md](IMPLEMENTATION_PLAN_MQTT.md), [MQTT_SETUP.md](MQTT_SETUP.md) |
 | Poll integration (driver → engine channels) | ✅ Complete — shared tick task in rest/mod.rs | [IMPLEMENTATION_PLAN_FILTER_AND_BACNET.md](IMPLEMENTATION_PLAN_FILTER_AND_BACNET.md) Stage 1/2 |
 | REST API + WebSocket | ✅ 30+ routes (see §3), bearer + SCRAM auth, rate limit, WS push. Since S-31 every HTTP write route is behind the auth layer and since S-32 the editor endpoints (`/live`, `/api/rows`, `/live/sedonaState`) are too (bearer header or session cookie, plus an Origin check). `/roxwarp` on the REST port has no auth and is mounted only with `--cluster-insecure` (S-36) | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 1, [DRIVER_REST_API.md](DRIVER_REST_API.md) |
-| Security hardening | 🟡 Partial. Open: the field service binds `0.0.0.0` with no auth configured; `/roxwarp` outside `check_auth` when `--cluster-insecure` is given (§3, S-36); SIGTERM not handled (no graceful shutdown) | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 5.7, §Phase 6.5 |
+| Security hardening | 🟡 Partial. Open: the packaged unit binds `0.0.0.0` with no auth (the test device turns it on with a drop-in since S-38); `/roxwarp` outside `check_auth` when `--cluster-insecure` is given (§3, S-36); SIGTERM not handled (no graceful shutdown) | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 5.7, §Phase 6.5 |
 | Visual DDC editor | 🟡 14.0A REST complete. 14.0B–F were superseded by 14.0G (native backend for the external Vue editor): about 75%, G-6 open, G-7/G-8 partial | [IMPLEMENTATION_PLAN_NATIVE_EDITOR_BACKEND.md](IMPLEMENTATION_PLAN_NATIVE_EDITOR_BACKEND.md) |
 | Driver Framework v2 (Phase 12) | ✅ All sub-phases complete (12.0A–G + 12.0D.WS). Caveats: MQTT never reconnects; BACnet COV subscriptions never start in production; REST-created drivers get no poll tick; Modbus is not loadable | [IMPLEMENTATION_PLAN_DRIVER_FRAMEWORK.md](IMPLEMENTATION_PLAN_DRIVER_FRAMEWORK.md) |
 | Clustering — roxWarp (Phase 9) | 🟡 9.0a + 9.0b + 9.0c shipped; 9.0d SkySpark Fantom pod open. The typed binary-Trio format exists in code but is not what goes over the wire | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 9, [research/16](../research/16_ROXWARP_PROTOCOL.md) |
@@ -235,7 +235,7 @@ Router: `router_with_auth` in `crates/sandstar-server/src/rest/mod.rs`, plus rou
 | `GET /api/sim/outputs` (drains recorded writes), `POST /api/sim/inject`, `POST /api/sim/scenario` | **yes** (S-31) | Only in builds with the `simulator-hal` feature |
 
 **Security posture:**
-- `--http-bind` defaults to `127.0.0.1`. ⚠ The packaged systemd unit passes `--http-bind 0.0.0.0` and configures no auth, so on the field device every route above is reachable on the LAN without credentials.
+- `--http-bind` defaults to `127.0.0.1`. ⚠ The packaged systemd unit passes `--http-bind 0.0.0.0` and configures no auth, so a fresh install answers every route above on the LAN without credentials. Auth is turned on per device with an `EnvironmentFile` drop-in (DEPLOYMENT_CHECKLIST §7a); the test device has it since S-38 (2026-11-23).
 - Bearer token (`--auth-token` / `SANDSTAR_AUTH_TOKEN`) and SCRAM-SHA-256 (`--auth-user` / `--auth-pass`, `SANDSTAR_AUTH_USER` / `SANDSTAR_AUTH_PASS`).
 - REST TLS is behind the `tls` cargo feature; the release alias `arm-build-svm` does not enable it.
 - Filter depth cap 32, watch cap 64, max channels per watch 256, body limit 1 MB, rate limit on by default (100 req/s, one counter shared by all clients).
@@ -315,7 +315,7 @@ Host addresses, SSH details and site names are deliberately not written in this 
 Rewritten 2026-11-18. Ranked by risk first, then value.
 
 ### 🔴 Security and robustness (field device affected)
-1. **Auth in the field configuration.** The unit binds `0.0.0.0` with no auth; and with `--cluster-insecure`, `/roxwarp` bypasses auth (§3, S-36). HTTP write routes are behind it since S-31, the editor endpoints since S-32; the editor itself cannot log in yet (S-32b).
+1. **Auth in the field configuration.** The packaged unit binds `0.0.0.0` with no auth; each device needs the auth drop-in (DEPLOYMENT_CHECKLIST §7a; on the test device since S-38). With `--cluster-insecure`, `/roxwarp` bypasses auth (§3, S-36). HTTP write routes are behind it since S-31, the editor endpoints since S-32, and the editor logs in since S-32b.
 2. **Panic paths on network input.** Release builds abort on panic; known cases include a short BACnet BVLL frame and some lock-poison `unwrap`s on REST paths.
 3. **Graceful shutdown.** Handle SIGTERM and wire `with_graceful_shutdown`.
 4. **Numeric output guards.** Not every value leaving the process is checked with `is_finite` (engine outputs, roxWarp feed).

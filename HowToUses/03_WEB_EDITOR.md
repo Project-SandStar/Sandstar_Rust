@@ -19,7 +19,10 @@ bash tools/editor-dev.sh [device[:port]]
 The script checks the device (`/api/about`, whether the editor gate asks for
 a login) and starts the editor at `http://localhost:8091/`. Add a connection
 with the device user; leave `peer` empty (it defaults to the page origin).
-With auth on, the device needs `--ws-allowed-origins http://localhost:8091`:
+With auth on (DEPLOYMENT_CHECKLIST §7a), log in with the device's Sandstar
+user; the login sets an `HttpOnly` session cookie for the page origin. The
+device needs `--ws-allowed-origins http://localhost:8091` (or
+`SANDSTAR_WS_ALLOWED_ORIGINS`):
 the editor's WebSockets, tree and file reads, and kit uploads (`PUT /file/*`)
 use the session cookie from the login and are checked against the page origin.
 Edits in the editor go to the running app on the device.

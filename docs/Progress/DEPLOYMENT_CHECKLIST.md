@@ -113,6 +113,35 @@ Read the journal soon after the start: it is volatile and holds well under an ho
 6. **Data:** `curl -s http://localhost:8085/api/status` and spot-read a few channels with `/api/read`.
 7. **Next day:** confirm that log pruning kept at most 14 dated files in `/var/log/sandstar/`.
 
+## 7a. Turning REST auth on or off
+
+The packaged unit starts with no auth. Auth is a device-local setting: an
+`EnvironmentFile` drop-in, so the password is not in the unit file or in
+`systemctl show`. Needs explicit approval (new kind of device write). Back up
+`/etc/systemd/system/sandstar-engine.service.d` and `/etc/sandstar` first.
+
+1. `/etc/sandstar/auth.env`, owner `root:root`, mode `0600` (write it with
+   `umask 077`; never print it):
+   - `SANDSTAR_AUTH_USER=<user>` and `SANDSTAR_AUTH_PASS=<password>`: SCRAM login (editor);
+   - optional `SANDSTAR_AUTH_TOKEN=<token>`: bearer for scripts;
+   - `SANDSTAR_WS_ALLOWED_ORIGINS=<origin>[,...]`: page origins allowed besides
+     the device itself, e.g. the editor dev server `http://localhost:8091`.
+2. `/etc/systemd/system/sandstar-engine.service.d/auth.conf` (0644):
+   `[Service]` / `EnvironmentFile=/etc/sandstar/auth.env`.
+3. `systemctl daemon-reload && systemctl restart sandstar-engine`.
+4. Verify on the device (no credentials, no real write):
+   - `/api/about`, `/api/read`, `/health`, `/api/cluster/status`: 200;
+   - `POST /api/pointWrite`, `HEAD /live/sedonaState`, `GET /api/sox/tree`,
+     `PUT /file/x`: 401;
+   - log: one `SCRAM-SHA-256 auth configured` line, no new ERROR;
+   - `systemctl show sandstar-engine -p Environment` does not contain the password;
+   - the editor logs in (`bash tools/editor-dev.sh`) and loads the tree.
+5. Off: remove both files, `daemon-reload`, restart.
+
+Clients that write without credentials get 401 once auth is on. Reads listed
+above stay open. `health-monitor.sh` (cron) only reads `/health` and
+`/api/diagnostics`.
+
 ## 8. Rollback
 
 Rolling back is a write outside the deploy scope and needs its own approval.
