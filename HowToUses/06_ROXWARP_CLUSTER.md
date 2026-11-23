@@ -5,10 +5,18 @@ roxWarp is a gossip-based state synchronization protocol for multi-device Sandst
 
 ## Enable Clustering
 
-### Basic (plain WebSocket, no TLS)
+The cluster is fail-closed: without mTLS certificates it starts only with
+`--cluster-insecure`. `--cluster` alone, or a broken or incomplete mTLS
+setup, leaves the cluster listener and peer connections off (the log says
+why); `/api/cluster/status` still answers.
+
+### Basic (plain WebSocket, no TLS, no peer authentication)
 ```bash
-sandstar-engine-server --sox --cluster --node-id sandstar-a-001
+sandstar-engine-server --sox --cluster --cluster-insecure --node-id sandstar-a-001
 ```
+Any host that can reach the port can join as a peer. Use it only on an
+isolated test network. In this mode `/roxwarp` is also served on the REST
+port.
 
 ### With Config File
 ```bash
@@ -35,6 +43,7 @@ sandstar-engine-server --sox --cluster --node-id sandstar-a-001 \
 | `--cluster-cert <path>` | none | Device certificate (PEM) |
 | `--cluster-key <path>` | none | Device private key (PEM) |
 | `--cluster-ca <path>` | none | CA certificate for peer verification |
+| `--cluster-insecure` | off | Allow plain WebSocket with no peer auth when no certificates are given (CLI only, not in the config file) |
 
 ## Cluster Config File
 

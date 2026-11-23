@@ -6,6 +6,8 @@
 //! - with the right token the request reaches the handler (not 401);
 //! - with no auth configured nothing gets 401 (field behavior unchanged).
 //!
+//! The SOX tree and `/file/*` reads sit behind the editor gate (R-55, S-33).
+//!
 //! Limitation: the route list is maintained by hand. A new write route that
 //! is not added to `WRITE_ROUTES` is not covered by this test.
 
@@ -84,7 +86,6 @@ const READ_ROUTES: &[&str] = &[
     "/api/about",
     "/api/read?filter=point",
     "/api/drivers",
-    "/api/sox/tree",
     "/api/tags",
     "/api/alerts/config",
     "/api/cluster/status",
@@ -127,15 +128,17 @@ fn build_app(auth: AuthStore) -> (Router, tokio::task::JoinHandle<()>) {
             key_path: None,
             ca_path: None,
             enable_mdns: false,
+            allow_plain: false,
         },
         sox_tree: None,
     };
 
-    let app = rest::router_with_auth(handle, auth_state.clone(), None, 0, Some(sox_state))
+    // Same order as `main.rs`: every router first, global layers last.
+    let app = rest::api_routes(handle, auth_state.clone(), None, Some(sox_state))
         .merge(rest::tags::router(dyn_store, auth_state.clone()))
         .merge(alert_router(alerts, auth_state.clone()))
         .merge(rest::roxwarp_router(rw_state, auth_state));
-    (app, cmd_task)
+    (rest::with_global_layers(app, 0), cmd_task)
 }
 
 async fn status(
@@ -235,6 +238,247 @@ async fn an_empty_configured_token_does_not_open_write_routes() {
             let s = status(&app, m, p, b, token).await;
             assert_eq!(s, StatusCode::UNAUTHORIZED, "{m} {p} token={token:?}");
         }
+    }
+}
+
+// ── SOX tree and file reads (R-55, S-33) ────────────────────
+
+/// Reads that carry the component tree or device files: behind the editor
+/// gate (bearer or session cookie, plus Origin).
+/// Each entry is (path, status once the gate lets the request through);
+/// exact so a route that is not mounted (404) cannot pass. `build_app`
+/// unsets the file root, so `/file/*` answers 503 behind the gate.
+const GATED_READS: &[(&str, StatusCode)] = &[
+    ("/api/sox/tree", StatusCode::OK),
+    // The test tree is empty: the handler answers 404 for comp 0.
+    ("/api/sox/comp/0", StatusCode::NOT_FOUND),
+    ("/api/sox/palette", StatusCode::OK),
+    ("/api/sox/names", StatusCode::OK),
+    (
+        "/file/sedona/manifests/x/x.xml",
+        StatusCode::SERVICE_UNAVAILABLE,
+    ),
+];
+
+async fn head_with(app: &Router, path: &str, headers: &[(&str, String)]) -> StatusCode {
+    let mut req = Request::builder().method("HEAD").uri(path);
+    for (k, v) in headers {
+        req = req.header(*k, v.as_str());
+    }
+    let req = req.body(Body::empty()).unwrap();
+    app.clone().oneshot(req).await.unwrap().status()
+}
+
+async fn get_with(app: &Router, path: &str, headers: &[(&str, String)]) -> StatusCode {
+    let mut req = Request::builder().method("GET").uri(path);
+    for (k, v) in headers {
+        req = req.header(*k, v.as_str());
+    }
+    let req = req.body(Body::empty()).unwrap();
+    app.clone().oneshot(req).await.unwrap().status()
+}
+
+#[tokio::test]
+async fn tree_and_file_reads_need_a_credential_when_auth_is_configured() {
+    let (app, _task) = build_app(AuthStore::with_bearer_token(TOKEN.to_string()));
+    let cookie = || ("cookie", format!("a=b; sandstar_session={TOKEN}"));
+    for &(p, want) in GATED_READS {
+        assert_eq!(
+            head_with(&app, p, &[]).await,
+            StatusCode::UNAUTHORIZED,
+            "HEAD {p} none"
+        );
+        assert_eq!(
+            get_with(&app, p, &[]).await,
+            StatusCode::UNAUTHORIZED,
+            "{p} none"
+        );
+        let bad = [("cookie", "sandstar_session=nope".to_string())];
+        assert_eq!(
+            get_with(&app, p, &bad).await,
+            StatusCode::UNAUTHORIZED,
+            "{p} bad cookie"
+        );
+        let wrong = [("authorization", "Bearer nope".to_string())];
+        assert_eq!(
+            get_with(&app, p, &wrong).await,
+            StatusCode::UNAUTHORIZED,
+            "{p} wrong"
+        );
+        // Same-origin editor fetch: the browser may send an Origin equal to Host.
+        let same = vec![
+            cookie(),
+            ("host", "dev.local:8091".to_string()),
+            ("origin", "http://dev.local:8091".to_string()),
+        ];
+        for ok in [vec![cookie()], vec![bearer()], same] {
+            assert_eq!(get_with(&app, p, &ok).await, want, "{p} {ok:?}");
+        }
+        for cred in [bearer(), cookie()] {
+            let evil = [cred, ("origin", "http://evil.example".to_string())];
+            assert_eq!(
+                get_with(&app, p, &evil).await,
+                StatusCode::FORBIDDEN,
+                "{p} {evil:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn file_upload_accepts_a_cookie_only_with_an_allowed_origin() {
+    // R-56, S-37: the editor uploads kits with its session cookie. A cookie
+    // write needs an Origin header that matches the Host or the allowlist.
+    let mut store = AuthStore::with_bearer_token(TOKEN.to_string());
+    store.set_allowed_origins(vec!["http://localhost:8091".to_string()]);
+    let (app, _task) = build_app(store);
+    let host = || ("host", "device.local".to_string());
+    let cookie = || ("cookie", format!("a=b; sandstar_session={TOKEN}"));
+    let bad_cookie = || ("cookie", "sandstar_session=forged".to_string());
+    let origin = |o: &str| ("origin", o.to_string());
+    let bearer = || ("authorization", format!("Bearer {TOKEN}"));
+    // No file root in tests: a request that passes the gate gets 503.
+    let passed = StatusCode::SERVICE_UNAVAILABLE;
+    let cases: Vec<(&str, Vec<(&str, String)>, StatusCode)> = vec![
+        ("none", vec![host()], StatusCode::UNAUTHORIZED),
+        (
+            "forged cookie, same-host origin",
+            vec![host(), bad_cookie(), origin("http://device.local")],
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            "cookie, same-host origin",
+            vec![host(), cookie(), origin("http://device.local")],
+            passed,
+        ),
+        (
+            "cookie, allowlisted origin",
+            vec![host(), cookie(), origin("http://localhost:8091")],
+            passed,
+        ),
+        (
+            "cookie, no origin",
+            vec![host(), cookie()],
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "cookie, foreign origin",
+            vec![host(), cookie(), origin("http://evil.example")],
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "cookie, opaque origin",
+            vec![host(), cookie(), origin("null")],
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "forged cookie before the valid one",
+            vec![
+                host(),
+                (
+                    "cookie",
+                    format!("sandstar_session=forged; sandstar_session={TOKEN}"),
+                ),
+                origin("http://device.local"),
+            ],
+            passed,
+        ),
+        (
+            "valid cookie in a second Cookie header",
+            vec![
+                host(),
+                bad_cookie(),
+                cookie(),
+                origin("http://device.local"),
+            ],
+            passed,
+        ),
+        (
+            "cookie, same host other port",
+            vec![host(), cookie(), origin("http://device.local:8091")],
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "cookie, subdomain origin",
+            vec![host(), cookie(), origin("http://a.device.local")],
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "cookie, non-http scheme",
+            vec![host(), cookie(), origin("ftp://device.local")],
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "cookie, origin differs only in case",
+            vec![host(), cookie(), origin("http://DEVICE.local")],
+            passed,
+        ),
+        ("bearer, no origin", vec![host(), bearer()], passed),
+        (
+            "bearer, foreign origin",
+            vec![host(), bearer(), origin("http://evil.example")],
+            passed,
+        ),
+    ];
+    for (name, headers, want) in cases {
+        let s = put_with(&app, "/file/s37-probe.txt", &headers).await;
+        assert_eq!(s, want, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn other_write_routes_still_reject_the_cookie() {
+    // Only `PUT /file/*` accepts the cookie; the rest stay bearer-only.
+    let (app, _task) = build_app(AuthStore::with_bearer_token(TOKEN.to_string()));
+    for (m, p, b) in WRITE_ROUTES {
+        if p.starts_with("/file/") {
+            continue;
+        }
+        let req = Request::builder()
+            .method(*m)
+            .uri(*p)
+            .header("host", "device.local")
+            .header("origin", "http://device.local")
+            .header("cookie", format!("sandstar_session={TOKEN}"))
+            .header("content-type", "application/json")
+            .body(Body::from(b.to_string()))
+            .unwrap();
+        let s = app.clone().oneshot(req).await.unwrap().status();
+        assert_eq!(s, StatusCode::UNAUTHORIZED, "{m} {p}");
+    }
+}
+
+#[tokio::test]
+async fn file_upload_stays_open_when_auth_is_not_configured() {
+    let (app, _task) = build_app(AuthStore::new());
+    let headers = [("origin", "http://evil.example".to_string())];
+    let s = put_with(&app, "/file/s37-probe.txt", &headers).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+async fn put_with(app: &Router, path: &str, headers: &[(&str, String)]) -> StatusCode {
+    let mut req = Request::builder().method("PUT").uri(path);
+    for (k, v) in headers {
+        req = req.header(*k, v.as_str());
+    }
+    let req = req.body(Body::from("x")).unwrap();
+    app.clone().oneshot(req).await.unwrap().status()
+}
+
+#[tokio::test]
+async fn library_stubs_stay_open_when_auth_is_configured() {
+    let (app, _task) = build_app(AuthStore::with_bearer_token(TOKEN.to_string()));
+    for p in ["/library/", "/tags"] {
+        assert_eq!(get_with(&app, p, &[]).await, StatusCode::OK, "{p}");
+    }
+}
+
+#[tokio::test]
+async fn tree_and_file_reads_stay_open_when_auth_is_not_configured() {
+    let (app, _task) = build_app(AuthStore::new());
+    for &(p, want) in GATED_READS {
+        let evil = [("origin", "http://evil.example".to_string())];
+        assert_eq!(get_with(&app, p, &evil).await, want, "{p}");
     }
 }
 

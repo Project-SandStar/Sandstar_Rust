@@ -45,8 +45,8 @@ This is the single-read status tracker for the Sandstar Rust project. It consoli
 | BACnet/IP driver (read + write + COV + RPM + BBMD) | ✅ Complete — Project B, 11 phases, live-validated | [IMPLEMENTATION_PLAN_FILTER_AND_BACNET.md](IMPLEMENTATION_PLAN_FILTER_AND_BACNET.md), [BACNET_SETUP.md](BACNET_SETUP.md) |
 | MQTT driver | ✅ Complete — Project C, 4 phases, live-validated | [IMPLEMENTATION_PLAN_MQTT.md](IMPLEMENTATION_PLAN_MQTT.md), [MQTT_SETUP.md](MQTT_SETUP.md) |
 | Poll integration (driver → engine channels) | ✅ Complete — shared tick task in rest/mod.rs | [IMPLEMENTATION_PLAN_FILTER_AND_BACNET.md](IMPLEMENTATION_PLAN_FILTER_AND_BACNET.md) Stage 1/2 |
-| REST API + WebSocket | ✅ 30+ routes (see §3), bearer + SCRAM auth, rate limit, WS push. Since S-31 every HTTP write route is behind the auth layer and since S-32 the editor endpoints (`/live`, `/api/rows`, `/live/sedonaState`) are too (bearer header or session cookie, plus an Origin check); ⚠ `/roxwarp` is not | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 1, [DRIVER_REST_API.md](DRIVER_REST_API.md) |
-| Security hardening | 🟡 Partial. Open: the field service binds `0.0.0.0` with no auth configured; editor WebSockets and `/roxwarp` outside `check_auth` (§3, S-32); SIGTERM not handled (no graceful shutdown) | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 5.7, §Phase 6.5 |
+| REST API + WebSocket | ✅ 30+ routes (see §3), bearer + SCRAM auth, rate limit, WS push. Since S-31 every HTTP write route is behind the auth layer and since S-32 the editor endpoints (`/live`, `/api/rows`, `/live/sedonaState`) are too (bearer header or session cookie, plus an Origin check). `/roxwarp` on the REST port has no auth and is mounted only with `--cluster-insecure` (S-36) | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 1, [DRIVER_REST_API.md](DRIVER_REST_API.md) |
+| Security hardening | 🟡 Partial. Open: the field service binds `0.0.0.0` with no auth configured; `/roxwarp` outside `check_auth` when `--cluster-insecure` is given (§3, S-36); SIGTERM not handled (no graceful shutdown) | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 5.7, §Phase 6.5 |
 | Visual DDC editor | 🟡 14.0A REST complete. 14.0B–F were superseded by 14.0G (native backend for the external Vue editor): about 75%, G-6 open, G-7/G-8 partial | [IMPLEMENTATION_PLAN_NATIVE_EDITOR_BACKEND.md](IMPLEMENTATION_PLAN_NATIVE_EDITOR_BACKEND.md) |
 | Driver Framework v2 (Phase 12) | ✅ All sub-phases complete (12.0A–G + 12.0D.WS). Caveats: MQTT never reconnects; BACnet COV subscriptions never start in production; REST-created drivers get no poll tick; Modbus is not loadable | [IMPLEMENTATION_PLAN_DRIVER_FRAMEWORK.md](IMPLEMENTATION_PLAN_DRIVER_FRAMEWORK.md) |
 | Clustering — roxWarp (Phase 9) | 🟡 9.0a + 9.0b + 9.0c shipped; 9.0d SkySpark Fantom pod open. The typed binary-Trio format exists in code but is not what goes over the wire | [ROADMAP_v2.md](ROADMAP_v2.md) §Phase 9, [research/16](../research/16_ROXWARP_PROTOCOL.md) |
@@ -218,16 +218,17 @@ Router: `router_with_auth` in `crates/sandstar-server/src/rest/mod.rs`, plus rou
 | `GET /api/ws` | handshake | Haystack-over-WebSocket (JSON) with SCRAM inside the socket. With auth on (S-32): a foreign browser `Origin` gets 403; a bearer header, session cookie or the deprecated legacy `?token=` pre-authenticates, otherwise the client must send an `auth` message |
 | `GET /api/drivers`, `/api/drivers/{id}/status`, `/api/drivers/{id}/learn` | no | Driver listing |
 | `POST /api/drivers`, `DELETE /api/drivers/{id}`, `POST /api/drivers/{id}/open\|close\|ping\|message\|write`, `POST /api/syncCur` | **yes** | Driver lifecycle ([DRIVER_REST_API.md](DRIVER_REST_API.md)) |
-| `GET /api/sox/tree`, `/api/sox/comp/{id}`, `/api/sox/palette`, `/api/sox/names` | no | SOX component tree (with `--sox`) |
+| `GET /api/sox/tree`, `/api/sox/comp/{id}`, `/api/sox/palette`, `/api/sox/names` | **yes** (S-33, `check_upgrade_auth`) | SOX component tree (with `--sox`). Bearer or `sandstar_session` cookie, plus Origin check |
 | `POST/DELETE/PUT /api/sox/comp*`, `/api/sox/link` | **yes** (S-31) | SOX component edits (with `--sox`) |
 | `GET /api/rows`, `GET /live`, `GET /live/sedonaState` | **yes** (S-32, `check_upgrade_auth`) | Editor endpoints (with `--sox`). Accept `Authorization: Bearer` or the `sandstar_session` cookie from `POST /api/auth`; with auth on a browser `Origin` must be the same host or in `--ws-allowed-origins` (else 403). The editor does not log in yet (S-32b), so it cannot connect while auth is on |
-| `GET /file/*`, `/library/`, `GET /tags` | no | File download and editor library stubs (with `--sox`) |
-| `PUT /file/*` | **yes** (S-31) | File upload (with `--sox`) |
+| `GET /file/*` | **yes** (S-33, `check_upgrade_auth`) | File download (with `--sox`); the editor fetches kit files same-origin with the session cookie |
+| `/library/`, `GET /tags` | no | Editor library stubs (with `--sox`) |
+| `PUT /file/*` | **yes** (S-31; `check_write_auth` since S-37) | File upload (with `--sox`). Bearer, or the session cookie with a required `Origin` that matches the `Host` or `--ws-allowed-origins` (missing or foreign `Origin`: 403); the editor uploads kits with its cookie. The other write routes stay bearer-only |
 | `GET /api/tags`, `/api/tags/stats`, `/api/tags/{comp_id}` | no | Dynamic tags (read) |
 | `PUT /api/tags/{comp_id}`, `DELETE /api/tags/{comp_id}/{key}` | **yes** (S-31) | Dynamic tags (write) |
 | `GET /api/alerts/config` (password masked), `/recipients`, `/active`, `/history` | no | Alert management (read) |
 | `PUT /api/alerts/config`, `POST/DELETE /api/alerts/recipients*`, `POST /api/alerts/test` | **yes** (S-31) | Alert management (write, test e-mail) |
-| `GET /roxwarp` | **no** ⚠ | roxWarp peer WebSocket on the REST port (with `--cluster`). Peers send no bearer token; mTLS applies only on the separate cluster port |
+| `GET /roxwarp` | **no** ⚠ | roxWarp peer WebSocket on the REST port, mounted only with `--cluster --cluster-insecure` and no mTLS paths (S-36). Peers send no bearer token. With mTLS, peers use the cluster port only |
 | `GET /api/cluster/status` | no | Cluster overview |
 | `POST /api/cluster/query` | **yes** (S-31) | Distributed Haystack query |
 | `GET /api/sim/state` | no | Only in builds with the `simulator-hal` feature |
@@ -237,7 +238,9 @@ Router: `router_with_auth` in `crates/sandstar-server/src/rest/mod.rs`, plus rou
 - `--http-bind` defaults to `127.0.0.1`. ⚠ The packaged systemd unit passes `--http-bind 0.0.0.0` and configures no auth, so on the field device every route above is reachable on the LAN without credentials.
 - Bearer token (`--auth-token` / `SANDSTAR_AUTH_TOKEN`) and SCRAM-SHA-256 (`--auth-user` / `--auth-pass`, `SANDSTAR_AUTH_USER` / `SANDSTAR_AUTH_PASS`).
 - REST TLS is behind the `tls` cargo feature; the release alias `arm-build-svm` does not enable it.
-- Filter depth cap 32, watch cap 64, max channels per watch 256, body limit 1 MB, rate limit on by default (100 req/s).
+- Filter depth cap 32, watch cap 64, max channels per watch 256, body limit 1 MB, rate limit on by default (100 req/s, one counter shared by all clients).
+- roxWarp cluster is fail-closed (R-54, S-36): the cluster port (default 7443) and outbound peer connections use mTLS (`--cluster-cert/--cluster-key/--cluster-ca`), or plain WS only with `--cluster-insecure`. No certificates and no flag, or a broken or incomplete mTLS setup: no cluster listener and no peer connections, with a WARN/ERROR line saying why; `/api/cluster/status` keeps answering. The field unit runs `--cluster` without either, so 7443 is closed there after S-36.
+- The request counter, rate limit, body limit and CORS wrap every route on the REST port, including the tags, alerts, roxWarp/cluster and simulator routers merged in `main.rs` (`rest::with_global_layers`, applied last; R-53, S-35). Before S-35 those routers were outside these layers.
 - CORS: any origin, with an explicit method and header list.
 - Engine calls from REST, the `/api/ws` WebSocket, SOX, roxWarp and drivers wait at most 10 s (`ENGINE_REPLY_TIMEOUT`). REST then answers `503 {"err":"engine timeout"}`; for writes and other state-changing commands the text adds "may still be applied" (R-28, S-20).
 - On an engine timeout (R-28, S-21):
@@ -312,7 +315,7 @@ Host addresses, SSH details and site names are deliberately not written in this 
 Rewritten 2026-11-18. Ranked by risk first, then value.
 
 ### 🔴 Security and robustness (field device affected)
-1. **Auth in the field configuration.** The unit binds `0.0.0.0` with no auth; and even with auth on, `/roxwarp` bypasses auth (§3). HTTP write routes are behind it since S-31, the editor endpoints since S-32; the editor itself cannot log in yet (S-32b).
+1. **Auth in the field configuration.** The unit binds `0.0.0.0` with no auth; and with `--cluster-insecure`, `/roxwarp` bypasses auth (§3, S-36). HTTP write routes are behind it since S-31, the editor endpoints since S-32; the editor itself cannot log in yet (S-32b).
 2. **Panic paths on network input.** Release builds abort on panic; known cases include a short BACnet BVLL frame and some lock-poison `unwrap`s on REST paths.
 3. **Graceful shutdown.** Handle SIGTERM and wire `with_graceful_shutdown`.
 4. **Numeric output guards.** Not every value leaving the process is checked with `is_finite` (engine outputs, roxWarp feed).

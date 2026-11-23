@@ -5,6 +5,25 @@
 http://<host>:8085/editor
 ```
 
+## Vue editor against a real device (development)
+
+The Vue Sedona editor (`sedonaWebEditor`, branch `trkrDevelop`) runs from its
+dev server and proxies `/live`, `/api`, `/file` to a device:
+
+```bash
+# Device address: argument, SANDSTAR_DEVICE, or tools/editor-dev.env
+# (git-ignored; one line SANDSTAR_DEVICE=<host>)
+bash tools/editor-dev.sh [device[:port]]
+```
+
+The script checks the device (`/api/about`, whether the editor gate asks for
+a login) and starts the editor at `http://localhost:8091/`. Add a connection
+with the device user; leave `peer` empty (it defaults to the page origin).
+With auth on, the device needs `--ws-allowed-origins http://localhost:8091`:
+the editor's WebSockets, tree and file reads, and kit uploads (`PUT /file/*`)
+use the session cookie from the login and are checked against the page origin.
+Edits in the editor go to the running app on the device.
+
 ## Layout
 - **Left sidebar**: Tree navigator (top) + Component palette (bottom)
 - **Center canvas**: Visual wire sheet (only user-added components)

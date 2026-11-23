@@ -636,7 +636,8 @@ pub(crate) fn has_valid_credential(
 }
 
 /// Gate for the editor endpoints (`/live`, `/live/sedonaState`,
-/// `/api/rows`), run before the WebSocket upgrade (R-52, S-32).
+/// `/api/rows`), run before the WebSocket upgrade (R-52, S-32). It also
+/// gates the SOX tree reads and `GET /file/*` (R-55, S-33).
 ///
 /// Browsers cannot send an `Authorization` header on an upgrade, so a
 /// session cookie from `POST /api/auth` is accepted too. With auth on, a
@@ -657,6 +658,52 @@ pub(crate) async fn check_upgrade_auth(
         return Ok(next.run(request).await);
     }
     Err(StatusCode::UNAUTHORIZED)
+}
+
+/// Gate for browser writes that cannot carry a bearer header: today only
+/// `PUT /file/*`, used by the editor to upload kits (R-56, S-37).
+///
+/// - auth not configured: every request passes (field default);
+/// - valid bearer header: passes, `Origin` is not checked (same as
+///   [`check_auth`]);
+/// - valid session cookie: passes only with an `Origin` header that matches
+///   the `Host` or the allowlist. A missing or foreign `Origin` gets 403.
+///   Browsers always send `Origin` on `PUT`, so a cookie write without one
+///   is not the editor. This backs up the cookie's `SameSite=Strict`
+///   against cross-site request forgery;
+/// - otherwise 401.
+pub(crate) async fn check_write_auth(
+    axum::extract::State(auth_state): axum::extract::State<AuthState>,
+    request: Request,
+    next: middleware::Next,
+) -> Result<Response, StatusCode> {
+    if !auth_state.store.is_auth_required() {
+        return Ok(next.run(request).await);
+    }
+    let headers = request.headers();
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    if bearer.is_some_and(|t| auth_state.check_token(t)) {
+        return Ok(next.run(request).await);
+    }
+    if session_cookies(headers).any(|t| auth_state.check_token(t)) {
+        // `origin_allowed` lets a request without `Origin` through (it is
+        // built for WebSocket clients); a cookie write must have one, so
+        // this check stays here and must not be dropped.
+        let has_origin = headers.contains_key(axum::http::header::ORIGIN);
+        if has_origin && origin_allowed(headers, &auth_state) {
+            return Ok(next.run(request).await);
+        }
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Err(StatusCode::UNAUTHORIZED)
+}
+
+/// Wrap every route already in `router` with [`check_write_auth`].
+pub fn require_write_auth(router: Router, auth_state: AuthState) -> Router {
+    router.route_layer(middleware::from_fn_with_state(auth_state, check_write_auth))
 }
 
 /// Wrap every route already in `router` with [`check_upgrade_auth`].
@@ -990,6 +1037,25 @@ pub fn router_with_auth(
     rate_limit: u64,
     sox_state: Option<sox_api::SoxApiState>,
 ) -> Router {
+    with_global_layers(
+        api_routes(handle, auth_state, auth_token, sox_state),
+        rate_limit,
+    )
+}
+
+/// Build the core routes, each with its auth layer, without the global
+/// layers.
+///
+/// A caller that merges more routers (`main.rs`: tags, alerts, roxWarp,
+/// simulator) merges them into this router and calls [`with_global_layers`]
+/// last. A router merged after that call gets no rate limit, body limit or
+/// CORS (R-53, S-35).
+pub fn api_routes(
+    handle: EngineHandle,
+    auth_state: AuthState,
+    auth_token: Option<String>,
+    sox_state: Option<sox_api::SoxApiState>,
+) -> Router {
     // Public read-only routes (no auth required)
     let public = Router::new()
         .route("/", get(dashboard))
@@ -1027,26 +1093,6 @@ pub fn router_with_auth(
         .route("/api/invokeAction", post(handlers::invoke_action))
         .with_state(handle.clone());
     let protected = require_auth(protected, auth_state.clone());
-
-    // CORS policy: allow any origin (embedded device accessed by various IPs)
-    // but restrict methods and headers to only what we actually use.
-    // This is safer than CorsLayer::permissive() which allows arbitrary
-    // headers and methods.
-    let cors = CorsLayer::new()
-        .allow_origin(tower_http::cors::Any)
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::DELETE,
-            Method::OPTIONS,
-        ])
-        .allow_headers([
-            HeaderName::from_static("content-type"),
-            HeaderName::from_static("authorization"),
-            HeaderName::from_static("accept"),
-        ])
-        .max_age(Duration::from_secs(3600));
 
     // Driver framework REST endpoints — backed by the async DriverHandle actor.
     // BACnet drivers (and future async drivers) are loaded from environment config
@@ -1110,8 +1156,7 @@ pub fn router_with_auth(
     }
     let driver_routes = crate::drivers::driver_router(driver_handle, auth_state.clone());
 
-    // Merge and apply global middleware.
-    // Layer order (axum applies bottom-up): CORS → body limit → rate limit → count.
+    // Global middleware is applied by `with_global_layers`, not here.
     let mut app = public
         .merge(protected)
         .merge(ws_route)
@@ -1158,13 +1203,20 @@ pub fn router_with_auth(
             auth_state.clone(),
         );
         // Phase 14.0G-5: editor `/library/` + `/tags` compatibility stubs.
+        // Left outside the gates on purpose: read-only stubs that return
+        // `[]` or library names, no device data (S-33).
         let library_route = library::router(live::LiveState {
             tree: sox.tree.clone(),
             manifest_db: sox.manifest_db.clone(),
             dyn_store: sox.dyn_store.clone(),
         });
         app = app
-            .merge(sox_api::public_router(sox.clone()))
+            // Tree reads carry the same data as `/live/sedonaState`, so they
+            // sit behind the same gate (R-55, S-33).
+            .merge(require_upgrade_auth(
+                sox_api::public_router(sox.clone()),
+                auth_state.clone(),
+            ))
             .merge(require_auth(
                 sox_api::protected_router(sox),
                 auth_state.clone(),
@@ -1180,8 +1232,37 @@ pub fn router_with_auth(
     // Phase 14.0G-7 skeleton: `/editor` is served by `editor_assets::router()`.
     // Returns the placeholder HTML when `SANDSTAR_WEB_DIR` is unset, or
     // mounts the built Vue SPA from that directory when set.
-    app = app.merge(editor_assets::router());
+    app.merge(editor_assets::router())
+}
 
+/// Apply the global HTTP layers to every route merged so far: request
+/// counter, rate limit (`rate_limit` requests per second, 0 = unlimited),
+/// 1 MiB body limit and CORS.
+///
+/// Call this once, after the last `.merge`; routes merged later are not
+/// wrapped (R-53).
+pub fn with_global_layers(app: Router, rate_limit: u64) -> Router {
+    // CORS policy: allow any origin (embedded device accessed by various IPs)
+    // but restrict methods and headers to only what we actually use.
+    // This is safer than CorsLayer::permissive() which allows arbitrary
+    // headers and methods.
+    let cors = CorsLayer::new()
+        .allow_origin(tower_http::cors::Any)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            HeaderName::from_static("content-type"),
+            HeaderName::from_static("authorization"),
+            HeaderName::from_static("accept"),
+        ])
+        .max_age(Duration::from_secs(3600));
+
+    // Layer order (axum applies bottom-up): CORS → body limit → rate limit → count.
     let mut app = app.layer(middleware::from_fn(count_requests));
 
     // Apply rate limiting only when configured (rate_limit > 0).
@@ -1226,11 +1307,17 @@ async fn cluster_disabled_handler() -> impl IntoResponse {
 pub fn roxwarp_router(state: crate::roxwarp::RoxWarpState, auth_state: AuthState) -> Router {
     use crate::roxwarp::handler;
 
-    // Outside the auth layer (R-2): cluster peers connect here without a
-    // bearer token; gating it needs a peer-auth decision first.
-    let ws_route = Router::new()
-        .route("/roxwarp", get(handler::roxwarp_upgrade))
-        .with_state(state.clone());
+    // Peer WebSocket on the REST port: outside the auth layer (R-2) and with
+    // no TLS, so it is mounted only in plain mode (`--cluster-insecure`, no
+    // mTLS paths). With mTLS, or with the cluster network off, peers cannot
+    // bypass the cluster port through here (R-54, S-36).
+    let ws_route = if crate::roxwarp::transport::plain_ws_allowed(&state.config) {
+        Router::new()
+            .route("/roxwarp", get(handler::roxwarp_upgrade))
+            .with_state(state.clone())
+    } else {
+        Router::new()
+    };
 
     let status_route = Router::new()
         .route("/api/cluster/status", get(cluster_status_handler))

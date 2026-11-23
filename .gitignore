@@ -56,5 +56,6 @@ server_stderr.log
 /tools/xeto/checkXetoFiles.sh
 
 # Local tool output
+/tools/editor-dev.env
 /.playwright-mcp/
 /editor_connected.png

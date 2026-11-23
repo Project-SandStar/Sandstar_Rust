@@ -58,6 +58,7 @@ curl http://localhost:8085/api/diagnostics
 ```bash
 # Full component tree
 curl http://localhost:8085/api/sox/tree
+# With auth on (S-33): add -H "Authorization: Bearer <token>"
 
 # Single component with slots and links
 curl http://localhost:8085/api/sox/comp/200

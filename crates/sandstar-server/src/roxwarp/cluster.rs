@@ -71,6 +71,11 @@ pub struct ClusterConfig {
     /// only the static list is used — no multicast traffic.
     #[serde(default)]
     pub enable_mdns: bool,
+    /// Allow plain WebSocket without peer auth when no mTLS is configured.
+    /// Set only by `--cluster-insecure`, never from the config file
+    /// (R-54, S-36). See [`super::transport`].
+    #[serde(skip)]
+    pub allow_plain: bool,
 }
 
 fn default_cluster_port() -> u16 {
@@ -99,6 +104,7 @@ impl Default for ClusterConfig {
             key_path: None,
             ca_path: None,
             enable_mdns: false,
+            allow_plain: false,
         }
     }
 }
@@ -510,6 +516,36 @@ impl ClusterManager {
             "roxWarp cluster manager starting"
         );
 
+        // Spawn the channel feed loop
+        let feed_engine = self.delta_engine.clone();
+        let feed_handle = self.engine_handle.clone();
+        let feed_interval = self.config.feed_interval_secs;
+        tokio::spawn(async move {
+            channel_feed_loop(feed_engine, feed_handle, feed_interval).await;
+        });
+
+        // Outbound transport, fail-closed (R-54, S-36): mTLS, or plain WS only
+        // with --cluster-insecure. `client_transport` logs why it is off.
+        use super::transport::{client_transport, Transport};
+        let mtls_client: super::peer::MtlsClientConfig = match client_transport(&self.config) {
+            Transport::Mtls(cfg) => {
+                info!("roxWarp: mTLS client config loaded for outbound connections");
+                Some(cfg)
+            }
+            Transport::Plain => None,
+            Transport::Off => {
+                // The local feed above still runs, so /api/cluster/status and
+                // /api/cluster/query keep answering for this node. Peers are
+                // not registered, so status shows none instead of "offline".
+                warn!(
+                    peers = self.config.peers.len(),
+                    mdns = self.config.enable_mdns,
+                    "roxWarp: cluster transport off, outbound peers and mDNS not started"
+                );
+                return;
+            }
+        };
+
         // Initialize peer states
         {
             let mut states = self.peer_states.write().await;
@@ -519,34 +555,6 @@ impl ClusterManager {
                 }
             }
         }
-
-        // Build mTLS client config for outbound connections (if configured)
-        let mtls_client: super::peer::MtlsClientConfig = if let (Some(cert), Some(key), Some(ca)) = (
-            &self.config.cert_path,
-            &self.config.key_path,
-            &self.config.ca_path,
-        ) {
-            match super::mtls::build_mtls_client_config(cert, key, ca) {
-                Ok(cfg) => {
-                    info!("roxWarp: mTLS client config loaded for outbound connections");
-                    Some(cfg)
-                }
-                Err(e) => {
-                    warn!(error = %e, "roxWarp: failed to load mTLS client config, using plain WS");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        // Spawn the channel feed loop
-        let feed_engine = self.delta_engine.clone();
-        let feed_handle = self.engine_handle.clone();
-        let feed_interval = self.config.feed_interval_secs;
-        tokio::spawn(async move {
-            channel_feed_loop(feed_engine, feed_handle, feed_interval).await;
-        });
 
         // Spawn outbound peer connections for the static peer list.
         for peer_config in &self.config.peers {
@@ -883,6 +891,48 @@ mod tests {
     #[test]
     fn default_config_is_valid() {
         assert!(ClusterConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn config_file_cannot_enable_plain_ws() {
+        let c = load_json(r#"{"node_id":"a","allow_plain":true}"#).unwrap();
+        assert!(!c.allow_plain);
+    }
+
+    /// Peers registered by `run` for a config with one static peer.
+    async fn peers_after_run(allow_plain: bool) -> Vec<String> {
+        let config = ClusterConfig {
+            node_id: "s36".to_string(),
+            peers: vec![PeerConfig {
+                node_id: "peer-b".to_string(),
+                // Nothing listens here; a dial attempt just fails.
+                address: "127.0.0.1:1".to_string(),
+                enabled: true,
+            }],
+            allow_plain,
+            ..ClusterConfig::default()
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let manager = ClusterManager::new(
+            config,
+            Arc::new(DeltaEngine::new("s36".to_string())),
+            EngineHandle::new(tx),
+        );
+        manager.run().await;
+        let states = manager.peer_states().read().await;
+        states.keys().cloned().collect()
+    }
+
+    #[tokio::test]
+    async fn run_without_transport_registers_no_peers() {
+        // No mTLS, no --cluster-insecure: no peer connection, no "offline"
+        // peer in /api/cluster/status (R-54, S-36).
+        assert!(peers_after_run(false).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_with_plain_transport_registers_static_peers() {
+        assert_eq!(peers_after_run(true).await, vec!["peer-b".to_string()]);
     }
 
     #[test]
