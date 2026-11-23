@@ -3,7 +3,7 @@
 > **Status (2026-11-18)**: re-checked against `master` `b48484b`. Most values are unchanged, but many line numbers moved. Search by constant name rather than trusting the `file:line` below.
 >
 > **Moved (same value):**
-> - `MAX_PARSE_DEPTH` → `rest/filter.rs:115`; CORS max-age → `rest/mod.rs:748`; `ws.rs` constants → lines 29-33 (S-22).
+> - `MAX_PARSE_DEPTH` → `rest/filter.rs:115`; CORS max-age → `rest/mod.rs:1217` (`with_global_layers`, S-35); `ws.rs` constants → lines 29-33 (S-22).
 > - `CONSECUTIVE_FAIL_THRESHOLD` → `engine.rs:42`. The code comment describes it as the count before the fail counter resets.
 > - `ERR_YIELD` / `ERR_RESTART` / `ERR_HIBERNATE` → `sandstar-svm/src/types.rs:72-74`.
 > - `args.rs`: rate limit line 75, port 53, bind 57.
@@ -18,7 +18,7 @@
 > - `CLIENT_TIMEOUT_SECS` also in `rest/live.rs` and `rest/rows.rs`.
 > - Driver write level 16, duration 30 s and poll interval 5 s (`drivers/loader.rs`).
 > - MQTT cache max age 600 s; BACnet discovery 2 s, COV renewal 240 s, foreign-device TTL 300 s, COV cache 600 s.
-> - Request body limit 1 MB (`rest/mod.rs`); driver actor channel capacity 64.
+> - Request body limit 1 MB (`rest/mod.rs:1231`, `with_global_layers`); since S-35 it also covers the tags, alerts, roxWarp and simulator routes, which had axum's 2 MB `Json` default before. Driver actor channel capacity 64.
 > - Log files kept: 14 by default (`--log-max-files`, `logging.rs`).
 > - roxWarp timer bounds: 1..=86400 s (`roxwarp/cluster.rs`).
 > - roxWarp `PEER_ANOMALY_WARN_INTERVAL_MS` = 60,000 ms (`roxwarp/cluster.rs:225`, R-45/R-27, 2026-11-19): at most one `warn` per minute about bad peer points (NaN/inf value, future timestamp); the rest go to `debug`. Keep hardcoded.
@@ -55,7 +55,7 @@ Audited: 2026-03-10
 | Rate limit default | 100 req/s | `sandstar-server/src/args.rs` | 65 | **Configurable** — already via `--rate-limit` / `SANDSTAR_RATE_LIMIT`. |
 | HTTP port default | 8085 | `sandstar-server/src/args.rs` | 43 | **Configurable** — already via `--http-port` / `SANDSTAR_HTTP_PORT`. |
 | HTTP bind default | 127.0.0.1 | `sandstar-server/src/args.rs` | 47 | **Configurable** — already via `--http-bind` / `SANDSTAR_HTTP_BIND`. |
-| CORS max-age | 3600s (1h) | `sandstar-server/src/rest/mod.rs` | 724 | **Document** — standard value. Keep hardcoded. |
+| CORS max-age | 3600s (1h) | `sandstar-server/src/rest/mod.rs` | 1217 | **Document** — standard value. Keep hardcoded. |
 
 ## WebSocket
 

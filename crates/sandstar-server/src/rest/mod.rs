@@ -991,6 +991,25 @@ pub fn router_with_auth(
     rate_limit: u64,
     sox_state: Option<sox_api::SoxApiState>,
 ) -> Router {
+    with_global_layers(
+        api_routes(handle, auth_state, auth_token, sox_state),
+        rate_limit,
+    )
+}
+
+/// Build the core routes, each with its auth layer, without the global
+/// layers.
+///
+/// A caller that merges more routers (`main.rs`: tags, alerts, roxWarp,
+/// simulator) merges them into this router and calls [`with_global_layers`]
+/// last. A router merged after that call gets no rate limit, body limit or
+/// CORS (R-53, S-35).
+pub fn api_routes(
+    handle: EngineHandle,
+    auth_state: AuthState,
+    auth_token: Option<String>,
+    sox_state: Option<sox_api::SoxApiState>,
+) -> Router {
     // Public read-only routes (no auth required)
     let public = Router::new()
         .route("/", get(dashboard))
@@ -1028,26 +1047,6 @@ pub fn router_with_auth(
         .route("/api/invokeAction", post(handlers::invoke_action))
         .with_state(handle.clone());
     let protected = require_auth(protected, auth_state.clone());
-
-    // CORS policy: allow any origin (embedded device accessed by various IPs)
-    // but restrict methods and headers to only what we actually use.
-    // This is safer than CorsLayer::permissive() which allows arbitrary
-    // headers and methods.
-    let cors = CorsLayer::new()
-        .allow_origin(tower_http::cors::Any)
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::DELETE,
-            Method::OPTIONS,
-        ])
-        .allow_headers([
-            HeaderName::from_static("content-type"),
-            HeaderName::from_static("authorization"),
-            HeaderName::from_static("accept"),
-        ])
-        .max_age(Duration::from_secs(3600));
 
     // Driver framework REST endpoints — backed by the async DriverHandle actor.
     // BACnet drivers (and future async drivers) are loaded from environment config
@@ -1111,8 +1110,7 @@ pub fn router_with_auth(
     }
     let driver_routes = crate::drivers::driver_router(driver_handle, auth_state.clone());
 
-    // Merge and apply global middleware.
-    // Layer order (axum applies bottom-up): CORS → body limit → rate limit → count.
+    // Global middleware is applied by `with_global_layers`, not here.
     let mut app = public
         .merge(protected)
         .merge(ws_route)
@@ -1188,8 +1186,37 @@ pub fn router_with_auth(
     // Phase 14.0G-7 skeleton: `/editor` is served by `editor_assets::router()`.
     // Returns the placeholder HTML when `SANDSTAR_WEB_DIR` is unset, or
     // mounts the built Vue SPA from that directory when set.
-    app = app.merge(editor_assets::router());
+    app.merge(editor_assets::router())
+}
 
+/// Apply the global HTTP layers to every route merged so far: request
+/// counter, rate limit (`rate_limit` requests per second, 0 = unlimited),
+/// 1 MiB body limit and CORS.
+///
+/// Call this once, after the last `.merge`; routes merged later are not
+/// wrapped (R-53).
+pub fn with_global_layers(app: Router, rate_limit: u64) -> Router {
+    // CORS policy: allow any origin (embedded device accessed by various IPs)
+    // but restrict methods and headers to only what we actually use.
+    // This is safer than CorsLayer::permissive() which allows arbitrary
+    // headers and methods.
+    let cors = CorsLayer::new()
+        .allow_origin(tower_http::cors::Any)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            HeaderName::from_static("content-type"),
+            HeaderName::from_static("authorization"),
+            HeaderName::from_static("accept"),
+        ])
+        .max_age(Duration::from_secs(3600));
+
+    // Layer order (axum applies bottom-up): CORS → body limit → rate limit → count.
     let mut app = app.layer(middleware::from_fn(count_requests));
 
     // Apply rate limiting only when configured (rate_limit > 0).

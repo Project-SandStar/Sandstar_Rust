@@ -11,7 +11,8 @@ paths:
 Bugünkü durum: üretim servisi `0.0.0.0` üzerinde ve auth'suz çalışıyor (R-1). Birçok yazma rotası auth katmanından **sonra** merge edildiği için korumasız (R-2). Auth modeli henüz karara bağlanmadı (Q-4, S-3). Bu kurallar durumu daha da kötüleştirmemek içindir.
 
 ## Yeni veya değişen rota
-- Rotanın auth katmanının **içinde mi dışında mı** olduğu açıkça belirlenir ve commit mesajında yazılır. axum'da `.layer(...)` yalnız kendisinden önce eklenen rotaları sarar. Layer'dan sonra yapılan `.merge(...)` / `.route(...)` korumasız kalır. Örnekler: `crates/sandstar-server/src/rest/mod.rs:855-868`, `crates/sandstar-server/src/main.rs:600-610`.
+- Rotanın auth katmanının **içinde mi dışında mı** olduğu açıkça belirlenir ve commit mesajında yazılır. axum'da `.layer(...)` yalnız kendisinden önce eklenen rotaları sarar. Layer'dan sonra yapılan `.merge(...)` / `.route(...)` korumasız kalır. Örnek: `rest/mod.rs` `require_auth` / `require_upgrade_auth`.
+- Global katmanlar (sayaç, rate limit, body limit, CORS) `rest::with_global_layers` ile **en son** uygulanır. Yeni bir router `main.rs`'de bu çağrıdan önce birleştirilir; sonra birleştirilen router bu katmanların dışında kalır (R-53, S-35).
 - Durum değiştiren uçlar (yazma, silme, config, dosya, alarm/SMTP ayarı) varsayılan olarak auth içinde olmalı. Dışarıda kalacaksa gerekçesi kodda yorumla yazılır.
 - Kimlik bilgisi ve token URL query'sine konmaz (R-14). Token karşılaştırması sabit zamanlı yapılır.
 - GET yanıtlarında sır alanları maskelenir (örnek: `crates/sandstar-server/src/alerts.rs`).
