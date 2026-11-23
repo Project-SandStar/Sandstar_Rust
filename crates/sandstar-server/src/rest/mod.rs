@@ -1261,11 +1261,17 @@ async fn cluster_disabled_handler() -> impl IntoResponse {
 pub fn roxwarp_router(state: crate::roxwarp::RoxWarpState, auth_state: AuthState) -> Router {
     use crate::roxwarp::handler;
 
-    // Outside the auth layer (R-2): cluster peers connect here without a
-    // bearer token; gating it needs a peer-auth decision first.
-    let ws_route = Router::new()
-        .route("/roxwarp", get(handler::roxwarp_upgrade))
-        .with_state(state.clone());
+    // Peer WebSocket on the REST port: outside the auth layer (R-2) and with
+    // no TLS, so it is mounted only in plain mode (`--cluster-insecure`, no
+    // mTLS paths). With mTLS, or with the cluster network off, peers cannot
+    // bypass the cluster port through here (R-54, S-36).
+    let ws_route = if crate::roxwarp::transport::plain_ws_allowed(&state.config) {
+        Router::new()
+            .route("/roxwarp", get(handler::roxwarp_upgrade))
+            .with_state(state.clone())
+    } else {
+        Router::new()
+    };
 
     let status_route = Router::new()
         .route("/api/cluster/status", get(cluster_status_handler))

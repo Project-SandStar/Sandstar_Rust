@@ -32,6 +32,7 @@ pub mod mtls;
 pub mod peer;
 pub mod protocol;
 pub mod string_table;
+pub mod transport;
 
 pub use binary_trio::{TrioDict, TrioValue};
 pub use cluster::{

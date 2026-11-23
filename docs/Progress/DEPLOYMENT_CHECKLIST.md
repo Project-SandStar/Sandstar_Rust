@@ -107,7 +107,8 @@ Read the journal soon after the start: it is volatile and holds well under an ho
 4. **Engine log** `/var/log/sandstar/sandstar-engine.log.<UTC-date>`:
    - `tables loaded` with the expected count;
    - a watchdog line saying GPIO60 was opened, or why not (the engine retries for about 5 minutes);
-   - no repeated `poll cycle exceeded`.
+   - no repeated `poll cycle exceeded`;
+   - with `--cluster` and no mTLS certificates (the packaged unit): `roxWarp: no mTLS configured, cluster listener disabled` and `cluster listener not started`, so port 7443 is not listening (S-36). With certificates expect `starting mTLS listener`; `mTLS config failed` means the certificate files need fixing.
 5. **Warnings:** count ERROR and WARN lines from the start time and compare them with the known types for this device (for example BACnet `comm fault` when a BACnet drop-in is active). Investigate anything new.
 6. **Data:** `curl -s http://localhost:8085/api/status` and spot-read a few channels with `/api/read`.
 7. **Next day:** confirm that log pruning kept at most 14 dated files in `/var/log/sandstar/`.

@@ -54,6 +54,7 @@ fn build_app(rate_limit: u64) -> (Router, tokio::task::JoinHandle<()>) {
             key_path: None,
             ca_path: None,
             enable_mdns: false,
+            allow_plain: false,
         },
         sox_tree: None,
     };
