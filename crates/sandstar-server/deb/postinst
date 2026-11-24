@@ -24,7 +24,19 @@ done
 
 chown -R eacio:root /home/eacio/sandstar/
 
-# Reload systemd for both services
+# The C-era validation unit is no longer shipped (S-52). It was a conffile,
+# so dpkg leaves an old copy in place: remove it unless someone runs it.
+OLD_UNIT=/etc/systemd/system/sandstar-rust-validate.service
+if [ -e "$OLD_UNIT" ]; then
+    if systemctl is-active --quiet sandstar-rust-validate; then
+        echo "WARNING: sandstar-rust-validate is running; $OLD_UNIT left in place"
+    else
+        systemctl disable sandstar-rust-validate 2>/dev/null || true
+        rm -f "$OLD_UNIT"
+        echo "Removed retired unit: $OLD_UNIT"
+    fi
+fi
+
 systemctl daemon-reload
 
 # Enable the production service (but don't auto-start on fresh install)
@@ -34,12 +46,11 @@ systemctl enable sandstar-engine 2>/dev/null || true
 if systemctl is-active --quiet sandstar-engine; then
     systemctl restart sandstar-engine
     echo "Sandstar engine restarted"
-elif systemctl is-active --quiet sandstar-rust-validate; then
-    # Running in validation mode — restart that instead
-    systemctl restart sandstar-rust-validate
-    echo "Sandstar validation service restarted"
 else
     # Fresh install — start production service
-    systemctl start sandstar-engine 2>/dev/null || true
-    echo "Sandstar engine started"
+    if systemctl start sandstar-engine 2>/dev/null; then
+        echo "Sandstar engine started"
+    else
+        echo "WARNING: sandstar-engine did not start; check 'systemctl status sandstar-engine'" >&2
+    fi
 fi

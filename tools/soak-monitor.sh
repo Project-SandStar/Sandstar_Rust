@@ -1,107 +1,147 @@
 #!/bin/bash
-# Soak test monitor — runs on BeagleBone alongside Rust validation service.
-# Periodically checks engine health, memory, match rate, and alerts on anomalies.
+# Soak monitor — runs on the device next to the sandstar-engine service.
+# Periodically checks that the service is up, has not restarted, answers
+# /health, does not grow in memory and logs no error. Read-only towards
+# the engine; it writes two log files.
+#
+# Written for the device as it is (Debian 9, systemd 232, run as the
+# service user): systemd 232 has no NRestarts property, so restarts are
+# counted from changes of the unit's start time; the journal is not
+# readable without the systemd-journal group, so errors are read from the
+# engine's own log files. A panic aborts the process and shows as a restart.
 #
 # Usage:
 #   ./soak-monitor.sh                   # Monitor forever (default)
 #   ./soak-monitor.sh --duration 24h    # Monitor for 24 hours
 #   ./soak-monitor.sh --interval 30     # Check every 30 seconds (default: 60)
 #   ./soak-monitor.sh --alert-log /var/log/sandstar/soak-alerts.log
+#
+# Exit code: 0 if no alert was raised, 1 otherwise.
 
-set -euo pipefail
+set -uo pipefail
 
 # ── Configuration ─────────────────────────────────────────────
-RUST_PORT="${RUST_PORT:-8086}"
-C_PORT="${C_PORT:-8085}"
+UNIT="${UNIT:-sandstar-engine}"
+PORT="${PORT:-8085}"
 INTERVAL="${INTERVAL:-60}"
 DURATION="${DURATION:-0}"  # 0 = forever
 ALERT_LOG="${ALERT_LOG:-/var/log/sandstar/soak-alerts.log}"
 MONITOR_LOG="${MONITOR_LOG:-/var/log/sandstar/soak-monitor.log}"
+ENGINE_LOG_DIR="${ENGINE_LOG_DIR:-/var/log/sandstar}"
 
 # Thresholds
 MEM_MAX_MB=64           # Alert if RSS exceeds this
 MEM_GROWTH_MAX_KB=512   # Alert if RSS grows more than this per check
-MATCH_RATE_MIN=99.0     # Alert if match rate drops below this %
-MAX_RESTARTS=0          # Alert if NRestarts exceeds this
+MAX_RESTARTS=0          # Alert if the service restarted more often than this
 
 # ── Parse args ────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --duration)   DURATION="$2"; shift 2 ;;
-        --interval)   INTERVAL="$2"; shift 2 ;;
-        --alert-log)  ALERT_LOG="$2"; shift 2 ;;
+        --duration|--interval|--alert-log)
+            if [ $# -lt 2 ]; then echo "$1 needs a value"; exit 2; fi
+            case "$1" in
+                --duration)  DURATION="$2" ;;
+                --interval)  INTERVAL="$2" ;;
+                --alert-log) ALERT_LOG="$2" ;;
+            esac
+            shift 2 ;;
         --help|-h)
             echo "Usage: $0 [--duration 24h] [--interval 60] [--alert-log FILE]"
             exit 0 ;;
-        *) echo "Unknown: $1"; exit 1 ;;
+        *) echo "Unknown: $1"; exit 2 ;;
     esac
 done
 
-# Convert duration to seconds
-duration_to_secs() {
-    local val="$1"
-    case "$val" in
-        *h) echo $(( ${val%h} * 3600 )) ;;
-        *m) echo $(( ${val%m} * 60 )) ;;
-        *s) echo "${val%s}" ;;
-        0)  echo 0 ;;
-        *)  echo "$val" ;;
-    esac
-}
-DURATION_SECS=$(duration_to_secs "$DURATION")
+# Duration: whole number with an optional h, m or s; 0 = forever.
+is_number() { case "$1" in ""|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+case "$DURATION" in
+    *h) DUR_NUM="${DURATION%h}"; DUR_MUL=3600 ;;
+    *m) DUR_NUM="${DURATION%m}"; DUR_MUL=60 ;;
+    *s) DUR_NUM="${DURATION%s}"; DUR_MUL=1 ;;
+    *)  DUR_NUM="$DURATION";      DUR_MUL=1 ;;
+esac
+if ! is_number "$DUR_NUM"; then
+    echo "duration must be a whole number, optionally ending in h, m or s"; exit 2
+fi
+if ! is_number "$INTERVAL" || [ "$INTERVAL" -lt 1 ]; then
+    echo "interval must be a whole number of seconds, at least 1"; exit 2
+fi
+DURATION_SECS=$((DUR_NUM * DUR_MUL))
 
 # ── Logging ───────────────────────────────────────────────────
 mkdir -p "$(dirname "$ALERT_LOG")" "$(dirname "$MONITOR_LOG")" 2>/dev/null || true
 PREV_RSS_KB=0
+PREV_START=""           # unit start time at the previous check
+RESTART_COUNT=0         # restarts seen since the monitor started
+ENGINE_LOG=""           # engine log file being followed
+ENGINE_LOG_LINES=0      # lines of it already counted
 START_TIME=$(date +%s)
 CHECK_COUNT=0
 ALERT_COUNT=0
 
 log()   { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$MONITOR_LOG"; }
+# Alerts are counted here, so no check may run in a subshell ($(...)):
+# each check sets its result in a global instead.
 alert() {
     ALERT_COUNT=$((ALERT_COUNT + 1))
     echo "[ALERT $(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$ALERT_LOG" "$MONITOR_LOG"
 }
 
-# ── Health check functions ────────────────────────────────────
+# ── Checks (each sets its R_* result) ─────────────────────────
 
 check_service_status() {
-    if ! systemctl is-active --quiet sandstar-rust-validate 2>/dev/null; then
-        # Try sandstar-engine for production mode
-        if ! systemctl is-active --quiet sandstar-engine 2>/dev/null; then
-            alert "DEAD: Rust engine service not running"
-            return 1
-        fi
+    R_STATUS="UP"
+    if ! systemctl is-active --quiet "$UNIT" 2>/dev/null; then
+        R_STATUS="DOWN"
+        alert "DEAD: $UNIT is not running"
     fi
-    return 0
 }
 
 check_restarts() {
-    local restarts
-    restarts=$(systemctl show sandstar-rust-validate -p NRestarts 2>/dev/null \
-        || systemctl show sandstar-engine -p NRestarts 2>/dev/null \
-        || echo "NRestarts=0")
-    restarts="${restarts#NRestarts=}"
-    if [ "$restarts" -gt "$MAX_RESTARTS" ]; then
-        alert "RESTARTS: $restarts (max: $MAX_RESTARTS)"
+    # A restart changes the time the unit entered the active state.
+    local out start
+    out=$(systemctl show "$UNIT" -p ActiveEnterTimestampMonotonic 2>/dev/null)
+    start="${out#ActiveEnterTimestampMonotonic=}"
+    case "$start" in
+        ""|0|*[!0-9]*)
+            R_RESTARTS="?"
+            alert "RESTARTS: cannot read the start time of $UNIT"
+            return ;;
+    esac
+    if [ -n "$PREV_START" ] && [ "$start" != "$PREV_START" ]; then
+        RESTART_COUNT=$((RESTART_COUNT + 1))
+        PREV_RSS_KB=0   # a new process: do not compare with the old one
+        alert "RESTARTED: $UNIT restarted (restarts seen: $RESTART_COUNT)"
     fi
-    echo "$restarts"
+    PREV_START="$start"
+    R_RESTARTS="$RESTART_COUNT"
+    if [ "$RESTART_COUNT" -gt "$MAX_RESTARTS" ] && [ $((CHECK_COUNT % 60)) -eq 0 ]; then
+        alert "RESTARTS: $RESTART_COUNT since the monitor started (max: $MAX_RESTARTS)"
+    fi
 }
 
 check_memory() {
-    local pid rss_kb
-    pid=$(pgrep -f sandstar-engine-server 2>/dev/null | head -1)
-    if [ -z "$pid" ]; then
-        alert "MEMORY: Cannot find sandstar-engine-server process"
-        return 1
-    fi
-    rss_kb=$(awk '/VmRSS/{print $2}' /proc/"$pid"/status 2>/dev/null || echo 0)
+    local out pid rss_kb
+    R_MEMORY="?"
+    out=$(systemctl show "$UNIT" -p MainPID 2>/dev/null)
+    pid="${out#MainPID=}"
+    case "$pid" in
+        ""|0|*[!0-9]*)
+            PREV_RSS_KB=0
+            alert "MEMORY: $UNIT has no main process"
+            return ;;
+    esac
+    rss_kb=$(awk '/^VmRSS:/{print $2}' "/proc/$pid/status" 2>/dev/null)
+    case "$rss_kb" in
+        ""|*[!0-9]*)
+            PREV_RSS_KB=0
+            alert "MEMORY: cannot read RSS of pid $pid"
+            return ;;
+    esac
     local rss_mb=$((rss_kb / 1024))
-
     if [ "$rss_mb" -gt "$MEM_MAX_MB" ]; then
         alert "MEMORY: ${rss_mb}MB exceeds limit of ${MEM_MAX_MB}MB"
     fi
-
     if [ "$PREV_RSS_KB" -gt 0 ]; then
         local growth=$((rss_kb - PREV_RSS_KB))
         if [ "$growth" -gt "$MEM_GROWTH_MAX_KB" ]; then
@@ -109,113 +149,108 @@ check_memory() {
         fi
     fi
     PREV_RSS_KB=$rss_kb
-    echo "${rss_mb}MB (${rss_kb}KB)"
+    R_MEMORY="${rss_mb}MB (${rss_kb}KB)"
 }
 
 check_api_health() {
     local http_code
+    R_API="OK"
+    # /health answers 503 when the engine does not respond in time.
     http_code=$(curl -s -o /dev/null -w '%{http_code}' \
         --connect-timeout 5 --max-time 10 \
-        "http://localhost:${RUST_PORT}/api/about" 2>/dev/null || echo "000")
+        "http://localhost:${PORT}/health" 2>/dev/null)
     if [ "$http_code" != "200" ]; then
-        alert "API: /api/about returned HTTP $http_code"
-        return 1
+        R_API="FAIL"
+        alert "API: /health returned HTTP ${http_code:-none}"
     fi
-    return 0
 }
 
-check_match_rate() {
-    # Compare channel values between C and Rust
-    local rust_polls c_polls
-    rust_polls=$(curl -s --connect-timeout 5 --max-time 10 \
-        "http://localhost:${RUST_PORT}/api/polls" 2>/dev/null)
-    c_polls=$(curl -s --connect-timeout 5 --max-time 10 \
-        "http://localhost:${C_PORT}/api/polls" 2>/dev/null)
-
-    if [ -z "$rust_polls" ] || [ -z "$c_polls" ]; then
-        log "SKIP: Cannot fetch polls from one or both engines"
-        return 0
-    fi
-
-    # Parse and compare using python (more reliable than jq on BeagleBone)
-    local result
-    result=$(python3 -c "
-import json, sys
-try:
-    rust = json.loads('''$rust_polls''')
-    c_eng = json.loads('''$c_polls''')
-    rust_map = {str(r.get('channel',r.get('id','?'))): r.get('lastCur',0) for r in rust.get('rows',rust) if isinstance(r, dict)}
-    c_map = {str(r.get('channel',r.get('id','?'))): r.get('lastCur',0) for r in c_eng.get('rows',c_eng) if isinstance(r, dict)}
-    total = max(len(rust_map), 1)
-    matches = sum(1 for k in rust_map if k in c_map and abs(float(rust_map[k] or 0) - float(c_map[k] or 0)) < 0.5)
-    rate = 100.0 * matches / total
-    print(f'{rate:.1f} {matches}/{total}')
-except Exception as e:
-    print(f'ERR {e}')
-" 2>/dev/null || echo "ERR parse")
-
-    if [[ "$result" == ERR* ]]; then
-        log "SKIP: Match rate parse error: $result"
-        return 0
-    fi
-
-    local rate="${result%% *}"
-    local detail="${result#* }"
-
-    # Compare rate against threshold (integer comparison)
-    local rate_int="${rate%%.*}"
-    local min_int="${MATCH_RATE_MIN%%.*}"
-    if [ "$rate_int" -lt "$min_int" ]; then
-        alert "MATCH_RATE: ${rate}% ($detail) below threshold ${MATCH_RATE_MIN}%"
-    fi
-    echo "${rate}% ($detail)"
+# Count the ERROR lines of `$1` after line `$2`; print "<count> <total lines>".
+# Prints nothing if the file cannot be read.
+errors_after() {
+    local total count
+    [ -r "$1" ] || return 1
+    total=$(wc -l < "$1" 2>/dev/null)
+    is_number "$total" || return 1
+    if [ "$total" -lt "$2" ]; then set -- "$1" 0; fi   # the file was replaced
+    # `grep -c` prints the count and exits 1 when it is 0.
+    count=$(tail -n "+$(($2 + 1))" "$1" 2>/dev/null | grep -c ' ERROR ')
+    is_number "$count" || return 1
+    echo "$count $total"
 }
 
 check_log_errors() {
-    # Check for recent panics or fatal errors in last interval
-    local since
-    since=$(date -d "-${INTERVAL} seconds" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date '+%Y-%m-%d %H:%M:%S')
-    local errors
-    errors=$(journalctl -u sandstar-rust-validate --since "$since" --no-pager 2>/dev/null \
-        | grep -cEi 'panic|fatal|SIGSE|SIGAB|thread.*panicked' || echo 0)
-    if [ "$errors" -gt 0 ]; then
-        alert "LOG_ERRORS: $errors panic/fatal entries in last ${INTERVAL}s"
+    # ERROR lines the engine wrote since the last check. The engine names
+    # its files by date, so the newest is the last one by name (mtime is
+    # not used: a copied or compressed old file must not be picked).
+    local newest res count=0
+    R_ERRORS="?"
+    newest=$(ls -1 "$ENGINE_LOG_DIR"/sandstar-engine.log.[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] 2>/dev/null | sort | tail -1)
+    if [ -z "$newest" ]; then
+        alert "LOG: no engine log file in $ENGINE_LOG_DIR"
+        return
     fi
-    echo "$errors"
+    if [ -z "$ENGINE_LOG" ]; then
+        # First file seen: start at its current end.
+        if ! res=$(errors_after "$newest" 0); then
+            alert "LOG: cannot read $newest"
+            return
+        fi
+        ENGINE_LOG="$newest"
+        ENGINE_LOG_LINES="${res#* }"
+        R_ERRORS=0
+        return
+    fi
+    if [ "$newest" != "$ENGINE_LOG" ]; then
+        # The daily file changed: first the rest of the old one.
+        if res=$(errors_after "$ENGINE_LOG" "$ENGINE_LOG_LINES"); then
+            count="${res%% *}"
+        else
+            alert "LOG: cannot read the rest of $ENGINE_LOG"
+        fi
+        ENGINE_LOG="$newest"
+        ENGINE_LOG_LINES=0
+    fi
+    if ! res=$(errors_after "$ENGINE_LOG" "$ENGINE_LOG_LINES"); then
+        alert "LOG: cannot read $ENGINE_LOG"
+        return
+    fi
+    count=$((count + ${res%% *}))
+    ENGINE_LOG_LINES="${res#* }"
+    R_ERRORS="$count"
+    if [ "$count" -gt 0 ]; then
+        alert "LOG_ERRORS: $count ERROR lines in the engine log since the last check"
+    fi
 }
 
 # ── Main loop ─────────────────────────────────────────────────
-log "Soak monitor started: interval=${INTERVAL}s, duration=${DURATION}, port=${RUST_PORT}"
-log "Thresholds: mem=${MEM_MAX_MB}MB, growth=${MEM_GROWTH_MAX_KB}KB, match=${MATCH_RATE_MIN}%, restarts=${MAX_RESTARTS}"
+finish() {
+    log "Soak monitor stopped: ${CHECK_COUNT} checks, ${ALERT_COUNT} alerts"
+    if [ "$ALERT_COUNT" -eq 0 ]; then exit 0; else exit 1; fi
+}
+trap finish INT TERM
 
-trap 'log "Soak monitor stopped after $CHECK_COUNT checks, $ALERT_COUNT alerts"; exit 0' INT TERM
+log "Soak monitor started: unit=${UNIT}, port=${PORT}, interval=${INTERVAL}s, duration=${DURATION}"
+log "Thresholds: mem=${MEM_MAX_MB}MB, growth=${MEM_GROWTH_MAX_KB}KB, restarts=${MAX_RESTARTS}"
 
 while true; do
-    CHECK_COUNT=$((CHECK_COUNT + 1))
     elapsed=$(( $(date +%s) - START_TIME ))
-
-    # Duration check
     if [ "$DURATION_SECS" -gt 0 ] && [ "$elapsed" -ge "$DURATION_SECS" ]; then
         log "Duration reached ($DURATION). Stopping."
         break
     fi
+    CHECK_COUNT=$((CHECK_COUNT + 1))
 
-    # Run all checks
-    status="UP"
-    check_service_status || status="DOWN"
-    restarts=$(check_restarts)
-    memory=$(check_memory 2>/dev/null || echo "?")
-    api_ok="OK"
-    check_api_health || api_ok="FAIL"
-    match_rate=$(check_match_rate 2>/dev/null || echo "?")
-    log_errors=$(check_log_errors 2>/dev/null || echo "?")
+    check_service_status
+    check_restarts
+    check_memory
+    check_api_health
+    check_log_errors
 
-    # Summary line
     hours=$((elapsed / 3600))
     mins=$(( (elapsed % 3600) / 60 ))
-    log "CHECK #${CHECK_COUNT} [${hours}h${mins}m] status=${status} api=${api_ok} mem=${memory} match=${match_rate} restarts=${restarts} errors=${log_errors}"
+    log "CHECK #${CHECK_COUNT} [${hours}h${mins}m] status=${R_STATUS} api=${R_API} mem=${R_MEMORY} restarts=${R_RESTARTS} errors=${R_ERRORS}"
 
-    # Periodic detailed summary (every 60 checks)
     if [ $((CHECK_COUNT % 60)) -eq 0 ]; then
         log "=== SUMMARY: ${CHECK_COUNT} checks, ${ALERT_COUNT} alerts, uptime ${hours}h${mins}m ==="
     fi
@@ -223,5 +258,4 @@ while true; do
     sleep "$INTERVAL"
 done
 
-log "Soak monitor complete: ${CHECK_COUNT} checks, ${ALERT_COUNT} alerts"
-exit $( [ "$ALERT_COUNT" -eq 0 ] && echo 0 || echo 1 )
+finish
