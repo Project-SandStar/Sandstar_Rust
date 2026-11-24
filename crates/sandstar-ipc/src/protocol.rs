@@ -8,7 +8,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::io;
 
 /// Maximum frame size (1 MB). Prevents OOM from malformed length prefixes.
-const MAX_FRAME_SIZE: u32 = 1_048_576;
+pub const MAX_FRAME_SIZE: u32 = 1_048_576;
 
 /// Write a serializable value as a length-prefixed bincode frame.
 ///
