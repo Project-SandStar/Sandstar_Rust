@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 struct Server {
     child: Child,
     lines: Arc<Mutex<Vec<String>>>,
-    reader: Option<std::thread::JoinHandle<()>>,
+    readers: Vec<std::thread::JoinHandle<()>>,
     dir: PathBuf,
     pid_file: PathBuf,
     socket: PathBuf,
@@ -39,24 +39,29 @@ impl Server {
             .arg(&pid_file)
             .arg("--socket")
             .arg(&socket)
-            .stdout(Stdio::null())
+            // Without --log-file the tracing logs go to stdout
+            // (tracing_subscriber::fmt default); eprintln lines to stderr.
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
         let lines = Arc::new(Mutex::new(Vec::new()));
-        let stderr = child.stderr.take().unwrap();
-        let reader = {
+        let read_into = |stream: Box<dyn std::io::Read + Send>| {
             let lines = lines.clone();
             std::thread::spawn(move || {
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                for line in BufReader::new(stream).lines().map_while(Result::ok) {
                     lines.lock().unwrap().push(line);
                 }
             })
         };
+        let readers = vec![
+            read_into(Box::new(child.stdout.take().unwrap())),
+            read_into(Box::new(child.stderr.take().unwrap())),
+        ];
         Self {
             child,
             lines,
-            reader: Some(reader),
+            readers,
             dir,
             pid_file,
             socket,
@@ -90,7 +95,7 @@ impl Server {
         let start = Instant::now();
         loop {
             if let Some(s) = self.child.try_wait().unwrap() {
-                if let Some(r) = self.reader.take() {
+                for r in self.readers.drain(..) {
                     let _ = r.join();
                 }
                 return s;
