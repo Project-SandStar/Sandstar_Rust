@@ -237,13 +237,14 @@ Protocol spec in [`docs/research/16_ROXWARP_PROTOCOL.md`](docs/research/16_ROXWA
 ### Systemd services
 
 - `sandstar-engine.service` — production service
-- `sandstar-rust-validate.service` — read-only validation alongside another engine
 
 ### Scripts
 
 | Script | Purpose |
 |--------|---------|
-| `tools/installSandstarRust.sh` | Deploy `.deb` to a named device |
+| `tools/soak-monitor.sh` | Long-running check of the service on the device (shipped in the `.deb`) |
+| `tools/health-monitor.sh` | Cron health line every 5 minutes (shipped in the `.deb`) |
+| `tools/kaldirilanlar/` | Retired C-era and early deploy scripts; not used, not packaged |
 | `tools/bacnet_sim.py` | Hand-crafted BACnet/IP simulator for driver validation |
 | `tools/ws_latency_test.py` | Live validator for the 12.0D.WS push bridge |
 | `tools/connections/*.sh` | expect-based SSH connection scripts per device |
