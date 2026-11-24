@@ -238,6 +238,8 @@ Key log lines to look for:
 - `BACnet poll tick complete ok=N err=0` — when the counts differ from the previous tick: `warn` if any point failed, otherwise `info`; repeated counts at `debug` (S-49)
 - `BACnet sync_cur failed driver=... point_id=... error=...` — per-point failure, at `warn` when it starts or the error changes; repeats are `debug` (`sync_cur failed (repeat)`)
 - `BACnet point recovered driver=... point_id=...` — a failing point reads again
+- `BACnet device not responding; its points are not read until the retry device=<id> retry_in_secs=30` — a request to the device timed out (4 attempts × 3 s). Its points then fail at once with `BACnet device <id> not responding` instead of each waiting 12 s; no point-by-point fallback after a timed-out ReadPropertyMultiple. The device is tried again after 30 s, then 60 s, 120 s, … at most every 5 min; COV renewals and subscriptions to it wait for the retry too. Writes are always sent; a timed-out write reports `… not responding (the write may have been applied)` and restarts the wait without lengthening it. An I-Am from the device's known address ends the wait early (`BACnet device announced itself; trying it again`) (S-50)
+- `BACnet device responding again device=<id>` — the device answered a retry; reads go back to every poll
 - `BACnet poll: points still failing points=N for_secs=S` — `warn` every 10 min while points keep failing
 - `BACnet COV subscribed process_id=<id>` — COV active
 - `BACnet COV subscription renewed` — lifetime renewal working

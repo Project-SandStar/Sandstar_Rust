@@ -1557,3 +1557,305 @@ async fn drain_adds_only_configured_devices_that_are_missing() {
         other.local_addr().unwrap()
     );
 }
+
+// ── Devices that stop answering (R-25, S-50) ──────────────────────────────
+
+/// A mock device that answers ReadProperty with Real(21.5) while `answer`
+/// is set and stays silent otherwise. Counts the confirmed requests it
+/// receives and, separately, the WriteProperty ones.
+async fn switchable_device(
+    answer: Arc<std::sync::atomic::AtomicBool>,
+) -> (u16, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    let sock = UdpSocket::bind("127.0.0.1:0").await.expect("mock bind");
+    let port = sock.local_addr().unwrap().port();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let writes = Arc::new(AtomicUsize::new(0));
+    let (r, w) = (requests.clone(), writes.clone());
+    tokio::spawn(async move {
+        let mut buf = [0u8; 1500];
+        while let Ok((n, from)) = sock.recv_from(&mut buf).await {
+            if matches!(
+                frame::decode_packet(&buf[..n]),
+                Ok((_, frame::Apdu::WhoIs { .. }))
+            ) {
+                continue;
+            }
+            r.fetch_add(1, Ordering::SeqCst);
+            if n >= 10 && buf[9] == frame::SVC_CONFIRMED_WRITE_PROPERTY {
+                w.fetch_add(1, Ordering::SeqCst);
+            }
+            if answer.load(Ordering::SeqCst) {
+                let ack = frame::encode_read_property_ack(
+                    extract_invoke_id(&buf, n),
+                    0,
+                    0,
+                    85,
+                    &BacnetValue::Real(21.5),
+                );
+                let _ = sock.send_to(&ack, from).await;
+            }
+        }
+    });
+    (port, requests, writes)
+}
+
+/// Driver with `points` AI points on device `device` at `port` (already in
+/// the registry), opened.
+async fn driver_on(port: u16, device: u32, points: &[u32]) -> BacnetDriver {
+    let mut d = BacnetDriver::new("bac-silent", "127.0.0.1", 0)
+        .with_broadcast_port(find_free_port())
+        .with_discovery_timeout(Duration::from_millis(10));
+    for (i, pid) in points.iter().enumerate() {
+        d.add_object(
+            *pid,
+            BacnetObject {
+                device_id: device,
+                object_type: 0,
+                instance: i as u32,
+                scale: 1.0,
+                offset: 0.0,
+                unit: None,
+            },
+        );
+    }
+    d.open().await.expect("open");
+    d.device_registry.insert(super::DeviceInfo {
+        instance: device,
+        addr: format!("127.0.0.1:{port}").parse().unwrap(),
+        max_apdu: 1476,
+        vendor_id: 8,
+        segmentation: 3,
+    });
+    d
+}
+
+fn refs(ids: &[u32]) -> Vec<DriverPointRef> {
+    ids.iter()
+        .map(|&point_id| DriverPointRef {
+            point_id,
+            address: String::new(),
+        })
+        .collect()
+}
+
+fn is_not_responding(r: &Result<f64, DriverError>, device: u32) -> bool {
+    matches!(r, Err(DriverError::Timeout(m)) if *m == format!("BACnet device {device} not responding"))
+}
+
+/// Put `device` into back-off, to be tried again at `next_try`, without
+/// waiting for a real timeout. Tests that also talk to an answering mock
+/// run in real time: with a paused clock the runtime may jump to the next
+/// timer before the mock's reply is read.
+fn back_off(d: &mut BacnetDriver, device: u32, next_try: tokio::time::Instant) {
+    d.unresponsive.insert(
+        device,
+        super::Unresponsive {
+            delay: super::UNRESPONSIVE_BACKOFF_MIN,
+            next_try,
+        },
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_silent_device_costs_one_timeout_then_waits_out_its_back_off() {
+    let answer = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (port, requests, _) = switchable_device(answer).await;
+    let ids = [301, 302, 303];
+    let mut d = driver_on(port, 1001, &ids).await;
+    let pts = refs(&ids);
+
+    // One ReadPropertyMultiple times out (4 × 3 s); no point-by-point
+    // fallback.
+    let start = tokio::time::Instant::now();
+    let res = d.sync_cur_vec(&pts).await;
+    assert_eq!(start.elapsed(), Duration::from_secs(12));
+    assert_eq!(res.len(), 3);
+    assert!(
+        res.iter().all(|(_, r)| is_not_responding(r, 1001)),
+        "{res:?}"
+    );
+    let sent = requests.load(Ordering::SeqCst);
+    assert_eq!(sent, 4, "one request, 4 attempts");
+
+    // While backing off: no waiting, nothing sent, same error.
+    let start = tokio::time::Instant::now();
+    let res = d.sync_cur_vec(&pts).await;
+    assert_eq!(start.elapsed(), Duration::ZERO);
+    assert!(res.iter().all(|(_, r)| is_not_responding(r, 1001)));
+    assert_eq!(requests.load(Ordering::SeqCst), sent);
+
+    // Tried again after 30 s, then 60 s, 120 s, 240 s, 300 s, 300 s.
+    let mut waits = Vec::new();
+    for _ in 0..6 {
+        let mut waited = 0;
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            waited += 5;
+            let start = tokio::time::Instant::now();
+            let _ = d.sync_cur_vec(&pts).await;
+            if start.elapsed() > Duration::ZERO {
+                break;
+            }
+        }
+        waits.push(waited);
+    }
+    // Each wait counts from the end of the previous 12 s attempt.
+    assert_eq!(waits, vec![30, 60, 120, 240, 300, 300]);
+}
+
+#[tokio::test]
+async fn a_device_that_answers_again_is_read_after_its_back_off() {
+    let answer = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let (port, requests, _) = switchable_device(answer).await;
+    let mut d = driver_on(port, 1001, &[301]).await;
+    let pts = refs(&[301]);
+
+    // Backing off: not read, even though the device would answer.
+    back_off(
+        &mut d,
+        1001,
+        tokio::time::Instant::now() + Duration::from_secs(30),
+    );
+    assert!(is_not_responding(&d.sync_cur_vec(&pts).await[0].1, 1001));
+    assert_eq!(requests.load(Ordering::SeqCst), 0);
+
+    // Wait over: read, and the back-off ends.
+    back_off(&mut d, 1001, tokio::time::Instant::now());
+    let res = d.sync_cur_vec(&pts).await;
+    assert!(matches!(res[0].1, Ok(v) if v == 21.5), "{res:?}");
+    assert!(d.unresponsive.is_empty());
+}
+
+#[tokio::test]
+async fn a_silent_device_does_not_hold_up_another_device() {
+    let (silent, silent_requests, _) =
+        switchable_device(Arc::new(std::sync::atomic::AtomicBool::new(false))).await;
+    let (alive, _, _) = switchable_device(Arc::new(std::sync::atomic::AtomicBool::new(true))).await;
+    let mut d = driver_on(silent, 1001, &[301]).await;
+    d.add_object(
+        401,
+        BacnetObject {
+            device_id: 1002,
+            object_type: 0,
+            instance: 0,
+            scale: 1.0,
+            offset: 0.0,
+            unit: None,
+        },
+    );
+    d.device_registry.insert(super::DeviceInfo {
+        instance: 1002,
+        addr: format!("127.0.0.1:{alive}").parse().unwrap(),
+        max_apdu: 1476,
+        vendor_id: 8,
+        segmentation: 3,
+    });
+    back_off(
+        &mut d,
+        1001,
+        tokio::time::Instant::now() + Duration::from_secs(30),
+    );
+    let pts = refs(&[301, 401]);
+
+    // The silent device is skipped; the other one is read at once (well
+    // under one 3 s attempt).
+    let start = tokio::time::Instant::now();
+    let res = d.sync_cur_vec(&pts).await;
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        start.elapsed()
+    );
+    let value_of = |pid: u32| res.iter().find(|(p, _)| *p == pid).map(|(_, r)| r.clone());
+    assert!(is_not_responding(&value_of(301).unwrap(), 1001));
+    assert!(matches!(value_of(401), Some(Ok(v)) if v == 21.5));
+    assert_eq!(silent_requests.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_write_is_tried_while_the_device_backs_off() {
+    let answer = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (port, _, writes) = switchable_device(answer).await;
+    let mut d = driver_on(port, 1001, &[301]).await;
+    let _ = d.sync_cur_vec(&refs(&[301])).await;
+    assert!(!d.unresponsive.is_empty());
+
+    let res = d.write_vec(&[(301, 5.0)]).await;
+    assert!(writes.load(Ordering::SeqCst) > 0, "the write was not sent");
+    assert!(
+        matches!(&res[0].1, Err(DriverError::Timeout(m))
+            if m == "BACnet device 1001 not responding (the write may have been applied)"),
+        "{res:?}"
+    );
+    // A timeout during the wait restarts it without lengthening it.
+    assert_eq!(d.unresponsive[&1001].delay, super::UNRESPONSIVE_BACKOFF_MIN);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cov_renewal_does_not_wait_for_a_backing_off_device() {
+    let answer = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (port, requests, _) = switchable_device(answer).await;
+    let mut d = driver_on(port, 1001, &[301]).await;
+    // A subscription that is always due for renewal.
+    d.renewal_interval = Duration::ZERO;
+    d.cov_subscriptions.insert(
+        7,
+        super::CovSubscription {
+            point_id: 301,
+            process_id: 7,
+            object_type: 0,
+            object_instance: 0,
+            device_id: 1001,
+            lifetime: Some(300),
+            subscribed_at: std::time::Instant::now(),
+        },
+    );
+    let pts = refs(&[301]);
+
+    // The renewal times out once (12 s); the read is then not waited for.
+    let start = tokio::time::Instant::now();
+    let res = d.sync_cur_vec(&pts).await;
+    assert_eq!(start.elapsed(), Duration::from_secs(12));
+    assert!(is_not_responding(&res[0].1, 1001));
+    let sent = requests.load(Ordering::SeqCst);
+
+    // Backing off: neither the renewal nor the read waits.
+    let start = tokio::time::Instant::now();
+    let _ = d.sync_cur_vec(&pts).await;
+    assert_eq!(start.elapsed(), Duration::ZERO);
+    assert_eq!(requests.load(Ordering::SeqCst), sent);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_i_am_from_the_known_address_ends_the_back_off() {
+    let device = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+    let port = device.local_addr().unwrap().port();
+    let mut d = driver_on(port, 1001, &[301]).await;
+    let _ = d.sync_cur_vec(&refs(&[301])).await; // silent: back-off starts
+    let now = tokio::time::Instant::now();
+    assert!(d.backing_off(1001, now));
+
+    let driver_port = d.socket.as_ref().unwrap().local_addr().unwrap().port();
+    let to = format!("127.0.0.1:{driver_port}");
+    // From another address: ignored.
+    let other = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+    other
+        .send_to(&encode_i_am(1001, 1476, 3, 8), &to)
+        .await
+        .unwrap();
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    d.drain_pending();
+    assert!(d.backing_off(1001, tokio::time::Instant::now()));
+    // From the known address: tried again at once.
+    device
+        .send_to(&encode_i_am(1001, 1476, 3, 8), &to)
+        .await
+        .unwrap();
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    d.drain_pending();
+    assert!(!d.backing_off(1001, tokio::time::Instant::now()));
+}
