@@ -128,6 +128,28 @@ impl Rediscovery {
 /// At most one `warn` per this long for socket errors while draining.
 const DRAIN_ERROR_WARN_INTERVAL: Duration = Duration::from_secs(60);
 
+// ── Unresponsive devices (S-50) ────────────────────────────
+
+/// After a device's request times out, its points are not read for this
+/// long; each further timeout doubles the wait (R-25, S-50).
+pub const UNRESPONSIVE_BACKOFF_MIN: Duration = Duration::from_secs(30);
+
+/// Longest wait before a device that keeps timing out is tried again.
+pub const UNRESPONSIVE_BACKOFF_MAX: Duration = Duration::from_secs(300);
+
+/// Back-off state of a device whose last request timed out.
+#[derive(Debug)]
+struct Unresponsive {
+    delay: Duration,
+    next_try: tokio::time::Instant,
+}
+
+/// The error a point gets while its device does not answer. The text is
+/// the same on every poll, so the tick log treats it as a repeat.
+fn not_responding(device_id: u32) -> DriverError {
+    DriverError::Timeout(format!("BACnet device {device_id} not responding"))
+}
+
 // ── Malformed frames ───────────────────────────────────────
 
 /// At most one `warn` per this many seconds for frames that fail to
@@ -376,6 +398,9 @@ pub struct BacnetDriver {
     rediscovery: Rediscovery,
     /// When the last socket error while draining was logged at `warn`.
     drain_error_warned: Option<tokio::time::Instant>,
+    /// Devices whose last request timed out, and when to try them again
+    /// (S-50). Cleared by `open()`.
+    unresponsive: HashMap<u32, Unresponsive>,
 }
 
 impl BacnetDriver {
@@ -403,6 +428,7 @@ impl BacnetDriver {
             renewal_interval: std::time::Duration::from_secs(240),
             rediscovery: Rediscovery::new(REDISCOVERY_MIN, tokio::time::Instant::now()),
             drain_error_warned: None,
+            unresponsive: HashMap::new(),
         }
     }
 
@@ -682,7 +708,7 @@ where
 
     // All retries exhausted
     transactions.timeout(invoke_id);
-    Err(DriverError::CommFault(format!(
+    Err(DriverError::Timeout(format!(
         "bacnet: timeout after {max_retries} retries"
     )))
 }
@@ -1021,8 +1047,9 @@ impl BacnetDriver {
     /// Returns:
     /// * `Ok(())` when the device sends a Simple-ACK.
     /// * [`DriverError::RemoteStatus`] on Error PDU.
-    /// * [`DriverError::CommFault`] on timeout, socket error, or unexpected
-    ///   response type.
+    /// * [`DriverError::Timeout`] when the device does not answer.
+    /// * [`DriverError::CommFault`] on socket error or unexpected response
+    ///   type.
     async fn write_property(
         &mut self,
         device_addr: std::net::SocketAddr,
@@ -1159,12 +1186,26 @@ impl BacnetDriver {
                         );
                         continue;
                     }
-                    if self.device_registry.get(device_instance).is_some() {
-                        tracing::debug!(
-                            driver = %self.id,
-                            device = device_instance,
-                            "BACnet drain: I-Am for a known device ignored"
-                        );
+                    if let Some(known) = self.device_registry.get(device_instance) {
+                        // Its address is not replaced (see above). From the
+                        // known address, an I-Am ends a back-off early.
+                        let same_addr = known.addr == src;
+                        match self.unresponsive.get_mut(&device_instance) {
+                            Some(u) if same_addr => {
+                                u.next_try = tokio::time::Instant::now();
+                                tracing::info!(
+                                    driver = %self.id,
+                                    device = device_instance,
+                                    "BACnet device announced itself; trying it again"
+                                );
+                            }
+                            _ => tracing::debug!(
+                                driver = %self.id,
+                                device = device_instance,
+                                same_addr,
+                                "BACnet drain: I-Am for a known device ignored"
+                            ),
+                        }
                         continue;
                     }
                     tracing::info!(
@@ -1196,6 +1237,78 @@ impl BacnetDriver {
             max = DRAIN_MAX_PACKETS,
             "BACnet drain: packet limit reached, the rest waits for the next poll"
         );
+    }
+
+    /// Whether `device_id` timed out recently and is not to be tried yet.
+    fn backing_off(&self, device_id: u32, now: tokio::time::Instant) -> bool {
+        self.unresponsive
+            .get(&device_id)
+            .is_some_and(|u| now < u.next_try)
+    }
+
+    /// Record a request to `device_id` that timed out: its points are not
+    /// read until the back-off is over.
+    fn note_timeout(&mut self, device_id: u32, now: tokio::time::Instant) {
+        match self.unresponsive.get_mut(&device_id) {
+            Some(u) => {
+                // A timeout during the wait (a write is always sent)
+                // restarts the wait but does not lengthen it.
+                if now >= u.next_try {
+                    u.delay = u.delay.saturating_mul(2).min(UNRESPONSIVE_BACKOFF_MAX);
+                }
+                u.next_try = now + u.delay;
+                tracing::debug!(
+                    driver = %self.id,
+                    device = device_id,
+                    retry_in_secs = u.delay.as_secs(),
+                    "BACnet device still not responding"
+                );
+            }
+            None => {
+                tracing::warn!(
+                    driver = %self.id,
+                    device = device_id,
+                    retry_in_secs = UNRESPONSIVE_BACKOFF_MIN.as_secs(),
+                    "BACnet device not responding; its points are not read until the retry"
+                );
+                self.unresponsive.insert(
+                    device_id,
+                    Unresponsive {
+                        delay: UNRESPONSIVE_BACKOFF_MIN,
+                        next_try: now + UNRESPONSIVE_BACKOFF_MIN,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Record the outcome of a request to `device_id`. A timeout starts or
+    /// extends the back-off and is returned as [`not_responding`]. An answer
+    /// from the device (a value or a BACnet error) ends it. A transport
+    /// error (`CommFault`: send or receive failed, or an answer that could
+    /// not be used) leaves it as it is.
+    fn note_outcome<T>(
+        &mut self,
+        device_id: u32,
+        res: Result<T, DriverError>,
+    ) -> Result<T, DriverError> {
+        match res {
+            Err(DriverError::Timeout(_)) => {
+                self.note_timeout(device_id, tokio::time::Instant::now());
+                Err(not_responding(device_id))
+            }
+            Err(e @ DriverError::CommFault(_)) => Err(e),
+            other => {
+                if self.unresponsive.remove(&device_id).is_some() {
+                    tracing::info!(
+                        driver = %self.id,
+                        device = device_id,
+                        "BACnet device responding again"
+                    );
+                }
+                other
+            }
+        }
     }
 
     /// Configured device instances that are not in the registry.
@@ -1333,7 +1446,8 @@ impl BacnetDriver {
     /// Send a SubscribeCOV-Request and await the Simple-ACK.
     ///
     /// Returns `Ok(())` on Simple-ACK, [`DriverError::RemoteStatus`] on
-    /// Error PDU, and [`DriverError::CommFault`] on timeout / socket error.
+    /// Error PDU, [`DriverError::Timeout`] when the device does not answer
+    /// and [`DriverError::CommFault`] on socket error.
     ///
     /// Does NOT track the subscription in `cov_subscriptions` — caller's
     /// responsibility.
@@ -1448,7 +1562,8 @@ impl BacnetDriver {
     async fn renew_due_subscriptions(&mut self) {
         let now = std::time::Instant::now();
         // Snapshot entries that are due (drop borrow before calling subscribe_cov).
-        let mut due: Vec<(u32, std::net::SocketAddr, u16, u32, Option<u32>)> = Vec::new();
+        let mut due: Vec<(u32, u32, std::net::SocketAddr, u16, u32, Option<u32>)> = Vec::new();
+        let now_t = tokio::time::Instant::now();
 
         for (process_id, sub) in &self.cov_subscriptions {
             if now.saturating_duration_since(sub.subscribed_at) < self.renewal_interval {
@@ -1462,8 +1577,19 @@ impl BacnetDriver {
                 );
                 continue;
             };
+            // A device that timed out recently is not waited for (S-50);
+            // the renewal stays due.
+            if self.backing_off(sub.device_id, now_t) {
+                tracing::debug!(
+                    process_id = *process_id,
+                    device_id = sub.device_id,
+                    "COV renewal: device not responding, skipping"
+                );
+                continue;
+            }
             due.push((
                 *process_id,
+                sub.device_id,
                 device.addr,
                 sub.object_type,
                 sub.object_instance,
@@ -1471,8 +1597,11 @@ impl BacnetDriver {
             ));
         }
 
-        for (process_id, device_addr, object_type, object_instance, lifetime) in due {
-            match self
+        for (process_id, device_id, device_addr, object_type, object_instance, lifetime) in due {
+            if self.backing_off(device_id, tokio::time::Instant::now()) {
+                continue; // timed out on an earlier renewal of this poll
+            }
+            let res = self
                 .subscribe_cov(
                     device_addr,
                     process_id,
@@ -1481,8 +1610,8 @@ impl BacnetDriver {
                     false,
                     lifetime,
                 )
-                .await
-            {
+                .await;
+            match self.note_outcome(device_id, res) {
                 Ok(()) => {
                     if let Some(sub) = self.cov_subscriptions.get_mut(&process_id) {
                         sub.subscribed_at = std::time::Instant::now();
@@ -1562,6 +1691,7 @@ impl AsyncDriver for BacnetDriver {
         // again from `sync_cur` (S-49).
         self.device_registry.bulk_insert(devices);
         self.rediscovery = Rediscovery::new(self.rediscovery.min, tokio::time::Instant::now());
+        self.unresponsive.clear();
 
         self.socket = Some(socket);
         self.status = DriverStatus::Ok;
@@ -1730,10 +1860,19 @@ impl AsyncDriver for BacnetDriver {
                 continue;
             }
 
+            // A device that timed out recently is not waited for (S-50).
+            if self.backing_off(device_id, tokio::time::Instant::now()) {
+                for (pid, _) in &group {
+                    results.push((*pid, Err(not_responding(device_id))));
+                }
+                continue;
+            }
+
             if group.len() == 1 {
                 // Single point — use the simpler read_present_value path.
                 let (pid, obj) = &group[0];
                 let res = self.read_present_value(device_addr, obj).await;
+                let res = self.note_outcome(device_id, res);
                 results.push((*pid, res));
             } else {
                 // Multiple points — try RPM, fall back to individual reads on error.
@@ -1748,7 +1887,16 @@ impl AsyncDriver for BacnetDriver {
                     .collect();
 
                 match self.read_properties_multiple(device_addr, &specs).await {
+                    // No answer: the points are not read one by one, each
+                    // would time out again (S-50).
+                    Err(BacnetError::Timeout(_)) => {
+                        self.note_timeout(device_id, tokio::time::Instant::now());
+                        for (pid, _) in &group {
+                            results.push((*pid, Err(not_responding(device_id))));
+                        }
+                    }
                     Ok(values) => {
+                        let _ = self.note_outcome(device_id, Ok(()));
                         for ((pid, obj), val_res) in group.iter().zip(values) {
                             let final_res = match val_res {
                                 Ok(v) => v
@@ -1769,7 +1917,14 @@ impl AsyncDriver for BacnetDriver {
                             "BACnet RPM failed, falling back to individual ReadProperty"
                         );
                         for (pid, obj) in &group {
+                            // After a timeout the rest of the device's
+                            // points are not waited for.
+                            if self.backing_off(device_id, tokio::time::Instant::now()) {
+                                results.push((*pid, Err(not_responding(device_id))));
+                                continue;
+                            }
                             let res = self.read_present_value(device_addr, obj).await;
+                            let res = self.note_outcome(device_id, res);
                             results.push((*pid, res));
                         }
                     }
@@ -1850,9 +2005,17 @@ impl AsyncDriver for BacnetDriver {
 
             // Priority 16 = lowest; a higher-priority command automatically
             // wins via BACnet's priority-array mechanism.
+            // Always tried, even while the device is backing off: a write
+            // is an operator request (S-50).
             let result = self
                 .write_property(device_addr, obj.object_type, obj.instance, 85, bv, Some(16))
                 .await;
+            let result = match self.note_outcome(obj.device_id, result) {
+                Err(DriverError::Timeout(m)) => Err(DriverError::Timeout(format!(
+                    "{m} (the write may have been applied)"
+                ))),
+                other => other,
+            };
             results.push((point_id, result));
         }
 
@@ -1905,11 +2068,20 @@ impl AsyncDriver for BacnetDriver {
                 }
             };
 
+            if self.backing_off(obj.device_id, tokio::time::Instant::now()) {
+                tracing::warn!(
+                    point_id = pt.point_id,
+                    device = obj.device_id,
+                    "BACnet COV subscribe skipped: device not responding"
+                );
+                continue;
+            }
+
             // Allocate process_id and subscribe.
             let process_id = self.allocate_process_id();
             let lifetime = Some(300u32); // 5 minutes — renewal is future Phase B8.1.
 
-            match self
+            let res = self
                 .subscribe_cov(
                     device_addr,
                     process_id,
@@ -1918,8 +2090,8 @@ impl AsyncDriver for BacnetDriver {
                     false, // unconfirmed notifications
                     lifetime,
                 )
-                .await
-            {
+                .await;
+            match self.note_outcome(obj.device_id, res) {
                 Ok(()) => {
                     self.cov_subscriptions.insert(
                         process_id,

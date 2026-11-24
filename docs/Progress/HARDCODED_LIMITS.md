@@ -19,6 +19,7 @@
 > - Driver write level 16, duration 30 s and poll interval 5 s (`drivers/loader.rs`).
 > - MQTT cache max age 600 s; BACnet discovery 2 s, COV renewal 240 s, foreign-device TTL 300 s, COV cache 600 s.
 > - BACnet `REDISCOVERY_MIN` = 30 s, `REDISCOVERY_MAX` = 600 s, `DRAIN_MAX_PACKETS` = 64 (`drivers/bacnet/mod.rs`, R-25/S-49): while a configured device is not in the registry, a poll sends a Who-Is (no waiting) first 30 s after `open()`, then doubling to at most every 10 min; each poll first reads up to 64 waiting datagrams without blocking (I-Am of a configured, missing device → registry; COV → cache); socket errors while reading at most one `warn` a minute. Keep hardcoded.
+> - BACnet `UNRESPONSIVE_BACKOFF_MIN` = 30 s, `UNRESPONSIVE_BACKOFF_MAX` = 300 s (`drivers/bacnet/mod.rs`, R-25/S-50): after a request to a device times out (4 × 3 s), its points are not read for 30 s, doubling to at most 5 min while it keeps timing out; they fail at once meanwhile. Writes are always sent. Keep hardcoded.
 > - Driver `FAILURE_REMINDER_INTERVAL` = 600 s (`drivers/loader.rs`, S-49): a point's error is logged when it starts or changes, and a `warn` summary repeats every 10 min while points keep failing. Keep hardcoded.
 > - Request body limit 1 MB (`rest/mod.rs:1231`, `with_global_layers`); since S-35 it also covers the tags, alerts, roxWarp and simulator routes, which had axum's 2 MB `Json` default before. Driver actor channel capacity 64.
 > - Log files kept: 14 by default (`--log-max-files`, `logging.rs`).
