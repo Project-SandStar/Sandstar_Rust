@@ -1264,3 +1264,296 @@ async fn e2e_bbmd_register_foreign_device() {
 
     handle.close_all().await.expect("close_all should succeed");
 }
+
+// ── Rediscovery of devices missing at open (R-25, S-49) ───────────────────
+
+use crate::drivers::async_driver::AsyncDriver;
+
+fn late_driver(mock_port: u16, rediscovery: Duration) -> BacnetDriver {
+    let mut d = BacnetDriver::new("bac-late", "127.0.0.1", 0)
+        .with_broadcast_port(mock_port)
+        .with_discovery_timeout(Duration::from_millis(50))
+        .with_rediscovery_interval(rediscovery);
+    d.add_object(
+        201,
+        BacnetObject {
+            device_id: 1001,
+            object_type: 0,
+            instance: 0,
+            scale: 1.0,
+            offset: 0.0,
+            unit: None,
+        },
+    );
+    d
+}
+
+fn late_point() -> [DriverPointRef; 1] {
+    [DriverPointRef {
+        point_id: 201,
+        address: String::new(),
+    }]
+}
+
+/// Who-Is packets that reach `sock` within `wait`.
+async fn count_who_is(sock: &UdpSocket, wait: Duration) -> usize {
+    let mut buf = [0u8; 1500];
+    let mut seen = 0;
+    let deadline = tokio::time::Instant::now() + wait;
+    while let Ok(Ok((n, _))) = tokio::time::timeout_at(deadline, sock.recv_from(&mut buf)).await {
+        if matches!(
+            frame::decode_packet(&buf[..n]),
+            Ok((_, frame::Apdu::WhoIs { .. }))
+        ) {
+            seen += 1;
+        }
+    }
+    seen
+}
+
+#[test]
+fn rediscovery_waits_then_doubles_up_to_the_cap() {
+    let t0 = tokio::time::Instant::now();
+    let mut r = super::Rediscovery::new(super::REDISCOVERY_MIN, t0);
+    // Nothing before the first wait.
+    assert!(!r.due(t0, true));
+    assert!(!r.due(t0 + Duration::from_secs(29), true));
+    // Then 30 s, 60 s, 120 s, ... apart, never more than 10 min.
+    let mut now = t0 + Duration::from_secs(30);
+    let mut gaps = Vec::new();
+    let mut last = now;
+    assert!(r.due(now, true));
+    for _ in 0..8 {
+        // Step 1 s at a time until the next Who-Is is due.
+        loop {
+            now += Duration::from_secs(1);
+            if r.due(now, true) {
+                break;
+            }
+        }
+        gaps.push((now - last).as_secs());
+        last = now;
+    }
+    assert_eq!(gaps, vec![60, 120, 240, 480, 600, 600, 600, 600]);
+}
+
+#[test]
+fn rediscovery_starts_over_when_no_device_is_missing() {
+    let t0 = tokio::time::Instant::now();
+    let mut r = super::Rediscovery::new(super::REDISCOVERY_MIN, t0);
+    let t1 = t0 + Duration::from_secs(30);
+    assert!(r.due(t1, true));
+    // All found: no Who-Is, and the wait is back to 30 s.
+    assert!(!r.due(t1 + Duration::from_secs(1000), false));
+    let t2 = t1 + Duration::from_secs(1000);
+    assert!(!r.due(t2 + Duration::from_secs(29), true));
+    assert!(r.due(t2 + Duration::from_secs(30), true));
+}
+
+#[tokio::test]
+async fn a_missing_device_gets_a_who_is_without_the_poll_waiting() {
+    let mock_port = find_free_port();
+    let mock = UdpSocket::bind(format!("127.0.0.1:{mock_port}"))
+        .await
+        .expect("mock bind");
+    let mut d = late_driver(mock_port, Duration::ZERO);
+    d.open().await.expect("open");
+    assert_eq!(count_who_is(&mock, Duration::from_millis(50)).await, 1);
+
+    let start = tokio::time::Instant::now();
+    let res = d.sync_cur_vec(&late_point()).await;
+    assert!(start.elapsed() < Duration::from_millis(500), "poll waited");
+    assert!(matches!(res[0].1, Err(DriverError::CommFault(_))));
+    // The poll sent a Who-Is for the missing device.
+    assert_eq!(count_who_is(&mock, Duration::from_millis(200)).await, 1);
+}
+
+#[tokio::test]
+async fn no_who_is_before_the_first_wait_is_over() {
+    let mock_port = find_free_port();
+    let mock = UdpSocket::bind(format!("127.0.0.1:{mock_port}"))
+        .await
+        .expect("mock bind");
+    // Default first wait (30 s).
+    let mut d = late_driver(mock_port, super::REDISCOVERY_MIN);
+    d.open().await.expect("open");
+    assert_eq!(count_who_is(&mock, Duration::from_millis(50)).await, 1);
+    for _ in 0..3 {
+        let _ = d.sync_cur_vec(&late_point()).await;
+    }
+    assert_eq!(count_who_is(&mock, Duration::from_millis(200)).await, 0);
+}
+
+#[tokio::test]
+async fn a_device_missing_at_open_is_found_later_and_read() {
+    let mock_port = find_free_port();
+    let mock = UdpSocket::bind(format!("127.0.0.1:{mock_port}"))
+        .await
+        .expect("mock bind");
+    // The device ignores the Who-Is sent by open() and answers the next ones.
+    let who_is_seen = Arc::new(AtomicUsize::new(0));
+    let seen = who_is_seen.clone();
+    let _mock = tokio::spawn(async move {
+        let mut buf = [0u8; 1500];
+        while let Ok((n, from)) = mock.recv_from(&mut buf).await {
+            match frame::decode_packet(&buf[..n]) {
+                Ok((_, frame::Apdu::WhoIs { .. })) => {
+                    if seen.fetch_add(1, Ordering::SeqCst) >= 1 {
+                        let _ = mock.send_to(&encode_i_am(1001, 1476, 3, 8), from).await;
+                    }
+                }
+                Ok(_) => {
+                    let ack = frame::encode_read_property_ack(
+                        extract_invoke_id(&buf, n),
+                        0,
+                        0,
+                        85,
+                        &BacnetValue::Real(21.5),
+                    );
+                    let _ = mock.send_to(&ack, from).await;
+                }
+                Err(_) => {}
+            }
+        }
+    });
+
+    let mut d = late_driver(mock_port, Duration::ZERO);
+    d.open().await.expect("open");
+    let first = d.sync_cur_vec(&late_point()).await;
+    assert!(matches!(first[0].1, Err(DriverError::CommFault(_))));
+
+    // The I-Am arrives after the poll; a later poll picks it up and reads.
+    let mut value = None;
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        if let Ok(v) = d.sync_cur_vec(&late_point()).await[0].1 {
+            value = Some(v);
+            break;
+        }
+    }
+    assert_eq!(value, Some(21.5));
+    assert!(who_is_seen.load(Ordering::SeqCst) >= 2);
+}
+
+#[tokio::test]
+async fn a_second_device_is_found_while_the_first_one_is_being_read() {
+    let mock_port = find_free_port();
+    let mock = UdpSocket::bind(format!("127.0.0.1:{mock_port}"))
+        .await
+        .expect("mock bind");
+    // Device 1001 answers every Who-Is; device 1002 (same mock) only the
+    // ones after open(). Reads of either answer Real(21.5).
+    let _mock = tokio::spawn(async move {
+        let mut buf = [0u8; 1500];
+        let mut who_is = 0usize;
+        while let Ok((n, from)) = mock.recv_from(&mut buf).await {
+            match frame::decode_packet(&buf[..n]) {
+                Ok((_, frame::Apdu::WhoIs { .. })) => {
+                    who_is += 1;
+                    let _ = mock.send_to(&encode_i_am(1001, 1476, 3, 8), from).await;
+                    if who_is >= 2 {
+                        let _ = mock.send_to(&encode_i_am(1002, 1476, 3, 8), from).await;
+                    }
+                }
+                Ok(_) => {
+                    let ack = frame::encode_read_property_ack(
+                        extract_invoke_id(&buf, n),
+                        0,
+                        0,
+                        85,
+                        &BacnetValue::Real(21.5),
+                    );
+                    let _ = mock.send_to(&ack, from).await;
+                }
+                Err(_) => {}
+            }
+        }
+    });
+
+    let mut d = late_driver(mock_port, Duration::ZERO);
+    d.add_object(
+        202,
+        BacnetObject {
+            device_id: 1002,
+            object_type: 0,
+            instance: 0,
+            scale: 1.0,
+            offset: 0.0,
+            unit: None,
+        },
+    );
+    let points = [
+        DriverPointRef {
+            point_id: 201,
+            address: String::new(),
+        },
+        DriverPointRef {
+            point_id: 202,
+            address: String::new(),
+        },
+    ];
+    d.open().await.expect("open");
+    assert!(d.device_registry.get(1001).is_some());
+    assert!(d.device_registry.get(1002).is_none());
+
+    let mut both = false;
+    for _ in 0..40 {
+        let res = d.sync_cur_vec(&points).await;
+        if res.iter().all(|(_, r)| matches!(r, Ok(v) if *v == 21.5)) {
+            both = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(both, "device 1002 was never found");
+}
+
+#[tokio::test]
+async fn drain_adds_only_configured_devices_that_are_missing() {
+    let mock_port = find_free_port();
+    let mock = UdpSocket::bind(format!("127.0.0.1:{mock_port}"))
+        .await
+        .expect("mock bind");
+    let mut d = late_driver(mock_port, super::REDISCOVERY_MAX);
+    d.add_object(
+        202,
+        BacnetObject {
+            device_id: 1002,
+            object_type: 0,
+            instance: 0,
+            scale: 1.0,
+            offset: 0.0,
+            unit: None,
+        },
+    );
+    d.open().await.expect("open");
+    let known = mock.local_addr().unwrap();
+    d.device_registry.insert(super::DeviceInfo {
+        instance: 1001,
+        addr: known,
+        max_apdu: 1476,
+        vendor_id: 8,
+        segmentation: 3,
+    });
+
+    // Another sender claims 1001 (known), 4242 (not configured) and 1002
+    // (configured, missing).
+    let other = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+    let port = d.socket.as_ref().unwrap().local_addr().unwrap().port();
+    let to = format!("127.0.0.1:{port}");
+    for dev in [1001, 4242, 1002] {
+        other
+            .send_to(&encode_i_am(dev, 1476, 3, 8), &to)
+            .await
+            .expect("send");
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    d.drain_pending();
+
+    assert_eq!(d.device_registry.get(1001).unwrap().addr, known);
+    assert!(d.device_registry.get(4242).is_none());
+    assert_eq!(
+        d.device_registry.get(1002).unwrap().addr,
+        other.local_addr().unwrap()
+    );
+}
