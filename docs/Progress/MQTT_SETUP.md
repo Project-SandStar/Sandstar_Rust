@@ -90,7 +90,7 @@ Each entry in `SANDSTAR_MQTT_CONFIGS` is a JSON object describing one MQTT drive
 | `host` | string | yes | MQTT broker hostname or IP. |
 | `port` | u16 | no | Default `1883` (plain), use `8883` for TLS. |
 | `client_id` | string | yes | Must be unique to the broker (duplicates get disconnected). |
-| `username` / `password` | string? | no | Plain auth. Both must be set to take effect. |
+| `username` / `password` | string? | no | Plain auth. Both must be set to take effect. The password is never printed: `MqttConfig`'s `Debug` shows it as `<redacted>` (S-48). |
 | `tls` | bool | no | Reserved — not yet wired; leave `false`. |
 | `keep_alive_secs` | u16 | no | Default `60`. Broker pings at ~half this interval. |
 | `objects` | array | yes | Points to bind. May be empty (driver still connects). |

@@ -31,7 +31,9 @@ use super::{
 /// Top-level MQTT driver configuration (deserialized from JSON).
 ///
 /// Mirrors the schema documented in `docs/IMPLEMENTATION_PLAN_MQTT.md`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is written by hand so that the password never reaches a log.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MqttConfig {
     /// Unique driver instance identifier.
     pub id: String,
@@ -46,7 +48,7 @@ pub struct MqttConfig {
     #[serde(default)]
     pub username: Option<String>,
     /// Optional password for plain auth.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::alerts::de_secret_opt")]
     pub password: Option<String>,
     /// Whether to use TLS. Defaults to false. (Not wired in M1.)
     #[serde(default)]
@@ -57,6 +59,25 @@ pub struct MqttConfig {
     /// List of MQTT objects to bind to Sandstar points.
     #[serde(default)]
     pub objects: Vec<MqttObjectConfig>,
+}
+
+impl std::fmt::Debug for MqttConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MqttConfig")
+            .field("id", &self.id)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("client_id", &self.client_id)
+            .field("username", &self.username)
+            .field(
+                "password",
+                &crate::alerts::redacted(self.password.as_deref().is_some_and(|p| !p.is_empty())),
+            )
+            .field("tls", &self.tls)
+            .field("keep_alive_secs", &self.keep_alive_secs)
+            .field("objects", &self.objects)
+            .finish()
+    }
 }
 
 fn default_port() -> u16 {
@@ -778,6 +799,14 @@ mod tests {
         assert_eq!(cfg.port, 8883);
         assert_eq!(cfg.username.as_deref(), Some("u"));
         assert_eq!(cfg.password.as_deref(), Some("p"));
+        // Debug never shows the password (R-14, S-48).
+        let mut cfg = cfg;
+        cfg.password = Some("s3cret-pw".into());
+        let shown = format!("{cfg:?}");
+        assert!(shown.contains("<redacted>"));
+        assert!(!shown.contains("s3cret-pw"));
+        cfg.password = None;
+        assert!(format!("{cfg:?}").contains("<none>"));
         assert!(cfg.tls);
         assert_eq!(cfg.keep_alive_secs, 30);
         assert_eq!(cfg.objects.len(), 1);
@@ -1221,5 +1250,16 @@ mod tests {
         for r in &results {
             assert!(matches!(r.1, Err(DriverError::ConfigFault(_))));
         }
+    }
+
+    #[test]
+    fn a_password_of_the_wrong_type_is_not_quoted_in_the_error() {
+        let json =
+            serde_json::json!({"id": "m", "host": "h", "client_id": "c", "password": 987654321});
+        let err = serde_json::from_value::<MqttConfig>(json)
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("987654321"), "{err}");
+        assert!(err.contains("secret must be a string"));
     }
 }
