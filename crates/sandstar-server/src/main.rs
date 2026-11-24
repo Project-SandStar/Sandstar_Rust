@@ -114,6 +114,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     }
 
+    // 0a. Listen for SIGTERM before anything needs cleaning up (PID file,
+    //     /dev/watchdog, IPC socket). systemd stops the service with SIGTERM;
+    //     without a listener the process died at once and skipped the
+    //     shutdown (R-13). A SIGTERM during startup stays pending and the first
+    //     loop turn shuts down. Extra signals during shutdown are ignored;
+    //     systemd escalates to SIGKILL after TimeoutStopSec.
+    let mut term = signal::TermSignal::new()?;
+
     // 0b. Enable core dumps for post-mortem debugging (Unix only).
     #[cfg(unix)]
     {
@@ -680,6 +688,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut shutdown = pin!(tokio::signal::ctrl_c());
     let mut hup = signal::HupSignal::new()?;
     let mut ipc_shutdown = false;
+    let mut stop_signal: Option<&str> = None;
     // IPC connections are served on their own tasks; only the command reaches
     // this loop (R-28).
     let (ipc_tx, mut ipc_rx) = mpsc::channel::<ipc::IpcRequest>(ipc::MAX_CONNECTIONS);
@@ -1018,15 +1027,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sd_notify::watchdog();
             }
 
-            // --- Shutdown signal (Ctrl+C / SIGTERM) — always works ---
+            // --- Shutdown signals — always work ---
             _ = &mut shutdown => {
-                info!("shutdown signal received (Ctrl+C)");
+                info!("shutdown signal received (SIGINT / Ctrl+C)");
+                stop_signal = Some("SIGINT");
+                break;
+            }
+            _ = term.recv() => {
+                info!("shutdown signal received (SIGTERM)");
+                stop_signal = Some("SIGTERM");
                 break;
             }
         }
     }
 
     // 13. Graceful shutdown
+    // Tell systemd we are stopping (matters for an IPC shutdown, where systemd
+    // did not ask for it).
+    sd_notify::notify("STOPPING=1");
+    // A poll that never comes back keeps a blocking task the runtime would
+    // wait for forever on exit; then we leave with process::exit below.
+    let mut poll_stuck = false;
     // If poll is in progress, wait up to 5s for it to finish
     if poll_in_progress {
         match tokio::time::timeout(Duration::from_secs(5), poll_result_rx.recv()).await {
@@ -1039,9 +1060,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(_) => {
                 warn!("poll completion timed out (5s) — shutting down anyway");
+                poll_stuck = true;
             }
         }
     }
+    // The loop no longer feeds the watchdogs; the poll wait took up to 5 s.
+    watchdog.kick();
+    sd_notify::watchdog();
 
     // Stop Sedona VM if running
     #[cfg(feature = "svm")]
@@ -1053,16 +1078,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reason = if ipc_shutdown {
         "IPC command"
     } else {
-        "signal"
+        stop_signal.unwrap_or("signal")
     };
     info!(uptime_secs = uptime.as_secs(), reason, "engine stopped");
     if let Some(ref mut eng) = engine {
         if let Err(e) = eng.hal.shutdown() {
             warn!(err = %e, "HAL shutdown error");
         }
+    } else {
+        warn!("HAL shutdown skipped: the engine did not come back from its poll");
     }
     watchdog.close();
     ipc::cleanup(&config.socket_path);
+    if poll_stuck {
+        // Dropping the runtime would wait for the stuck poll without limit
+        // (tokio: Runtime drop blocks on spawn_blocking tasks), until systemd
+        // sends SIGKILL. Clean up and leave now.
+        warn!("exiting without waiting for the stuck poll");
+        drop(_pid_guard);
+        drop(_log_guard);
+        std::process::exit(0);
+    }
     // _pid_guard dropped here -> PID file removed
     // _log_guard dropped here -> log file flushed
 

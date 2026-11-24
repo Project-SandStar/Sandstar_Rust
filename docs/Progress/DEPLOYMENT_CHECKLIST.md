@@ -108,6 +108,7 @@ Read the journal soon after the start: it is volatile and holds well under an ho
    - `tables loaded` with the expected count;
    - a watchdog line saying GPIO60 was opened, or why not (the engine retries for about 5 minutes);
    - no repeated `poll cycle exceeded`;
+   - from S-43 on, a stop or restart ends the previous run with `shutdown signal received (SIGTERM)`, `engine stopped … reason="SIGTERM"` and `watchdog: /dev/watchdog closed (magic close)` when `/dev/watchdog` was open. On the first deploy of S-43 the old binary is stopped, so these lines appear from the next restart on. `magic close failed`, `HAL shutdown skipped` or `exiting without waiting for the stuck poll` need a look;
    - with `--cluster` and no mTLS certificates (the packaged unit): `roxWarp: no mTLS configured, cluster listener disabled` and `cluster listener not started`, so port 7443 is not listening (S-36). With certificates expect `starting mTLS listener`; `mTLS config failed` means the certificate files need fixing.
 5. **Warnings:** count ERROR and WARN lines from the start time and compare them with the known types for this device (for example BACnet `comm fault` when a BACnet drop-in is active). Investigate anything new.
 6. **Data:** `curl -s http://localhost:8085/api/status` and spot-read a few channels with `/api/read`.

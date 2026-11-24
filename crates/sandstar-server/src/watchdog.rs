@@ -195,8 +195,13 @@ impl Watchdog {
     pub fn close(&mut self) {
         if let Some(ref mut fd) = self.dev_watchdog {
             // Magic close: "V" disables watchdog on close
-            let _ = fd.write_all(b"V");
-            info!("watchdog: /dev/watchdog closed (magic close)");
+            match fd.write_all(b"V") {
+                Ok(()) => info!("watchdog: /dev/watchdog closed (magic close)"),
+                // The kernel watchdog stays armed and resets the board.
+                Err(e) => {
+                    warn!(err = %e, "watchdog: magic close failed, /dev/watchdog stays armed")
+                }
+            }
         }
         self.dev_watchdog = None;
         self.gpio60_value = None;
