@@ -680,6 +680,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut shutdown = pin!(tokio::signal::ctrl_c());
     let mut hup = signal::HupSignal::new()?;
     let mut ipc_shutdown = false;
+    // IPC connections are served on their own tasks; only the command reaches
+    // this loop (R-28).
+    let (ipc_tx, mut ipc_rx) = mpsc::channel::<ipc::IpcRequest>(ipc::MAX_CONNECTIONS);
+    let ipc_slots = Arc::new(tokio::sync::Semaphore::new(ipc::MAX_CONNECTIONS));
+    let _ipc_accept = ipc::spawn_accept_loop(listener, ipc_tx, ipc_slots);
 
     // 12. Main event loop
     info!("engine running — press Ctrl+C to stop");
@@ -918,47 +923,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            // --- Incoming IPC connection (only when engine is available) ---
-            result = ipc::accept(&listener), if engine.is_some() => {
-                match result {
-                    Ok((stream, _read_buf, _write_buf)) => {
-                        let conn_result = dispatch::handle_connection(
-                            stream,
-                            engine.as_mut().expect("select! guard ensures engine.is_some()"),
-                            &config,
-                            start_time,
-                            &history_store,
-                        );
-                        match conn_result {
-                            Ok(dispatch::ConnectionResult::Shutdown) => {
-                                info!("shutdown requested via IPC");
-                                ipc_shutdown = true;
-                                break;
-                            }
-                            Ok(dispatch::ConnectionResult::PollNow) => {
-                                if !poll_in_progress {
-                                    let mut eng = engine.take().expect("select! guard ensures engine.is_some()");
-                                    let mut ctrl = control_runner.take().unwrap_or_default();
-                                    poll_in_progress = true;
-                                    let tx = poll_result_tx.clone();
-                                    tokio::task::spawn_blocking(move || {
-                                        let poll_start = Instant::now();
-                                        let notifications = eng.poll_update();
-                                        ctrl.execute(&mut eng, Instant::now());
-                                        let elapsed = poll_start.elapsed();
-                                        let _ = tx.blocking_send((eng, ctrl, notifications, elapsed));
-                                    });
-                                }
-                            }
-                            Ok(dispatch::ConnectionResult::Continue) => {}
-                            Err(e) => {
-                                error!(err = %e, "IPC connection error");
-                            }
+            // --- IPC command (only when engine is available) ---
+            Some(req) = ipc_rx.recv(), if engine.is_some() => {
+                let name = ipc::command_name(&req.cmd);
+                if req.abandoned() {
+                    // The client was told "not run" (deadline passed in the queue).
+                    warn!(cmd = %name, "IPC: client gave up while the command was queued; not run");
+                    continue;
+                }
+                let (conn_result, response) = dispatch::run(
+                    req.cmd,
+                    engine.as_mut().expect("select! guard ensures engine.is_some()"),
+                    &config,
+                    start_time,
+                    &history_store,
+                );
+                if req.reply.send(response).is_err() {
+                    warn!(cmd = %name, "IPC: command ran, but the client gave up before the reply");
+                }
+                match conn_result {
+                    dispatch::ConnectionResult::Shutdown => {
+                        info!("shutdown requested via IPC");
+                        // Let the reply reach the client before the runtime goes.
+                        if !matches!(
+                            tokio::time::timeout(ipc::SHUTDOWN_REPLY_WAIT, req.written).await,
+                            Ok(Ok(()))
+                        ) {
+                            warn!("IPC: shutdown reply not confirmed as written");
+                        }
+                        ipc_shutdown = true;
+                        break;
+                    }
+                    dispatch::ConnectionResult::PollNow => {
+                        if !poll_in_progress {
+                            let mut eng = engine.take().expect("select! guard ensures engine.is_some()");
+                            let mut ctrl = control_runner.take().unwrap_or_default();
+                            poll_in_progress = true;
+                            let tx = poll_result_tx.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let poll_start = Instant::now();
+                                let notifications = eng.poll_update();
+                                ctrl.execute(&mut eng, Instant::now());
+                                let elapsed = poll_start.elapsed();
+                                let _ = tx.blocking_send((eng, ctrl, notifications, elapsed));
+                            });
                         }
                     }
-                    Err(e) => {
-                        error!(err = %e, "failed to accept IPC connection");
-                    }
+                    dispatch::ConnectionResult::Continue => {}
                 }
             }
 

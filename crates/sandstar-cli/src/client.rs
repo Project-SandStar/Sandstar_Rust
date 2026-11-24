@@ -4,6 +4,12 @@ use sandstar_ipc::protocol::{read_frame, write_frame};
 use sandstar_ipc::types::{EngineCommand, EngineResponse};
 use std::io;
 use std::net::TcpStream;
+use std::time::Duration;
+
+/// Longest wait for the server, per read or write. Above the server's own
+/// deadlines (5 s read, 10 s engine, 5 s write), so the server's error reply
+/// arrives first; below it the CLI would give up on a busy but healthy engine.
+const IO_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Send a command to the engine server and return the response.
 pub fn send_command(address: &str, cmd: &EngineCommand) -> io::Result<EngineResponse> {
@@ -28,15 +34,22 @@ pub fn send_command(address: &str, cmd: &EngineCommand) -> io::Result<EngineResp
 fn connect(address: &str) -> io::Result<ConnStream> {
     if !address.contains(':') {
         let stream = std::os::unix::net::UnixStream::connect(address)?;
+        stream.set_read_timeout(Some(IO_TIMEOUT))?;
+        stream.set_write_timeout(Some(IO_TIMEOUT))?;
         return Ok(ConnStream::Unix(stream));
     }
     let stream = TcpStream::connect(address)?;
+    stream.set_read_timeout(Some(IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(IO_TIMEOUT))?;
     Ok(ConnStream::Tcp(stream))
 }
 
 #[cfg(not(unix))]
 fn connect(address: &str) -> io::Result<TcpStream> {
-    TcpStream::connect(address)
+    let stream = TcpStream::connect(address)?;
+    stream.set_read_timeout(Some(IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(IO_TIMEOUT))?;
+    Ok(stream)
 }
 
 // --- Platform-specific stream type ---
