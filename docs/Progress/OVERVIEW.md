@@ -227,7 +227,7 @@ Router: `router_with_auth` in `crates/sandstar-server/src/rest/mod.rs`, plus rou
 | `GET /api/tags`, `/api/tags/stats`, `/api/tags/{comp_id}` | no | Dynamic tags (read) |
 | `PUT /api/tags/{comp_id}`, `DELETE /api/tags/{comp_id}/{key}` | **yes** (S-31) | Dynamic tags (write) |
 | `GET /api/alerts/config` (password masked), `/recipients`, `/active`, `/history` | no | Alert management (read) |
-| `PUT /api/alerts/config`, `POST/DELETE /api/alerts/recipients*`, `POST /api/alerts/test` | **yes** (S-31) | Alert management (write, test e-mail) |
+| `PUT /api/alerts/config`, `POST/DELETE /api/alerts/recipients*`, `POST /api/alerts/test` | **yes** (S-31) | Alert management (write, test e-mail). `PUT` with the password `********` (the GET mask) keeps the stored one, an empty one clears it; `alerts.json` is written atomically, owner-only 0600 (S-48) |
 | `GET /roxwarp` | **no** ⚠ | roxWarp peer WebSocket on the REST port, mounted only with `--cluster --cluster-insecure` and no mTLS paths (S-36). Peers send no bearer token. With mTLS, peers use the cluster port only |
 | `GET /api/cluster/status` | no | Cluster overview |
 | `POST /api/cluster/query` | **yes** (S-31) | Distributed Haystack query |

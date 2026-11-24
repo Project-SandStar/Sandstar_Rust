@@ -9,7 +9,8 @@
 //!
 //! - **Zero cost for components without dynamic tags** — just a HashMap miss
 //! - **Haystack-compatible value types** via [`DynValue`]
-//! - **Memory-bounded** — configurable per-component and total tag limits
+//! - **Memory-bounded** — per-component and total tag counts, tag name
+//!   rule and length, value size and a total byte budget (R-48)
 //! - **Persistent** — JSON serialization to disk, auto-saved when dirty
 
 use serde::{Deserialize, Serialize};
@@ -22,6 +23,94 @@ use tracing::{debug, info, warn};
 pub const DEFAULT_MAX_PER_COMP: usize = 64;
 /// Default maximum total tags across all components.
 pub const DEFAULT_MAX_TOTAL: usize = 10_000;
+/// Longest tag name in bytes (R-48, S-46).
+pub const MAX_TAG_NAME_BYTES: usize = 63;
+/// Largest `Str` / `Ref` tag value in bytes (R-48, S-46).
+pub const MAX_TAG_VALUE_BYTES: usize = 4096;
+/// Default budget for all tag names and values together (R-48, S-46).
+pub const DEFAULT_MAX_TOTAL_BYTES: usize = 2 * 1024 * 1024;
+
+/// Why a tag write was refused. Nothing is written when one is returned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DynSlotError {
+    /// The name is not a Haystack tag name (see [`is_valid_tag_name`]).
+    InvalidKey(String),
+    /// A `Str` / `Ref` value longer than [`MAX_TAG_VALUE_BYTES`].
+    ValueTooLarge { key: String, len: usize },
+    /// A count or byte limit of the store would be exceeded.
+    Limit(String),
+}
+
+impl fmt::Display for DynSlotError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidKey(k) => write!(
+                f,
+                "invalid tag name {:?}: must match [a-z][A-Za-z0-9_]* and be at most {MAX_TAG_NAME_BYTES} bytes",
+                truncate_for_msg(k)
+            ),
+            Self::ValueTooLarge { key, len } => write!(
+                f,
+                "value of tag {:?} is {len} bytes (max {MAX_TAG_VALUE_BYTES})",
+                truncate_for_msg(key)
+            ),
+            Self::Limit(msg) => f.write_str(msg),
+        }
+    }
+}
+
+impl DynSlotError {
+    /// A store limit (as opposed to a bad name or value in the request).
+    pub fn is_limit(&self) -> bool {
+        matches!(self, Self::Limit(_))
+    }
+}
+
+/// At most 64 bytes of `s` (on a char boundary) for an error message.
+fn truncate_for_msg(s: &str) -> &str {
+    let mut end = s.len().min(64);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// A Haystack tag name: `[a-z][A-Za-z0-9_]*`, at most
+/// [`MAX_TAG_NAME_BYTES`] bytes.
+pub fn is_valid_tag_name(name: &str) -> bool {
+    let b = name.as_bytes();
+    match b.first() {
+        Some(c) if c.is_ascii_lowercase() => {}
+        _ => return false,
+    }
+    b.len() <= MAX_TAG_NAME_BYTES && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_')
+}
+
+/// Bytes a tag counts against the budget: its name plus its value
+/// (`Str` / `Ref` by length, every other value as 8).
+fn entry_bytes(key: &str, value: &DynValue) -> usize {
+    let v = match value {
+        DynValue::Str(s) | DynValue::Ref(s) => s.len(),
+        _ => 8,
+    };
+    key.len().saturating_add(v)
+}
+
+/// Check one tag against the name rule and the value size.
+fn check_entry(key: &str, value: &DynValue) -> Result<(), DynSlotError> {
+    if !is_valid_tag_name(key) {
+        return Err(DynSlotError::InvalidKey(key.to_string()));
+    }
+    if let DynValue::Str(s) | DynValue::Ref(s) = value {
+        if s.len() > MAX_TAG_VALUE_BYTES {
+            return Err(DynSlotError::ValueTooLarge {
+                key: key.to_string(),
+                len: s.len(),
+            });
+        }
+    }
+    Ok(())
+}
 
 /// Common Haystack / protocol tag names pre-interned at startup.
 const COMMON_TAG_NAMES: &[&str] = &[
@@ -310,6 +399,10 @@ pub struct DynSlotStore {
     max_total: usize,
     /// Current total tag count.
     total: usize,
+    /// Budget for all names and values (see [`entry_bytes`]).
+    max_total_bytes: usize,
+    /// Current bytes of all names and values.
+    bytes: usize,
     /// Dirty flag for persistence.
     dirty: bool,
     /// String interner for tag name deduplication and stats.
@@ -326,6 +419,8 @@ impl DynSlotStore {
             max_per_comp,
             max_total,
             total: 0,
+            max_total_bytes: DEFAULT_MAX_TOTAL_BYTES,
+            bytes: 0,
             dirty: false,
             interner: TagNameInterner::new(),
             computed: HashMap::new(),
@@ -337,6 +432,27 @@ impl DynSlotStore {
         Self::new(DEFAULT_MAX_PER_COMP, DEFAULT_MAX_TOTAL)
     }
 
+    /// Replace the byte budget (default [`DEFAULT_MAX_TOTAL_BYTES`]).
+    pub fn with_byte_limit(mut self, max_total_bytes: usize) -> Self {
+        self.max_total_bytes = max_total_bytes;
+        self
+    }
+
+    /// Current bytes of all tag names and values.
+    pub fn total_bytes(&self) -> usize {
+        self.bytes
+    }
+
+    fn check_bytes(&self, new_bytes: usize) -> Result<(), DynSlotError> {
+        if new_bytes > self.max_total_bytes && new_bytes > self.bytes {
+            return Err(DynSlotError::Limit(format!(
+                "tags would use {new_bytes} bytes (limit {})",
+                self.max_total_bytes
+            )));
+        }
+        Ok(())
+    }
+
     /// Get a single tag value for a component.
     pub fn get(&self, comp_id: u16, key: &str) -> Option<&DynValue> {
         self.slots.get(&comp_id).and_then(|tags| tags.get(key))
@@ -344,48 +460,105 @@ impl DynSlotStore {
 
     /// Set a single tag on a component. Returns the previous value if any.
     ///
-    /// Returns `Err` if the per-component or total tag limit would be exceeded.
+    /// Returns `Err` (and writes nothing) if the name or value is refused or
+    /// a count or byte limit would be exceeded.
     pub fn set(
         &mut self,
         comp_id: u16,
         key: String,
         value: DynValue,
-    ) -> Result<Option<DynValue>, String> {
-        let tags = self.slots.entry(comp_id).or_default();
-        let current_len = tags.len();
+    ) -> Result<Option<DynValue>, DynSlotError> {
+        check_entry(&key, &value)?;
+        let old = self
+            .slots
+            .get(&comp_id)
+            .and_then(|t| t.get(&key))
+            .map(|v| entry_bytes(&key, v))
+            .unwrap_or(0);
+        let new_bytes = self
+            .bytes
+            .saturating_sub(old)
+            .saturating_add(entry_bytes(&key, &value));
+        self.check_bytes(new_bytes)?;
 
-        // Use entry API to avoid contains_key + insert pattern.
-        use std::collections::hash_map::Entry;
-        match tags.entry(key) {
-            Entry::Occupied(mut e) => {
-                // Replacement — no count change.
-                let prev = e.insert(value);
-                self.dirty = true;
-                Ok(Some(prev))
+        // Every limit is checked before the component entry exists, so a
+        // refused write leaves no empty map behind.
+        let current = self.slots.get(&comp_id);
+        let is_new = current.is_none_or(|t| !t.contains_key(&key));
+        if is_new {
+            let current_len = current.map(|t| t.len()).unwrap_or(0);
+            if current_len >= self.max_per_comp {
+                return Err(DynSlotError::Limit(format!(
+                    "component {comp_id} has {current_len} tags (max {})",
+                    self.max_per_comp
+                )));
             }
-            Entry::Vacant(e) => {
-                // New key — check limits.
-                if current_len >= self.max_per_comp {
-                    return Err(format!(
-                        "component {comp_id} has {current_len} tags (max {})",
-                        self.max_per_comp
-                    ));
-                }
-                if self.total >= self.max_total {
-                    return Err(format!(
-                        "total tag count {} reached limit {}",
-                        self.total, self.max_total
-                    ));
-                }
-                // Intern only accepted keys (dedup stats / future wire
-                // optimization); a rejected request must not grow it.
-                self.interner.intern(e.key());
-                e.insert(value);
-                self.total += 1;
-                self.dirty = true;
-                Ok(None)
+            if self.total >= self.max_total {
+                return Err(DynSlotError::Limit(format!(
+                    "total tag count {} reached limit {}",
+                    self.total, self.max_total
+                )));
             }
+            // Intern only accepted keys (dedup stats / future wire
+            // optimization); a rejected request must not grow it.
+            self.interner.intern(&key);
+            self.total += 1;
         }
+        let prev = self.slots.entry(comp_id).or_default().insert(key, value);
+        self.bytes = new_bytes;
+        self.dirty = true;
+        Ok(prev)
+    }
+
+    /// Merge `tags` into a component: all of them or none. Every name,
+    /// value and limit is checked before anything is written.
+    pub fn set_many(
+        &mut self,
+        comp_id: u16,
+        tags: HashMap<String, DynValue>,
+    ) -> Result<(), DynSlotError> {
+        let existing = self.slots.get(&comp_id);
+        let mut added = 0usize;
+        let mut new_bytes = self.bytes;
+        for (key, value) in &tags {
+            check_entry(key, value)?;
+            match existing.and_then(|t| t.get(key)) {
+                Some(old) => new_bytes = new_bytes.saturating_sub(entry_bytes(key, old)),
+                None => added += 1,
+            }
+            new_bytes = new_bytes.saturating_add(entry_bytes(key, value));
+        }
+        let comp_len = existing.map(|t| t.len()).unwrap_or(0);
+        if comp_len + added > self.max_per_comp && added > 0 {
+            return Err(DynSlotError::Limit(format!(
+                "component {comp_id} would have {} tags (max {})",
+                comp_len + added,
+                self.max_per_comp
+            )));
+        }
+        if self.total + added > self.max_total && added > 0 {
+            return Err(DynSlotError::Limit(format!(
+                "total tag count would be {} (limit {})",
+                self.total + added,
+                self.max_total
+            )));
+        }
+        self.check_bytes(new_bytes)?;
+
+        if tags.is_empty() {
+            return Ok(());
+        }
+        let slot = self.slots.entry(comp_id).or_default();
+        for (key, value) in tags {
+            if !slot.contains_key(&key) {
+                self.interner.intern(&key);
+            }
+            slot.insert(key, value);
+        }
+        self.total += added;
+        self.bytes = new_bytes;
+        self.dirty = true;
+        Ok(())
     }
 
     /// Remove a single tag from a component. Returns the removed value if any.
@@ -393,6 +566,7 @@ impl DynSlotStore {
         let tags = self.slots.get_mut(&comp_id)?;
         let removed = tags.remove(key)?;
         self.total -= 1;
+        self.bytes = self.bytes.saturating_sub(entry_bytes(key, &removed));
         self.dirty = true;
         // Clean up empty maps to save memory.
         if tags.is_empty() {
@@ -409,24 +583,43 @@ impl DynSlotStore {
     /// Bulk-set all tags for a component, replacing any existing tags.
     ///
     /// Returns `Err` if the new tag count would exceed limits.
-    pub fn set_all(&mut self, comp_id: u16, tags: HashMap<String, DynValue>) -> Result<(), String> {
-        if tags.len() > self.max_per_comp {
-            return Err(format!(
+    pub fn set_all(
+        &mut self,
+        comp_id: u16,
+        tags: HashMap<String, DynValue>,
+    ) -> Result<(), DynSlotError> {
+        for (key, value) in &tags {
+            check_entry(key, value)?;
+        }
+        // Only a result that grows past a limit is refused: a store loaded
+        // over a limit can still shrink (as with the byte budget).
+        let old_count = self.slots.get(&comp_id).map(|t| t.len()).unwrap_or(0);
+        if tags.len() > self.max_per_comp && tags.len() > old_count {
+            return Err(DynSlotError::Limit(format!(
                 "tag count {} exceeds per-component limit {}",
                 tags.len(),
                 self.max_per_comp
-            ));
+            )));
         }
 
         // Calculate new total: subtract old count, add new count.
-        let old_count = self.slots.get(&comp_id).map(|t| t.len()).unwrap_or(0);
+        let old = self.slots.get(&comp_id);
+        let old_bytes: usize = old
+            .map(|t| t.iter().map(|(k, v)| entry_bytes(k, v)).sum())
+            .unwrap_or(0);
         let new_total = self.total - old_count + tags.len();
-        if new_total > self.max_total {
-            return Err(format!(
+        if new_total > self.max_total && new_total > self.total {
+            return Err(DynSlotError::Limit(format!(
                 "new total {} would exceed limit {}",
                 new_total, self.max_total
-            ));
+            )));
         }
+        let new_bytes = tags
+            .iter()
+            .fold(self.bytes.saturating_sub(old_bytes), |acc, (k, v)| {
+                acc.saturating_add(entry_bytes(k, v))
+            });
+        self.check_bytes(new_bytes)?;
 
         // Intern all tag names.
         for key in tags.keys() {
@@ -434,6 +627,7 @@ impl DynSlotStore {
         }
 
         self.total = new_total;
+        self.bytes = new_bytes;
         if tags.is_empty() {
             self.slots.remove(&comp_id);
         } else {
@@ -447,6 +641,8 @@ impl DynSlotStore {
     pub fn remove_all(&mut self, comp_id: u16) {
         if let Some(tags) = self.slots.remove(&comp_id) {
             self.total -= tags.len();
+            let freed: usize = tags.iter().map(|(k, v)| entry_bytes(k, v)).sum();
+            self.bytes = self.bytes.saturating_sub(freed);
             self.dirty = true;
         }
         self.computed.remove(&comp_id);
@@ -681,15 +877,45 @@ impl DynSlotStore {
         }
 
         // Apply (trusting the file for now, just count accurately).
-        // Intern all loaded tag names.
+        // Intern loaded names that pass the rule; a legacy name of any
+        // length stays out of the interner (R-48).
         for tags in data.slots.values() {
-            for key in tags.keys() {
+            for key in tags.keys().filter(|k| is_valid_tag_name(k)) {
                 self.interner.intern(key);
             }
         }
         self.slots = data.slots;
         self.total = self.slots.values().map(|t| t.len()).sum();
+        self.bytes = self
+            .slots
+            .values()
+            .flat_map(|t| t.iter())
+            .fold(0usize, |acc, (k, v)| acc.saturating_add(entry_bytes(k, v)));
         self.dirty = false;
+
+        // Tags written before S-46 are kept even when they break today's
+        // rules; they can be read and deleted, not rewritten (R-48).
+        let legacy = self
+            .slots
+            .values()
+            .flat_map(|t| t.iter())
+            .filter(|(k, v)| check_entry(k, v).is_err())
+            .count();
+        if legacy > 0 {
+            warn!(
+                path,
+                count = legacy,
+                "dyn_slots: loaded tags break the name or value rules; kept, but cannot be rewritten"
+            );
+        }
+        if self.bytes > self.max_total_bytes {
+            warn!(
+                path,
+                bytes = self.bytes,
+                max = self.max_total_bytes,
+                "dyn_slots: loaded tags exceed the byte budget; new tags are refused until some are removed"
+            );
+        }
 
         info!(
             path,
@@ -854,7 +1080,7 @@ mod tests {
         store.set(10, "b".into(), DynValue::Marker).unwrap();
         let err = store.set(10, "c".into(), DynValue::Marker);
         assert!(err.is_err());
-        assert!(err.unwrap_err().contains("max 2"));
+        assert!(err.unwrap_err().to_string().contains("max 2"));
     }
 
     #[test]
@@ -865,7 +1091,7 @@ mod tests {
         store.set(3, "c".into(), DynValue::Marker).unwrap();
         let err = store.set(4, "d".into(), DynValue::Marker);
         assert!(err.is_err());
-        assert!(err.unwrap_err().contains("limit 3"));
+        assert!(err.unwrap_err().to_string().contains("limit 3"));
     }
 
     #[test]
@@ -1615,5 +1841,295 @@ mod tests {
         store2.load(path_str).unwrap();
         // After load, the custom tag name should be interned.
         assert!(store2.interner().get_id("customTag").is_some());
+    }
+
+    // ── R-48 / S-46: name rule, value size, byte budget ──
+
+    fn s(v: &str) -> DynValue {
+        DynValue::Str(v.to_string())
+    }
+
+    #[test]
+    fn tag_name_rule() {
+        let max = format!("a{}", "b".repeat(MAX_TAG_NAME_BYTES - 1));
+        for ok in ["a", "dis", "navName", "devEUI", "a_1", "tag0", max.as_str()] {
+            assert!(is_valid_tag_name(ok), "{ok:?} should be valid");
+        }
+        let long = format!("a{}", "b".repeat(MAX_TAG_NAME_BYTES));
+        for bad in [
+            "",
+            "A",
+            "Dis",
+            "_replace",
+            "1a",
+            "a b",
+            "a-b",
+            "ç",
+            "aç",
+            "a\0",
+            long.as_str(),
+        ] {
+            assert!(!is_valid_tag_name(bad), "{bad:?} should be invalid");
+        }
+    }
+
+    #[test]
+    fn set_refuses_a_bad_name_and_writes_nothing() {
+        let mut store = DynSlotStore::with_defaults();
+        let err = store
+            .set(1, "Bad Key".into(), DynValue::Marker)
+            .unwrap_err();
+        assert!(matches!(err, DynSlotError::InvalidKey(_)));
+        assert!(!err.is_limit());
+        assert_eq!(store.total_count(), 0);
+        assert_eq!(store.total_bytes(), 0);
+        assert!(!store.is_dirty());
+    }
+
+    #[test]
+    fn value_size_boundary() {
+        let mut store = DynSlotStore::with_defaults();
+        let at = "x".repeat(MAX_TAG_VALUE_BYTES);
+        let over = "x".repeat(MAX_TAG_VALUE_BYTES + 1);
+        assert!(store.set(1, "dis".into(), s(&at)).is_ok());
+        let err = store.set(1, "geo".into(), s(&over)).unwrap_err();
+        assert!(
+            matches!(err, DynSlotError::ValueTooLarge { len, .. } if len == MAX_TAG_VALUE_BYTES + 1)
+        );
+        let err = store.set(1, "id".into(), DynValue::Ref(over)).unwrap_err();
+        assert!(matches!(err, DynSlotError::ValueTooLarge { .. }));
+        assert_eq!(store.total_count(), 1);
+    }
+
+    #[test]
+    fn byte_budget_is_kept_across_set_remove_and_set_all() {
+        let mut store = DynSlotStore::with_defaults().with_byte_limit(100);
+        store.set(1, "a".into(), s(&"x".repeat(40))).unwrap(); // 41
+        store.set(1, "b".into(), s(&"x".repeat(40))).unwrap(); // 82
+        let err = store.set(1, "c".into(), s(&"x".repeat(40))).unwrap_err();
+        assert!(err.is_limit());
+        assert_eq!(store.total_bytes(), 82);
+        // Growing an existing tag past the budget is refused, shrinking is fine.
+        assert!(store.set(1, "a".into(), s(&"x".repeat(60))).is_err());
+        store.set(1, "a".into(), s("y")).unwrap(); // 2 + 41
+        assert_eq!(store.total_bytes(), 43);
+        store.remove(1, "b");
+        assert_eq!(store.total_bytes(), 2);
+
+        let mut all = HashMap::new();
+        all.insert("p".to_string(), s(&"x".repeat(50)));
+        all.insert("q".to_string(), DynValue::Int(1));
+        store.set_all(2, all).unwrap(); // 51 + 9
+        assert_eq!(store.total_bytes(), 62);
+        let mut too_big = HashMap::new();
+        too_big.insert("r".to_string(), s(&"x".repeat(99)));
+        assert!(store.set_all(3, too_big).unwrap_err().is_limit());
+        store.remove_all(2);
+        assert_eq!(store.total_bytes(), 2);
+    }
+
+    #[test]
+    fn set_many_is_all_or_nothing() {
+        let mut store = DynSlotStore::new(3, 100);
+        store.set(1, "keep".into(), DynValue::Marker).unwrap();
+
+        let mut bad = HashMap::new();
+        bad.insert("good".to_string(), DynValue::Int(1));
+        bad.insert("Bad".to_string(), DynValue::Int(2));
+        assert!(matches!(
+            store.set_many(1, bad),
+            Err(DynSlotError::InvalidKey(_))
+        ));
+        assert_eq!(
+            store.tag_count(1),
+            1,
+            "nothing of a refused request is written"
+        );
+
+        let mut many = HashMap::new();
+        for k in ["x", "y", "z"] {
+            many.insert(k.to_string(), DynValue::Marker);
+        }
+        assert!(store.set_many(1, many).unwrap_err().is_limit());
+        assert_eq!(store.tag_count(1), 1);
+
+        let mut ok = HashMap::new();
+        ok.insert("keep".to_string(), DynValue::Int(5)); // replaces, no new slot
+        ok.insert("x".to_string(), DynValue::Marker);
+        ok.insert("y".to_string(), DynValue::Marker);
+        store.set_many(1, ok).unwrap();
+        assert_eq!(store.tag_count(1), 3);
+        assert_eq!(store.total_count(), 3);
+        assert_eq!(store.get(1, "keep"), Some(&DynValue::Int(5)));
+    }
+
+    #[test]
+    fn legacy_tags_are_kept_on_load_and_can_be_removed() {
+        let dir = std::env::temp_dir().join(format!("s46_dyn_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("dyn_slots.json");
+        let big = "x".repeat(MAX_TAG_VALUE_BYTES + 10);
+        let json = serde_json::json!({
+            "version": 1,
+            "slots": {"7": {
+                "Bad Key": {"type": "Marker"},
+                "dis": {"type": "Str", "val": big},
+                "ok": {"type": "Int", "val": 1}
+            }}
+        });
+        std::fs::write(&path, json.to_string()).unwrap();
+        let mut store = DynSlotStore::with_defaults();
+        assert_eq!(store.load(path.to_str().unwrap()).unwrap(), 3);
+        assert!(store.get(7, "Bad Key").is_some());
+        assert_eq!(store.total_bytes(), 7 + 8 + 3 + big.len() + 2 + 8);
+        // Not rewritable under the old name, but removable.
+        assert!(store.set(7, "Bad Key".into(), DynValue::Marker).is_err());
+        assert!(store.remove(7, "Bad Key").is_some());
+        assert!(store.remove(7, "dis").is_some());
+        assert_eq!(store.total_bytes(), 2 + 8);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn error_messages_cut_long_multibyte_names_safely() {
+        let name = "ğ".repeat(100); // 200 bytes, 2 per char
+        let msg = DynSlotError::InvalidKey(name).to_string();
+        assert!(msg.len() < 200);
+        let msg = DynSlotError::ValueTooLarge {
+            key: "é".repeat(40),
+            len: 9,
+        }
+        .to_string();
+        assert!(msg.contains("9 bytes"));
+    }
+
+    /// Bytes recomputed from the stored tags; must equal `total_bytes`.
+    fn recount(store: &DynSlotStore) -> usize {
+        store
+            .slots
+            .values()
+            .flat_map(|t| t.iter())
+            .map(|(k, v)| entry_bytes(k, v))
+            .sum()
+    }
+
+    #[test]
+    fn a_refused_set_leaves_no_empty_component() {
+        let mut store = DynSlotStore::new(1, 1);
+        store.set(1, "a".into(), DynValue::Marker).unwrap();
+        assert!(store
+            .set(2, "b".into(), DynValue::Marker)
+            .unwrap_err()
+            .is_limit());
+        assert_eq!(store.comp_ids(), vec![1]);
+    }
+
+    #[test]
+    fn set_many_accounting_and_interner_on_refusal() {
+        let mut store = DynSlotStore::with_defaults().with_byte_limit(100);
+        store.set(1, "a".into(), s("12345")).unwrap();
+        let mut mix = HashMap::new();
+        mix.insert("a".to_string(), s("1")); // replace, shrinks
+        mix.insert("b".to_string(), DynValue::Int(2)); // add
+        store.set_many(1, mix).unwrap();
+        assert_eq!(store.total_bytes(), recount(&store));
+        assert_eq!(store.total_bytes(), 2 + 9);
+
+        let names_before = store.interner().len();
+        let mut over = HashMap::new();
+        over.insert("fresh".to_string(), s(&"x".repeat(95)));
+        assert!(store.set_many(1, over).unwrap_err().is_limit());
+        let mut bad = HashMap::new();
+        bad.insert("other".to_string(), DynValue::Marker);
+        bad.insert("Nope".to_string(), DynValue::Marker);
+        assert!(store.set_many(1, bad).is_err());
+        assert_eq!(
+            store.interner().len(),
+            names_before,
+            "refusals intern nothing"
+        );
+        assert_eq!(store.get(1, "a"), Some(&s("1")));
+        assert_eq!(store.total_bytes(), recount(&store));
+    }
+
+    #[test]
+    fn byte_budget_exact_boundary() {
+        let mut store = DynSlotStore::with_defaults().with_byte_limit(20);
+        store.set(1, "a".into(), s(&"x".repeat(19))).unwrap(); // exactly 20
+        assert_eq!(store.total_bytes(), 20);
+        assert!(store
+            .set(1, "b".into(), DynValue::Marker)
+            .unwrap_err()
+            .is_limit());
+    }
+
+    #[test]
+    fn value_limit_counts_bytes_not_chars() {
+        let mut store = DynSlotStore::with_defaults();
+        let two_byte = "é".repeat(MAX_TAG_VALUE_BYTES / 2 + 1); // < 4096 chars, > 4096 bytes
+        assert!(two_byte.chars().count() < MAX_TAG_VALUE_BYTES);
+        let err = store.set(1, "dis".into(), s(&two_byte)).unwrap_err();
+        assert!(matches!(err, DynSlotError::ValueTooLarge { .. }));
+    }
+
+    #[test]
+    fn set_all_refused_keeps_the_component_as_it_was() {
+        let mut store = DynSlotStore::new(2, 100);
+        store.set(1, "a".into(), DynValue::Int(1)).unwrap();
+        store.set(1, "b".into(), DynValue::Int(2)).unwrap();
+        let mut bad = HashMap::new();
+        bad.insert("c".to_string(), DynValue::Int(3));
+        bad.insert("Bad".to_string(), DynValue::Int(4));
+        assert!(store.set_all(1, bad).is_err());
+        let mut too_many = HashMap::new();
+        for k in ["c", "d", "e"] {
+            too_many.insert(k.to_string(), DynValue::Marker);
+        }
+        assert!(store.set_all(1, too_many).unwrap_err().is_limit());
+        assert_eq!(store.get(1, "a"), Some(&DynValue::Int(1)));
+        assert_eq!(store.get(1, "b"), Some(&DynValue::Int(2)));
+        assert_eq!(store.total_bytes(), recount(&store));
+    }
+
+    #[test]
+    fn a_store_loaded_over_its_limits_can_shrink_but_not_grow() {
+        let dir = std::env::temp_dir().join(format!("s46_over_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("dyn_slots.json");
+        let tags: serde_json::Map<String, serde_json::Value> = (0..4)
+            .map(|i| {
+                (
+                    format!("t{i}"),
+                    serde_json::json!({"type": "Int", "val": i}),
+                )
+            })
+            .collect();
+        let json = serde_json::json!({"version": 1, "slots": {"1": tags, "2": {"Long Legacy Name": {"type": "Marker"}}}});
+        std::fs::write(&path, json.to_string()).unwrap();
+        // Limits below what the file holds: 2 per component, 3 in total.
+        let mut store = DynSlotStore::new(2, 3);
+        assert_eq!(store.load(path.to_str().unwrap()).unwrap(), 5);
+        assert!(
+            store.interner().get_id("Long Legacy Name").is_none(),
+            "legacy name not interned"
+        );
+        assert_eq!(store.total_bytes(), recount(&store));
+        // Growing is refused...
+        assert!(store
+            .set(3, "x".into(), DynValue::Marker)
+            .unwrap_err()
+            .is_limit());
+        // ...shrinking a component with a replace is allowed.
+        let mut fewer = HashMap::new();
+        fewer.insert("t0".to_string(), DynValue::Int(0));
+        fewer.insert("t1".to_string(), DynValue::Int(1));
+        fewer.insert("t2".to_string(), DynValue::Int(2));
+        store.set_all(1, fewer).unwrap();
+        assert_eq!(store.tag_count(1), 3);
+        assert_eq!(store.total_count(), 4);
+        // A legacy name can still be removed.
+        store.remove(2, "Long Legacy Name");
+        assert_eq!(store.total_bytes(), recount(&store));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

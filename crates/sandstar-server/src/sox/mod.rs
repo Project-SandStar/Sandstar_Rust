@@ -15,6 +15,7 @@ pub mod name_intern;
 pub mod sox_handlers;
 pub mod sox_ops;
 pub mod sox_protocol;
+pub mod write_queue;
 
 pub use sox_protocol::*;
 
@@ -23,7 +24,7 @@ use crate::sox::dasp::DaspTransport;
 use crate::sox::dyn_slots::DynSlotStore;
 use crate::sox::sox_handlers::{
     handle_put_chunk, handle_sox_request_with_dyn, is_put_transfer_active, parse_write_request,
-    ComponentTree, ManifestDb, SubscriptionManager,
+    release_stale_file_xfer, ComponentTree, ManifestDb, SubscriptionManager, SOX_FILE_XFER_IDLE,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -209,6 +210,8 @@ async fn run_sox_server(
     cleanup_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let mut tree_refresh_interval = tokio::time::interval(Duration::from_secs(1));
+    // Channel writes go through one bounded queue and one writer (R-40).
+    let mut write_queue = write_queue::SoxWriteQueue::spawn(engine_handle.clone());
     tree_refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Last refresh-failure warning; the refresh runs every second, so further
     // failures within REFRESH_WARN_INTERVAL are logged at debug.
@@ -244,13 +247,16 @@ async fn run_sox_server(
                         // chunk handler instead of the normal Invoke handler.
                         // In Sedona, 'k' is used for both invoke and file chunk transfer.
                         // During a put, chunks are received silently (no response).
-                        if payload.len() >= 2 && payload[0] == b'k' && is_put_transfer_active() {
+                        if payload.len() >= 2
+                            && payload[0] == b'k'
+                            && is_put_transfer_active(session_id)
+                        {
                             debug!(
                                 session = session_id,
                                 "SOX: routing 'k' to put chunk handler"
                             );
                             let chunk_payload = &payload[2..]; // skip cmd + replyNum
-                            handle_put_chunk(chunk_payload);
+                            handle_put_chunk(session_id, chunk_payload);
                             continue; // no response for put chunks
                         }
 
@@ -282,26 +288,18 @@ async fn run_sox_server(
                                     if let Some((channel_id, value)) =
                                         write_req.to_channel_write(&tree)
                                     {
-                                        info!(channel_id, value, "SOX: writing to engine");
-                                        let handle = engine_handle.clone();
-                                        // Fire-and-forget write (don't block the SOX loop).
-                                        tokio::spawn(async move {
-                                            if let Err(e) = handle
-                                                .write_channel(
-                                                    channel_id,
-                                                    Some(value),
-                                                    8, // priority level 8 (operator)
-                                                    "sox".to_string(),
-                                                    0.0,
-                                                )
-                                                .await
-                                            {
-                                                warn!(
-                                                    channel = channel_id,
-                                                    "SOX write failed: {e}"
-                                                );
-                                            }
-                                        });
+                                        // Queued without waiting (don't block the SOX loop).
+                                        if write_queue.submit(write_queue::WriteJob {
+                                            channel: channel_id,
+                                            value,
+                                            level: 8, // priority level 8 (operator)
+                                            who: "sox",
+                                        }) {
+                                            info!(
+                                                channel_id,
+                                                value, "SOX: write queued for the engine"
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -502,6 +500,9 @@ async fn run_sox_server(
                     subscriptions.unsubscribe_all(*sid);
                 }
                 transport.cleanup_expired();
+                // A file transfer whose session ended (expired or closed) or
+                // went quiet would otherwise hold the single slot (R-15).
+                release_stale_file_xfer(&transport.authenticated_sessions(), SOX_FILE_XFER_IDLE);
             }
             _ = tree_refresh_interval.tick() => {
                 // Refresh the component tree from engine channel data. The
@@ -535,8 +536,8 @@ async fn run_sox_server(
                             .copied()
                             .collect();
                         let channel_writes = tree.collect_channel_writes(&all_changed);
-                        // Collect writes to spawn after dropping the lock.
-                        let writes_to_spawn = channel_writes;
+                        // Queued after dropping the lock.
+                        let bridge_writes = channel_writes;
 
                         // On first tick after subscribe, queue ALL channel comps for burst push
                         if force_full_cov {
@@ -618,30 +619,19 @@ async fn run_sox_server(
                             }
                         }
 
-                        // Drop tree lock before spawning async writes.
                         drop(tree);
 
-                        // Fire-and-forget channel writes from logic→channel bridge.
-                        for (channel_id, value) in writes_to_spawn {
-                            info!(channel_id, value, "SOX: logic→channel write");
-                            let handle = engine_handle.clone();
-                            tokio::spawn(async move {
-                                if let Err(e) = handle
-                                    .write_channel(
-                                        channel_id,
-                                        Some(value),
-                                        17, // priority level 17 (default) — same as browser writes
-                                        "sox-logic".to_string(),
-                                        0.0,
-                                    )
-                                    .await
-                                {
-                                    warn!(
-                                        channel = channel_id,
-                                        "SOX logic→channel write failed: {e}"
-                                    );
-                                }
-                            });
+                        // Channel writes from the logic→channel bridge, queued
+                        // without waiting.
+                        for (channel_id, value) in bridge_writes {
+                            if write_queue.submit(write_queue::WriteJob {
+                                channel: channel_id,
+                                value,
+                                level: 17, // priority level 17 (default) — same as browser writes
+                                who: "sox-logic",
+                            }) {
+                                info!(channel_id, value, "SOX: logic→channel write queued");
+                            }
                         }
                     }
                     // Timeouts are already reported (rate-limited) by

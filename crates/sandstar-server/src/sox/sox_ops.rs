@@ -616,15 +616,21 @@ fn handle_set_tags(state: &SoxState, comp_id: u16, tags_val: &JsonValue) -> SoxR
         None => return SoxResponse::error("BAD_REQUEST", "'tags' must be a JSON object"),
     };
 
+    let tags = obj
+        .iter()
+        .map(|(key, val)| {
+            let dv = serde_json::from_value::<DynValue>(val.clone())
+                .unwrap_or_else(|_| crate::rest::tags::json_to_dynvalue(val));
+            (key.clone(), dv)
+        })
+        .collect();
     let mut store = crate::lock::write_or_recover(dyn_store, "dyn slot store");
-    for (key, val) in obj {
-        let dv = serde_json::from_value::<DynValue>(val.clone())
-            .unwrap_or_else(|_| crate::rest::tags::json_to_dynvalue(val));
-        if let Err(e) = store.set(comp_id, key.clone(), dv) {
-            return SoxResponse::error("LIMIT_EXCEEDED", e);
-        }
+    // All tags or none; a bad name or value is the request's fault (R-48).
+    match store.set_many(comp_id, tags) {
+        Ok(()) => SoxResponse::ok(serde_json::json!({ "ok": true })),
+        Err(e) if e.is_limit() => SoxResponse::error("LIMIT_EXCEEDED", e.to_string()),
+        Err(e) => SoxResponse::error("BAD_REQUEST", e.to_string()),
     }
-    SoxResponse::ok(serde_json::json!({ "ok": true }))
 }
 
 fn handle_delete_tag(state: &SoxState, comp_id: u16, key: &str) -> SoxResponse {

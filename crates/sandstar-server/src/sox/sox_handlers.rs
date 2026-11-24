@@ -4183,10 +4183,10 @@ pub fn handle_sox_request_with_dyn(
         SoxCmd::Link => handle_link(request, tree),
         SoxCmd::Reorder => handle_reorder(request, tree),
         SoxCmd::Invoke => handle_invoke(request, tree),
-        SoxCmd::FileOpen => handle_file_open(request),
-        SoxCmd::FileRead => handle_file_read(request),
-        SoxCmd::FileWrite => handle_file_write(request),
-        SoxCmd::FileClose => handle_file_close(request),
+        SoxCmd::FileOpen => handle_file_open(request, session_id),
+        SoxCmd::FileRead => handle_file_read(request, session_id),
+        SoxCmd::FileWrite => handle_file_write(request, session_id),
+        SoxCmd::FileClose => handle_file_close(request, session_id),
         SoxCmd::FileRename => handle_file_rename(request),
         _ => error_msg(request.cmd, request.req_id, "unsupported command"),
     }
@@ -4194,10 +4194,23 @@ pub fn handle_sox_request_with_dyn(
 
 // ---- SOX File Transfer ----
 
+use std::path::{Component, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
-/// Global file transfer state for SOX file get/put operations.
+/// The one active SOX file transfer (get or put). It belongs to the DASP
+/// session that opened it; other sessions get "busy" (R-15, S-45).
 static SOX_FILE_XFER: Mutex<Option<SoxFileXfer>> = Mutex::new(None);
+
+/// Session whose open put was dropped by `release_stale_file_xfer`; its next
+/// fileClose gets "transfer expired" instead of a success (nothing was written).
+static SOX_FILE_XFER_DROPPED: Mutex<Option<u16>> = Mutex::new(None);
+
+/// A transfer whose owner sends nothing for this long is dropped.
+pub const SOX_FILE_XFER_IDLE: Duration = Duration::from_secs(60);
+
+/// Largest file a put may announce.
+const SOX_PUT_MAX_SIZE: usize = 10 * 1024 * 1024;
 
 /// Transfer mode: reading (get) or writing (put).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4207,20 +4220,181 @@ enum SoxFileXferMode {
 }
 
 struct SoxFileXfer {
+    /// DASP session that opened the transfer.
+    owner: u16,
+    /// Last accepted request from the owner; see `SOX_FILE_XFER_IDLE`.
+    last_activity: Instant,
     /// For GET: the full file data. For PUT: a pre-allocated buffer filled by chunks.
     data: Vec<u8>,
     chunk_size: usize,
     mode: SoxFileXferMode,
-    /// PUT only: the file path to write to when transfer is complete.
+    /// PUT only: the requested path, validated again (and its directories
+    /// created) at fileClose, just before the write.
     write_path: Option<String>,
-    /// PUT only: total expected file size.
+    /// GET: bytes served from `offset`. PUT: total expected file size.
     file_size: usize,
     /// PUT only: total number of expected chunks.
     num_chunks: usize,
-    /// PUT only: count of chunks received so far.
+    /// PUT only: count of distinct chunks received so far.
     chunks_received: usize,
-    /// PUT only: byte offset for writing (from fileOpen headers).
+    /// PUT only: one bit per chunk, set when that chunk arrived.
+    received: Vec<u64>,
+    /// PUT only: chunks refused (bad size, number or payload). The first is
+    /// logged at warn, the rest at debug; the count is logged at the end.
+    rejected: usize,
+    /// GET only: byte offset in the file (from fileOpen headers).
     offset: usize,
+}
+
+impl SoxFileXfer {
+    fn get(owner: u16, data: Vec<u8>, chunk_size: usize, file_size: usize, offset: usize) -> Self {
+        Self {
+            owner,
+            last_activity: Instant::now(),
+            data,
+            chunk_size,
+            mode: SoxFileXferMode::Get,
+            write_path: None,
+            file_size,
+            num_chunks: 0,
+            chunks_received: 0,
+            received: Vec::new(),
+            rejected: 0,
+            offset,
+        }
+    }
+
+    /// `chunk_size` must be > 0.
+    fn put(owner: u16, file_size: usize, chunk_size: usize, write_path: Option<String>) -> Self {
+        // Sedona: even a zero-byte file has one (empty) chunk.
+        let num_chunks = file_size.div_ceil(chunk_size).max(1);
+        Self {
+            owner,
+            last_activity: Instant::now(),
+            data: vec![0u8; file_size],
+            chunk_size,
+            mode: SoxFileXferMode::Put,
+            write_path,
+            file_size,
+            num_chunks,
+            chunks_received: 0,
+            received: vec![0u64; num_chunks.div_ceil(64)],
+            rejected: 0,
+            offset: 0,
+        }
+    }
+
+    /// Every chunk arrived (a zero-byte put needs none).
+    fn put_complete(&self) -> bool {
+        self.file_size == 0 || self.chunks_received == self.num_chunks
+    }
+
+    /// Copy one put chunk into the buffer. The chunk must have exactly the
+    /// length its position calls for, so a complete set of chunks fills the
+    /// whole buffer. A repeated chunk overwrites and is not counted twice.
+    fn store_chunk(&mut self, chunk_num: usize, chunk: &[u8]) -> Result<(), &'static str> {
+        if self.mode != SoxFileXferMode::Put {
+            return Err("not in put mode");
+        }
+        if chunk_num >= self.num_chunks {
+            return Err("chunk out of range");
+        }
+        let start = chunk_num
+            .checked_mul(self.chunk_size)
+            .ok_or("chunk out of range")?;
+        let expected = self.file_size.saturating_sub(start).min(self.chunk_size);
+        if chunk.len() != expected {
+            return Err("bad chunk size");
+        }
+        let end = start.checked_add(expected).ok_or("chunk out of range")?;
+        let dst = self.data.get_mut(start..end).ok_or("chunk out of range")?;
+        dst.copy_from_slice(chunk);
+        // INVARIANT: chunk_num < num_chunks, received has num_chunks bits.
+        let (word, bit) = (chunk_num / 64, 1u64 << (chunk_num % 64));
+        if let Some(w) = self.received.get_mut(word) {
+            if *w & bit == 0 {
+                *w |= bit;
+                self.chunks_received += 1;
+            }
+        }
+        self.last_activity = Instant::now();
+        Ok(())
+    }
+
+    /// Count a refused chunk; only the first per transfer is a warning, so
+    /// a client sending bad chunks cannot flood the log.
+    fn note_rejected(&mut self, chunk_num: Option<usize>, len: usize, msg: &str) {
+        self.rejected += 1;
+        if self.rejected == 1 {
+            tracing::warn!(
+                session = self.owner,
+                chunk_num,
+                len,
+                msg,
+                "SOX: put chunk rejected (further rejections at debug)"
+            );
+        } else {
+            tracing::debug!(
+                session = self.owner,
+                chunk_num,
+                len,
+                msg,
+                "SOX: put chunk rejected"
+            );
+        }
+    }
+
+    /// Bytes of GET chunk `chunk_num`, or `None` past the end.
+    fn get_chunk(&self, chunk_num: usize) -> Option<&[u8]> {
+        let start = chunk_num
+            .checked_mul(self.chunk_size)?
+            .checked_add(self.offset)?;
+        let limit = self
+            .offset
+            .checked_add(self.file_size)?
+            .min(self.data.len());
+        let end = start.saturating_add(self.chunk_size).min(limit);
+        if start >= end {
+            return None;
+        }
+        self.data.get(start..end)
+    }
+}
+
+/// The transfer, only when `session` owns it.
+fn owned_xfer<'a>(
+    guard: &'a mut std::sync::MutexGuard<'static, Option<SoxFileXfer>>,
+    session: u16,
+) -> Option<&'a mut SoxFileXfer> {
+    guard.as_mut().filter(|x| x.owner == session)
+}
+
+/// Drop the transfer when its session is no longer in `live_sessions`
+/// (expired or closed) or it has been idle for `idle`. Called from the SOX
+/// loop's cleanup tick. A dropped put leaves a mark so the owner's later
+/// fileClose reports it instead of a success.
+pub fn release_stale_file_xfer(live_sessions: &[u16], idle: Duration) {
+    let mut xfer = crate::lock::lock_or_recover(&SOX_FILE_XFER, "SOX file transfer");
+    let reason = match xfer.as_ref() {
+        Some(x) if !live_sessions.contains(&x.owner) => "session ended",
+        Some(x) if x.last_activity.elapsed() >= idle => "idle",
+        _ => return,
+    };
+    let Some(x) = xfer.take() else { return };
+    drop(xfer);
+    tracing::warn!(
+        session = x.owner,
+        mode = ?x.mode,
+        chunks = x.chunks_received,
+        expected = x.num_chunks,
+        rejected = x.rejected,
+        reason,
+        "SOX: file transfer dropped without fileClose (nothing written)"
+    );
+    if x.mode == SoxFileXferMode::Put {
+        *crate::lock::lock_or_recover(&SOX_FILE_XFER_DROPPED, "SOX dropped transfer") =
+            Some(x.owner);
+    }
 }
 
 const SOX_CHUNK_SIZE: usize = 256;
@@ -4229,20 +4403,24 @@ const MANIFESTS_DIR: &str = "/home/eacio/sandstar/etc/manifests";
 /// Allowed directories for file writes (put operations).
 const WRITE_ALLOWED_DIRS: &[&str] = &[MANIFESTS_DIR, "/home/eacio/sandstar/etc/config", "/tmp"];
 
-/// Return the list of allowed write directories, including the system temp dir on non-Linux.
-fn allowed_write_dirs() -> Vec<String> {
-    let mut dirs: Vec<String> = WRITE_ALLOWED_DIRS.iter().map(|s| s.to_string()).collect();
-    // On non-Linux (e.g. Windows dev), also allow the OS temp directory.
-    // Canonicalize to handle 8.3 short name → long name differences on Windows.
-    let temp_dir = std::env::temp_dir();
-    let temp_canonical = std::fs::canonicalize(&temp_dir).unwrap_or(temp_dir);
-    let temp_str = temp_canonical.to_string_lossy().into_owned();
-    // Normalize trailing separator
-    let temp_normalized = temp_str.trim_end_matches(['/', '\\']).to_string();
-    if !dirs.contains(&temp_normalized) {
-        dirs.push(temp_normalized);
+/// Allowed write directories. Off Linux (Windows dev) the OS temp directory
+/// is added; on the device `TMPDIR` must not widen the list.
+fn allowed_write_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = WRITE_ALLOWED_DIRS.iter().map(PathBuf::from).collect();
+    if cfg!(not(target_os = "linux")) {
+        let temp = std::env::temp_dir();
+        if !dirs.contains(&temp) {
+            dirs.push(temp);
+        }
     }
     dirs
+}
+
+fn read_allowed_dirs() -> Vec<PathBuf> {
+    [KITS_BASE_DIR, MANIFESTS_DIR]
+        .iter()
+        .map(PathBuf::from)
+        .collect()
 }
 
 /// Resolve a SOX file URI to a local filesystem path.
@@ -4269,65 +4447,198 @@ fn resolve_sox_uri(uri: &str) -> Result<String, &'static str> {
     }
 }
 
-/// Check that a resolved path has no traversal tricks and stays within allowed directories.
-///
-/// For reads: must be under KITS_BASE_DIR or MANIFESTS_DIR.
-/// For writes: must be under one of WRITE_ALLOWED_DIRS.
-fn validate_path(local_path: &str, allow_write: bool) -> Result<std::path::PathBuf, &'static str> {
-    // Basic path traversal checks
-    if local_path.contains("..") || local_path.contains('\0') {
+/// What a validated path is used for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathUse {
+    /// Read an existing file under the kits or manifests directory.
+    Read,
+    /// Check a write target without touching the disk (fileOpen put).
+    WriteCheck,
+    /// Write target: missing directories are created after the checks pass
+    /// (fileClose, rename destination).
+    Write,
+    /// The source of a rename: must exist, not be a link, and lie in an
+    /// allowed write directory; nothing is created.
+    RenameSource,
+}
+
+/// `path` is one of `dirs` or below it, compared by path components
+/// (`/tmp` does not admit `/tmpX`).
+fn under_any(path: &Path, dirs: &[PathBuf]) -> bool {
+    dirs.iter().any(|d| path.starts_with(d))
+}
+
+/// `dirs` with links resolved, as far as they exist: the existing part is
+/// canonicalized and the missing rest appended.
+fn canonical_dirs(dirs: &[PathBuf]) -> Result<Vec<PathBuf>, &'static str> {
+    dirs.iter().map(|d| resolve_existing(d)).collect()
+}
+
+/// `path` with its longest existing prefix canonicalized (links resolved)
+/// and the remaining, not yet existing components appended. Where a
+/// missing directory would really be created. A stat error is an error,
+/// never "missing".
+fn resolve_existing(path: &Path) -> Result<PathBuf, &'static str> {
+    let mut rest: Vec<&std::ffi::OsStr> = Vec::new();
+    for anc in path.ancestors() {
+        match anc.try_exists() {
+            Ok(true) => {
+                let mut out = std::fs::canonicalize(anc).map_err(|e| {
+                    tracing::warn!(path = ?anc, err = %e, "SOX: cannot resolve path");
+                    "invalid path"
+                })?;
+                out.extend(rest.iter().rev());
+                return Ok(out);
+            }
+            Ok(false) => match anc.file_name() {
+                Some(name) => rest.push(name),
+                None => return Err("invalid path"),
+            },
+            Err(e) => {
+                tracing::warn!(path = ?anc, err = %e, "SOX: cannot stat path");
+                return Err("invalid path");
+            }
+        }
+    }
+    Err("invalid path")
+}
+
+/// Check a resolved path before any file system change (R-15).
+fn validate_path(local_path: &str, use_: PathUse) -> Result<PathBuf, &'static str> {
+    validate_path_in(
+        local_path,
+        use_,
+        &allowed_write_dirs(),
+        &read_allowed_dirs(),
+    )
+}
+
+/// Order: syntax (NUL, `..` component, absolute) → allow-list on the path
+/// as written → allow-list on the real location (existing part resolved,
+/// links followed) → only for `Write`: create missing directories and check
+/// the canonical parent again. The final component must not be a link.
+/// Every comparison is by path component.
+fn validate_path_in(
+    local_path: &str,
+    use_: PathUse,
+    write_dirs: &[PathBuf],
+    read_dirs: &[PathBuf],
+) -> Result<PathBuf, &'static str> {
+    let path = Path::new(local_path);
+    if local_path.contains('\0')
+        || !path.is_absolute()
+        || path.components().any(|c| c == Component::ParentDir)
+    {
         return Err("invalid path");
     }
 
-    // For writes, the file may not exist yet, so canonicalize the parent directory
-    if allow_write {
-        let write_dirs = allowed_write_dirs();
-        let path = std::path::Path::new(local_path);
-        if let Some(parent) = path.parent() {
-            // Ensure parent directory exists (create if needed for writes)
-            if !parent.exists() && std::fs::create_dir_all(parent).is_err() {
-                return Err("cannot create directory");
-            }
-            let canonical_parent = std::fs::canonicalize(parent).map_err(|_| "invalid path")?;
-            let parent_str = canonical_parent.to_string_lossy();
-            if !write_dirs
-                .iter()
-                .any(|d| parent_str.starts_with(d.as_str()))
-            {
-                return Err("invalid path");
-            }
-            // Return the full path with canonical parent + original filename
-            if let Some(filename) = path.file_name() {
-                Ok(canonical_parent.join(filename))
-            } else {
-                Err("invalid path")
-            }
-        } else {
-            Err("invalid path")
-        }
-    } else {
-        let read_dirs: &[&str] = &[KITS_BASE_DIR, MANIFESTS_DIR];
-        let canonical = std::fs::canonicalize(local_path).map_err(|_| "file not found")?;
-        let canonical_str = canonical.to_string_lossy();
-        if !read_dirs.iter().any(|d| canonical_str.starts_with(d)) {
+    if use_ == PathUse::Read {
+        let canonical = std::fs::canonicalize(path).map_err(|_| "file not found")?;
+        if !under_any(&canonical, &canonical_dirs(read_dirs)?) {
             return Err("invalid path");
         }
-        Ok(canonical)
+        return Ok(canonical);
     }
+
+    let parent = path.parent().ok_or("invalid path")?;
+    let filename = path.file_name().ok_or("invalid path")?;
+    if !under_any(parent, write_dirs) {
+        return Err("invalid path");
+    }
+    let canonical_write_dirs = canonical_dirs(write_dirs)?;
+
+    // Where the file really lands, links in existing ancestors followed.
+    let real_parent = resolve_existing(parent)?;
+    if !under_any(&real_parent, &canonical_write_dirs) {
+        return Err("invalid path");
+    }
+
+    let parent_exists = parent.try_exists().map_err(|e| {
+        tracing::warn!(dir = ?parent, err = %e, "SOX: cannot stat directory");
+        "invalid path"
+    })?;
+    let final_parent = match (use_, parent_exists) {
+        (PathUse::RenameSource, false) => return Err("not found"),
+        (PathUse::WriteCheck, false) => real_parent,
+        (PathUse::Write, false) => {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                tracing::warn!(dir = ?parent, err = %e, "SOX: cannot create directory");
+                "cannot create directory"
+            })?;
+            let canonical = std::fs::canonicalize(parent).map_err(|e| {
+                tracing::warn!(dir = ?parent, err = %e, "SOX: cannot resolve directory");
+                "invalid path"
+            })?;
+            if !under_any(&canonical, &canonical_write_dirs) {
+                return Err("invalid path");
+            }
+            canonical
+        }
+        _ => real_parent,
+    };
+
+    let full = final_parent.join(filename);
+    match std::fs::symlink_metadata(&full) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            tracing::warn!(path = ?full, "SOX: refusing a symbolic link as file target");
+            Err("invalid path")
+        }
+        Ok(_) => Ok(full),
+        Err(_) if use_ == PathUse::RenameSource => Err("not found"),
+        Err(_) => Ok(full),
+    }
+}
+
+/// Write `data` to `path` atomically: a new temp file in the same
+/// directory (never an existing file or link), flushed, then renamed over
+/// the target. A failure leaves the old file as it was.
+fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let dir = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("no parent directory"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("no file name"))?;
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(name);
+    tmp_name.push(format!(".sox-{}.tmp", std::process::id()));
+    let tmp = dir.join(tmp_name);
+
+    let result = (|| {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp); // best effort; the error below is what counts
+    }
+    result
 }
 
 /// fileOpen ('f') — open a file for get (reading) or put (writing).
 ///
 /// Request: str method, str uri, i4 fileSize, u2 chunkSize, headers[]
 /// Response: u4 fileSize, u2 chunkSize, u1 end-of-headers(0x00)
-fn handle_file_open(req: &SoxRequest) -> SoxResponse {
+fn handle_file_open(req: &SoxRequest, session: u16) -> SoxResponse {
     let mut reader = SoxReader::new(&req.payload);
-    let method = reader.read_str().unwrap_or_default();
-    let uri = reader.read_str().unwrap_or_default();
-    let file_size = reader.read_u32().unwrap_or(0) as usize;
-    let mut chunk_size = reader.read_u16().unwrap_or(SOX_CHUNK_SIZE as u16) as usize;
+    let (Some(method), Some(uri), Some(file_size), Some(chunk_size)) = (
+        reader.read_str(),
+        reader.read_str(),
+        reader.read_u32(),
+        reader.read_u16(),
+    ) else {
+        tracing::warn!(session, len = req.payload.len(), "SOX: fileOpen truncated");
+        return error_msg(SoxCmd::FileOpen, req.req_id, "bad request");
+    };
+    let file_size = file_size as usize;
+    let mut chunk_size = chunk_size as usize;
 
-    tracing::info!(method = %method, uri = %uri, file_size, chunk_size, "SOX: fileOpen");
+    tracing::info!(session, method = %method, uri = %uri, file_size, chunk_size, "SOX: fileOpen");
 
     // Parse optional headers (key-value pairs terminated by empty string)
     let mut offset: usize = 0;
@@ -4338,7 +4649,10 @@ fn handle_file_open(req: &SoxRequest) -> SoxResponse {
             Some(key) => {
                 let val = reader.read_str().unwrap_or_default();
                 match key.as_str() {
-                    "offset" => offset = val.parse().unwrap_or(0),
+                    "offset" => match val.parse() {
+                        Ok(v) => offset = v,
+                        Err(_) => return error_msg(SoxCmd::FileOpen, req.req_id, "bad offset"),
+                    },
                     "mode" => _mode = val,
                     _ => {} // ignore unknown headers
                 }
@@ -4352,171 +4666,212 @@ fn handle_file_open(req: &SoxRequest) -> SoxResponse {
         chunk_size = SOX_CHUNK_SIZE;
     }
 
+    // Another session's transfer: busy, before anything else is done.
+    {
+        let xfer = crate::lock::lock_or_recover(&SOX_FILE_XFER, "SOX file transfer");
+        if matches!(xfer.as_ref(), Some(x) if x.owner != session) {
+            return error_msg(SoxCmd::FileOpen, req.req_id, "busy");
+        }
+    }
+
     let local_path = match resolve_sox_uri(&uri) {
         Ok(p) => p,
         Err(msg) => return error_msg(SoxCmd::FileOpen, req.req_id, msg),
     };
 
-    // Check if a transfer is already active
-    {
-        let xfer = crate::lock::lock_or_recover(&SOX_FILE_XFER, "SOX file transfer");
-        if xfer.is_some() {
-            return error_msg(SoxCmd::FileOpen, req.req_id, "busy");
-        }
-    }
-
-    match method.as_str() {
+    let (file, size_u32) = match method.as_str() {
         "g" => {
             // --- GET: read file from disk ---
-            let canonical = match validate_path(&local_path, false) {
+            let canonical = match validate_path(&local_path, PathUse::Read) {
                 Ok(p) => p,
                 Err(msg) => {
                     tracing::warn!(path = %local_path, msg, "SOX: fileOpen get rejected");
                     return error_msg(SoxCmd::FileOpen, req.req_id, msg);
                 }
             };
-
-            match std::fs::read(&canonical) {
-                Ok(data) => {
-                    let actual_size = data.len();
-                    // If the client requested a specific size with offset, cap accordingly
-                    let effective_size = if file_size == 0 {
-                        actual_size.saturating_sub(offset)
-                    } else {
-                        file_size.min(actual_size.saturating_sub(offset))
-                    };
-
-                    tracing::info!(path = ?canonical, size = effective_size, "SOX: fileOpen GET OK");
-
-                    let mut xfer =
-                        crate::lock::lock_or_recover(&SOX_FILE_XFER, "SOX file transfer");
-                    *xfer = Some(SoxFileXfer {
-                        data,
-                        chunk_size,
-                        mode: SoxFileXferMode::Get,
-                        write_path: None,
-                        file_size: effective_size,
-                        num_chunks: 0, // not used for get
-                        chunks_received: 0,
-                        offset,
-                    });
-
-                    let mut resp = SoxResponse::success(SoxCmd::FileOpen, req.req_id);
-                    resp.write_u32(effective_size as u32);
-                    resp.write_u16(chunk_size as u16);
-                    resp.write_u8(0x00); // end of headers
-                    resp
-                }
+            let data = match std::fs::read(&canonical) {
+                Ok(d) => d,
                 Err(e) => {
                     tracing::warn!(path = ?canonical, err = %e, "SOX: fileOpen read failed");
-                    error_msg(SoxCmd::FileOpen, req.req_id, "file not found")
+                    return error_msg(SoxCmd::FileOpen, req.req_id, "file not found");
                 }
-            }
+            };
+            let actual_size = data.len();
+            // If the client requested a specific size with offset, cap accordingly
+            let effective_size = if file_size == 0 {
+                actual_size.saturating_sub(offset)
+            } else {
+                file_size.min(actual_size.saturating_sub(offset))
+            };
+            let Ok(size_u32) = u32::try_from(effective_size) else {
+                return error_msg(SoxCmd::FileOpen, req.req_id, "too big");
+            };
+            tracing::info!(path = ?canonical, size = effective_size, "SOX: fileOpen GET OK");
+            (
+                SoxFileXfer::get(session, data, chunk_size, effective_size, offset),
+                size_u32,
+            )
         }
         "p" => {
             // --- PUT: prepare to receive file data from client ---
-            let validated_path = match validate_path(&local_path, true) {
-                Ok(p) => p,
-                Err(msg) => {
-                    tracing::warn!(path = %local_path, msg, "SOX: fileOpen put rejected");
-                    return error_msg(SoxCmd::FileOpen, req.req_id, msg);
-                }
-            };
-            let write_path_str = validated_path.to_string_lossy().into_owned();
-
-            // Compute number of chunks
-            let num_chunks = if file_size == 0 {
-                1 // Sedona spec: even zero-byte files get one chunk
-            } else {
-                file_size.div_ceil(chunk_size)
-            };
-
-            // Size limit: 10MB max
-            if file_size > 10 * 1024 * 1024 {
+            if file_size > SOX_PUT_MAX_SIZE {
                 return error_msg(SoxCmd::FileOpen, req.req_id, "too big");
             }
-
-            tracing::info!(path = %write_path_str, file_size, num_chunks, chunk_size, "SOX: fileOpen PUT OK");
-
-            let mut xfer = crate::lock::lock_or_recover(&SOX_FILE_XFER, "SOX file transfer");
-            *xfer = Some(SoxFileXfer {
-                data: vec![0u8; file_size],
-                chunk_size,
-                mode: SoxFileXferMode::Put,
-                write_path: Some(write_path_str),
+            // The buffer is written whole at fileClose; a put at an offset
+            // was never written where asked (S-45).
+            if offset != 0 {
+                return error_msg(SoxCmd::FileOpen, req.req_id, "offset not supported");
+            }
+            // Checked now, touched nothing: directories are created and the
+            // path checked again at fileClose, right before the write.
+            if let Err(msg) = validate_path(&local_path, PathUse::WriteCheck) {
+                tracing::warn!(path = %local_path, msg, "SOX: fileOpen put rejected");
+                return error_msg(SoxCmd::FileOpen, req.req_id, msg);
+            }
+            let file = SoxFileXfer::put(session, file_size, chunk_size, Some(local_path));
+            tracing::info!(
+                path = file.write_path.as_deref().unwrap_or_default(),
                 file_size,
-                num_chunks,
-                chunks_received: 0,
-                offset,
-            });
-
-            let mut resp = SoxResponse::success(SoxCmd::FileOpen, req.req_id);
-            resp.write_u32(file_size as u32);
-            resp.write_u16(chunk_size as u16);
-            resp.write_u8(0x00); // end of headers
-            resp
+                num_chunks = file.num_chunks,
+                chunk_size,
+                "SOX: fileOpen PUT OK"
+            );
+            // INVARIANT: file_size <= SOX_PUT_MAX_SIZE fits in u32.
+            (file, file_size as u32)
         }
-        _ => error_msg(SoxCmd::FileOpen, req.req_id, "bad method"),
+        _ => return error_msg(SoxCmd::FileOpen, req.req_id, "bad method"),
+    };
+
+    // Install. The owner's previous transfer is replaced only now, so a
+    // refused fileOpen leaves it as it was.
+    let mut xfer = crate::lock::lock_or_recover(&SOX_FILE_XFER, "SOX file transfer");
+    match xfer.as_ref() {
+        Some(x) if x.owner != session => {
+            return error_msg(SoxCmd::FileOpen, req.req_id, "busy");
+        }
+        Some(x) => tracing::warn!(
+            session,
+            mode = ?x.mode,
+            chunks = x.chunks_received,
+            expected = x.num_chunks,
+            "SOX: fileOpen replaces this session's open transfer (nothing written)"
+        ),
+        None => {}
     }
+    *xfer = Some(file);
+    drop(xfer);
+    let mut dropped = crate::lock::lock_or_recover(&SOX_FILE_XFER_DROPPED, "SOX dropped transfer");
+    if *dropped == Some(session) {
+        *dropped = None;
+    }
+
+    let mut resp = SoxResponse::success(SoxCmd::FileOpen, req.req_id);
+    resp.write_u32(size_u32);
+    resp.write_u16(chunk_size as u16);
+    resp.write_u8(0x00); // end of headers
+    resp
 }
 
 /// fileRead ('g') — read a chunk of the open file.
 /// Request: u2 chunkNum
 /// Response: raw chunk bytes
-fn handle_file_read(req: &SoxRequest) -> SoxResponse {
+fn handle_file_read(req: &SoxRequest, session: u16) -> SoxResponse {
     let mut reader = SoxReader::new(&req.payload);
-    let chunk_num = reader.read_u16().unwrap_or(0) as usize;
+    let Some(chunk_num) = reader.read_u16() else {
+        return error_msg(SoxCmd::FileRead, req.req_id, "bad chunk");
+    };
 
-    let xfer = crate::lock::lock_or_recover(&SOX_FILE_XFER, "SOX file transfer");
-    if let Some(ref file) = *xfer {
-        if file.mode != SoxFileXferMode::Get {
-            return error_msg(SoxCmd::FileRead, req.req_id, "not in get mode");
-        }
-        let start = match chunk_num.checked_mul(file.chunk_size) {
-            Some(s) => s + file.offset,
-            None => return error_msg(SoxCmd::FileRead, req.req_id, "chunk out of range"),
-        };
-        let end = (start + file.chunk_size)
-            .min(file.offset + file.file_size)
-            .min(file.data.len());
-
-        if start < file.data.len() && start < file.offset + file.file_size {
+    let mut guard = crate::lock::lock_or_recover(&SOX_FILE_XFER, "SOX file transfer");
+    let Some(file) = owned_xfer(&mut guard, session) else {
+        return error_msg(SoxCmd::FileRead, req.req_id, "no file open");
+    };
+    if file.mode != SoxFileXferMode::Get {
+        return error_msg(SoxCmd::FileRead, req.req_id, "not in get mode");
+    }
+    file.last_activity = Instant::now();
+    match file.get_chunk(chunk_num as usize) {
+        Some(bytes) => {
             let mut resp = SoxResponse::success(SoxCmd::FileRead, req.req_id);
-            resp.write_bytes(&file.data[start..end]);
+            resp.write_bytes(bytes);
             resp
-        } else {
-            error_msg(SoxCmd::FileRead, req.req_id, "chunk out of range")
         }
-    } else {
-        error_msg(SoxCmd::FileRead, req.req_id, "no file open")
+        None => error_msg(SoxCmd::FileRead, req.req_id, "chunk out of range"),
     }
 }
 
 /// fileClose ('z'/'q') — close the current file transfer.
 ///
 /// For GET: simply releases the file data.
-/// For PUT: writes the received data to disk, then releases the transfer state.
-fn handle_file_close(req: &SoxRequest) -> SoxResponse {
-    let mut xfer = crate::lock::lock_or_recover(&SOX_FILE_XFER, "SOX file transfer");
-    if let Some(ref file) = *xfer {
-        if file.mode == SoxFileXferMode::Put {
-            if let Some(ref path) = file.write_path {
-                tracing::info!(
-                    path,
-                    chunks = file.chunks_received,
-                    size = file.data.len(),
-                    "SOX: fileClose — flushing PUT to disk"
-                );
-                if let Err(e) = std::fs::write(path, &file.data) {
-                    tracing::error!(path, err = %e, "SOX: fileClose — failed to write file");
-                    *xfer = None;
-                    return error_msg(SoxCmd::FileClose, req.req_id, "write failed");
+/// For PUT: writes the received data to disk (atomically) if every chunk
+/// arrived; otherwise nothing is written and "incomplete" is returned
+/// (S-45). The transfer is released in every case. A put that was dropped
+/// as stale answers "transfer expired".
+fn handle_file_close(req: &SoxRequest, session: u16) -> SoxResponse {
+    let mut guard = crate::lock::lock_or_recover(&SOX_FILE_XFER, "SOX file transfer");
+    if owned_xfer(&mut guard, session).is_none() {
+        let others = guard.is_some();
+        drop(guard);
+        let mut dropped =
+            crate::lock::lock_or_recover(&SOX_FILE_XFER_DROPPED, "SOX dropped transfer");
+        if *dropped == Some(session) {
+            *dropped = None;
+            tracing::warn!(
+                session,
+                "SOX: fileClose after the put was dropped (nothing written)"
+            );
+            return error_msg(SoxCmd::FileClose, req.req_id, "transfer expired");
+        }
+        if others {
+            // Another session's transfer: leave it alone.
+            return error_msg(SoxCmd::FileClose, req.req_id, "no file open");
+        }
+        tracing::info!(session, "SOX: fileClose (no transfer)");
+        return SoxResponse::success(SoxCmd::FileClose, req.req_id);
+    }
+    let Some(file) = guard.take() else {
+        return SoxResponse::success(SoxCmd::FileClose, req.req_id);
+    };
+    drop(guard);
+
+    if file.mode == SoxFileXferMode::Put {
+        let requested = file.write_path.as_deref().unwrap_or_default();
+        if !file.put_complete() {
+            tracing::warn!(
+                session,
+                path = requested,
+                chunks = file.chunks_received,
+                expected = file.num_chunks,
+                rejected = file.rejected,
+                "SOX: fileClose — put incomplete, nothing written"
+            );
+            return error_msg(SoxCmd::FileClose, req.req_id, "incomplete");
+        }
+        if file.write_path.is_some() {
+            // Checked again: the tree may have changed since fileOpen.
+            let path = match validate_path(requested, PathUse::Write) {
+                Ok(p) => p,
+                Err(msg) => {
+                    tracing::warn!(
+                        path = requested,
+                        msg,
+                        "SOX: fileClose — put target rejected"
+                    );
+                    return error_msg(SoxCmd::FileClose, req.req_id, msg);
                 }
+            };
+            tracing::info!(
+                path = ?path,
+                chunks = file.chunks_received,
+                size = file.data.len(),
+                "SOX: fileClose — flushing PUT to disk"
+            );
+            if let Err(e) = write_atomic(&path, &file.data) {
+                tracing::error!(path = ?path, err = %e, "SOX: fileClose — failed to write file");
+                return error_msg(SoxCmd::FileClose, req.req_id, "write failed");
             }
         }
     }
-    *xfer = None;
-    tracing::info!("SOX: fileClose");
+    tracing::info!(session, "SOX: fileClose");
     SoxResponse::success(SoxCmd::FileClose, req.req_id)
 }
 
@@ -4528,145 +4883,88 @@ fn handle_file_close(req: &SoxRequest) -> SoxResponse {
 ///
 /// Request: u2 chunkNum, u2 chunkSize, u1[chunkSize] data
 /// Response: 'H' + replyNum (success) or '!' + replyNum (error)
-///
-/// Also used internally by `handle_file_write_chunk` for 'k' during put.
-fn handle_file_write(req: &SoxRequest) -> SoxResponse {
-    handle_file_write_chunk_inner(&req.payload, req.req_id)
-}
-
-/// Process a file write chunk (shared implementation for 'h' and 'k' during put).
-///
-/// Payload format: u2(chunkNum) + u2(chunkSize) + u1[chunkSize](data)
-fn handle_file_write_chunk_inner(payload: &[u8], req_id: u8) -> SoxResponse {
-    let mut reader = SoxReader::new(payload);
-    let chunk_num = match reader.read_u16() {
-        Some(n) => n as usize,
-        None => return error_msg(SoxCmd::FileWrite, req_id, "bad chunk"),
+fn handle_file_write(req: &SoxRequest, session: u16) -> SoxResponse {
+    let mut guard = crate::lock::lock_or_recover(&SOX_FILE_XFER, "SOX file transfer");
+    let Some(file) = owned_xfer(&mut guard, session) else {
+        return error_msg(SoxCmd::FileWrite, req.req_id, "no file open");
     };
-    let chunk_data_size = match reader.read_u16() {
-        Some(n) => n as usize,
-        None => return error_msg(SoxCmd::FileWrite, req_id, "bad chunk"),
-    };
-    let chunk_data = match reader.read_bytes(chunk_data_size) {
-        Some(d) => d,
-        None => return error_msg(SoxCmd::FileWrite, req_id, "truncated chunk"),
-    };
-
-    let mut xfer = crate::lock::lock_or_recover(&SOX_FILE_XFER, "SOX file transfer");
-    if let Some(ref mut file) = *xfer {
-        if file.mode != SoxFileXferMode::Put {
-            return error_msg(SoxCmd::FileWrite, req_id, "not in put mode");
-        }
-
-        // Calculate write offset within the buffer
-        let write_start = file.offset + chunk_num * file.chunk_size;
-        let write_end = write_start + chunk_data_size;
-
-        if write_end > file.data.len() {
-            tracing::warn!(
+    let result = parse_put_chunk(&req.payload).and_then(|(n, chunk)| {
+        file.store_chunk(n, chunk)
+            .map(|()| n)
+            .map_err(|msg| (Some(n), chunk.len(), msg))
+    });
+    match result {
+        Ok(chunk_num) => {
+            tracing::debug!(
                 chunk_num,
-                chunk_data_size,
-                write_start,
-                write_end,
-                buf_len = file.data.len(),
-                "SOX: fileWrite chunk out of range"
+                received = file.chunks_received,
+                expected = file.num_chunks,
+                "SOX: fileWrite chunk received"
             );
-            return error_msg(SoxCmd::FileWrite, req_id, "chunk out of range");
+            SoxResponse::success(SoxCmd::FileWrite, req.req_id)
         }
-
-        file.data[write_start..write_end].copy_from_slice(chunk_data);
-        file.chunks_received += 1;
-
-        tracing::debug!(
-            chunk_num,
-            chunk_data_size,
-            received = file.chunks_received,
-            expected = file.num_chunks,
-            "SOX: fileWrite chunk received"
-        );
-
-        SoxResponse::success(SoxCmd::FileWrite, req_id)
-    } else {
-        error_msg(SoxCmd::FileWrite, req_id, "no file open")
+        Err((chunk_num, len, msg)) => {
+            file.note_rejected(chunk_num, len, msg);
+            error_msg(SoxCmd::FileWrite, req.req_id, msg)
+        }
     }
 }
 
-/// Check if there is an active PUT file transfer in progress.
+/// A refused put chunk: chunk number (if it could be read), payload length, message.
+type ChunkError = (Option<usize>, usize, &'static str);
+
+/// Parse a put chunk: u2(chunkNum) + u2(chunkSize) + u1[chunkSize](data).
+/// On error: (chunk number if read, payload length, message).
+fn parse_put_chunk(payload: &[u8]) -> Result<(usize, &[u8]), ChunkError> {
+    let mut reader = SoxReader::new(payload);
+    let bad = |n, msg| (n, payload.len(), msg);
+    let chunk_num = reader.read_u16().ok_or(bad(None, "bad chunk"))? as usize;
+    let len = reader.read_u16().ok_or(bad(Some(chunk_num), "bad chunk"))? as usize;
+    let data = reader
+        .read_bytes(len)
+        .ok_or(bad(Some(chunk_num), "truncated chunk"))?;
+    Ok((chunk_num, data))
+}
+
+/// True when `session` has a PUT transfer open.
 ///
-/// This is used by the dispatch loop to route 'k' messages to the chunk
-/// handler instead of the invoke handler when a put transfer is active.
-pub fn is_put_transfer_active() -> bool {
+/// The dispatch loop routes that session's 'k' messages to the chunk
+/// handler instead of the invoke handler; other sessions' 'k' stay invokes.
+pub fn is_put_transfer_active(session: u16) -> bool {
     let xfer = crate::lock::lock_or_recover(&SOX_FILE_XFER, "SOX file transfer");
-    matches!(&*xfer, Some(ref f) if f.mode == SoxFileXferMode::Put)
+    matches!(&*xfer, Some(f) if f.mode == SoxFileXferMode::Put && f.owner == session)
 }
 
 /// Handle a raw 'k' chunk message during a PUT transfer.
 ///
-/// Called from the dispatch loop when `is_put_transfer_active()` returns true.
+/// Called from the dispatch loop when `is_put_transfer_active(session)` is true.
 /// The payload is everything after the 2-byte SOX header (cmd + replyNum).
 ///
-/// Returns `None` if the chunk was processed but no response should be sent
-/// (matching Sedona behavior where chunk receipts are silent).
-pub fn handle_put_chunk(payload: &[u8]) -> Option<SoxResponse> {
-    // In Sedona, chunks during put don't get a response — the server just
-    // silently writes the data. But we log it for debugging.
-    let mut reader = SoxReader::new(payload);
-    let chunk_num = match reader.read_u16() {
-        Some(n) => n as usize,
-        None => {
-            tracing::warn!("SOX: bad put chunk — missing chunkNum");
-            return None;
-        }
+/// Returns `None`: chunk receipts are silent, as in Sedona. A rejected
+/// chunk is counted (first one logged at warn); fileClose then reports the
+/// put as incomplete.
+pub fn handle_put_chunk(session: u16, payload: &[u8]) -> Option<SoxResponse> {
+    let mut guard = crate::lock::lock_or_recover(&SOX_FILE_XFER, "SOX file transfer");
+    let Some(file) = owned_xfer(&mut guard, session) else {
+        // Only after the transfer was dropped between routing and here.
+        tracing::debug!(session, "SOX: put chunk without an open transfer");
+        return None;
     };
-    let chunk_data_size = match reader.read_u16() {
-        Some(n) => n as usize,
-        None => {
-            tracing::warn!("SOX: bad put chunk — missing chunkSize");
-            return None;
-        }
-    };
-    let chunk_data = match reader.read_bytes(chunk_data_size) {
-        Some(d) => d,
-        None => {
-            tracing::warn!("SOX: bad put chunk — truncated data");
-            return None;
-        }
-    };
-
-    let mut xfer = crate::lock::lock_or_recover(&SOX_FILE_XFER, "SOX file transfer");
-    if let Some(ref mut file) = *xfer {
-        if file.mode != SoxFileXferMode::Put {
-            tracing::warn!("SOX: received chunk but not in put mode");
-            return None;
-        }
-
-        let write_start = file.offset + chunk_num * file.chunk_size;
-        let write_end = write_start + chunk_data_size;
-
-        if write_end > file.data.len() {
-            tracing::warn!(
-                chunk_num,
-                chunk_data_size,
-                write_start,
-                write_end,
-                buf_len = file.data.len(),
-                "SOX: put chunk out of range"
-            );
-            return None;
-        }
-
-        file.data[write_start..write_end].copy_from_slice(chunk_data);
-        file.chunks_received += 1;
-
-        tracing::debug!(
+    let result = parse_put_chunk(payload).and_then(|(n, chunk)| {
+        file.store_chunk(n, chunk)
+            .map(|()| n)
+            .map_err(|msg| (Some(n), chunk.len(), msg))
+    });
+    match result {
+        Ok(chunk_num) => tracing::debug!(
             chunk_num,
-            chunk_data_size,
             received = file.chunks_received,
             expected = file.num_chunks,
             "SOX: put chunk received"
-        );
+        ),
+        Err((chunk_num, len, msg)) => file.note_rejected(chunk_num, len, msg),
     }
-    None // no response for put chunks (matches Sedona behavior)
+    None
 }
 
 /// fileRename ('b') — rename a file on the device.
@@ -4696,21 +4994,17 @@ fn handle_file_rename(req: &SoxRequest) -> SoxResponse {
         Err(msg) => return error_msg(SoxCmd::FileRename, req.req_id, msg),
     };
 
-    // Validate source path exists and is within allowed write dirs
-    let canonical_from = match validate_path(&from_path, true) {
+    // The source must exist within the allowed write dirs; nothing is created for it.
+    let canonical_from = match validate_path(&from_path, PathUse::RenameSource) {
         Ok(p) => p,
         Err(msg) => {
             tracing::warn!(from = %from_path, msg, "SOX: fileRename source rejected");
             return error_msg(SoxCmd::FileRename, req.req_id, msg);
         }
     };
-    // Source must actually exist
-    if !canonical_from.exists() {
-        return error_msg(SoxCmd::FileRename, req.req_id, "not found");
-    }
 
     // Validate destination path is within allowed write dirs
-    let canonical_to = match validate_path(&to_path, true) {
+    let canonical_to = match validate_path(&to_path, PathUse::Write) {
         Ok(p) => p,
         Err(msg) => {
             tracing::warn!(to = %to_path, msg, "SOX: fileRename dest rejected");
@@ -9600,31 +9894,71 @@ mod tests {
     /// Serialization lock for file transfer tests that share global SOX_FILE_XFER state.
     static FILE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+    /// Session that owns the transfers in these tests; `OTHER` is a second client.
+    const OWNER: u16 = 1;
+    const OTHER: u16 = 2;
+
     /// Helper: acquire the serialization lock and clear file transfer state.
     /// Hold the returned guard for the duration of the test.
     fn lock_file_xfer() -> std::sync::MutexGuard<'static, ()> {
         let guard = FILE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut xfer = SOX_FILE_XFER.lock().expect("mutex poisoned");
-        *xfer = None;
+        clear_file_xfer();
         guard
     }
 
     /// Helper: clear the global file transfer state (use within a locked test).
     fn clear_file_xfer() {
-        let mut xfer = SOX_FILE_XFER.lock().expect("mutex poisoned");
+        let mut xfer = SOX_FILE_XFER.lock().unwrap_or_else(|e| e.into_inner());
         *xfer = None;
+    }
+
+    fn set_xfer(x: SoxFileXfer) {
+        *SOX_FILE_XFER.lock().unwrap_or_else(|e| e.into_inner()) = Some(x);
+    }
+
+    fn with_xfer<R>(f: impl FnOnce(Option<&SoxFileXfer>) -> R) -> R {
+        let xfer = SOX_FILE_XFER.lock().unwrap_or_else(|e| e.into_inner());
+        f(xfer.as_ref())
+    }
+
+    fn req(cmd: SoxCmd, payload: Vec<u8>) -> SoxRequest {
+        SoxRequest {
+            cmd,
+            req_id: 7,
+            payload,
+        }
+    }
+
+    /// Error text of a `!` response.
+    fn err_text(resp: &SoxResponse) -> String {
+        assert_eq!(resp.cmd, b'!', "expected an error response");
+        let end = resp
+            .payload
+            .iter()
+            .position(|b| *b == 0)
+            .unwrap_or(resp.payload.len());
+        String::from_utf8_lossy(&resp.payload[..end]).into_owned()
+    }
+
+    /// A unique path in the OS temp dir (allowed for writes on every platform).
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("sandstar_s45_{}_{name}", std::process::id()))
+    }
+
+    fn close(session: u16) -> SoxResponse {
+        handle_file_close(&req(SoxCmd::FileClose, vec![]), session)
+    }
+
+    fn write(session: u16, chunk_num: u16, data: &[u8]) -> SoxResponse {
+        let payload = build_file_write_chunk_payload(chunk_num, data);
+        handle_file_write(&req(SoxCmd::FileWrite, payload), session)
     }
 
     #[test]
     fn file_open_put_bad_method() {
         let _guard = lock_file_xfer();
         let payload = build_file_open_payload("x", "/tmp/test.txt", 10, 256);
-        let req = SoxRequest {
-            cmd: SoxCmd::FileOpen,
-            req_id: 1,
-            payload,
-        };
-        let resp = handle_file_open(&req);
+        let resp = handle_file_open(&req(SoxCmd::FileOpen, payload), OWNER);
         assert_eq!(resp.cmd, b'!', "expected error for bad method");
     }
 
@@ -9632,30 +9966,20 @@ mod tests {
     fn file_open_put_path_traversal_rejected() {
         let _guard = lock_file_xfer();
         let payload = build_file_open_payload("p", "/tmp/../etc/passwd", 10, 256);
-        let req = SoxRequest {
-            cmd: SoxCmd::FileOpen,
-            req_id: 2,
-            payload,
-        };
-        let resp = handle_file_open(&req);
+        let resp = handle_file_open(&req(SoxCmd::FileOpen, payload), OWNER);
         assert_eq!(resp.cmd, b'!', "expected error for path traversal");
     }
 
     #[test]
-    fn file_open_put_null_byte_rejected() {
+    fn file_open_put_null_byte_is_a_string_end() {
         let _guard = lock_file_xfer();
+        // read_str stops at the NUL: "evil" becomes the next field and the
+        // size bytes no longer line up, so the request is refused.
         let payload = build_file_open_payload("p", "/tmp/test\0evil", 10, 256);
-        let req = SoxRequest {
-            cmd: SoxCmd::FileOpen,
-            req_id: 3,
-            payload,
-        };
-        let _resp = handle_file_open(&req);
-        // The null byte in the URI means read_str will stop at the \0,
-        // so the uri will be "/tmp/test" — but the path itself is fine.
-        // However the payload after the first \0 would be parsed as the next field.
-        // This is acceptable — the null-terminated string parsing handles it safely.
-        // The key security check is on ".." which is tested above.
+        let resp = handle_file_open(&req(SoxCmd::FileOpen, payload), OWNER);
+        assert_eq!(resp.cmd, b'!');
+        with_xfer(|x| assert!(x.is_none()));
+        assert!(validate_path("/tmp/a\0b", PathUse::Write).is_err());
     }
 
     #[test]
@@ -9663,281 +9987,371 @@ mod tests {
         let _guard = lock_file_xfer();
         // 11MB exceeds the 10MB limit
         let payload = build_file_open_payload("p", "/tmp/bigfile", 11 * 1024 * 1024, 256);
-        let req = SoxRequest {
-            cmd: SoxCmd::FileOpen,
-            req_id: 4,
-            payload,
-        };
-        let resp = handle_file_open(&req);
-        assert_eq!(resp.cmd, b'!', "expected error for oversized file");
+        let resp = handle_file_open(&req(SoxCmd::FileOpen, payload), OWNER);
+        assert_eq!(err_text(&resp), "too big");
+    }
+
+    #[test]
+    fn file_open_put_with_offset_rejected() {
+        let _guard = lock_file_xfer();
+        let path = temp_path("offset.bin");
+        let mut payload = build_file_open_payload("p", &path.to_string_lossy(), 4, 4);
+        payload.pop(); // drop end of headers
+        payload.extend_from_slice(b"offset\0");
+        payload.extend_from_slice(format!("{}\0", usize::MAX).as_bytes());
+        payload.push(0x00);
+        let resp = handle_file_open(&req(SoxCmd::FileOpen, payload), OWNER);
+        assert_eq!(err_text(&resp), "offset not supported");
+        with_xfer(|x| assert!(x.is_none()));
+    }
+
+    #[test]
+    fn file_open_bad_offset_rejected() {
+        let _guard = lock_file_xfer();
+        let mut payload = build_file_open_payload("g", "m:sys.xml", 0, 64);
+        payload.pop();
+        payload.extend_from_slice(b"offset\0-1\0\0");
+        let resp = handle_file_open(&req(SoxCmd::FileOpen, payload), OWNER);
+        assert_eq!(err_text(&resp), "bad offset");
     }
 
     #[test]
     fn file_write_chunk_no_transfer() {
         let _guard = lock_file_xfer();
-        // Attempt to write a chunk without an active transfer
-        let payload = build_file_write_chunk_payload(0, &[1, 2, 3]);
-        let req = SoxRequest {
-            cmd: SoxCmd::FileWrite,
-            req_id: 5,
-            payload,
-        };
-        let resp = handle_file_write(&req);
-        assert_eq!(resp.cmd, b'!', "expected error when no transfer active");
+        let resp = write(OWNER, 0, &[1, 2, 3]);
+        assert_eq!(err_text(&resp), "no file open");
     }
 
     #[test]
-    fn file_write_chunk_inner_accepts_data() {
+    fn file_write_chunk_accepts_data() {
         let _guard = lock_file_xfer();
-        // Manually set up a put transfer state
-        {
-            let mut xfer = SOX_FILE_XFER.lock().expect("mutex poisoned");
-            *xfer = Some(SoxFileXfer {
-                data: vec![0u8; 10],
-                chunk_size: 10,
-                mode: SoxFileXferMode::Put,
-                write_path: None,
-                file_size: 10,
-                num_chunks: 1,
-                chunks_received: 0,
-                offset: 0,
-            });
-        }
-
-        let chunk_data = vec![0xAA; 10];
-        let payload = build_file_write_chunk_payload(0, &chunk_data);
-        let req = SoxRequest {
-            cmd: SoxCmd::FileWrite,
-            req_id: 6,
-            payload,
-        };
-        let resp = handle_file_write(&req);
+        set_xfer(SoxFileXfer::put(OWNER, 10, 10, None));
+        let resp = write(OWNER, 0, &[0xAA; 10]);
         assert_eq!(resp.cmd, b'H', "expected success response 'H'");
-
-        // Verify data was written to the buffer
-        {
-            let xfer = SOX_FILE_XFER.lock().expect("mutex poisoned");
-            let file = xfer.as_ref().unwrap();
+        with_xfer(|x| {
+            let file = x.expect("transfer");
             assert_eq!(file.data, vec![0xAA; 10]);
             assert_eq!(file.chunks_received, 1);
-        }
+        });
     }
 
     #[test]
     fn file_write_chunk_out_of_range() {
         let _guard = lock_file_xfer();
-        {
-            let mut xfer = SOX_FILE_XFER.lock().expect("mutex poisoned");
-            *xfer = Some(SoxFileXfer {
-                data: vec![0u8; 10],
-                chunk_size: 10,
-                mode: SoxFileXferMode::Put,
-                write_path: None,
-                file_size: 10,
-                num_chunks: 1,
-                chunks_received: 0,
-                offset: 0,
-            });
-        }
+        set_xfer(SoxFileXfer::put(OWNER, 10, 10, None));
+        // Chunk 1 does not exist in a one-chunk file.
+        assert_eq!(err_text(&write(OWNER, 1, &[0xBB; 5])), "chunk out of range");
+        // The largest chunk number and size do not overflow or panic.
+        set_xfer(SoxFileXfer::put(OWNER, 10, usize::from(u16::MAX), None));
+        assert_eq!(
+            err_text(&write(OWNER, u16::MAX, &[1])),
+            "chunk out of range"
+        );
+    }
 
-        // Chunk 1 would start at offset 10, but data only holds 10 bytes
-        let chunk_data = vec![0xBB; 5];
-        let payload = build_file_write_chunk_payload(1, &chunk_data);
-        let req = SoxRequest {
-            cmd: SoxCmd::FileWrite,
-            req_id: 7,
-            payload,
-        };
-        let resp = handle_file_write(&req);
-        assert_eq!(resp.cmd, b'!', "expected error for out-of-range chunk");
+    #[test]
+    fn file_write_chunk_of_the_wrong_size_rejected() {
+        let _guard = lock_file_xfer();
+        set_xfer(SoxFileXfer::put(OWNER, 12, 8, None));
+        // Chunk 0 must be 8 bytes, the last chunk the 4 that remain.
+        assert_eq!(err_text(&write(OWNER, 0, &[1; 5])), "bad chunk size");
+        assert_eq!(err_text(&write(OWNER, 1, &[1; 8])), "bad chunk size");
+        assert_eq!(write(OWNER, 1, &[1; 4]).cmd, b'H');
+        with_xfer(|x| assert_eq!(x.expect("transfer").chunks_received, 1));
+    }
+
+    #[test]
+    fn file_write_short_and_corrupt_payloads() {
+        let _guard = lock_file_xfer();
+        set_xfer(SoxFileXfer::put(OWNER, 8, 8, None));
+        for payload in [vec![], vec![0], vec![0, 0, 0], vec![0, 0, 0, 9, 1, 2]] {
+            let resp = handle_file_write(&req(SoxCmd::FileWrite, payload), OWNER);
+            assert_eq!(resp.cmd, b'!');
+            assert!(handle_put_chunk(OWNER, &[0, 0, 0, 9, 1]).is_none());
+        }
+        with_xfer(|x| assert_eq!(x.expect("transfer").chunks_received, 0));
     }
 
     #[test]
     fn file_write_multiple_chunks() {
         let _guard = lock_file_xfer();
-        {
-            let mut xfer = SOX_FILE_XFER.lock().expect("mutex poisoned");
-            *xfer = Some(SoxFileXfer {
-                data: vec![0u8; 20],
-                chunk_size: 10,
-                mode: SoxFileXferMode::Put,
-                write_path: None,
-                file_size: 20,
-                num_chunks: 2,
-                chunks_received: 0,
-                offset: 0,
-            });
-        }
-
-        // Chunk 0: first 10 bytes
-        let payload0 = build_file_write_chunk_payload(0, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-        let req0 = SoxRequest {
-            cmd: SoxCmd::FileWrite,
-            req_id: 8,
-            payload: payload0,
-        };
-        let resp0 = handle_file_write(&req0);
-        assert_eq!(resp0.cmd, b'H');
-
-        // Chunk 1: next 10 bytes
-        let payload1 = build_file_write_chunk_payload(1, &[11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
-        let req1 = SoxRequest {
-            cmd: SoxCmd::FileWrite,
-            req_id: 9,
-            payload: payload1,
-        };
-        let resp1 = handle_file_write(&req1);
-        assert_eq!(resp1.cmd, b'H');
-
-        {
-            let xfer = SOX_FILE_XFER.lock().expect("mutex poisoned");
-            let file = xfer.as_ref().unwrap();
+        set_xfer(SoxFileXfer::put(OWNER, 20, 10, None));
+        assert_eq!(write(OWNER, 0, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]).cmd, b'H');
+        assert_eq!(
+            write(OWNER, 1, &[11, 12, 13, 14, 15, 16, 17, 18, 19, 20]).cmd,
+            b'H'
+        );
+        with_xfer(|x| {
+            let file = x.expect("transfer");
             let expected: Vec<u8> = (1..=20).collect();
             assert_eq!(file.data, expected);
             assert_eq!(file.chunks_received, 2);
-        }
+            assert!(file.put_complete());
+        });
+    }
+
+    #[test]
+    fn a_repeated_chunk_is_counted_once() {
+        let _guard = lock_file_xfer();
+        set_xfer(SoxFileXfer::put(OWNER, 8, 4, None));
+        assert_eq!(write(OWNER, 0, &[1; 4]).cmd, b'H');
+        assert_eq!(write(OWNER, 0, &[2; 4]).cmd, b'H');
+        with_xfer(|x| {
+            let file = x.expect("transfer");
+            assert_eq!(file.chunks_received, 1);
+            assert!(!file.put_complete());
+        });
     }
 
     #[test]
     fn file_close_clears_state() {
         let _guard = lock_file_xfer();
-        {
-            let mut xfer = SOX_FILE_XFER.lock().expect("mutex poisoned");
-            *xfer = Some(SoxFileXfer {
-                data: vec![0u8; 10],
-                chunk_size: 10,
-                mode: SoxFileXferMode::Get,
-                write_path: None,
-                file_size: 10,
-                num_chunks: 0,
-                chunks_received: 0,
-                offset: 0,
-            });
-        }
-
-        let req = SoxRequest {
-            cmd: SoxCmd::FileClose,
-            req_id: 10,
-            payload: vec![],
-        };
-        let resp = handle_file_close(&req);
-        assert_eq!(resp.cmd, b'Z');
-
-        assert!(!is_put_transfer_active());
-        {
-            let xfer = SOX_FILE_XFER.lock().expect("mutex poisoned");
-            assert!(xfer.is_none());
-        }
+        set_xfer(SoxFileXfer::get(OWNER, vec![0u8; 10], 10, 10, 0));
+        assert_eq!(close(OWNER).cmd, b'Z');
+        assert!(!is_put_transfer_active(OWNER));
+        with_xfer(|x| assert!(x.is_none()));
     }
 
     #[test]
     fn file_close_put_writes_to_disk() {
         let _guard = lock_file_xfer();
-        let test_path = std::env::temp_dir().join("sandstar_test_file_write.bin");
-        let test_path_str = test_path.to_string_lossy().into_owned();
-
-        // Clean up from previous runs
+        let test_path = temp_path("close_write.bin");
         let _ = std::fs::remove_file(&test_path);
-
-        {
-            let mut xfer = SOX_FILE_XFER.lock().expect("mutex poisoned");
-            *xfer = Some(SoxFileXfer {
-                data: vec![0xDE, 0xAD, 0xBE, 0xEF],
-                chunk_size: 4,
-                mode: SoxFileXferMode::Put,
-                write_path: Some(test_path_str.clone()),
-                file_size: 4,
-                num_chunks: 1,
-                chunks_received: 1,
-                offset: 0,
-            });
-        }
-
-        let req = SoxRequest {
-            cmd: SoxCmd::FileClose,
-            req_id: 11,
-            payload: vec![],
-        };
-        let resp = handle_file_close(&req);
-        assert_eq!(resp.cmd, b'Z');
-
-        // Verify file was written to disk
+        set_xfer(SoxFileXfer::put(
+            OWNER,
+            4,
+            4,
+            Some(test_path.to_string_lossy().into_owned()),
+        ));
+        assert_eq!(write(OWNER, 0, &[0xDE, 0xAD, 0xBE, 0xEF]).cmd, b'H');
+        assert_eq!(close(OWNER).cmd, b'Z');
         let contents = std::fs::read(&test_path).expect("file should exist");
         assert_eq!(contents, vec![0xDE, 0xAD, 0xBE, 0xEF]);
-
-        // Cleanup
         let _ = std::fs::remove_file(&test_path);
     }
 
     #[test]
-    fn is_put_transfer_active_flag() {
+    fn file_close_with_missing_chunks_writes_nothing() {
         let _guard = lock_file_xfer();
-        assert!(!is_put_transfer_active());
+        let test_path = temp_path("incomplete.bin");
+        let _ = std::fs::remove_file(&test_path);
+        set_xfer(SoxFileXfer::put(
+            OWNER,
+            8,
+            4,
+            Some(test_path.to_string_lossy().into_owned()),
+        ));
+        assert_eq!(write(OWNER, 1, &[9; 4]).cmd, b'H');
+        assert_eq!(err_text(&close(OWNER)), "incomplete");
+        assert!(
+            !test_path.exists(),
+            "an incomplete put must not reach the disk"
+        );
+        // The transfer is released either way.
+        with_xfer(|x| assert!(x.is_none()));
+    }
 
-        {
-            let mut xfer = SOX_FILE_XFER.lock().expect("mutex poisoned");
-            *xfer = Some(SoxFileXfer {
-                data: vec![],
-                chunk_size: 256,
-                mode: SoxFileXferMode::Put,
-                write_path: None,
-                file_size: 0,
-                num_chunks: 0,
-                chunks_received: 0,
-                offset: 0,
-            });
-        }
-        assert!(is_put_transfer_active());
+    #[test]
+    fn file_close_zero_byte_put_writes_an_empty_file() {
+        let _guard = lock_file_xfer();
+        let test_path = temp_path("empty.bin");
+        let _ = std::fs::remove_file(&test_path);
+        set_xfer(SoxFileXfer::put(
+            OWNER,
+            0,
+            256,
+            Some(test_path.to_string_lossy().into_owned()),
+        ));
+        assert_eq!(close(OWNER).cmd, b'Z');
+        assert_eq!(std::fs::read(&test_path).expect("file").len(), 0);
+        let _ = std::fs::remove_file(&test_path);
+    }
 
+    #[test]
+    fn is_put_transfer_active_only_for_the_owner() {
+        let _guard = lock_file_xfer();
+        assert!(!is_put_transfer_active(OWNER));
+        set_xfer(SoxFileXfer::put(OWNER, 0, 256, None));
+        assert!(is_put_transfer_active(OWNER));
+        assert!(!is_put_transfer_active(OTHER));
         clear_file_xfer();
-        assert!(!is_put_transfer_active());
+        assert!(!is_put_transfer_active(OWNER));
     }
 
     #[test]
     fn handle_put_chunk_silent() {
         let _guard = lock_file_xfer();
-        {
-            let mut xfer = SOX_FILE_XFER.lock().expect("mutex poisoned");
-            *xfer = Some(SoxFileXfer {
-                data: vec![0u8; 8],
-                chunk_size: 4,
-                mode: SoxFileXferMode::Put,
-                write_path: None,
-                file_size: 8,
-                num_chunks: 2,
-                chunks_received: 0,
-                offset: 0,
-            });
-        }
-
-        // Build chunk payload (no cmd/replyNum prefix — just the chunk data)
-        let mut chunk = Vec::new();
-        chunk.extend_from_slice(&0u16.to_be_bytes()); // chunkNum = 0
-        chunk.extend_from_slice(&4u16.to_be_bytes()); // chunkSize = 4
-        chunk.extend_from_slice(&[0xCA, 0xFE, 0xBA, 0xBE]); // data
-
-        let result = handle_put_chunk(&chunk);
-        assert!(result.is_none(), "put chunk should return None (silent)");
-
-        {
-            let xfer = SOX_FILE_XFER.lock().expect("mutex poisoned");
-            let file = xfer.as_ref().unwrap();
+        set_xfer(SoxFileXfer::put(OWNER, 8, 4, None));
+        let chunk = build_file_write_chunk_payload(0, &[0xCA, 0xFE, 0xBA, 0xBE]);
+        assert!(
+            handle_put_chunk(OWNER, &chunk).is_none(),
+            "put chunk should be silent"
+        );
+        with_xfer(|x| {
+            let file = x.expect("transfer");
             assert_eq!(&file.data[0..4], &[0xCA, 0xFE, 0xBA, 0xBE]);
             assert_eq!(file.chunks_received, 1);
+        });
+    }
+
+    #[test]
+    fn another_session_cannot_touch_the_transfer() {
+        let _guard = lock_file_xfer();
+        set_xfer(SoxFileXfer::put(OWNER, 8, 4, None));
+        let chunk = build_file_write_chunk_payload(0, &[1; 4]);
+        assert!(handle_put_chunk(OTHER, &chunk).is_none());
+        assert_eq!(err_text(&write(OTHER, 0, &[1; 4])), "no file open");
+        let read = handle_file_read(&req(SoxCmd::FileRead, vec![0, 0]), OTHER);
+        assert_eq!(err_text(&read), "no file open");
+        let open = build_file_open_payload("p", "/tmp/other.bin", 4, 4);
+        assert_eq!(
+            err_text(&handle_file_open(&req(SoxCmd::FileOpen, open), OTHER)),
+            "busy"
+        );
+        assert_eq!(err_text(&close(OTHER)), "no file open");
+        with_xfer(|x| {
+            let file = x.expect("the owner's transfer is still open");
+            assert_eq!(file.owner, OWNER);
+            assert_eq!(file.chunks_received, 0);
+        });
+    }
+
+    #[test]
+    fn the_owner_reopening_replaces_its_transfer() {
+        let _guard = lock_file_xfer();
+        set_xfer(SoxFileXfer::put(OWNER, 8, 4, None));
+        let path = temp_path("reopen.bin");
+        let open = build_file_open_payload("p", &path.to_string_lossy(), 4, 4);
+        assert_eq!(
+            handle_file_open(&req(SoxCmd::FileOpen, open), OWNER).cmd,
+            b'F'
+        );
+        with_xfer(|x| assert_eq!(x.expect("transfer").file_size, 4));
+        clear_file_xfer();
+    }
+
+    #[test]
+    fn a_transfer_of_a_gone_or_idle_session_is_released() {
+        let _guard = lock_file_xfer();
+        set_xfer(SoxFileXfer::put(OWNER, 8, 4, None));
+        release_stale_file_xfer(&[OWNER, OTHER], SOX_FILE_XFER_IDLE);
+        with_xfer(|x| assert!(x.is_some(), "live and active: kept"));
+        release_stale_file_xfer(&[OTHER], SOX_FILE_XFER_IDLE);
+        with_xfer(|x| assert!(x.is_none(), "owner session gone: released"));
+
+        set_xfer(SoxFileXfer::get(OWNER, vec![1; 4], 4, 4, 0));
+        release_stale_file_xfer(&[OWNER], Duration::ZERO);
+        with_xfer(|x| assert!(x.is_none(), "idle: released"));
+    }
+
+    #[test]
+    fn file_read_never_panics_on_large_offsets_or_chunks() {
+        let _guard = lock_file_xfer();
+        for offset in [0, 9, 10, usize::MAX - 5, usize::MAX] {
+            set_xfer(SoxFileXfer::get(
+                OWNER,
+                vec![7u8; 10],
+                4,
+                10usize.saturating_sub(offset),
+                offset,
+            ));
+            for chunk in [0u16, 1, 2, 3, u16::MAX] {
+                let payload = chunk.to_be_bytes().to_vec();
+                let resp = handle_file_read(&req(SoxCmd::FileRead, payload), OWNER);
+                assert!(resp.cmd == b'G' || resp.cmd == b'!');
+            }
         }
+        set_xfer(SoxFileXfer::get(OWNER, (0u8..10).collect(), 4, 10, 0));
+        let last = handle_file_read(&req(SoxCmd::FileRead, vec![0, 2]), OWNER);
+        assert_eq!(last.payload, vec![8, 9]);
+        let short = handle_file_read(&req(SoxCmd::FileRead, vec![0]), OWNER);
+        assert_eq!(err_text(&short), "bad chunk");
+    }
+
+    // ---- validate_path (R-15) ----
+
+    /// The temp dir as a string with no trailing separator.
+    fn temp_str() -> String {
+        std::env::temp_dir()
+            .to_string_lossy()
+            .trim_end_matches(['/', '\\'])
+            .to_string()
+    }
+
+    #[test]
+    fn validate_path_rejects_a_sibling_with_the_same_prefix() {
+        // "/tmp" must not admit "/tmpX"; no directory may appear there.
+        let sibling = format!("{}S45x{}", temp_str(), std::process::id());
+        let _ = std::fs::remove_dir_all(&sibling);
+        let file = Path::new(&sibling).join("sub").join("f.bin");
+        let res = validate_path(&file.to_string_lossy(), PathUse::Write);
+        assert_eq!(res.err(), Some("invalid path"));
+        assert!(
+            !Path::new(&sibling).exists(),
+            "nothing is created before the check"
+        );
+        assert!(validate_path("/home/eacio/sandstar/etc/config2/f", PathUse::Write).is_err());
+    }
+
+    #[test]
+    fn validate_path_creates_missing_dirs_only_inside_the_allowed_tree() {
+        let dir = temp_path("newdir");
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("a").join("f.bin");
+        let ok = validate_path(&file.to_string_lossy(), PathUse::Write).expect("allowed");
+        assert!(dir.join("a").is_dir());
+        assert_eq!(ok.file_name(), file.file_name());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_path_rename_source_creates_nothing() {
+        let dir = temp_path("missing_src");
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("f.bin");
+        let res = validate_path(&file.to_string_lossy(), PathUse::RenameSource);
+        assert_eq!(res.err(), Some("not found"));
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn validate_path_rejects_relative_and_dotdot() {
+        assert!(validate_path("tmp/f", PathUse::Write).is_err());
+        assert!(validate_path("/tmp/../etc/f", PathUse::Write).is_err());
+        assert!(validate_path("/tmp/../etc/f", PathUse::Read).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_path_rejects_a_link_out_of_the_allowed_tree() {
+        let outside = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("s45_outside_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&outside).expect("outside dir");
+        let link = temp_path("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&outside, &link).expect("symlink");
+
+        // Existing parent behind the link.
+        let direct = link.join("f.bin");
+        assert!(validate_path(&direct.to_string_lossy(), PathUse::Write).is_err());
+        // New directories behind the link must not be created.
+        let deep = link.join("made").join("f.bin");
+        assert!(validate_path(&deep.to_string_lossy(), PathUse::Write).is_err());
+        assert!(
+            !outside.join("made").exists(),
+            "no directory outside the allowed tree"
+        );
+
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[test]
     fn file_rename_empty_paths_rejected() {
-        let mut payload = Vec::new();
-        payload.push(0x00); // empty "from"
-        payload.push(0x00); // empty "to"
-        let req = SoxRequest {
-            cmd: SoxCmd::FileRename,
-            req_id: 12,
-            payload,
-        };
-        let resp = handle_file_rename(&req);
+        let payload = vec![0x00, 0x00]; // empty "from" and "to"
+        let resp = handle_file_rename(&req(SoxCmd::FileRename, payload));
         assert_eq!(resp.cmd, b'!', "expected error for empty paths");
     }
 
@@ -9946,170 +10360,249 @@ mod tests {
         let mut payload = Vec::new();
         payload.extend_from_slice(b"/tmp/../etc/shadow\0");
         payload.extend_from_slice(b"/tmp/renamed\0");
-        let req = SoxRequest {
-            cmd: SoxCmd::FileRename,
-            req_id: 13,
-            payload,
-        };
-        let resp = handle_file_rename(&req);
+        let resp = handle_file_rename(&req(SoxCmd::FileRename, payload));
         assert_eq!(resp.cmd, b'!', "expected error for path traversal");
+    }
+
+    fn rename_payload(from: &Path, to: &Path) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(from.to_string_lossy().as_bytes());
+        payload.push(0x00);
+        payload.extend_from_slice(to.to_string_lossy().as_bytes());
+        payload.push(0x00);
+        payload
     }
 
     #[test]
     fn file_rename_success() {
-        let tmp = std::env::temp_dir();
-        let from = tmp.join("sandstar_rename_from.txt");
-        let to = tmp.join("sandstar_rename_to.txt");
-
-        // Clean up
+        let from = temp_path("rename_from.txt");
+        let to = temp_path("rename_to.txt");
         let _ = std::fs::remove_file(&from);
         let _ = std::fs::remove_file(&to);
-
-        // Create source file
         std::fs::write(&from, b"test content").expect("write source file");
 
-        let from_str = from.to_string_lossy();
-        let to_str = to.to_string_lossy();
-
-        let mut payload = Vec::new();
-        payload.extend_from_slice(from_str.as_bytes());
-        payload.push(0x00);
-        payload.extend_from_slice(to_str.as_bytes());
-        payload.push(0x00);
-
-        let req = SoxRequest {
-            cmd: SoxCmd::FileRename,
-            req_id: 14,
-            payload,
-        };
-        let resp = handle_file_rename(&req);
+        let resp = handle_file_rename(&req(SoxCmd::FileRename, rename_payload(&from, &to)));
         assert_eq!(resp.cmd, b'B', "expected success response 'B'");
-
-        // Verify: source gone, dest exists
         assert!(!from.exists(), "source should not exist after rename");
-        assert!(to.exists(), "dest should exist after rename");
-        let contents = std::fs::read(&to).expect("read dest file");
-        assert_eq!(contents, b"test content");
-
-        // Cleanup
+        assert_eq!(std::fs::read(&to).expect("read dest file"), b"test content");
         let _ = std::fs::remove_file(&to);
     }
 
     #[test]
     fn file_rename_source_not_found() {
-        let tmp = std::env::temp_dir();
-        let from = tmp.join("sandstar_nonexistent_file.txt");
-        let to = tmp.join("sandstar_rename_dest.txt");
-
+        let from = temp_path("nonexistent.txt");
+        let to = temp_path("rename_dest.txt");
         let _ = std::fs::remove_file(&from);
         let _ = std::fs::remove_file(&to);
-
-        let from_str = from.to_string_lossy();
-        let to_str = to.to_string_lossy();
-
-        let mut payload = Vec::new();
-        payload.extend_from_slice(from_str.as_bytes());
-        payload.push(0x00);
-        payload.extend_from_slice(to_str.as_bytes());
-        payload.push(0x00);
-
-        let req = SoxRequest {
-            cmd: SoxCmd::FileRename,
-            req_id: 15,
-            payload,
-        };
-        let resp = handle_file_rename(&req);
-        assert_eq!(resp.cmd, b'!', "expected error for non-existent source");
+        let resp = handle_file_rename(&req(SoxCmd::FileRename, rename_payload(&from, &to)));
+        assert_eq!(err_text(&resp), "not found");
     }
 
     #[test]
     fn file_write_not_in_put_mode() {
         let _guard = lock_file_xfer();
-        {
-            let mut xfer = SOX_FILE_XFER.lock().expect("mutex poisoned");
-            *xfer = Some(SoxFileXfer {
-                data: vec![0u8; 10],
-                chunk_size: 10,
-                mode: SoxFileXferMode::Get,
-                write_path: None,
-                file_size: 10,
-                num_chunks: 0,
-                chunks_received: 0,
-                offset: 0,
-            });
-        }
-
-        let payload = build_file_write_chunk_payload(0, &[1, 2, 3]);
-        let req = SoxRequest {
-            cmd: SoxCmd::FileWrite,
-            req_id: 16,
-            payload,
-        };
-        let resp = handle_file_write(&req);
-        assert_eq!(resp.cmd, b'!', "expected error when in get mode");
+        set_xfer(SoxFileXfer::get(OWNER, vec![0u8; 10], 10, 10, 0));
+        assert_eq!(err_text(&write(OWNER, 0, &[1, 2, 3])), "not in put mode");
     }
 
     #[test]
     fn full_put_flow_open_write_close() {
         let _guard = lock_file_xfer();
-        let test_path = std::env::temp_dir().join("sandstar_test_full_put.bin");
-        let test_path_str = test_path.to_string_lossy().into_owned();
+        let test_path = temp_path("full_put.bin");
         let _ = std::fs::remove_file(&test_path);
-
-        // Manually set up the put transfer (since fileOpen needs valid paths on disk)
         let file_data = b"Hello, Sandstar!";
-        let chunk_size = 8usize;
-        let file_size = file_data.len();
-        let num_chunks = (file_size + chunk_size - 1) / chunk_size;
 
-        {
-            let mut xfer = SOX_FILE_XFER.lock().expect("mutex poisoned");
-            *xfer = Some(SoxFileXfer {
-                data: vec![0u8; file_size],
-                chunk_size,
-                mode: SoxFileXferMode::Put,
-                write_path: Some(test_path_str.clone()),
-                file_size,
-                num_chunks,
-                chunks_received: 0,
-                offset: 0,
-            });
-        }
+        let open = build_file_open_payload("p", &test_path.to_string_lossy(), 16, 8);
+        let resp = handle_file_open(&req(SoxCmd::FileOpen, open), OWNER);
+        assert_eq!(resp.cmd, b'F', "fileOpen put: {:?}", resp.payload);
+        assert!(is_put_transfer_active(OWNER));
 
-        // Write chunk 0: "Hello, S"
-        let payload0 = build_file_write_chunk_payload(0, &file_data[0..8]);
-        let req0 = SoxRequest {
-            cmd: SoxCmd::FileWrite,
-            req_id: 20,
-            payload: payload0,
-        };
-        let resp0 = handle_file_write(&req0);
-        assert_eq!(resp0.cmd, b'H');
+        assert_eq!(write(OWNER, 0, &file_data[0..8]).cmd, b'H');
+        // The second chunk arrives as a raw 'k' message, as Sedona sends it.
+        let chunk = build_file_write_chunk_payload(1, &file_data[8..16]);
+        assert!(handle_put_chunk(OWNER, &chunk).is_none());
+        assert_eq!(close(OWNER).cmd, b'Z');
 
-        // Write chunk 1: "andstar!"
-        let payload1 = build_file_write_chunk_payload(1, &file_data[8..16]);
-        let req1 = SoxRequest {
-            cmd: SoxCmd::FileWrite,
-            req_id: 21,
-            payload: payload1,
-        };
-        let resp1 = handle_file_write(&req1);
-        assert_eq!(resp1.cmd, b'H');
-
-        // Close — should flush to disk
-        let close_req = SoxRequest {
-            cmd: SoxCmd::FileClose,
-            req_id: 22,
-            payload: vec![],
-        };
-        let close_resp = handle_file_close(&close_req);
-        assert_eq!(close_resp.cmd, b'Z');
-
-        // Verify file on disk
-        let contents = std::fs::read(&test_path).expect("file should exist");
-        assert_eq!(contents, file_data);
-
+        assert_eq!(
+            std::fs::read(&test_path).expect("file should exist"),
+            file_data
+        );
         let _ = std::fs::remove_file(&test_path);
+    }
+
+    #[test]
+    fn file_open_short_or_odd_payloads_are_refused_without_panic() {
+        let _guard = lock_file_xfer();
+        let cases: Vec<Vec<u8>> = vec![
+            vec![],
+            vec![b'p'],
+            b"p\0".to_vec(),
+            b"p\0/tmp/x\0".to_vec(),
+            b"p\0/tmp/x\0\0\0\0\x04".to_vec(), // size but no chunk size
+        ];
+        for payload in cases {
+            let resp = handle_file_open(&req(SoxCmd::FileOpen, payload), OWNER);
+            assert_eq!(err_text(&resp), "bad request");
+        }
+        // Multi-byte UTF-8 in the uri: answered either way, no panic.
+        for uri in ["/tmp/çğ\u{1F600}/ü.bin", "m:ü\u{1F600}.xml", "/kits/ş"] {
+            let open = build_file_open_payload("p", uri, 4, 4);
+            let resp = handle_file_open(&req(SoxCmd::FileOpen, open), OWNER);
+            assert!(resp.cmd == b'F' || resp.cmd == b'!');
+            clear_file_xfer();
+        }
+    }
+
+    #[test]
+    fn file_open_put_touches_nothing_until_close() {
+        let _guard = lock_file_xfer();
+        let dir = temp_path("lazy_dir");
+        let _ = std::fs::remove_dir_all(&dir);
+        let target = dir.join("sub").join("f.bin");
+        let open = build_file_open_payload("p", &target.to_string_lossy(), 4, 4);
+        assert_eq!(
+            handle_file_open(&req(SoxCmd::FileOpen, open), OWNER).cmd,
+            b'F'
+        );
+        assert!(!dir.exists(), "fileOpen creates no directory");
+        // Abandoned: still nothing on disk, and the close says so.
+        release_stale_file_xfer(&[], SOX_FILE_XFER_IDLE);
+        assert!(!dir.exists());
+        assert_eq!(err_text(&close(OWNER)), "transfer expired");
+        // A second close of that session is a plain no-op again.
+        assert_eq!(close(OWNER).cmd, b'Z');
+
+        let open = build_file_open_payload("p", &target.to_string_lossy(), 4, 4);
+        assert_eq!(
+            handle_file_open(&req(SoxCmd::FileOpen, open), OWNER).cmd,
+            b'F'
+        );
+        assert_eq!(write(OWNER, 0, b"abcd").cmd, b'H');
+        assert_eq!(close(OWNER).cmd, b'Z');
+        assert_eq!(std::fs::read(&target).expect("written"), b"abcd");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_refused_file_open_keeps_the_owners_transfer() {
+        let _guard = lock_file_xfer();
+        set_xfer(SoxFileXfer::put(OWNER, 8, 4, None));
+        assert_eq!(write(OWNER, 0, &[1; 4]).cmd, b'H');
+        let bad = build_file_open_payload("p", "/tmp/../etc/x", 4, 4);
+        assert_eq!(
+            handle_file_open(&req(SoxCmd::FileOpen, bad), OWNER).cmd,
+            b'!'
+        );
+        let big = build_file_open_payload("p", "/tmp/x", 11 * 1024 * 1024, 4);
+        assert_eq!(
+            handle_file_open(&req(SoxCmd::FileOpen, big), OWNER).cmd,
+            b'!'
+        );
+        with_xfer(|x| assert_eq!(x.expect("kept").chunks_received, 1));
+    }
+
+    #[test]
+    fn rejected_chunks_are_counted() {
+        let _guard = lock_file_xfer();
+        set_xfer(SoxFileXfer::put(OWNER, 8, 4, None));
+        for _ in 0..5 {
+            assert!(handle_put_chunk(OWNER, &[0, 9, 0, 1, 7]).is_none());
+        }
+        assert_eq!(err_text(&write(OWNER, 0, &[1; 3])), "bad chunk size");
+        with_xfer(|x| {
+            let file = x.expect("transfer");
+            assert_eq!(file.rejected, 6);
+            assert_eq!(file.chunks_received, 0);
+        });
+    }
+
+    #[test]
+    fn validate_path_allows_dots_inside_a_name() {
+        let file = temp_path("kit..xml");
+        assert!(validate_path(&file.to_string_lossy(), PathUse::WriteCheck).is_ok());
+    }
+
+    #[test]
+    fn validate_path_creates_a_missing_allowed_dir() {
+        // The allowed dir itself does not exist yet, its parent does (as with
+        // etc/manifests on a fresh device): a put must still be possible.
+        let root = temp_path("allow_root");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("root");
+        let allowed = root.join("manifests");
+        let dirs = vec![allowed.clone()];
+        let f = allowed.join("kit.xml").to_string_lossy().into_owned();
+        assert!(validate_path_in(&f, PathUse::WriteCheck, &dirs, &[]).is_ok());
+        assert!(!allowed.exists(), "a check creates nothing");
+        assert!(validate_path_in(&f, PathUse::Write, &dirs, &[]).is_ok());
+        assert!(allowed.is_dir());
+        // Beside the allowed dir: refused, nothing created.
+        let b = root
+            .join("other")
+            .join("x.xml")
+            .to_string_lossy()
+            .into_owned();
+        assert!(validate_path_in(&b, PathUse::Write, &dirs, &[]).is_err());
+        assert!(!root.join("other").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_as_the_file_itself_is_refused() {
+        let _guard = lock_file_xfer();
+        let outside = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("s45_victim_{}", std::process::id()));
+        std::fs::create_dir_all(outside.parent().expect("parent")).expect("target dir");
+        std::fs::write(&outside, b"keep").expect("victim");
+        let link = temp_path("file_link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&outside, &link).expect("symlink");
+        let l = link.to_string_lossy().into_owned();
+
+        assert!(validate_path(&l, PathUse::WriteCheck).is_err());
+        assert!(validate_path(&l, PathUse::RenameSource).is_err());
+        let open = build_file_open_payload("p", &l, 4, 4);
+        assert_eq!(
+            handle_file_open(&req(SoxCmd::FileOpen, open), OWNER).cmd,
+            b'!'
+        );
+
+        // A link put in place after fileOpen is refused at fileClose.
+        let target = temp_path("late_link");
+        let _ = std::fs::remove_file(&target);
+        let t = target.to_string_lossy().into_owned();
+        let open = build_file_open_payload("p", &t, 4, 4);
+        assert_eq!(
+            handle_file_open(&req(SoxCmd::FileOpen, open), OWNER).cmd,
+            b'F'
+        );
+        assert_eq!(write(OWNER, 0, b"new!").cmd, b'H');
+        std::os::unix::fs::symlink(&outside, &target).expect("late symlink");
+        assert_eq!(close(OWNER).cmd, b'!', "the target is a link at fileClose");
+        assert_eq!(std::fs::read(&outside).expect("victim"), b"keep");
+
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_file(&target);
+        let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
+    fn write_atomic_replaces_the_file_and_leaves_no_temp() {
+        let dir = temp_path("atomic");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let file = dir.join("cfg.xml");
+        std::fs::write(&file, b"old").expect("old");
+        write_atomic(&file, b"new content").expect("write");
+        assert_eq!(std::fs::read(&file).expect("read"), b"new content");
+        assert_eq!(
+            std::fs::read_dir(&dir).expect("ls").count(),
+            1,
+            "no temp file left"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ---- Persistence tests ----

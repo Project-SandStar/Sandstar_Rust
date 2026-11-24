@@ -21,8 +21,14 @@ use sandstar_ipc::types::ChannelInfo;
 
 // ── Configuration ──────────────────────────────────────────
 
+/// What `GET /api/alerts/config` shows instead of the SMTP password. A
+/// `PUT` that sends it back keeps the stored password (R-14, S-48).
+pub const PASSWORD_MASK: &str = "********";
+
 /// Alert system configuration, loaded from a JSON file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is written by hand so that the SMTP password never reaches a log.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AlertConfig {
     /// Master enable/disable for the alert system.
     pub enabled: bool,
@@ -33,7 +39,7 @@ pub struct AlertConfig {
     /// SMTP username for authentication.
     pub smtp_user: String,
     /// SMTP password (app-specific password recommended).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_secret")]
     pub smtp_password: String,
     /// Email "From" address.
     pub from_address: String,
@@ -70,19 +76,120 @@ impl Default for AlertConfig {
     }
 }
 
+impl std::fmt::Debug for AlertConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AlertConfig")
+            .field("enabled", &self.enabled)
+            .field("smtp_host", &self.smtp_host)
+            .field("smtp_port", &self.smtp_port)
+            .field("smtp_user", &self.smtp_user)
+            .field("smtp_password", &redacted(!self.smtp_password.is_empty()))
+            .field("from_address", &self.from_address)
+            .field("recipients", &self.recipients)
+            .field("cooldown_minutes", &self.cooldown_minutes)
+            .field("alert_on_fault", &self.alert_on_fault)
+            .field("alert_on_down", &self.alert_on_down)
+            .field("alert_on_recovery", &self.alert_on_recovery)
+            .field("subject_prefix", &self.subject_prefix)
+            .finish()
+    }
+}
+
+/// Deserialize a secret string. A wrong type gives an error without the
+/// value: serde's own message would quote it ("invalid type: integer
+/// `1234`"), and that message reaches logs and responses (S-48).
+fn de_secret<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    String::deserialize(d).map_err(|_| serde::de::Error::custom("secret must be a string"))
+}
+
+/// Like [`de_secret`] for an optional secret (`null` or missing = `None`).
+pub(crate) fn de_secret_opt<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(d)
+        .map_err(|_| serde::de::Error::custom("secret must be a string or null"))
+}
+
+/// How a secret appears in `Debug` output.
+pub(crate) fn redacted(set: bool) -> &'static str {
+    if set {
+        "<redacted>"
+    } else {
+        "<none>"
+    }
+}
+
+/// Whether `path` can be read by anyone but its owner (Unix mode bits).
+fn readable_by_others(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o077 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// Write `data` to `path` atomically, readable by the owner only (0600 on
+/// Unix): a new temp file next to it, synced, then renamed over it.
+fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut tmp_name = path.as_os_str().to_owned();
+    tmp_name.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp_name);
+    // A temp file left by a crash would make create_new fail.
+    let _ = std::fs::remove_file(&tmp);
+    let result = (|| {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 impl AlertConfig {
     /// Load configuration from a JSON file.
     pub fn load(path: &Path) -> Result<Self, String> {
         let data = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read alert config {}: {}", path.display(), e))?;
-        serde_json::from_str(&data).map_err(|e| format!("failed to parse alert config: {}", e))
+        let config: Self = serde_json::from_str(&data)
+            .map_err(|e| format!("failed to parse alert config: {}", e))?;
+        // Permissions are only reported here; the next save writes 0600.
+        if config.secret_file_is_exposed(path) {
+            warn!(
+                path = %path.display(),
+                "alert config holds an SMTP password but can be read by other users; \
+                 it is rewritten owner-only (0600) on the next save"
+            );
+        }
+        Ok(config)
     }
 
-    /// Save configuration to a JSON file.
+    /// Whether this config holds a password and `path` is readable by others.
+    fn secret_file_is_exposed(&self, path: &Path) -> bool {
+        !self.smtp_password.is_empty() && readable_by_others(path)
+    }
+
+    /// Save configuration to a JSON file, owner-only and atomically (S-48).
     pub fn save(&self, path: &Path) -> Result<(), String> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("failed to serialize alert config: {}", e))?;
-        std::fs::write(path, json)
+        write_private(path, json.as_bytes())
             .map_err(|e| format!("failed to write alert config {}: {}", path.display(), e))
     }
 
@@ -90,7 +197,7 @@ impl AlertConfig {
     pub fn masked(&self) -> Self {
         let mut copy = self.clone();
         if !copy.smtp_password.is_empty() {
-            copy.smtp_password = "********".into();
+            copy.smtp_password = PASSWORD_MASK.into();
         }
         copy
     }
@@ -259,7 +366,13 @@ impl AlertManager {
 
     /// Update the configuration. Optionally persists to disk if a config
     /// path was set during load.
-    pub fn update_config(&mut self, new_config: AlertConfig) -> Result<(), String> {
+    ///
+    /// A password equal to [`PASSWORD_MASK`] (what `GET` shows) keeps the
+    /// stored password; an empty one clears it (R-14, S-48).
+    pub fn update_config(&mut self, mut new_config: AlertConfig) -> Result<(), String> {
+        if new_config.smtp_password == PASSWORD_MASK {
+            new_config.smtp_password = self.config.smtp_password.clone();
+        }
         if let Some(ref path) = self.config_path {
             new_config.save(path)?;
         }
@@ -761,6 +874,147 @@ mod tests {
         assert_eq!(loaded.cooldown_minutes, config.cooldown_minutes);
         assert_eq!(loaded.recipients.len(), 2);
         assert_eq!(loaded.subject_prefix, "[Test]");
+    }
+
+    #[test]
+    fn put_with_the_mask_keeps_the_stored_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("alerts.json");
+        let mut stored = test_config();
+        stored.smtp_password = "real-secret".into();
+        stored.save(&path).unwrap();
+        let mut mgr = AlertManager::load(&path);
+
+        // GET → edit → PUT, as a client does.
+        let mut edited = mgr.config().masked();
+        edited.cooldown_minutes = 99;
+        mgr.update_config(edited).unwrap();
+        assert_eq!(mgr.config().smtp_password, "real-secret");
+        assert_eq!(mgr.config().cooldown_minutes, 99);
+        assert_eq!(
+            AlertConfig::load(&path).unwrap().smtp_password,
+            "real-secret"
+        );
+
+        // A new value replaces it; an empty one clears it.
+        let mut new_pw = mgr.config().clone();
+        new_pw.smtp_password = "other".into();
+        mgr.update_config(new_pw).unwrap();
+        assert_eq!(mgr.config().smtp_password, "other");
+        let mut cleared = mgr.config().clone();
+        cleared.smtp_password.clear();
+        mgr.update_config(cleared).unwrap();
+        assert!(mgr.config().smtp_password.is_empty());
+        assert!(AlertConfig::load(&path).unwrap().smtp_password.is_empty());
+    }
+
+    #[test]
+    fn debug_does_not_show_the_password() {
+        let mut config = test_config();
+        config.smtp_password = "real-secret".into();
+        let shown = format!("{config:?}");
+        assert!(!shown.contains("real-secret"));
+        assert!(shown.contains("<redacted>"));
+        config.smtp_password.clear();
+        assert!(format!("{config:?}").contains("<none>"));
+    }
+
+    #[test]
+    fn save_replaces_the_file_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("alerts.json");
+        std::fs::write(&path, "old").unwrap();
+        test_config().save(&path).unwrap();
+        assert!(AlertConfig::load(&path).is_ok());
+        assert!(!dir.path().join("alerts.json.tmp").exists());
+        // A temp file left by a crash does not block the next save.
+        std::fs::write(dir.path().join("alerts.json.tmp"), "junk").unwrap();
+        test_config().save(&path).unwrap();
+        assert!(!dir.path().join("alerts.json.tmp").exists());
+    }
+
+    #[test]
+    fn a_secret_of_the_wrong_type_is_not_quoted_in_the_error() {
+        let mut json = serde_json::to_value(test_config()).unwrap();
+        json["smtp_password"] = serde_json::json!(987654321);
+        let err = serde_json::from_value::<AlertConfig>(json)
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("987654321"), "{err}");
+        assert!(err.contains("secret must be a string"));
+    }
+
+    /// Log lines written while `f` runs (no new dependency: tracing-subscriber
+    /// with a writer into a buffer).
+    #[cfg(unix)]
+    fn captured_logs(f: impl FnOnce()) -> String {
+        #[derive(Clone)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = Buf(Arc::new(Mutex::new(Vec::new())));
+        let writer = buf.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let out = String::from_utf8_lossy(&buf.0.lock().unwrap()).into_owned();
+        out
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_warns_about_an_exposed_secret_without_changing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("alerts.json");
+        let mut config = test_config();
+        config.smtp_password = "real-secret".into();
+        std::fs::write(&path, serde_json::to_string(&config).unwrap()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let logs = captured_logs(|| {
+            AlertConfig::load(&path).unwrap();
+        });
+        assert!(logs.contains("can be read by other users"), "{logs}");
+        assert!(!logs.contains("real-secret"));
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "load does not change permissions");
+        // No password: no warning.
+        config.smtp_password.clear();
+        std::fs::write(&path, serde_json::to_string(&config).unwrap()).unwrap();
+        let logs = captured_logs(|| {
+            AlertConfig::load(&path).unwrap();
+        });
+        assert!(!logs.contains("can be read by other users"), "{logs}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_is_owner_only_and_load_flags_an_exposed_secret() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("alerts.json");
+        let mut config = test_config();
+        config.smtp_password = "real-secret".into();
+        std::fs::write(&path, serde_json::to_string(&config).unwrap()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(config.secret_file_is_exposed(&path));
+        config.save(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert!(!config.secret_file_is_exposed(&path));
+        // No password: a readable file is not flagged.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        config.smtp_password.clear();
+        assert!(!config.secret_file_is_exposed(&path));
     }
 
     #[test]
