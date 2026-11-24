@@ -92,12 +92,8 @@ impl PidFile {
 impl Drop for PidFile {
     fn drop(&mut self) {
         if let Err(e) = fs::remove_file(&self.path) {
-            // Don't panic in Drop
-            eprintln!(
-                "warning: failed to remove PID file {}: {}",
-                self.path.display(),
-                e
-            );
+            // Don't panic in Drop; the log guard is still alive here.
+            tracing::warn!(err = %e, path = %self.path.display(), "failed to remove PID file");
         }
     }
 }

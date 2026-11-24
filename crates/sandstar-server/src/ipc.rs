@@ -333,7 +333,11 @@ async fn write_frame<W: AsyncWrite + Unpin>(
 pub fn cleanup(path: &str) {
     #[cfg(unix)]
     {
-        let _ = std::fs::remove_file(path);
+        if let Err(e) = std::fs::remove_file(path) {
+            if e.kind() != io::ErrorKind::NotFound {
+                warn!(err = %e, path, "failed to remove IPC socket file");
+            }
+        }
     }
 
     #[cfg(not(unix))]
