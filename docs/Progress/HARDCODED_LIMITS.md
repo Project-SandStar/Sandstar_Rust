@@ -145,6 +145,9 @@ Audited: 2026-03-10
 | `REFRESH_WARN_INTERVAL` | 60s | `sandstar-server/src/sox/mod.rs` | 37 | **Keep** — SOX tree refresh runs every second; a non-timeout failure is logged at `warn` at most once per interval, the rest at `debug` (S-21). |
 | `MAX_INTERNED_NAMES` | 65,534 | `sandstar-server/src/sox/name_intern.rs` | 25 | **Keep** — SOX name intern table size; a full table drops unused names, never panics (S-26). |
 | `MAX_INTERNED_TAG_NAMES` | 65,536 | `sandstar-server/src/sox/dyn_slots.rs` | 76 | **Keep** — dynamic tag name interner size (whole `u16` space); full interner stops interning (S-26). |
+| `SOX_PUT_MAX_SIZE` | 10 MiB | `sandstar-server/src/sox/sox_handlers.rs` | 4213 | **Keep** — largest file a SOX put may announce; checked before the path, so a refused put creates nothing (R-15, S-45). |
+| `SOX_FILE_XFER_IDLE` | 60s | `sandstar-server/src/sox/sox_handlers.rs` | 4210 | **Keep** — one SOX file transfer at a time, owned by the session that opened it; dropped (nothing written) when that session is gone or sends nothing for this long, checked on the 10 s cleanup tick. The owner's next fileClose then answers "transfer expired" (R-15, S-45). |
+| `SOX_CHUNK_SIZE` | 256 | `sandstar-server/src/sox/sox_handlers.rs` | 4400 | **Keep** — file transfer chunk size when the client asks for 0. A put is written only when every chunk arrived with its exact size (else fileClose answers "incomplete"); the path is checked again and directories created at fileClose, and the file is replaced atomically (temp file + rename) (S-45). |
 | Command channel capacity | 64 | `sandstar-server/src/main.rs` | 423 | **Document** — mpsc channel buffer for REST commands. |
 
 ## Sedona VM (SVM)
