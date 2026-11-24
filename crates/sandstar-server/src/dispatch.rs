@@ -1,20 +1,19 @@
-//! Command dispatch: deserialize IPC commands, execute on engine, send response.
+//! Command dispatch: run an IPC command on the engine (main loop side).
+//!
+//! The connection itself (framing, deadlines) lives in `crate::ipc` (R-28).
 
-use std::io;
 use std::time::Instant;
 
 use sandstar_engine::{Engine, EngineValue};
 use sandstar_hal::{HalDiagnostics, HalRead, HalWrite};
-use sandstar_ipc::protocol::{read_frame, write_frame};
 use sandstar_ipc::types::*;
 use tracing::{debug, info, warn};
 
 use crate::config::ServerConfig;
 use crate::history::HistoryStore;
-use crate::ipc::Stream;
 use crate::reload;
 
-/// Result of handling an IPC connection.
+/// What the main loop must do after an IPC command.
 pub enum ConnectionResult {
     /// Normal command processed, continue accepting connections.
     Continue,
@@ -24,19 +23,15 @@ pub enum ConnectionResult {
     PollNow,
 }
 
-/// Handle a single IPC connection: read one command, dispatch, write response.
-pub fn handle_connection<H: HalRead + HalWrite + HalDiagnostics>(
-    mut stream: Stream,
+/// Run one IPC command on the engine: what the main loop must do next, and
+/// the reply for the client.
+pub fn run<H: HalRead + HalWrite + HalDiagnostics>(
+    cmd: EngineCommand,
     engine: &mut Engine<H>,
     config: &ServerConfig,
     start_time: Instant,
     history_store: &HistoryStore,
-) -> io::Result<ConnectionResult> {
-    let cmd: EngineCommand = match read_frame(&mut stream)? {
-        Some(cmd) => cmd,
-        None => return Ok(ConnectionResult::Continue), // clean disconnect
-    };
-
+) -> (ConnectionResult, EngineResponse) {
     debug!(?cmd, "received command");
     crate::metrics::metrics()
         .ipc_requests
@@ -47,10 +42,10 @@ pub fn handle_connection<H: HalRead + HalWrite + HalDiagnostics>(
         EngineCommand::PollNow => ConnectionResult::PollNow,
         _ => ConnectionResult::Continue,
     };
-    let response = execute(cmd, engine, config, start_time, history_store);
-    write_frame(&mut stream, &response)?;
-
-    Ok(result)
+    (
+        result,
+        execute(cmd, engine, config, start_time, history_store),
+    )
 }
 
 /// Execute a command against the engine and produce a response.

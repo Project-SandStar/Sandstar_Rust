@@ -132,7 +132,12 @@ Audited: 2026-03-10
 | Constant | Value | File | Line | Recommendation |
 |----------|-------|------|------|----------------|
 | `MAX_FRAME_SIZE` | 1,048,576 (1MB) | `sandstar-ipc/src/protocol.rs` | 11 | **Document** — max IPC message size. Prevents unbounded allocation. |
-| IPC read timeout | 5s | `sandstar-server/src/ipc.rs` | 58,68 | **Document** — prevents blocking IPC reads indefinitely. |
+| IPC `IO_TIMEOUT` | 5s | `sandstar-server/src/ipc.rs` | 43 | **Document** — total time to read one command frame, and again to write the reply. Connections are served on their own tasks, never in the main loop (R-28, S-42). |
+| IPC `REPLY_TIMEOUT` | 10s | `sandstar-server/src/ipc.rs` | 47 | **Document** — one deadline for queueing the command and getting the engine's reply. On expiry the client gets `Error(...not run)`; the main loop skips a command whose client gave up (S-42). |
+| IPC `MAX_CONNECTIONS` | 4 | `sandstar-server/src/ipc.rs` | 50 | **Document** — IPC connections served at once, also the IPC command channel capacity. A fifth gets `Error("busy...")` (S-42). |
+| IPC `SHUTDOWN_REPLY_WAIT` | 1s | `sandstar-server/src/ipc.rs` | 53 | **Keep** — `Shutdown` waits this long for its reply to be written; kept short for systemd `WatchdogSec=10` (S-42). |
+| IPC `ACCEPT_BACKOFF` / `ERROR_REPLY_TIMEOUT` / `LOG_EVERY` | 100ms / 1s / 10s | `sandstar-server/src/ipc.rs` | 56-62 | **Keep** — pause after a failed `accept`; time for a failure reply; one IPC failure log line per kind per period, with a suppressed count (S-42). |
+| CLI `IO_TIMEOUT` | 20s | `sandstar-cli/src/client.rs` | 12 | **Keep** — `sandstar-cli` read/write timeout; above the server's own deadlines so its error reply arrives first (S-42). |
 | `ENGINE_REPLY_TIMEOUT` | 10s | `sandstar-server/src/rest/mod.rs` | 146 | **Document** — max wait for an `EngineHandle` command (send + reply). On timeout the caller gets `engine timeout` (REST: 503); a state-changing command may still run later (R-28, S-20). |
 | Engine timeout warn interval | 60s | `sandstar-server/src/rest/mod.rs` | 160 | **Keep** — first timeout per 60 s logged at `warn`, the rest at `debug`. |
 | `HEALTH_ENGINE_TIMEOUT` | 2s | `sandstar-server/src/rest/handlers.rs` | 369 | **Document** — `/health` waits at most this long for the engine; otherwise 503 with `healthy:false` (R-28, S-21). |

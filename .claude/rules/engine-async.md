@@ -15,7 +15,7 @@ paths:
 - Bloklayan I/O (sysfs/I2C/UART, dosya, senkron IPC), uzun CPU işleri ve SVM çağrıları `tokio::task::spawn_blocking` içinde çalışır. Async kodda `std::fs` ve `std::thread::sleep` kullanılmaz.
 - `std::sync::Mutex`/`RwLock` guard'ı `.await` boyunca tutulmaz. Kısa kritik bölüm → guard'ı düşür → sonra await.
 - Kanallar: sınırsız (`unbounded`) kanal yeni kodda kullanılmaz. Kapasiteyi ve dolu durumdaki davranışı (bekle / düşür / hata) açıkça seç.
-- Yeni arka plan görevinin kapanış yolu olmalı. Not: şu an yalnız SIGINT dinleniyor (R-13).
+- Yeni arka plan görevinin kapanış yolu olmalı. Main loop SIGINT, SIGTERM (`signal::TermSignal`, S-43) ve IPC `Shutdown` ile döngüden çıkar ve kapanış adımlarını koşar.
 
 ## Sürücüler (driver actor)
 - Sürücü hatası tüm actor'ü düşürmez; yeniden bağlanma ve backoff sürücünün içinde kalır (R-25).
