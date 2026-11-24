@@ -4,7 +4,7 @@
 > - **No ConnAck wait and no reconnect.** `open()` sets status `Ok` right after queuing the subscribes; it does not wait for ConnAck, so `"status":"Ok"` does not prove a broker connection. The event loop exits on the first error (`mqtt event loop error`) and status stays `Ok`. Check with `POST /api/drivers/{id}/ping`: a dead loop returns 503 `mqtt event loop dead`. Recover with `close` then `open`, or restart the service.
 > - `objects` is optional (defaults to an empty list).
 > - `learn` names each point after `subscribe_topic` (falling back to `publish_topic`) with `kind: "Number"`, wrapped in `{"driverId": …, "points": [...]}`. `GET /api/drivers` reports `pollMode: "Manual"` for MQTT.
-> - The `tls` field is parsed but not applied; connections are plain TCP.
+> - TLS is not implemented. A config with `tls: true` is refused at `open()` (`mqtt TLS is not supported in this build`, S-51) instead of connecting in plain text; connections are plain TCP.
 > - Outbound TCP 1883 to public brokers may be blocked on site networks; a local mosquitto is the tested path.
 > - Logs: prefer `/var/log/sandstar/sandstar-engine.log.YYYY-MM-DD` over `journalctl` on the device (volatile journal).
 
@@ -91,7 +91,7 @@ Each entry in `SANDSTAR_MQTT_CONFIGS` is a JSON object describing one MQTT drive
 | `port` | u16 | no | Default `1883` (plain), use `8883` for TLS. |
 | `client_id` | string | yes | Must be unique to the broker (duplicates get disconnected). |
 | `username` / `password` | string? | no | Plain auth. Both must be set to take effect. The password is never printed: `MqttConfig`'s `Debug` shows it as `<redacted>` (S-48). |
-| `tls` | bool | no | Reserved — not yet wired; leave `false`. |
+| `tls` | bool | no | Leave `false`. `true` is refused: the driver does not open (S-51). |
 | `keep_alive_secs` | u16 | no | Default `60`. Broker pings at ~half this interval. |
 | `objects` | array | yes | Points to bind. May be empty (driver still connects). |
 
@@ -239,7 +239,10 @@ Key log lines to look for:
 - `MQTT driver registered driver=mqtt-local` — config loaded
 - `MQTT poll bucket added (5s interval) driver=... points=N` — points enrolled
 - `MQTT drivers opened count=N` — broker connection established
-- `mqtt connected` (debug) — CONNACK received
+- `mqtt connected` — CONNACK received (`info`, on the first connection and after every reconnect). The driver subscribes to its topics again and drops the values cached before the outage (S-51)
+- `mqtt not connected; retrying retry_in_secs=N` — `warn` once per outage; the event loop keeps trying after 1 s, 2 s, 4 s, … at most every 60 s (`mqtt still not connected` at `debug` for the repeats). While the broker is not connected the driver status is `Down`, reads fail with `mqtt broker not connected` (cached values are not served) and writes are refused, not queued
+- `mqtt requests not delivered before the disconnect were dropped dropped=N` — `warn`: publishes (and subscribes) that the broker had not acknowledged when the connection broke are discarded, not sent again after the reconnect, so a write never reaches equipment late. A write that returned success means "handed to the connection", not "acknowledged by the broker" (S-51)
+- `mqtt broker refused a subscription; its topic will not deliver refused=N` — `warn`: the broker answered a SUBSCRIBE with a failure code (for example an ACL)
 - `mqtt cache updated` (debug) — a PUBLISH arrived and was parsed
 - `MQTT poll tick task spawned (5s interval)` — tick task alive
 - `MQTT poll tick complete ok=N err=0` — when the counts differ from the previous tick: `warn` if any point failed, otherwise `info`; repeated counts at `debug` (S-49)
