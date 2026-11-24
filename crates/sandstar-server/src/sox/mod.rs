@@ -23,7 +23,7 @@ use crate::sox::dasp::DaspTransport;
 use crate::sox::dyn_slots::DynSlotStore;
 use crate::sox::sox_handlers::{
     handle_put_chunk, handle_sox_request_with_dyn, is_put_transfer_active, parse_write_request,
-    ComponentTree, ManifestDb, SubscriptionManager,
+    release_stale_file_xfer, ComponentTree, ManifestDb, SubscriptionManager, SOX_FILE_XFER_IDLE,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -244,13 +244,16 @@ async fn run_sox_server(
                         // chunk handler instead of the normal Invoke handler.
                         // In Sedona, 'k' is used for both invoke and file chunk transfer.
                         // During a put, chunks are received silently (no response).
-                        if payload.len() >= 2 && payload[0] == b'k' && is_put_transfer_active() {
+                        if payload.len() >= 2
+                            && payload[0] == b'k'
+                            && is_put_transfer_active(session_id)
+                        {
                             debug!(
                                 session = session_id,
                                 "SOX: routing 'k' to put chunk handler"
                             );
                             let chunk_payload = &payload[2..]; // skip cmd + replyNum
-                            handle_put_chunk(chunk_payload);
+                            handle_put_chunk(session_id, chunk_payload);
                             continue; // no response for put chunks
                         }
 
@@ -502,6 +505,9 @@ async fn run_sox_server(
                     subscriptions.unsubscribe_all(*sid);
                 }
                 transport.cleanup_expired();
+                // A file transfer whose session ended (expired or closed) or
+                // went quiet would otherwise hold the single slot (R-15).
+                release_stale_file_xfer(&transport.authenticated_sessions(), SOX_FILE_XFER_IDLE);
             }
             _ = tree_refresh_interval.tick() => {
                 // Refresh the component tree from engine channel data. The
