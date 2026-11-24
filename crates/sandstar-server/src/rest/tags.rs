@@ -190,19 +190,18 @@ async fn set_tags(
 
     let mut store = crate::lock::write_or_recover(&store, "dyn slot store");
 
-    if replace {
-        // Full replacement.
-        if let Err(e) = store.set_all(comp_id, new_tags) {
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"err": e}))).into_response();
-        }
+    // Full replacement or merge; either way all tags or none (R-48).
+    let result = if replace {
+        store.set_all(comp_id, new_tags)
     } else {
-        // Merge: set each tag individually.
-        for (key, val) in new_tags {
-            if let Err(e) = store.set(comp_id, key, val) {
-                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"err": e})))
-                    .into_response();
-            }
-        }
+        store.set_many(comp_id, new_tags)
+    };
+    if let Err(e) = result {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"err": e.to_string()})),
+        )
+            .into_response();
     }
 
     let count = store.tag_count(comp_id);
@@ -574,5 +573,45 @@ mod tests {
         assert!(interner["internedCount"].as_u64().unwrap() >= 28);
         assert!(interner["totalStringBytes"].as_u64().unwrap() > 0);
         assert!(interner["preInterned"].as_u64().unwrap() >= 28);
+    }
+
+    #[tokio::test]
+    async fn put_tags_with_a_bad_name_writes_nothing() {
+        let store = test_store();
+        // Existing tags must survive a refused merge and a refused replace.
+        store
+            .write()
+            .unwrap()
+            .set(10, "good".into(), DynValue::Str("before".into()))
+            .unwrap();
+        let app = router(store.clone(), no_auth());
+        for body in [
+            serde_json::json!({"good": 1, "Bad Key": 2}),
+            serde_json::json!({"good": 1, "big": "x".repeat(5000)}),
+            serde_json::json!({"_replace": true, "good": 1, "Bad": 2}),
+            serde_json::json!({"_replace": true, "good": "x".repeat(5000)}),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::put("/api/tags/10")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            let err: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(resp.into_body(), 1_000_000)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(err["err"].as_str().unwrap().len() < 300);
+            let s = store.read().unwrap();
+            assert_eq!(s.tag_count(10), 1, "nothing written");
+            assert_eq!(s.get(10, "good"), Some(&DynValue::Str("before".into())));
+        }
     }
 }

@@ -1359,6 +1359,56 @@ mod tests {
     }
 
     #[test]
+    fn rows_set_tags_refuses_a_bad_name_as_bad_request() {
+        let (state, dyn_store) = make_test_state_with_dyn_store();
+        let mut subscribed = HashSet::new();
+        let mut cov_cache = HashMap::new();
+        let mut tree_cache = HashMap::new();
+        let mut compact_cov = false;
+        let reply = handle_client_msg(
+            r#"{"op":"setTags","compId":50,"tags":{"addr":1,"Bad Key":2},"id":"st2"}"#,
+            &state,
+            &mut subscribed,
+            &mut cov_cache,
+            &mut tree_cache,
+            &mut compact_cov,
+        );
+        let v: JsonValue = serde_json::from_str(reply.as_deref().unwrap()).unwrap();
+        assert_eq!(v["op"], "error");
+        assert_eq!(v["code"], "BAD_REQUEST");
+        assert_eq!(
+            dyn_store.read().unwrap().tag_count(50),
+            0,
+            "nothing written"
+        );
+    }
+
+    #[test]
+    fn rows_set_tags_over_a_limit_is_limit_exceeded() {
+        let (state, dyn_store) = make_test_state_with_dyn_store();
+        let tags: serde_json::Map<String, JsonValue> = (0
+            ..=crate::sox::dyn_slots::DEFAULT_MAX_PER_COMP)
+            .map(|i| (format!("t{i}"), JsonValue::from(i)))
+            .collect();
+        let msg = serde_json::json!({"op": "setTags", "compId": 50, "tags": tags, "id": "st3"});
+        let mut subscribed = HashSet::new();
+        let mut cov_cache = HashMap::new();
+        let mut tree_cache = HashMap::new();
+        let mut compact_cov = false;
+        let reply = handle_client_msg(
+            &msg.to_string(),
+            &state,
+            &mut subscribed,
+            &mut cov_cache,
+            &mut tree_cache,
+            &mut compact_cov,
+        );
+        let v: JsonValue = serde_json::from_str(reply.as_deref().unwrap()).unwrap();
+        assert_eq!(v["code"], "LIMIT_EXCEEDED");
+        assert_eq!(dyn_store.read().unwrap().tag_count(50), 0);
+    }
+
+    #[test]
     fn rows_delete_tag_command() {
         let (state, dyn_store) = make_test_state_with_dyn_store();
         {
