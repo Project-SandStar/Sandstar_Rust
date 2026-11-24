@@ -231,10 +231,14 @@ Key log lines to look for:
 - `BACnet poll bucket added (5s interval) driver=... points=N` — points enrolled
 - `BACnet discovery: RX from=... bytes=...` — receiving Who-Is/I-Am traffic
 - `BACnet discovery: decoded I-Am device=<id>` — a device answered
-- `BACnet discovery complete devices=<n>` — final count
+- `BACnet discovery complete devices=<n>` — final count of the discovery in `open()`
+- `BACnet devices not found, Who-Is sent missing=N first=<id> next_in_secs=S` — a configured device did not answer; at the end of a poll a Who-Is goes out without waiting, first after 30 s, then 60 s, 120 s, … at most every 10 min, until every configured device is found. A Who-Is that could not be sent (`bacnet who-is send failed`) is tried again after 30 s (S-49)
+- `BACnet device discovered device=<id>` — a configured device that was missing answered a later Who-Is; its points are read from then on. I-Am packets from unconfigured devices, or for a device already known, are ignored (`debug`); a known device's address is not replaced
 - `BACnet poll tick task spawned (5s interval)` — tick task alive
-- `BACnet poll tick complete ok=N err=0` — every 5s, one per tick
-- `BACnet sync_cur failed driver=... point_id=... error=...` — per-point failure
+- `BACnet poll tick complete ok=N err=0` — when the counts differ from the previous tick: `warn` if any point failed, otherwise `info`; repeated counts at `debug` (S-49)
+- `BACnet sync_cur failed driver=... point_id=... error=...` — per-point failure, at `warn` when it starts or the error changes; repeats are `debug` (`sync_cur failed (repeat)`)
+- `BACnet point recovered driver=... point_id=...` — a failing point reads again
+- `BACnet poll: points still failing points=N for_secs=S` — `warn` every 10 min while points keep failing
 - `BACnet COV subscribed process_id=<id>` — COV active
 - `BACnet COV subscription renewed` — lifetime renewal working
 

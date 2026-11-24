@@ -242,9 +242,11 @@ Key log lines to look for:
 - `mqtt connected` (debug) — CONNACK received
 - `mqtt cache updated` (debug) — a PUBLISH arrived and was parsed
 - `MQTT poll tick task spawned (5s interval)` — tick task alive
-- `MQTT poll tick complete ok=N err=0` — every 5 s, one per tick
-- `MQTT sync_cur -> write_channel driver=... point_id=... value=...` — a cached value flowed into the engine
-- `MQTT sync_cur failed driver=... point_id=... error=...` — per-point failure (usually stale cache, or `last payload rejected` after an unusable payload)
+- `MQTT poll tick complete ok=N err=0` — when the counts differ from the previous tick: `warn` if any point failed, otherwise `info`; repeated counts at `debug` (S-49)
+- `MQTT sync_cur -> write_channel driver=... point_id=... value=...` (debug) — a cached value flowed into the engine
+- `MQTT sync_cur failed driver=... point_id=... error=...` — per-point failure (usually stale cache, or `last payload rejected` after an unusable payload), at `warn` when it starts or the error changes; repeats are `debug`
+- `MQTT point recovered driver=... point_id=...` — a failing point delivers again
+- `MQTT poll: points still failing points=N for_secs=S` — `warn` every 10 min while points keep failing
 
 ---
 

@@ -72,6 +72,62 @@ impl From<BacnetError> for super::DriverError {
     }
 }
 
+// ── Rediscovery (S-49) ─────────────────────────────────────
+
+/// First wait before a Who-Is for configured devices that did not answer
+/// the discovery in `open()`. Doubles after each Who-Is (R-25, S-49).
+pub const REDISCOVERY_MIN: Duration = Duration::from_secs(30);
+
+/// Longest wait between two Who-Is while a configured device is missing.
+pub const REDISCOVERY_MAX: Duration = Duration::from_secs(600);
+
+/// Most datagrams read without waiting at the start of one poll.
+pub const DRAIN_MAX_PACKETS: usize = 64;
+
+/// Who-Is schedule for configured devices that are not in the registry.
+#[derive(Debug)]
+struct Rediscovery {
+    min: Duration,
+    delay: Duration,
+    next: tokio::time::Instant,
+}
+
+impl Rediscovery {
+    fn new(min: Duration, now: tokio::time::Instant) -> Self {
+        Self {
+            min,
+            delay: min,
+            next: now + min,
+        }
+    }
+
+    /// Whether a Who-Is is due at `now`. When it is, the next one is
+    /// scheduled twice as far out, at most [`REDISCOVERY_MAX`]. With no
+    /// device missing the schedule starts over from `min`.
+    fn due(&mut self, now: tokio::time::Instant, missing: bool) -> bool {
+        if !missing {
+            self.delay = self.min;
+            self.next = now + self.min;
+            return false;
+        }
+        if now < self.next {
+            return false;
+        }
+        self.delay = self.delay.saturating_mul(2).min(REDISCOVERY_MAX);
+        self.next = now + self.delay;
+        true
+    }
+
+    /// After a Who-Is that could not be sent: try again after `min`.
+    fn retry_soon(&mut self, now: tokio::time::Instant) {
+        self.delay = self.min;
+        self.next = now + self.min;
+    }
+}
+
+/// At most one `warn` per this long for socket errors while draining.
+const DRAIN_ERROR_WARN_INTERVAL: Duration = Duration::from_secs(60);
+
 // ── Malformed frames ───────────────────────────────────────
 
 /// At most one `warn` per this many seconds for frames that fail to
@@ -315,6 +371,11 @@ pub struct BacnetDriver {
     /// How long after `subscribed_at` to renew a COV subscription.
     /// Default: 240s (80% of the default 300s lifetime).
     renewal_interval: std::time::Duration,
+    /// When to send the next Who-Is for configured devices that are not in
+    /// the registry (S-49). Restarted by `open()`.
+    rediscovery: Rediscovery,
+    /// When the last socket error while draining was logged at `warn`.
+    drain_error_warned: Option<tokio::time::Instant>,
 }
 
 impl BacnetDriver {
@@ -340,7 +401,16 @@ impl BacnetDriver {
             bbmd_addr: None,
             is_foreign_device: false,
             renewal_interval: std::time::Duration::from_secs(240),
+            rediscovery: Rediscovery::new(REDISCOVERY_MIN, tokio::time::Instant::now()),
+            drain_error_warned: None,
         }
+    }
+
+    /// Override the first wait before a Who-Is for missing devices (useful
+    /// in tests). Default: [`REDISCOVERY_MIN`].
+    pub fn with_rediscovery_interval(mut self, min: Duration) -> Self {
+        self.rediscovery = Rediscovery::new(min, tokio::time::Instant::now());
+        self
     }
 
     /// Override the COV subscription renewal interval (useful in tests).
@@ -1004,6 +1074,179 @@ impl BacnetDriver {
         }
     }
 
+    // ── Who-Is and rediscovery (S-49) ──────────────────────
+
+    /// Send a Who-Is as a local broadcast and, when registered as a foreign
+    /// device, through the BBMD. Send failures are logged and reported as
+    /// `Ok(false)` (the local broadcast did not go out): I-Am packets may
+    /// still arrive. Only an invalid broadcast address is an error.
+    async fn send_who_is_on(&self, socket: &UdpSocket) -> Result<bool, DriverError> {
+        let bcast: SocketAddr = format!("{}:{}", self.broadcast_addr, self.broadcast_port)
+            .parse()
+            .map_err(|e: std::net::AddrParseError| {
+                DriverError::ConfigFault(format!("invalid broadcast addr: {e}"))
+            })?;
+
+        let sent = match discovery::send_who_is(socket, bcast).await {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(driver = %self.id, "bacnet who-is send failed: {e}");
+                false
+            }
+        };
+
+        if self.is_foreign_device {
+            if let Some(bbmd) = self.bbmd_addr {
+                let who_is_apdu = [0x10, frame::SVC_UNCONFIRMED_WHOIS];
+                let npdu_apdu = [&[0x01u8, 0x00][..], &who_is_apdu[..]].concat();
+                let distribute = frame::encode_distribute_broadcast_to_network(&npdu_apdu);
+                if let Err(e) = socket.send_to(&distribute, bbmd).await {
+                    tracing::warn!(driver = %self.id, "bbmd distribute who-is failed: {e}");
+                }
+            }
+        }
+        Ok(sent)
+    }
+
+    /// Read the datagrams already waiting on the socket, without waiting
+    /// (at most [`DRAIN_MAX_PACKETS`]). An I-Am goes into the registry only
+    /// for a configured device that is not there yet: a known device's
+    /// address is never replaced this way, and unconfigured devices are not
+    /// added. COV notifications go into the cache; anything else is dropped.
+    fn drain_pending(&mut self) {
+        let Some(socket) = self.socket.as_ref() else {
+            return;
+        };
+        let configured: std::collections::BTreeSet<u32> =
+            self.objects.values().map(|o| o.device_id).collect();
+        let mut buf = [0u8; 1500];
+        for _ in 0..DRAIN_MAX_PACKETS {
+            let (n, src) = match socket.try_recv_from(&mut buf) {
+                Ok(r) => r,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return,
+                Err(e) => {
+                    let now = tokio::time::Instant::now();
+                    let due = self.drain_error_warned.is_none_or(|t| {
+                        now.saturating_duration_since(t) >= DRAIN_ERROR_WARN_INTERVAL
+                    });
+                    if due {
+                        self.drain_error_warned = Some(now);
+                        tracing::warn!(driver = %self.id, error = %e, "BACnet drain: recv error");
+                    } else {
+                        tracing::debug!(driver = %self.id, error = %e, "BACnet drain: recv error");
+                    }
+                    return;
+                }
+            };
+            let Some(data) = buf.get(..n) else {
+                return;
+            };
+            match decode_or_log(data, src, "drain") {
+                Some((
+                    _,
+                    frame::Apdu::IAm {
+                        device_instance,
+                        max_apdu,
+                        segmentation,
+                        vendor_id,
+                    },
+                )) => {
+                    if !configured.contains(&device_instance) {
+                        tracing::debug!(
+                            driver = %self.id,
+                            device = device_instance,
+                            "BACnet drain: I-Am from an unconfigured device ignored"
+                        );
+                        continue;
+                    }
+                    if self.device_registry.get(device_instance).is_some() {
+                        tracing::debug!(
+                            driver = %self.id,
+                            device = device_instance,
+                            "BACnet drain: I-Am for a known device ignored"
+                        );
+                        continue;
+                    }
+                    tracing::info!(
+                        driver = %self.id,
+                        device = device_instance,
+                        "BACnet device discovered"
+                    );
+                    self.device_registry.insert(DeviceInfo {
+                        instance: device_instance,
+                        addr: src,
+                        max_apdu,
+                        vendor_id,
+                        segmentation,
+                    });
+                }
+                Some((_, frame::Apdu::UnconfirmedCovNotification { notification }))
+                | Some((_, frame::Apdu::ConfirmedCovNotification { notification, .. })) => {
+                    self.cov_cache.update(&notification);
+                }
+                Some((_, other)) => {
+                    tracing::debug!(driver = %self.id, apdu = ?other, "BACnet drain: ignored APDU");
+                }
+                // Logged (rate-limited) by decode_or_log.
+                None => {}
+            }
+        }
+        tracing::debug!(
+            driver = %self.id,
+            max = DRAIN_MAX_PACKETS,
+            "BACnet drain: packet limit reached, the rest waits for the next poll"
+        );
+    }
+
+    /// Configured device instances that are not in the registry.
+    fn missing_devices(&self) -> std::collections::BTreeSet<u32> {
+        self.objects
+            .values()
+            .map(|o| o.device_id)
+            .filter(|d| self.device_registry.get(*d).is_none())
+            .collect()
+    }
+
+    /// Send a Who-Is, without waiting for replies, when a configured device
+    /// is missing and the schedule allows it. Called at the end of a poll,
+    /// so that the replies are not taken by that poll's read loops (which
+    /// drop I-Am packets); [`Self::drain_pending`] reads them on the next
+    /// poll. A Who-Is that could not be sent is tried again after the
+    /// first wait.
+    async fn rediscover_missing(&mut self) {
+        if self.socket.is_none() {
+            return;
+        }
+        let missing = self.missing_devices();
+        let now = tokio::time::Instant::now();
+        if !self.rediscovery.due(now, !missing.is_empty()) {
+            return;
+        }
+        let Some(socket) = self.socket.as_ref() else {
+            return;
+        };
+        match self.send_who_is_on(socket).await {
+            Ok(true) => {}
+            Ok(false) => {
+                // Already logged at warn by send_who_is_on.
+                self.rediscovery.retry_soon(now);
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(driver = %self.id, error = %e, "BACnet rediscovery: who-is not sent");
+                self.rediscovery.retry_soon(now);
+                return;
+            }
+        }
+        tracing::info!(
+            driver = %self.id,
+            missing = missing.len(),
+            first = missing.iter().next().copied().unwrap_or_default(),
+            next_in_secs = self.rediscovery.delay.as_secs(),
+            "BACnet devices not found, Who-Is sent"
+        );
+    }
+
     // ── Phase B8.1: COV notification handling ───────────────
 
     /// Process a COV notification: update the cache.
@@ -1307,38 +1550,18 @@ impl AsyncDriver for BacnetDriver {
             }
         }
 
-        // 3. Send Who-Is broadcast.
-        let bcast: SocketAddr = format!("{}:{}", self.broadcast_addr, self.broadcast_port)
-            .parse()
-            .map_err(|e: std::net::AddrParseError| {
-                DriverError::ConfigFault(format!("invalid broadcast addr: {e}"))
-            })?;
-
-        // Always send local broadcast
-        if let Err(e) = discovery::send_who_is(&socket, bcast).await {
-            tracing::warn!(driver = %self.id, "bacnet who-is send failed: {e}");
-            // Non-fatal: we still listen for any I-Am packets that arrive.
-        }
-
-        // Additionally distribute via BBMD for remote subnets
-        if self.is_foreign_device {
-            if let Some(bbmd) = self.bbmd_addr {
-                let who_is_apdu = [0x10, frame::SVC_UNCONFIRMED_WHOIS];
-                let npdu_apdu = [&[0x01u8, 0x00][..], &who_is_apdu[..]].concat();
-                let distribute = frame::encode_distribute_broadcast_to_network(&npdu_apdu);
-                if let Err(e) = socket.send_to(&distribute, bbmd).await {
-                    tracing::warn!(driver = %self.id, "bbmd distribute who-is failed: {e}");
-                }
-            }
-        }
+        // 3. Send Who-Is (local broadcast, and via the BBMD if registered).
+        self.send_who_is_on(&socket).await?;
 
         // 4. Collect I-Am responses during the discovery window.
         let devices = discovery::collect_i_am(&socket, self.discovery_timeout).await;
         let n = devices.len();
         tracing::info!(driver = %self.id, devices = n, "BACnet discovery complete");
 
-        // 5. Update registry.
+        // 5. Update registry. Devices that did not answer are looked for
+        // again from `sync_cur` (S-49).
         self.device_registry.bulk_insert(devices);
+        self.rediscovery = Rediscovery::new(self.rediscovery.min, tokio::time::Instant::now());
 
         self.socket = Some(socket);
         self.status = DriverStatus::Ok;
@@ -1437,6 +1660,10 @@ impl AsyncDriver for BacnetDriver {
 
         // Renew any COV subscriptions due for refresh before reading points.
         self.renew_due_subscriptions().await;
+
+        // Pick up I-Am replies (and COV notifications) that arrived since
+        // the last poll (S-49).
+        self.drain_pending();
 
         // Group points by device_id. Points whose object isn't configured get
         // a ConfigFault immediately. Points whose device isn't in the registry
@@ -1556,6 +1783,10 @@ impl AsyncDriver for BacnetDriver {
                 Err(e) => ctx.update_cur_err(pid, e),
             }
         }
+
+        // Look again for devices still missing, after this poll's reads
+        // (S-49).
+        self.rediscover_missing().await;
     }
 
     async fn write(&mut self, writes: &[(u32, f64)], ctx: &mut WriteContext) {
