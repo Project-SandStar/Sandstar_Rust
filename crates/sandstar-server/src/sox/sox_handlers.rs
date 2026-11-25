@@ -86,6 +86,40 @@ pub struct Link {
     pub to_slot: u8,
 }
 
+/// Why a link was not added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkError {
+    /// The source or the target component does not exist.
+    NotFound,
+    /// A slot index is past the end of its component's slots.
+    BadSlot,
+    /// The same link is already there.
+    Duplicate,
+    /// The link would close a loop in the dataflow graph.
+    Cycle,
+}
+
+impl std::fmt::Display for LinkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            LinkError::NotFound => "link component not found",
+            LinkError::BadSlot => "link slot out of range",
+            LinkError::Duplicate => "link already exists",
+            LinkError::Cycle => "link would create a cycle",
+        })
+    }
+}
+
+/// What a tree holds that should not be there (see
+/// [`ComponentTree::integrity_report`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IntegrityReport {
+    /// Components whose parent does not exist.
+    pub orphans: usize,
+    /// Links with a missing end or a slot index out of range.
+    pub bad_links: usize,
+}
+
 // ---- Virtual component ----
 
 /// A virtual Sedona component mapped from engine data.
@@ -131,6 +165,10 @@ pub struct ComponentState {
 
 /// No parent sentinel (root component).
 pub const NO_PARENT: u16 = 0xFFFF;
+
+/// Ids below this are the system components (app and services). They are
+/// never deleted, neither by request nor as part of a subtree.
+pub const FIRST_USER_COMP_ID: u16 = 7;
 
 /// Base comp_id for channel-mapped components.
 pub const CHANNEL_COMP_BASE: u16 = 100;
@@ -291,6 +329,129 @@ impl ComponentTree {
         Some(comp)
     }
 
+    /// A component and everything below it, the component first. Empty if
+    /// it does not exist.
+    ///
+    /// Only `parent_id` decides what is below: a `children` list can name
+    /// a component that belongs elsewhere (a saved file from before reorder
+    /// was checked), and following it would take that component along.
+    /// System components are never a descendant. Each id is visited once,
+    /// so a loop in the data ends.
+    pub fn subtree_ids(&self, comp_id: u16) -> Vec<u16> {
+        if !self.components.contains_key(&comp_id) {
+            return Vec::new();
+        }
+        let mut by_parent: HashMap<u16, Vec<u16>> = HashMap::new();
+        for comp in self.components.values() {
+            if comp.parent_id != NO_PARENT && comp.parent_id != comp.comp_id {
+                by_parent
+                    .entry(comp.parent_id)
+                    .or_default()
+                    .push(comp.comp_id);
+            }
+        }
+        let mut seen: HashSet<u16> = HashSet::from([comp_id]);
+        let mut order = vec![comp_id];
+        let mut next = 0;
+        while let Some(&id) = order.get(next) {
+            next += 1;
+            for &child in by_parent.get(&id).map(Vec::as_slice).unwrap_or_default() {
+                if child >= FIRST_USER_COMP_ID && seen.insert(child) {
+                    order.push(child);
+                }
+            }
+        }
+        order
+    }
+
+    /// Remove a component together with everything below it. The links of
+    /// every removed component go from the other end too, and the removed
+    /// ids leave the user-added set. Returns the removed ids (the component
+    /// first), or `None` if it does not exist.
+    ///
+    /// A child left behind would keep running and keep being saved while
+    /// pointing at a parent that is gone (R-61).
+    pub fn remove_subtree(&mut self, comp_id: u16) -> Option<Vec<u16>> {
+        let ids = self.subtree_ids(comp_id);
+        let top_parent = self.components.get(&comp_id)?.parent_id;
+        let gone: HashSet<u16> = ids.iter().copied().collect();
+
+        // One pass over what goes, then one `retain` per surviving peer:
+        // the work grows with the size of the subtree, not with its square.
+        let mut peers: HashSet<u16> = HashSet::new();
+        for id in &ids {
+            if let Some(comp) = self.components.remove(id) {
+                for l in &comp.links {
+                    for end in [l.from_comp, l.to_comp] {
+                        if !gone.contains(&end) {
+                            peers.insert(end);
+                        }
+                    }
+                }
+                if self.name_to_comp.get(&comp.name) == Some(id) {
+                    self.name_to_comp.remove(&comp.name);
+                }
+            }
+            self.user_added_ids.remove(id);
+            self.component_state.remove(id);
+        }
+        for peer in peers {
+            if let Some(comp) = self.components.get_mut(&peer) {
+                comp.links
+                    .retain(|l| !gone.contains(&l.from_comp) && !gone.contains(&l.to_comp));
+            }
+        }
+        if let Some(parent) = self.components.get_mut(&top_parent) {
+            parent.children.retain(|id| !gone.contains(id));
+        }
+        Some(ids)
+    }
+
+    /// Whether `slot` can be a slot of `comp`. A type the manifest knows
+    /// has exactly its manifest slots. A type it does not know starts with
+    /// `meta` only and gets its slots as they are written, so any index is
+    /// possible there and none is refused.
+    fn slot_can_exist(&self, comp: &VirtualComponent, slot: u8) -> bool {
+        usize::from(slot) < comp.slots.len()
+            || self
+                .manifest_db
+                .get_slots(comp.kit_id, comp.type_id)
+                .is_none()
+    }
+
+    /// Count what should not be in the tree: components whose parent is
+    /// missing, and links with a missing end or a slot its type does not
+    /// have. A link is stored on both ends and counted once.
+    pub fn integrity_report(&self) -> IntegrityReport {
+        let orphans = self
+            .components
+            .values()
+            .filter(|c| {
+                c.parent_id != NO_PARENT
+                    && c.parent_id != c.comp_id
+                    && !self.components.contains_key(&c.parent_id)
+            })
+            .count();
+        let end_ok = |id: u16, slot: u8| {
+            self.components
+                .get(&id)
+                .is_some_and(|c| self.slot_can_exist(c, slot))
+        };
+        let mut bad: HashSet<(u16, u8, u16, u8)> = HashSet::new();
+        for comp in self.components.values() {
+            for l in &comp.links {
+                let ok = end_ok(l.from_comp, l.from_slot) && end_ok(l.to_comp, l.to_slot);
+                if !ok {
+                    bad.insert((l.from_comp, l.from_slot, l.to_comp, l.to_slot));
+                }
+            }
+        }
+        IntegrityReport {
+            orphans,
+            bad_links: bad.len(),
+        }
+    }
+
     /// Names some component in the tree still carries.
     fn live_names(&self) -> HashSet<&str> {
         self.components
@@ -385,20 +546,40 @@ impl ComponentTree {
 
     /// Add a link to the tree. Returns true if the link was added (not a duplicate).
     pub fn add_link(&mut self, from_comp: u16, from_slot: u8, to_comp: u16, to_slot: u8) -> bool {
+        self.try_add_link(from_comp, from_slot, to_comp, to_slot)
+            .is_ok()
+    }
+
+    /// Add a link, or say why not. Both components must exist, and a slot
+    /// index must be one the component's type has (see `slot_can_exist`); a
+    /// link to nothing would stay in the tree and in the saved file without
+    /// ever carrying a value.
+    pub fn try_add_link(
+        &mut self,
+        from_comp: u16,
+        from_slot: u8,
+        to_comp: u16,
+        to_slot: u8,
+    ) -> Result<(), LinkError> {
         let link = Link {
             from_comp,
             from_slot,
             to_comp,
             to_slot,
         };
-        // Store the link on BOTH components so the editor can render wires
-        // from both the source and target sides.
-        if let Some(comp) = self.components.get(&to_comp) {
-            if comp.links.contains(&link) {
-                return false;
-            }
-        } else {
-            return false;
+        let (Some(from), Some(to)) = (
+            self.components.get(&from_comp),
+            self.components.get(&to_comp),
+        ) else {
+            return Err(LinkError::NotFound);
+        };
+        if !self.slot_can_exist(from, from_slot) || !self.slot_can_exist(to, to_slot) {
+            return Err(LinkError::BadSlot);
+        }
+        // The link is stored on BOTH components so the editor can render
+        // wires from both the source and target sides.
+        if to.links.contains(&link) {
+            return Err(LinkError::Duplicate);
         }
         // Reject if the link would create a cycle in the dataflow graph.
         if self.would_create_cycle(from_comp, to_comp) {
@@ -407,7 +588,7 @@ impl ComponentTree {
                 to_comp,
                 "SOX: link rejected — would create cycle"
             );
-            return false;
+            return Err(LinkError::Cycle);
         }
 
         // DDC semantics: a single input slot has at most one incoming link.
@@ -445,7 +626,7 @@ impl ComponentTree {
                 }
             }
         }
-        true
+        Ok(())
     }
 
     /// Remove a link from the tree. Returns true if the link was found and removed.
@@ -842,6 +1023,16 @@ impl ComponentTree {
             next_id = self.next_id,
             "SOX: loaded user components from disk"
         );
+        // Report only: nothing is dropped from what the file held.
+        let report = self.integrity_report();
+        if report != IntegrityReport::default() {
+            tracing::warn!(
+                path,
+                orphans = report.orphans,
+                bad_links = report.bad_links,
+                "SOX: saved components hold orphans or links to nothing"
+            );
+        }
         Ok(count)
     }
 
@@ -3842,6 +4033,12 @@ impl ManifestDb {
     /// Look up the slot schema for a component type.
     ///
     /// Returns `None` if no manifest was loaded for this (kit_id, type_id).
+    /// Make a type known to the manifest, with no slot details (tests).
+    #[cfg(test)]
+    pub(crate) fn know_type_for_test(&mut self, kit_id: u8, type_id: u8) {
+        self.types.entry((kit_id, type_id)).or_default();
+    }
+
     pub fn get_slots(&self, kit_id: u8, type_id: u8) -> Option<&Vec<ManifestSlot>> {
         self.types.get(&(kit_id, type_id))
     }
@@ -3984,6 +4181,18 @@ impl SubscriptionManager {
         Self {
             subscriptions: HashMap::new(),
             by_session: HashMap::new(),
+        }
+    }
+
+    /// Drop every subscription to a component that no longer exists, so a
+    /// later component that gets the same id does not inherit its watchers.
+    pub fn forget_component(&mut self, comp_id: u16) {
+        if let Some(sessions) = self.subscriptions.remove(&comp_id) {
+            for session_id in sessions {
+                if let Some(comps) = self.by_session.get_mut(&session_id) {
+                    comps.remove(&comp_id);
+                }
+            }
         }
     }
 
@@ -5767,13 +5976,9 @@ fn handle_delete(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
         return error_msg(req.cmd, req.req_id, "cannot delete system component");
     }
 
-    let was_user_added = tree.is_user_added(comp_id);
-    if tree.remove(comp_id).is_some() {
-        if was_user_added {
-            tree.user_added_ids.remove(&comp_id);
-            tree.mark_dirty();
-        }
-        tracing::info!(comp_id, "SOX: component deleted");
+    if let Some(removed) = tree.remove_subtree(comp_id) {
+        tree.mark_dirty();
+        tracing::info!(comp_id, removed = removed.len(), "SOX: component deleted");
         SoxResponse::success(SoxCmd::Delete, req.req_id)
     } else {
         error_msg(req.cmd, req.req_id, "bad compId")
@@ -5861,14 +6066,18 @@ pub fn handle_link(req: &SoxRequest, tree: &mut ComponentTree) -> SoxResponse {
             if tree.would_create_cycle(from_comp, to_comp) {
                 return error_msg(req.cmd, req.req_id, "link rejected: would create cycle");
             }
-            if tree.add_link(from_comp, from_slot, to_comp, to_slot) {
-                if tree.is_user_added(from_comp) || tree.is_user_added(to_comp) {
-                    tree.mark_dirty();
+            match tree.try_add_link(from_comp, from_slot, to_comp, to_slot) {
+                Ok(()) => {
+                    if tree.is_user_added(from_comp) || tree.is_user_added(to_comp) {
+                        tree.mark_dirty();
+                    }
+                    tracing::info!(from_comp, from_slot, to_comp, to_slot, "SOX: link added");
+                    SoxResponse::success(SoxCmd::Link, req.req_id)
                 }
-                tracing::info!(from_comp, from_slot, to_comp, to_slot, "SOX: link added");
-                SoxResponse::success(SoxCmd::Link, req.req_id)
-            } else {
-                error_msg(req.cmd, req.req_id, "link add failed")
+                Err(e) => {
+                    tracing::warn!(from_comp, from_slot, to_comp, to_slot, reason = %e, "SOX: link refused");
+                    error_msg(req.cmd, req.req_id, "link add failed")
+                }
             }
         }
         b'd' => {
@@ -11038,7 +11247,12 @@ mod tests {
                 kit_id: 0,
                 type_id: 5,
                 children: vec![],
-                slots: vec![],
+                slots: vec![VirtualSlot {
+                    name: "meta".into(),
+                    type_id: SoxValueType::Int as u8,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Int(0),
+                }],
                 links: vec![],
             });
         }
@@ -12540,5 +12754,175 @@ mod tests {
 
         // Should return error (unknown comp)
         assert_eq!(resp.cmd, b'!');
+    }
+
+    // ── S-55: links to nothing, orphans, saved-file report ──
+
+    fn s55_comp(comp_id: u16, parent_id: u16, slots: usize) -> VirtualComponent {
+        VirtualComponent {
+            comp_id,
+            parent_id,
+            name: format!("s55c{comp_id}"),
+            type_name: "Test".into(),
+            kit_id: 200,
+            type_id: 1,
+            children: vec![],
+            slots: (0..slots)
+                .map(|i| VirtualSlot {
+                    name: format!("s{i}"),
+                    type_id: SoxValueType::Float as u8,
+                    flags: 0,
+                    value: SlotValue::Float(0.0),
+                })
+                .collect(),
+            links: vec![],
+        }
+    }
+
+    fn s55_tree() -> ComponentTree {
+        let mut manifest = ManifestDb::new();
+        manifest.know_type_for_test(200, 1);
+        let mut tree = ComponentTree::new_with_manifest(Arc::new(manifest));
+        tree.add(s55_comp(0, NO_PARENT, 1));
+        tree.add(s55_comp(300, 0, 3));
+        tree.add(s55_comp(301, 0, 3));
+        tree
+    }
+
+    #[test]
+    fn try_add_link_names_each_reason() {
+        let mut tree = s55_tree();
+        assert_eq!(tree.try_add_link(300, 1, 999, 1), Err(LinkError::NotFound));
+        assert_eq!(tree.try_add_link(999, 1, 301, 1), Err(LinkError::NotFound));
+        assert_eq!(tree.try_add_link(300, 3, 301, 1), Err(LinkError::BadSlot));
+        assert_eq!(tree.try_add_link(300, 1, 301, 3), Err(LinkError::BadSlot));
+        assert_eq!(tree.try_add_link(300, 1, 301, 1), Ok(()));
+        assert_eq!(tree.try_add_link(300, 1, 301, 1), Err(LinkError::Duplicate));
+        assert_eq!(tree.try_add_link(301, 2, 300, 2), Err(LinkError::Cycle));
+        // A refused link leaves nothing behind.
+        assert_eq!(tree.get(300).unwrap().links.len(), 1);
+        assert_eq!(tree.get(301).unwrap().links.len(), 1);
+        assert_eq!(tree.integrity_report(), IntegrityReport::default());
+    }
+
+    #[test]
+    fn subtree_ids_of_a_missing_component_is_empty() {
+        let tree = s55_tree();
+        assert!(tree.subtree_ids(999).is_empty());
+        assert_eq!(tree.subtree_ids(300), vec![300]);
+        let mut all = tree.subtree_ids(0);
+        all.sort_unstable();
+        assert_eq!(all, vec![0, 300, 301]);
+    }
+
+    #[test]
+    fn remove_subtree_of_a_missing_component_changes_nothing() {
+        let mut tree = s55_tree();
+        assert!(tree.remove_subtree(999).is_none());
+        assert_eq!(tree.len(), 3);
+    }
+
+    #[test]
+    fn integrity_report_counts_orphans_and_bad_links_once() {
+        let mut tree = s55_tree();
+        assert!(tree.add_link(300, 1, 301, 1));
+        assert_eq!(tree.integrity_report(), IntegrityReport::default());
+
+        // An orphan: its parent was never in the tree.
+        tree.add(s55_comp(302, 777, 3));
+        // A link to a component that is not there, and one to a slot past
+        // the end; the second is stored on both of its ends.
+        let gone = Link {
+            from_comp: 300,
+            from_slot: 1,
+            to_comp: 888,
+            to_slot: 1,
+        };
+        let bad_slot = Link {
+            from_comp: 300,
+            from_slot: 2,
+            to_comp: 301,
+            to_slot: 9,
+        };
+        tree.get_mut(300).unwrap().links.push(gone);
+        tree.get_mut(300).unwrap().links.push(bad_slot.clone());
+        tree.get_mut(301).unwrap().links.push(bad_slot);
+
+        assert_eq!(
+            tree.integrity_report(),
+            IntegrityReport {
+                orphans: 1,
+                bad_links: 2
+            }
+        );
+    }
+
+    /// The UDP SOX delete takes the subtree and its links with it too.
+    #[test]
+    fn sox_delete_removes_the_subtree_and_its_links() {
+        let mut tree = s55_tree();
+        tree.add(s55_comp(310, 300, 3));
+        tree.mark_user_added(300);
+        tree.mark_user_added(310);
+        assert!(tree.add_link(310, 1, 301, 1));
+
+        let req = SoxRequest {
+            cmd: SoxCmd::Delete,
+            req_id: 1,
+            payload: 300u16.to_be_bytes().to_vec(),
+        };
+        let _ = handle_delete(&req, &mut tree);
+
+        assert!(tree.get(300).is_none());
+        assert!(tree.get(310).is_none());
+        assert!(!tree.is_user_added(310));
+        assert!(tree.get(301).unwrap().links.is_empty());
+        assert!(tree.dirty);
+        assert_eq!(tree.integrity_report(), IntegrityReport::default());
+    }
+
+    #[test]
+    fn try_add_link_does_not_bound_slots_of_an_unknown_type() {
+        let mut tree = s55_tree();
+        // Kit 201 is not in the manifest.
+        let mut unknown = s55_comp(320, 0, 1);
+        unknown.kit_id = 201;
+        tree.add(unknown);
+        assert_eq!(tree.try_add_link(300, 1, 320, 9), Ok(()));
+        assert_eq!(tree.try_add_link(320, 200, 301, 1), Ok(()));
+        assert_eq!(tree.integrity_report(), IntegrityReport::default());
+    }
+
+    #[test]
+    fn remove_subtree_handles_a_wide_parent_and_a_wide_fan_out() {
+        let mut tree = s55_tree();
+        // 2000 children under 300, each fed by 301.
+        for i in 0..2000u16 {
+            let id = 1000 + i;
+            tree.add(s55_comp(id, 300, 3));
+            assert!(tree.add_link(301, 1, id, 1));
+        }
+        assert_eq!(tree.get(301).unwrap().links.len(), 2000);
+
+        let removed = tree.remove_subtree(300).unwrap();
+
+        assert_eq!(removed.len(), 2001);
+        assert_eq!(tree.len(), 2);
+        assert!(tree.get(301).unwrap().links.is_empty());
+        assert_eq!(tree.get(0).unwrap().children, vec![301]);
+    }
+
+    #[test]
+    fn forget_component_drops_its_subscriptions_only() {
+        let mut subs = SubscriptionManager::new();
+        subs.subscribe(1, 300);
+        subs.subscribe(2, 300);
+        subs.subscribe(1, 301);
+
+        subs.forget_component(300);
+
+        assert!(subs.get_watchers(300).is_none());
+        assert_eq!(subs.get_watchers(301).map(|s| s.len()), Some(1));
+        assert_eq!(subs.total_subscriptions(), 1);
     }
 }

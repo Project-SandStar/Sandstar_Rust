@@ -23,6 +23,7 @@ use tracing::{error, info, warn};
 use crate::loader;
 
 /// Summary of what changed during a config reload.
+#[derive(Debug)]
 pub struct ReloadSummary {
     pub channels_updated: usize,
     pub channels_added: usize,
@@ -77,6 +78,16 @@ pub fn reload_config<H: HalRead + HalWrite + HalDiagnostics>(
         errors: Vec::new(),
     };
 
+    // A reload that could not read what it was asked to read is an error
+    // for the caller, not a line in the log (R-62).
+    //
+    // It is also all or nothing: when a file cannot be read, the engine
+    // keeps the tables, channels and poll list it had.
+    if !config_dir.is_dir() {
+        // Not "not found": the REST layer would turn that into a 404.
+        return Err(format!("config directory is missing: {}", config_dir.display()).into());
+    }
+
     // 1. Reload tables (tables.csv + data files)
     let tables_csv = config_dir.join("tables.csv");
     let table_dir = [
@@ -88,17 +99,26 @@ pub fn reload_config<H: HalRead + HalWrite + HalDiagnostics>(
     .find(|p| p.exists())
     .unwrap_or_else(|| config_dir.to_path_buf());
 
+    // Loaded on the side: a file that cannot be read must not leave the
+    // engine without tables. The previous store is kept until the database
+    // step is through, so a failure there can put it back.
+    let mut previous_tables = None;
     if tables_csv.exists() {
-        engine.tables.clear();
-        match loader::load_tables(&mut engine.tables, &tables_csv, &table_dir) {
+        let mut fresh = sandstar_engine::table::TableStore::new();
+        match loader::load_tables(&mut fresh, &tables_csv, &table_dir) {
             Ok(n) => {
+                previous_tables = Some(std::mem::replace(&mut engine.tables, fresh));
                 summary.tables_reloaded = n;
                 info!(count = n, "tables reloaded");
             }
             Err(e) => {
-                let msg = format!("failed to reload tables: {}", e);
+                let msg = format!(
+                    "failed to reload tables from {} (nothing changed): {}",
+                    tables_csv.display(),
+                    e
+                );
                 error!("{}", msg);
-                summary.errors.push(msg);
+                return Err(msg.into());
             }
         }
     }
@@ -106,9 +126,6 @@ pub fn reload_config<H: HalRead + HalWrite + HalDiagnostics>(
     // 2. Reload database.zinc (granular diff-based)
     let database_path = config_dir.join("database.zinc");
     if database_path.exists() {
-        // Snapshot current polls before attempting reload — enables rollback on failure
-        let polls_snapshot = engine.polls.snapshot();
-
         match loader::load_database_granular(engine, &database_path) {
             Ok(result) => {
                 summary.channels_updated = result.modified;
@@ -156,22 +173,19 @@ pub fn reload_config<H: HalRead + HalWrite + HalDiagnostics>(
                 );
             }
             Err(e) => {
-                let msg = format!("failed to reload database.zinc: {}", e);
-                error!("{}", msg);
-                summary.errors.push(msg);
-                // Fallback: poll all input channels
-                engine.polls.clear();
-                let fallback_count = loader::setup_polls(engine);
-                if fallback_count == 0 && engine.polls.count() == 0 {
-                    // Both database load AND setup_polls produced 0 polls —
-                    // restore the previous poll list so we don't stop reading
-                    // all sensors.
-                    error!(
-                        prev_polls = polls_snapshot.len(),
-                        "reload failed completely — rolling back to previous poll list"
-                    );
-                    engine.polls.restore(polls_snapshot);
+                // The loader fails before it touches a channel (read and
+                // parse come first), so the channels and the poll list are
+                // as they were; the tables go back too.
+                if let Some(previous) = previous_tables {
+                    engine.tables = previous;
                 }
+                let msg = format!(
+                    "failed to reload {} (nothing changed): {}",
+                    database_path.display(),
+                    e
+                );
+                error!("{}", msg);
+                return Err(msg.into());
             }
         }
     } else {
@@ -193,7 +207,7 @@ pub fn reload_config<H: HalRead + HalWrite + HalDiagnostics>(
     if summary.errors.is_empty() {
         info!(%summary, "config reload complete");
     } else {
-        warn!(%summary, "config reload completed with errors");
+        warn!(%summary, "config reload completed with warnings");
     }
 
     Ok(summary)
@@ -279,14 +293,139 @@ mod tests {
         engine.polls.add(1100).unwrap();
         assert_eq!(engine.polls.count(), 1);
 
-        let result = reload_config(&mut engine, dir.path()).unwrap();
-
-        // database.zinc failed, but setup_polls should have rebuilt the list
-        // from the enabled input channel. Either way, we should never have 0 polls.
-        assert!(
-            result.polls_after > 0,
-            "polls_after should not be 0 after reload failure with rollback"
+        // A second channel that is enabled but not polled: a rebuilt list
+        // would pick it up, the kept list does not.
+        let extra = Channel::new(
+            1200,
+            ChannelType::Analog,
+            ChannelDirection::In,
+            0,
+            1,
+            false,
+            ValueConv::default(),
+            "extra",
         );
+        engine.channels.add(extra).unwrap();
+        engine.channels.get_mut(1200).unwrap().enabled = true;
+
+        // The caller is told (R-62)...
+        let err = reload_config(&mut engine, dir.path()).unwrap_err();
+        assert!(err.to_string().contains("database.zinc"), "{err}");
+
+        // ...and the poll list is the one it was.
+        let polled: Vec<u32> = engine.polls.iter().map(|(&id, _)| id).collect();
+        assert_eq!(polled, vec![1100]);
+        assert_eq!(engine.channels.count(), 2);
+    }
+
+    /// Good tables and a bad database: the new tables do not stay.
+    #[test]
+    fn a_bad_database_puts_the_previous_tables_back() {
+        let dir = TempDir::new().unwrap();
+        let mut engine = make_engine_with_channel(1100);
+        assert_eq!(engine.tables.count(), 0);
+
+        write_good_tables(dir.path());
+        fs::write(dir.path().join("database.zinc"), "not zinc {{{\n").unwrap();
+
+        let err = reload_config(&mut engine, dir.path()).unwrap_err();
+        assert!(err.to_string().contains("database.zinc"), "{err}");
+        assert_eq!(
+            engine.tables.count(),
+            0,
+            "new tables stayed after a failed reload"
+        );
+    }
+
+    /// Bad tables and a database file: the database is not applied.
+    #[test]
+    fn bad_tables_stop_the_reload_before_the_database() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("tables.csv")).unwrap();
+        // A grid that parses and names no channel: applied, it would remove
+        // nothing here, so the poll list is the witness.
+        fs::write(
+            dir.path().join("database.zinc"),
+            "ver:\"3.0\"\nid,channel\n",
+        )
+        .unwrap();
+        let mut engine = make_engine_with_channel(1100);
+        engine.channels.get_mut(1100).unwrap().enabled = true;
+        engine.polls.add(1100).unwrap();
+
+        let err = reload_config(&mut engine, dir.path())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("tables"), "{err}");
+        assert!(!err.contains("database.zinc"), "{err}");
+        assert_eq!(engine.polls.count(), 1);
+        assert_eq!(engine.channels.count(), 1);
+    }
+
+    #[test]
+    fn reload_with_missing_config_dir_is_an_error_and_keeps_everything() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("no-such-dir");
+        let mut engine = make_engine_with_channel(1100);
+        engine.polls.add(1100).unwrap();
+
+        let err = reload_config(&mut engine, &missing).unwrap_err();
+        assert!(
+            err.to_string().contains("config directory is missing"),
+            "{err}"
+        );
+        assert_eq!(engine.channels.count(), 1);
+        assert_eq!(engine.polls.count(), 1);
+    }
+
+    /// A path that is a file, not a directory, is refused the same way.
+    #[test]
+    fn reload_with_a_file_as_config_dir_is_an_error() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("database.zinc");
+        fs::write(&file, "x").unwrap();
+        let mut engine = make_engine_with_channel(1100);
+        assert!(reload_config(&mut engine, &file).is_err());
+    }
+
+    fn write_good_tables(dir: &std::path::Path) {
+        fs::write(
+            dir.join("tables.csv"),
+            "name,description,path,unit_type,f_min,f_max,c_min,c_max,k_min,k_max,tag\n\
+             test_table,Test,test_data.txt,temp,-40,303,-40,150,233,423,testTherm\n",
+        )
+        .unwrap();
+        fs::write(dir.join("test_data.txt"), "100\n200\n300\n").unwrap();
+    }
+
+    #[test]
+    fn reload_that_cannot_read_tables_is_an_error_and_keeps_the_old_tables() {
+        let dir = TempDir::new().unwrap();
+        write_good_tables(dir.path());
+        let mut engine = make_engine_with_channel(1100);
+        let first = reload_config(&mut engine, dir.path()).unwrap();
+        assert_eq!(first.tables_reloaded, 1);
+        assert_eq!(engine.tables.count(), 1);
+
+        // tables.csv is now something that cannot be read as a file.
+        fs::remove_file(dir.path().join("tables.csv")).unwrap();
+        fs::create_dir(dir.path().join("tables.csv")).unwrap();
+
+        let err = reload_config(&mut engine, dir.path()).unwrap_err();
+        assert!(err.to_string().contains("tables"), "{err}");
+        assert_eq!(engine.tables.count(), 1, "old tables were dropped");
+    }
+
+    #[test]
+    fn a_good_reload_replaces_the_tables() {
+        let dir = TempDir::new().unwrap();
+        write_good_tables(dir.path());
+        let mut engine = make_engine_with_channel(1100);
+        reload_config(&mut engine, dir.path()).unwrap();
+        // A second reload does not pile the same table up twice.
+        let again = reload_config(&mut engine, dir.path()).unwrap();
+        assert_eq!(again.tables_reloaded, 1);
+        assert_eq!(engine.tables.count(), 1);
     }
 
     #[test]

@@ -125,7 +125,7 @@ Core Haystack + Sandstar endpoints:
 | `/api/watchUnsub` | POST | Unsubscribe |
 | `/api/history/{channel}` | GET | Historical data |
 | `/api/pollNow` | POST | Trigger immediate poll |
-| `/api/reload` | POST | Reload configuration |
+| `/api/reload` | POST | Reload configuration (error reply and nothing changed if a file cannot be read) |
 | `/api/auth` | POST | SCRAM-SHA-256 authentication |
 | `/api/metrics` | GET | Internal metrics as JSON |
 | `/metrics` | GET | **Prometheus exposition format** (scraper-friendly) |
@@ -264,7 +264,7 @@ cargo test -p sandstar-server
 cargo test -- --ignored
 ```
 
-3,066 tests across the workspace (2.10.0). Platform-specific tests (sysfs GPIO, I2C, PWM) are gated behind `#[cfg(target_os = "linux")]`. Live-network tests (mDNS multicast) are marked `#[ignore]` and require a multicast-capable host.
+3,097 tests across the workspace (2.10.0). Platform-specific tests (sysfs GPIO, I2C, PWM) are gated behind `#[cfg(target_os = "linux")]`. Live-network tests (mDNS multicast) are marked `#[ignore]` and require a multicast-capable host.
 
 ## Documentation
 

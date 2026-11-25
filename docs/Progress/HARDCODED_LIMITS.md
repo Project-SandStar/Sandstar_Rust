@@ -147,6 +147,7 @@ Audited: 2026-03-10
 | `HEALTH_ENGINE_TIMEOUT` | 2s | `sandstar-server/src/rest/handlers.rs` | 369 | **Document** — `/health` waits at most this long for the engine; otherwise 503 with `healthy:false` (R-28, S-21). |
 | `REFRESH_BACKOFF_AFTER_TIMEOUT` | 10s | `sandstar-server/src/sox/mod.rs` | 40 | **Keep** — pause before the next SOX tree refresh after an engine timeout (S-22). |
 | `REFRESH_WARN_INTERVAL` | 60s | `sandstar-server/src/sox/mod.rs` | 37 | **Keep** — SOX tree refresh runs every second; a non-timeout failure is logged at `warn` at most once per interval, the rest at `debug` (S-21). |
+| `FIRST_USER_COMP_ID` | 7 | `sandstar-server/src/sox/sox_handlers.rs` | — | **Keep** — component ids below it are the system components (app and services); they are never deleted, neither by request nor as part of a subtree (S-55) |
 | `MAX_INTERNED_NAMES` | 65,534 | `sandstar-server/src/sox/name_intern.rs` | 25 | **Keep** — SOX name intern table size; a full table drops unused names, never panics (S-26). |
 | `MAX_INTERNED_TAG_NAMES` | 65,536 | `sandstar-server/src/sox/dyn_slots.rs` | 76 | **Keep** — dynamic tag name interner size (whole `u16` space); full interner stops interning (S-26). |
 | `MAX_TAG_NAME_BYTES` | 63 | `sandstar-server/src/sox/dyn_slots.rs` | 27 | **Keep** — dynamic tag names must be Haystack names `[a-z][A-Za-z0-9_]*` of at most 63 bytes; REST `PUT /api/tags` answers 400, `/api/rows` `setTags` `BAD_REQUEST`. Names loaded from an older `dyn_slots.json` are kept (one `warn`) and can be deleted, not rewritten (R-48, S-46). |

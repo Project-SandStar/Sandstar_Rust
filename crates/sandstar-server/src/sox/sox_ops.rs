@@ -16,7 +16,7 @@ use serde_json::Value as JsonValue;
 
 use crate::sox::dyn_slots::DynValue;
 use crate::sox::sox_handlers::{
-    ComponentTree, ManifestDb, SlotValue, VirtualComponent, VirtualSlot, DEFAULT_KITS,
+    ComponentTree, LinkError, ManifestDb, SlotValue, VirtualComponent, VirtualSlot, DEFAULT_KITS,
     SLOT_FLAG_ACTION, SLOT_FLAG_CONFIG,
 };
 use crate::sox::sox_protocol::SoxValueType;
@@ -362,22 +362,13 @@ fn handle_delete_comp(state: &SoxState, comp_id: u16) -> SoxResponse {
 
     let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
 
-    let link_peers: Vec<(u16, u8, u16, u8)> = tree
-        .get(comp_id)
-        .map(|c| {
-            c.links
-                .iter()
-                .map(|l| (l.from_comp, l.from_slot, l.to_comp, l.to_slot))
-                .collect()
-        })
-        .unwrap_or_default();
-    for (fc, fs, tc, ts) in &link_peers {
-        tree.remove_link(*fc, *fs, *tc, *ts);
-    }
-
-    match tree.remove(comp_id) {
-        Some(_) => {
+    // The whole subtree goes, with its links (R-61).
+    match tree.remove_subtree(comp_id) {
+        Some(removed) => {
             tree.mark_dirty();
+            drop(tree);
+            forget_tags(state.dyn_store.as_ref(), &removed);
+            tracing::info!(comp_id, removed = removed.len(), "SOX: component deleted");
             SoxResponse::ok(serde_json::json!({ "ok": true }))
         }
         None => SoxResponse::error("NOT_FOUND", format!("component {comp_id} not found")),
@@ -406,11 +397,17 @@ fn handle_add_link(
     to_slot: u8,
 ) -> SoxResponse {
     let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
-    if tree.add_link(from_comp, from_slot, to_comp, to_slot) {
-        tree.mark_dirty();
-        SoxResponse::ok(serde_json::json!({ "ok": true }))
-    } else {
-        SoxResponse::error("CONFLICT", "link already exists or would create a cycle")
+    match tree.try_add_link(from_comp, from_slot, to_comp, to_slot) {
+        Ok(()) => {
+            tree.mark_dirty();
+            SoxResponse::ok(serde_json::json!({ "ok": true }))
+        }
+        Err(e @ LinkError::NotFound) => SoxResponse::error("NOT_FOUND", e.to_string()),
+        Err(e @ LinkError::BadSlot) => SoxResponse::error("BAD_REQUEST", e.to_string()),
+        // The text the clients have always had for these two.
+        Err(LinkError::Duplicate | LinkError::Cycle) => {
+            SoxResponse::error("CONFLICT", "link already exists or would create a cycle")
+        }
     }
 }
 
@@ -695,13 +692,17 @@ fn handle_version_ext() -> SoxResponse {
 
 fn handle_reorder(state: &SoxState, comp_id: u16, children: Vec<u16>) -> SoxResponse {
     let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
-    let comp = match tree.get_mut(comp_id) {
-        Some(c) => c,
-        None => return SoxResponse::error("NOT_FOUND", format!("component {comp_id} not found")),
-    };
-    // Match Fantom semantics: accept the client's ordering verbatim (no
-    // membership validation). Callers are trusted to pass valid child IDs.
-    comp.children = children;
+    if tree.get(comp_id).is_none() {
+        return SoxResponse::error("NOT_FOUND", format!("component {comp_id} not found"));
+    }
+    // The new order must be the same set of children: a list that leaves
+    // one out, or names a stranger, would change the tree, not its order.
+    if !tree.reorder_children(comp_id, &children) {
+        return SoxResponse::error(
+            "BAD_REQUEST",
+            "children must be the component's current children in a new order",
+        );
+    }
     tree.mark_dirty();
     SoxResponse::ok(serde_json::json!({ "ok": true }))
 }
@@ -819,6 +820,18 @@ pub(crate) fn comp_to_detail_json(comp: &VirtualComponent, tree: &ComponentTree)
     })
 }
 
+/// Drop the tags of removed components. Ids are reused (`max + 1`), so a
+/// tag left behind would show up on the next component that gets the id.
+pub(crate) fn forget_tags(dyn_store: Option<&DynSlotStoreHandle>, removed: &[u16]) {
+    let Some(dyn_store) = dyn_store else {
+        return;
+    };
+    let mut store = crate::lock::write_or_recover(dyn_store, "dyn slot store");
+    for &id in removed {
+        store.remove_all(id);
+    }
+}
+
 // ── Request field helpers (shared by the envelopes) ─
 
 /// A list of component ids for an op that replaces state with it (reorder).
@@ -901,7 +914,9 @@ mod tests {
 
     /// Root (id 0) with two children A and B; tags enabled.
     fn make_state() -> SoxState {
-        let manifest_db = Arc::new(ManifestDb::load(""));
+        let mut manifest = ManifestDb::load("");
+        manifest.know_type_for_test(200, 1);
+        let manifest_db = Arc::new(manifest);
         let mut tree = ComponentTree::new_with_manifest(manifest_db.clone());
         tree.add(comp(ROOT, NO_PARENT, "app"));
         tree.add(comp(A, ROOT, "compA"));
@@ -1095,7 +1110,7 @@ mod tests {
         SoxOp::AddComp {
             parent_id,
             kit_id: 200,
-            type_id: 1,
+            type_id: 2,
             name: name.into(),
         }
     }
@@ -1228,9 +1243,8 @@ mod tests {
     #[test]
     fn a_second_source_replaces_the_link_on_the_same_input() {
         let state = make_state();
-        let c = ok(apply(&state, add(ROOT, "compC")))["compId"]
-            .as_u64()
-            .unwrap() as u16;
+        let c = 12;
+        state.tree.write().unwrap().add(comp(c, ROOT, "compC"));
         ok(apply(&state, link(A, 1, B, 1)));
         ok(apply(&state, link(c, 1, B, 1)));
 
@@ -1261,6 +1275,218 @@ mod tests {
                 },
             )),
             "NOT_FOUND"
+        );
+    }
+
+    #[test]
+    fn add_link_refuses_a_missing_end() {
+        let state = make_state();
+        assert_eq!(err_code(apply(&state, link(A, 1, MISSING, 1))), "NOT_FOUND");
+        assert_eq!(err_code(apply(&state, link(MISSING, 1, B, 1))), "NOT_FOUND");
+        assert_eq!(link_count(&state, A), 0);
+        assert_eq!(link_count(&state, B), 0);
+    }
+
+    #[test]
+    fn add_link_refuses_a_slot_out_of_range() {
+        let state = make_state();
+        // The test component has 6 slots: 5 is the last one.
+        assert_eq!(err_code(apply(&state, link(A, 1, B, 6))), "BAD_REQUEST");
+        assert_eq!(err_code(apply(&state, link(A, 6, B, 1))), "BAD_REQUEST");
+        assert_eq!(err_code(apply(&state, link(A, 255, B, 255))), "BAD_REQUEST");
+        assert_eq!(link_count(&state, A), 0);
+        assert_eq!(link_count(&state, B), 0);
+        ok(apply(&state, link(A, 5, B, 5)));
+    }
+
+    /// A type the manifest does not know gets its slots as they are
+    /// written, so a link to a slot it does not have yet is not refused.
+    #[test]
+    fn add_link_to_an_unknown_type_accepts_any_slot() {
+        let state = make_state();
+        let c = ok(apply(&state, add(ROOT, "compC")))["compId"]
+            .as_u64()
+            .unwrap() as u16;
+        assert_eq!(state.tree.read().unwrap().get(c).unwrap().slots.len(), 1);
+        ok(apply(&state, link(A, 1, c, 3)));
+        ok(apply(&state, link(c, 4, B, 2)));
+    }
+
+    /// A `children` list can name a component that belongs elsewhere (a
+    /// saved file from before reorder was checked). Deleting the component
+    /// with that list must not take the stranger, a system component or a
+    /// channel component along.
+    #[test]
+    fn delete_comp_does_not_follow_a_children_list_to_strangers() {
+        let state = make_state();
+        {
+            let mut tree = state.tree.write().unwrap();
+            for id in 1..7u16 {
+                tree.add(comp(id, ROOT, &format!("sys{id}")));
+            }
+            tree.get_mut(A).unwrap().children = vec![B, 3, ROOT];
+        }
+        ok(apply(&state, SoxOp::DeleteComp { comp_id: A }));
+        let tree = state.tree.read().unwrap();
+        assert!(tree.get(A).is_none());
+        assert!(
+            tree.get(B).is_some(),
+            "a sibling named in the list was deleted"
+        );
+        assert!(tree.get(3).is_some(), "a system component was deleted");
+        assert!(tree.get(ROOT).is_some());
+    }
+
+    /// A system component is not deleted as part of a subtree even when its
+    /// `parent_id` puts it there.
+    #[test]
+    fn delete_comp_never_takes_a_system_component() {
+        let state = make_state();
+        state.tree.write().unwrap().add(comp(4, A, "sys4"));
+        ok(apply(&state, SoxOp::DeleteComp { comp_id: A }));
+        assert!(state.tree.read().unwrap().get(4).is_some());
+    }
+
+    #[test]
+    fn delete_comp_drops_the_tags_of_the_whole_subtree() {
+        let state = make_state();
+        state.tree.write().unwrap().add(comp(12, A, "kid"));
+        ok(apply(&state, set_tags(A, json!({ "a": 1 }))));
+        ok(apply(&state, set_tags(12, json!({ "b": 2 }))));
+        ok(apply(&state, set_tags(B, json!({ "c": 3 }))));
+
+        ok(apply(&state, SoxOp::DeleteComp { comp_id: A }));
+
+        let tags = |id| ok(apply(&state, SoxOp::ReadTags { comp_id: id }))["tags"].clone();
+        assert!(tags(A).as_object().unwrap().is_empty());
+        assert!(tags(12).as_object().unwrap().is_empty());
+        assert_eq!(tags(B).as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_link_from_a_component_to_itself_is_still_accepted() {
+        let state = make_state();
+        ok(apply(&state, link(A, 1, A, 2)));
+        assert_eq!(link_count(&state, A), 1);
+    }
+
+    #[test]
+    fn delete_comp_removes_the_whole_subtree() {
+        let state = make_state();
+        // A -> child -> grandchild, plus a sibling of child.
+        let add_under = |parent| {
+            ok(apply(
+                &state,
+                SoxOp::AddComp {
+                    parent_id: parent,
+                    kit_id: 200,
+                    type_id: 2,
+                    name: format!("n{parent}x{}", state.tree.read().unwrap().len()),
+                },
+            ))["compId"]
+                .as_u64()
+                .unwrap() as u16
+        };
+        let child = add_under(A);
+        let sibling = add_under(A);
+        let grandchild = add_under(child);
+
+        ok(apply(&state, SoxOp::DeleteComp { comp_id: A }));
+
+        let tree = state.tree.read().unwrap();
+        for id in [A, child, sibling, grandchild] {
+            assert!(tree.get(id).is_none(), "component {id} is still there");
+            assert!(!tree.is_user_added(id), "{id} is still marked user-added");
+        }
+        assert!(tree.get(B).is_some());
+        assert_eq!(tree.get(ROOT).unwrap().children, vec![B]);
+        assert_eq!(tree.integrity_report().orphans, 0);
+    }
+
+    #[test]
+    fn delete_comp_drops_links_between_the_subtree_and_the_rest() {
+        let state = make_state();
+        let (child, other) = (12, 13);
+        {
+            let mut tree = state.tree.write().unwrap();
+            tree.add(comp(child, A, "kid"));
+            tree.add(comp(other, ROOT, "other"));
+        }
+        // One link out of the subtree, one into it, one inside it.
+        ok(apply(&state, link(child, 1, B, 1)));
+        ok(apply(&state, link(other, 2, child, 2)));
+        ok(apply(&state, link(A, 1, child, 1)));
+        assert_eq!(link_count(&state, B), 1);
+        assert_eq!(link_count(&state, other), 1);
+
+        ok(apply(&state, SoxOp::DeleteComp { comp_id: A }));
+
+        assert_eq!(link_count(&state, B), 0);
+        assert_eq!(link_count(&state, other), 0);
+        let report = state.tree.read().unwrap().integrity_report();
+        assert_eq!(report.bad_links, 0);
+    }
+
+    /// A child that is missing from its parent's `children` list (only
+    /// `parent_id` says where it belongs) goes with the parent too.
+    #[test]
+    fn delete_comp_finds_children_by_parent_id() {
+        let state = make_state();
+        {
+            let mut tree = state.tree.write().unwrap();
+            tree.add(comp(12, A, "kid"));
+            tree.get_mut(A).unwrap().children.clear();
+        }
+        ok(apply(&state, SoxOp::DeleteComp { comp_id: A }));
+        assert!(state.tree.read().unwrap().get(12).is_none());
+    }
+
+    /// Parent ids that point at each other must not hang the delete.
+    #[test]
+    fn delete_comp_ends_on_a_parent_loop() {
+        let state = make_state();
+        {
+            let mut tree = state.tree.write().unwrap();
+            tree.add(comp(12, A, "kid"));
+            let a = tree.get_mut(A).unwrap();
+            a.parent_id = 12;
+            a.children = vec![12, A];
+        }
+        ok(apply(&state, SoxOp::DeleteComp { comp_id: A }));
+        let tree = state.tree.read().unwrap();
+        assert!(tree.get(A).is_none());
+        assert!(tree.get(12).is_none());
+        assert!(tree.get(B).is_some());
+    }
+
+    #[test]
+    fn reorder_refuses_a_list_that_is_not_the_same_children() {
+        let state = make_state();
+        let reorder = |children: Vec<u16>| {
+            apply(
+                &state,
+                SoxOp::Reorder {
+                    comp_id: ROOT,
+                    children,
+                },
+            )
+        };
+        for bad in [
+            vec![],
+            vec![A],
+            vec![A, B, MISSING],
+            vec![A, A],
+            vec![B, MISSING],
+        ] {
+            assert_eq!(
+                err_code(reorder(bad.clone())),
+                "BAD_REQUEST",
+                "{bad:?} accepted"
+            );
+        }
+        assert_eq!(
+            state.tree.read().unwrap().get(ROOT).unwrap().children,
+            vec![A, B]
         );
     }
 

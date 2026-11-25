@@ -1179,7 +1179,10 @@ mod flow_tests {
     impl Conn {
         /// Root (id 0) with two children, SRC and DST.
         fn new() -> Self {
-            let manifest_db = Arc::new(ManifestDb::load(""));
+            // The manifest knows the test type, so its slot count is a bound.
+            let mut manifest = ManifestDb::load("");
+            manifest.know_type_for_test(200, 1);
+            let manifest_db = Arc::new(manifest);
             let mut tree = ComponentTree::new_with_manifest(manifest_db.clone());
             tree.add(comp(ROOT, NO_PARENT, "app"));
             tree.add(comp(SRC, ROOT, "src"));
@@ -1675,6 +1678,48 @@ mod flow_tests {
         assert_eq!(events[0]["what"], "d");
         assert_eq!(events[0]["compId"], SRC);
         assert!(conn.events().is_empty());
+    }
+
+    /// Deleting a parent tells the subscribers of its children too (S-55).
+    #[test]
+    fn deleting_a_parent_gives_a_delete_event_for_each_subscribed_child() {
+        let mut conn = Conn::new();
+        let kid = 300;
+        conn.state.tree.write().unwrap().add(comp(kid, SRC, "kid"));
+        subscribe(&mut conn, &[SRC, kid, DST]);
+
+        let reply = conn.send_json(json!({ "msgType": "d", "compId": SRC }));
+        assert_eq!(reply["msgType"], "D");
+        assert!(!conn.exists(kid));
+
+        let mut deleted: Vec<u64> = conn
+            .events()
+            .iter()
+            .filter(|e| e["what"] == "d")
+            .map(|e| e["compId"].as_u64().unwrap())
+            .collect();
+        deleted.sort_unstable();
+        assert_eq!(deleted, vec![u64::from(SRC), u64::from(kid)]);
+    }
+
+    #[test]
+    fn link_errors_name_the_reason() {
+        let mut conn = Conn::new();
+        let mut missing = link_msg("a");
+        missing["fromCompId"] = json!(999);
+        let reply = conn.send_json(missing);
+        assert!(is_error(&reply));
+        assert!(
+            reply["cause"].as_str().unwrap().contains("not found"),
+            "{reply}"
+        );
+
+        let mut bad_slot = link_msg("a");
+        bad_slot["toSlotId"] = json!(3);
+        let reply = conn.send_json(bad_slot);
+        assert!(is_error(&reply));
+        assert!(reply["cause"].as_str().unwrap().contains("slot"), "{reply}");
+        assert_eq!(conn.links(DST), 0);
     }
 
     #[test]
