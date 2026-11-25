@@ -354,16 +354,30 @@ fn handle_client_msg(
 /// Returns `Err((code, message))` for malformed requests; the caller wraps
 /// these in RoWS's `{"op":"error",...}` envelope.
 fn parse_rows_op(op: &str, msg: &JsonValue) -> Result<SoxOp, (&'static str, String)> {
-    let u16_of = |k: &str| msg.get(k).and_then(|v| v.as_u64()).map(|v| v as u16);
-    let u8_of = |k: &str| msg.get(k).and_then(|v| v.as_u64()).map(|v| v as u8);
-    let usize_of = |k: &str| msg.get(k).and_then(|v| v.as_u64()).map(|v| v as usize);
+    // A number that does not fit the field is treated as missing; `as`
+    // would wrap it onto another component or slot.
+    let u16_of = |k: &str| {
+        msg.get(k)
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u16::try_from(v).ok())
+    };
+    let u8_of = |k: &str| {
+        msg.get(k)
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u8::try_from(v).ok())
+    };
+    let usize_of = |k: &str| {
+        msg.get(k)
+            .and_then(|v| v.as_u64())
+            .and_then(|v| usize::try_from(v).ok())
+    };
     let str_of = |k: &str| msg.get(k).and_then(|v| v.as_str()).map(String::from);
     let vec_u16 = |k: &str| {
         msg.get(k)
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|v| v.as_u64().map(|n| n as u16))
+                    .filter_map(|v| v.as_u64().and_then(|n| u16::try_from(n).ok()))
                     .collect::<Vec<u16>>()
             })
             .unwrap_or_default()
@@ -474,7 +488,8 @@ fn parse_rows_op(op: &str, msg: &JsonValue) -> Result<SoxOp, (&'static str, Stri
         "versionExt" => Ok(SoxOp::VersionExt),
         "reorder" => {
             let comp_id = u16_of("compId").ok_or(("BAD_REQUEST", "missing compId".into()))?;
-            let children = vec_u16("children");
+            let children = crate::sox::sox_ops::strict_u16_list(msg.get("children"))
+                .ok_or(("BAD_REQUEST", "missing or invalid children".into()))?;
             Ok(SoxOp::Reorder { comp_id, children })
         }
         "query" => {
@@ -1744,5 +1759,23 @@ mod tests {
             manifest_db,
             dyn_store: None,
         }
+    }
+
+    /// A component id that does not fit 16 bits must not be cut down to
+    /// another component's id (S-54).
+    #[test]
+    fn component_id_above_u16_is_rejected_not_wrapped() {
+        let wrapped = 65_536u64 + 200;
+        let read = serde_json::json!({ "compId": wrapped });
+        assert!(parse_rows_op("readComp", &read).is_err());
+
+        let write = serde_json::json!({ "compId": wrapped, "slotIdx": 1, "value": 1.0 });
+        assert!(parse_rows_op("writeSlot", &write).is_err());
+
+        let ok = serde_json::json!({ "compId": 200 });
+        assert!(matches!(
+            parse_rows_op("readComp", &ok),
+            Ok(SoxOp::ReadComp { comp_id: 200 })
+        ));
     }
 }

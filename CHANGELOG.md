@@ -32,6 +32,7 @@ Hardening release: 73 commits since the `v2.9.1` tag (maintenance steps S-5 to S
 - Credential-bearing tool scripts are ignored by git (S-6, S-9).
 
 ### Fixed
+- `/live`, RoWS and the SOX REST API refuse numbers that do not fit their field instead of wrapping or cutting them: a component id above 65535 no longer reaches another component, an integer outside `i32` or a number too large for `f32` is not stored, a reorder list with an invalid id is rejected, and REST `invoke` answers 400 when the value was not written (R-33, S-54).
 - Poisoned locks are recovered instead of aborting the process (REST, SOX, roxWarp, alerts) (R-4; S-16 to S-19).
 - Engine calls from REST, WebSocket, driver and SOX paths have a 10 s reply timeout; WS push polls and the SOX refresh no longer block their loops; each WS connection uses one engine slot (R-28; S-20 to S-23).
 - IPC connections are served off the main loop with total deadlines (R-28, S-42).
@@ -51,6 +52,7 @@ Hardening release: 73 commits since the `v2.9.1` tag (maintenance steps S-5 to S
 - Retired scripts moved to `tools/kaldirilanlar/` (kept for reference; not packaged) (S-52).
 
 ### Tests
+- Tests for IPC command dispatch, the shared SOX operation layer and the `/live` write, link and event flows (R-33, S-54).
 - 2,998 tests pass (`cargo test --workspace --no-fail-fast`), 0 clippy warnings.
 
 ## [2.9.1] — 2026-04-29
