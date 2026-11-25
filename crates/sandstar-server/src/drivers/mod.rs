@@ -18,8 +18,8 @@
 //! |--------|--------|--------|
 //! | [`local_io`] | `LocalIoDriver` — BeagleBone GPIO/ADC/I2C/PWM via HAL | Active |
 //! | [`modbus`] | `ModbusDriver` — Modbus TCP (frame-level I/O) | Active |
-//! | [`bacnet`] | `BacnetDriver` — BACnet/IP | Stub |
-//! | [`mqtt`] | `MqttDriver` — MQTT pub/sub | Stub |
+//! | [`bacnet`] | `BacnetDriver` — BACnet/IP (discovery, RP/RPM, WP, COV, BBMD) | Active |
+//! | [`mqtt`] | `MqttDriver` — MQTT v3.1.1 pub/sub (no TLS) | Active |
 
 pub mod actor;
 pub mod async_driver;
