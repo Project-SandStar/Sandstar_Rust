@@ -546,23 +546,17 @@ pub async fn delete_comp(State(state): State<SoxApiState>, Path(id): Path<u16>) 
 
     let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
 
-    // Remove all links involving this component from other components.
-    let link_peers: Vec<(u16, u8, u16, u8)> = tree
-        .get(id)
-        .map(|c| {
-            c.links
-                .iter()
-                .map(|l| (l.from_comp, l.from_slot, l.to_comp, l.to_slot))
-                .collect()
-        })
-        .unwrap_or_default();
-    for (fc, fs, tc, ts) in &link_peers {
-        tree.remove_link(*fc, *fs, *tc, *ts);
-    }
-
-    match tree.remove(id) {
-        Some(_) => {
+    // The whole subtree goes, with its links (R-61).
+    match tree.remove_subtree(id) {
+        Some(removed) => {
             tree.mark_dirty();
+            drop(tree);
+            crate::sox::sox_ops::forget_tags(state.dyn_store.as_ref(), &removed);
+            tracing::info!(
+                comp_id = id,
+                removed = removed.len(),
+                "SOX: component deleted"
+            );
             StatusCode::NO_CONTENT.into_response()
         }
         None => (StatusCode::NOT_FOUND, format!("component {id} not found")).into_response(),
@@ -712,15 +706,19 @@ pub async fn invoke_action(
 /// POST /api/sox/link — add a link.
 pub async fn add_link(State(state): State<SoxApiState>, Json(req): Json<LinkRequest>) -> Response {
     let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
-    if tree.add_link(req.from_comp, req.from_slot, req.to_comp, req.to_slot) {
-        tree.mark_dirty();
-        StatusCode::CREATED.into_response()
-    } else {
-        (
+    use crate::sox::sox_handlers::LinkError;
+    match tree.try_add_link(req.from_comp, req.from_slot, req.to_comp, req.to_slot) {
+        Ok(()) => {
+            tree.mark_dirty();
+            StatusCode::CREATED.into_response()
+        }
+        Err(e @ LinkError::NotFound) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+        Err(e @ LinkError::BadSlot) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(LinkError::Duplicate | LinkError::Cycle) => (
             StatusCode::CONFLICT,
             "link already exists or would create a cycle",
         )
-            .into_response()
+            .into_response(),
     }
 }
 

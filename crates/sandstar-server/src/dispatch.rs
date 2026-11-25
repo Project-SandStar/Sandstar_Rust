@@ -651,6 +651,19 @@ mod tests {
         assert_eq!(engine.channels.count(), 2);
     }
 
+    /// A reload that read nothing is not reported as done (R-62, S-55).
+    #[test]
+    fn reload_with_missing_config_dir_is_an_error_and_keeps_channels() {
+        let mut engine = make_engine();
+        let mut config = make_config(false);
+        config.config_dir = Some(std::env::temp_dir().join("sandstar-dispatch-test-no-such-dir"));
+        let (result, resp) = send(EngineCommand::ReloadConfig, &mut engine, &config);
+        assert!(matches!(result, ConnectionResult::Continue));
+        assert!(error_text(&resp).contains("reload failed"));
+        assert_eq!(engine.channels.count(), 2);
+        assert_eq!(engine.polls.count(), 1);
+    }
+
     #[test]
     fn history_honours_channel_since_and_limit() {
         let mut engine = make_engine();

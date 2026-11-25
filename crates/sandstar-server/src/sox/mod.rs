@@ -312,6 +312,11 @@ async fn run_sox_server(
                             } else {
                                 None
                             };
+                            // Everything a delete will take along, known only
+                            // before it runs.
+                            let delete_subtree = delete_comp_id
+                                .map(|cid| tree.subtree_ids(cid))
+                                .unwrap_or_default();
                             let delete_parent_id = if let Some(cid) = delete_comp_id {
                                 tree.get(cid).map(|c| c.parent_id).unwrap_or(0)
                             } else {
@@ -330,15 +335,15 @@ async fn run_sox_server(
                                 debug!(session = session_id, "SOX: failed to send response: {e}");
                             }
 
-                            // After Delete: clean up dynamic tags for the deleted component.
+                            // After a delete that happened (a refused one leaves
+                            // the component in place): drop the tags and the
+                            // subscriptions of everything that went, so a new
+                            // component with a reused id starts clean.
                             if let Some(cid) = delete_comp_id {
-                                if let Ok(mut ds) = dyn_store_handle.write() {
-                                    if ds.tag_count(cid) > 0 {
-                                        info!(
-                                            comp_id = cid,
-                                            "dyn_slots: cleaning up tags for deleted component"
-                                        );
-                                        ds.remove_all(cid);
+                                if tree.get(cid).is_none() && !delete_subtree.is_empty() {
+                                    sox_ops::forget_tags(Some(&dyn_store_handle), &delete_subtree);
+                                    for &gone in &delete_subtree {
+                                        subscriptions.forget_component(gone);
                                     }
                                 }
                             }
