@@ -199,7 +199,7 @@ fn handle_live_msg(
     let reply_num = msg
         .get("replyNum")
         .and_then(|v| v.as_u64())
-        .map(|v| v as u8)
+        .and_then(|v| u8::try_from(v).ok())
         .unwrap_or(0xFF);
     // Exactly one byte, which in a str is always ASCII.
     let msg_type = match msg
@@ -270,15 +270,25 @@ fn handle_live_msg(
 /// Returns `Err(cause)` for malformed requests; caller wraps in a `!`
 /// error frame.
 fn parse_live_op(msg_type: char, msg: &JsonValue) -> Result<SoxOp, String> {
-    let u16_of = |k: &str| msg.get(k).and_then(|v| v.as_u64()).map(|v| v as u16);
-    let u8_of = |k: &str| msg.get(k).and_then(|v| v.as_u64()).map(|v| v as u8);
+    // A number that does not fit the field is treated as missing; `as`
+    // would wrap it onto another component or slot.
+    let u16_of = |k: &str| {
+        msg.get(k)
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u16::try_from(v).ok())
+    };
+    let u8_of = |k: &str| {
+        msg.get(k)
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u8::try_from(v).ok())
+    };
     let str_of = |k: &str| msg.get(k).and_then(|v| v.as_str()).map(String::from);
     let vec_u16 = |k: &str| {
         msg.get(k)
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|v| v.as_u64().map(|n| n as u16))
+                    .filter_map(|v| v.as_u64().and_then(|n| u16::try_from(n).ok()))
                     .collect::<Vec<u16>>()
             })
             .unwrap_or_default()
@@ -306,7 +316,7 @@ fn parse_live_op(msg_type: char, msg: &JsonValue) -> Result<SoxOp, String> {
             let slot_idx = msg
                 .get("slotId")
                 .and_then(|v| v.as_u64())
-                .map(|v| v as usize)
+                .and_then(|v| usize::try_from(v).ok())
                 .ok_or("missing slotId".to_string())?;
             // Editor sends value as base64 binary; MVP: decode and re-encode as a JSON string
             // so apply_op's WriteSlot accepts it via json_to_slot_value's string path.
@@ -375,7 +385,8 @@ fn parse_live_op(msg_type: char, msg: &JsonValue) -> Result<SoxOp, String> {
         }
         'o' => {
             let comp_id = u16_of("compId").ok_or("missing compId".to_string())?;
-            let children = vec_u16("childrenIds");
+            let children = crate::sox::sox_ops::strict_u16_list(msg.get("childrenIds"))
+                .ok_or("missing or invalid childrenIds".to_string())?;
             Ok(SoxOp::Reorder { comp_id, children })
         }
         's' => Ok(SoxOp::Subscribe {
@@ -401,7 +412,7 @@ fn parse_live_op(msg_type: char, msg: &JsonValue) -> Result<SoxOp, String> {
             let slot_idx = msg
                 .get("slotId")
                 .and_then(|v| v.as_u64())
-                .map(|v| v as usize)
+                .and_then(|v| usize::try_from(v).ok())
                 .ok_or("missing slotId".to_string())?;
             Ok(SoxOp::Invoke { comp_id, slot_idx })
         }
@@ -535,7 +546,11 @@ fn flatten(out: &mut serde_json::Map<String, JsonValue>, data: JsonValue) {
 // ── Component read (direct tree access, binary slot encoding) ──
 
 fn handle_read_comp_live(state: &LiveState, reply_num: u8, msg: &JsonValue) -> Option<String> {
-    let comp_id = match msg.get("compId").and_then(|v| v.as_u64()).map(|v| v as u16) {
+    let comp_id = match msg
+        .get("compId")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u16::try_from(v).ok())
+    {
         Some(id) => id,
         None => return render_error(reply_num, "missing compId"),
     };
@@ -588,14 +603,18 @@ fn handle_write_slot_live(state: &LiveState, reply_num: u8, msg: &JsonValue) -> 
     use crate::sox::sox_handlers::decode_slot_value;
     use crate::sox::sox_protocol::SoxReader;
 
-    let comp_id = match msg.get("compId").and_then(|v| v.as_u64()).map(|v| v as u16) {
+    let comp_id = match msg
+        .get("compId")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u16::try_from(v).ok())
+    {
         Some(id) => id,
         None => return render_error(reply_num, "missing compId"),
     };
     let slot_idx = match msg
         .get("slotId")
         .and_then(|v| v.as_u64())
-        .map(|v| v as usize)
+        .and_then(|v| usize::try_from(v).ok())
     {
         Some(idx) => idx,
         None => return render_error(reply_num, "missing slotId"),
@@ -1092,5 +1111,585 @@ mod tests {
             SlotValue::Float(v) => assert_eq!(*v, 42.0, "WriteFloat passthrough should set out=in"),
             other => panic!("expected Float, got {other:?}"),
         }
+    }
+}
+
+// ── Tests: write, component, link and event flows (R-33, S-54) ──
+
+#[cfg(test)]
+mod flow_tests {
+    use super::*;
+    use crate::sox::sox_handlers::{
+        ComponentTree, ManifestDb, SlotValue, VirtualSlot, NO_PARENT, SLOT_FLAG_CONFIG,
+    };
+    use crate::sox::sox_protocol::SoxValueType;
+    use std::sync::Arc;
+
+    const ROOT: u16 = 0;
+    const SRC: u16 = 200;
+    const DST: u16 = 201;
+
+    // Slot indices of the test component.
+    const S_META: usize = 0;
+    const S_FLOAT: usize = 1;
+    const S_STR: usize = 2;
+
+    fn comp(comp_id: u16, parent_id: u16, name: &str) -> VirtualComponent {
+        VirtualComponent {
+            comp_id,
+            parent_id,
+            name: name.into(),
+            type_name: "Test".into(),
+            kit_id: 200,
+            type_id: 1,
+            children: vec![],
+            slots: vec![
+                VirtualSlot {
+                    name: "meta".into(),
+                    type_id: SoxValueType::Int as u8,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Int(0),
+                },
+                VirtualSlot {
+                    name: "val".into(),
+                    type_id: SoxValueType::Float as u8,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Float(0.0),
+                },
+                VirtualSlot {
+                    name: "label".into(),
+                    type_id: SoxValueType::Buf as u8,
+                    flags: SLOT_FLAG_CONFIG,
+                    value: SlotValue::Str(String::new()),
+                },
+            ],
+            links: vec![],
+        }
+    }
+
+    /// One connection: shared state plus the per-session caches.
+    struct Conn {
+        state: LiveState,
+        subscribed: HashSet<u16>,
+        cov_cache: HashMap<u16, Vec<JsonValue>>,
+        tree_cache: HashMap<u16, Vec<u16>>,
+        compact_cov: bool,
+    }
+
+    impl Conn {
+        /// Root (id 0) with two children, SRC and DST.
+        fn new() -> Self {
+            let manifest_db = Arc::new(ManifestDb::load(""));
+            let mut tree = ComponentTree::new_with_manifest(manifest_db.clone());
+            tree.add(comp(ROOT, NO_PARENT, "app"));
+            tree.add(comp(SRC, ROOT, "src"));
+            tree.add(comp(DST, ROOT, "dst"));
+            Conn {
+                state: LiveState {
+                    tree: Arc::new(std::sync::RwLock::new(tree)),
+                    manifest_db,
+                    dyn_store: None,
+                },
+                subscribed: HashSet::new(),
+                cov_cache: HashMap::new(),
+                tree_cache: HashMap::new(),
+                compact_cov: false,
+            }
+        }
+
+        fn send(&mut self, text: &str) -> JsonValue {
+            let reply = handle_live_msg(
+                text,
+                &self.state,
+                &mut self.subscribed,
+                &mut self.cov_cache,
+                &mut self.tree_cache,
+                &mut self.compact_cov,
+            );
+            serde_json::from_str(reply.as_deref().unwrap()).unwrap()
+        }
+
+        fn send_json(&mut self, msg: JsonValue) -> JsonValue {
+            self.send(&msg.to_string())
+        }
+
+        fn events(&mut self) -> Vec<JsonValue> {
+            build_live_events(
+                &self.state.tree,
+                &self.subscribed,
+                &mut self.cov_cache,
+                &mut self.tree_cache,
+            )
+            .iter()
+            .map(|f| serde_json::from_str(f).unwrap())
+            .collect()
+        }
+
+        fn slot(&self, comp_id: u16, idx: usize) -> SlotValue {
+            self.state.tree.read().unwrap().get(comp_id).unwrap().slots[idx]
+                .value
+                .clone()
+        }
+
+        fn exists(&self, comp_id: u16) -> bool {
+            self.state.tree.read().unwrap().get(comp_id).is_some()
+        }
+
+        fn name(&self, comp_id: u16) -> String {
+            self.state
+                .tree
+                .read()
+                .unwrap()
+                .get(comp_id)
+                .unwrap()
+                .name
+                .clone()
+        }
+
+        fn links(&self, comp_id: u16) -> usize {
+            self.state
+                .tree
+                .read()
+                .unwrap()
+                .get(comp_id)
+                .unwrap()
+                .links
+                .len()
+        }
+
+        fn comp_count(&self) -> usize {
+            self.state.tree.read().unwrap().len()
+        }
+    }
+
+    fn is_error(reply: &JsonValue) -> bool {
+        reply["msgType"] == "!" && reply["isError"] == true
+    }
+
+    fn b64(bytes: &[u8]) -> String {
+        BASE64.encode(bytes)
+    }
+
+    fn write_msg(comp_id: u16, slot_id: usize, bytes: &[u8]) -> JsonValue {
+        json!({ "msgType": "w", "replyNum": 5, "compId": comp_id, "slotId": slot_id, "value": b64(bytes) })
+    }
+
+    // ── envelope ───────────────────────────────────
+
+    #[test]
+    fn empty_and_non_object_messages_are_errors() {
+        let mut conn = Conn::new();
+        for text in ["", " ", "null", "[]", "42", "\"w\"", "{", "{\"msgType\":"] {
+            let reply = conn.send(text);
+            assert!(is_error(&reply), "{text:?} gave {reply}");
+        }
+    }
+
+    #[test]
+    fn msg_type_must_be_one_ascii_character() {
+        let mut conn = Conn::new();
+        for bad in [json!(""), json!("ww"), json!("ş"), json!(5), json!(null)] {
+            let reply = conn.send_json(json!({ "msgType": bad, "replyNum": 3 }));
+            assert!(is_error(&reply), "{bad} gave {reply}");
+            assert_eq!(reply["replyNum"], 3);
+        }
+    }
+
+    #[test]
+    fn error_reply_echoes_the_reply_number() {
+        let mut conn = Conn::new();
+        let reply = conn.send(r#"{"msgType":"d","replyNum":17}"#);
+        assert!(is_error(&reply));
+        assert_eq!(reply["replyNum"], 17);
+        assert!(reply["cause"].as_str().unwrap().contains("compId"));
+    }
+
+    // ── write ──────────────────────────────────────
+
+    #[test]
+    fn write_sets_a_float_slot_from_four_big_endian_bytes() {
+        let mut conn = Conn::new();
+        let reply = conn.send_json(write_msg(SRC, S_FLOAT, &21.5f32.to_be_bytes()));
+        assert_eq!(reply["msgType"], "W");
+        assert_eq!(reply["replyNum"], 5);
+        assert_eq!(conn.slot(SRC, S_FLOAT), SlotValue::Float(21.5));
+        assert_eq!(conn.slot(DST, S_FLOAT), SlotValue::Float(0.0));
+    }
+
+    #[test]
+    fn write_sets_an_int_slot() {
+        let mut conn = Conn::new();
+        let reply = conn.send_json(write_msg(SRC, S_META, &(-7i32).to_be_bytes()));
+        assert_eq!(reply["msgType"], "W");
+        assert_eq!(conn.slot(SRC, S_META), SlotValue::Int(-7));
+    }
+
+    #[test]
+    fn write_with_missing_or_mistyped_fields_is_an_error() {
+        let mut conn = Conn::new();
+        let value = b64(&1.0f32.to_be_bytes());
+        let bad = [
+            json!({ "msgType": "w", "slotId": S_FLOAT, "value": value }),
+            json!({ "msgType": "w", "compId": SRC, "value": value }),
+            json!({ "msgType": "w", "compId": SRC, "slotId": S_FLOAT }),
+            json!({ "msgType": "w", "compId": "200", "slotId": S_FLOAT, "value": value }),
+            json!({ "msgType": "w", "compId": -1, "slotId": S_FLOAT, "value": value }),
+            json!({ "msgType": "w", "compId": 1.5, "slotId": S_FLOAT, "value": value }),
+            json!({ "msgType": "w", "compId": SRC, "slotId": "1", "value": value }),
+            json!({ "msgType": "w", "compId": SRC, "slotId": S_FLOAT, "value": 1.0 }),
+            json!({ "msgType": "w", "compId": SRC, "slotId": S_FLOAT, "value": "not base64 !!" }),
+        ];
+        for msg in bad {
+            let reply = conn.send_json(msg.clone());
+            assert!(is_error(&reply), "{msg} gave {reply}");
+        }
+        assert_eq!(conn.slot(SRC, S_FLOAT), SlotValue::Float(0.0));
+    }
+
+    #[test]
+    fn write_to_a_missing_component_or_slot_is_an_error() {
+        let mut conn = Conn::new();
+        let bytes = 1.0f32.to_be_bytes();
+        assert!(is_error(&conn.send_json(write_msg(999, S_FLOAT, &bytes))));
+        assert!(is_error(&conn.send_json(write_msg(SRC, 3, &bytes))));
+        let huge =
+            json!({ "msgType": "w", "compId": SRC, "slotId": u64::MAX, "value": b64(&bytes) });
+        assert!(is_error(&conn.send_json(huge)));
+    }
+
+    #[test]
+    fn write_with_too_few_bytes_is_an_error_and_keeps_the_value() {
+        let mut conn = Conn::new();
+        conn.send_json(write_msg(SRC, S_FLOAT, &3.0f32.to_be_bytes()));
+        for short in [&[][..], &[0x41][..], &[0x41, 0x20, 0x00][..]] {
+            let reply = conn.send_json(write_msg(SRC, S_FLOAT, short));
+            assert!(is_error(&reply), "{} bytes gave {reply}", short.len());
+        }
+        assert_eq!(conn.slot(SRC, S_FLOAT), SlotValue::Float(3.0));
+    }
+
+    #[test]
+    fn write_of_a_string_with_a_bad_length_or_bad_utf8_does_not_panic() {
+        let mut conn = Conn::new();
+        // Length field says 500 bytes, only 2 follow.
+        let reply = conn.send_json(write_msg(SRC, S_STR, &[0x01, 0xF4, b'a', b'b']));
+        assert!(is_error(&reply), "{reply}");
+        // Length 2, bytes are not valid UTF-8: any answer is fine, a panic is not.
+        let _ = conn.send_json(write_msg(SRC, S_STR, &[0x00, 0x02, 0xFF, 0xFE]));
+        // Multi-byte UTF-8 with a correct length.
+        let text = "çğü";
+        let mut bytes = (text.len() as u16 + 1).to_be_bytes().to_vec();
+        bytes.extend_from_slice(text.as_bytes());
+        bytes.push(0);
+        let _ = conn.send_json(write_msg(SRC, S_STR, &bytes));
+    }
+
+    // ── add / delete / rename ──────────────────────
+
+    #[test]
+    fn add_returns_the_new_id_and_delete_removes_it() {
+        let mut conn = Conn::new();
+        let reply = conn.send_json(json!({
+            "msgType": "a", "replyNum": 2, "parentId": ROOT, "kitId": 200, "typeId": 1, "name": "fresh"
+        }));
+        assert_eq!(reply["msgType"], "A");
+        let id = reply["compId"].as_u64().unwrap() as u16;
+        assert_eq!(conn.name(id), "fresh");
+
+        let reply = conn.send_json(json!({ "msgType": "d", "replyNum": 3, "compId": id }));
+        assert_eq!(reply["msgType"], "D");
+        assert!(!conn.exists(id));
+    }
+
+    #[test]
+    fn add_with_missing_fields_or_a_bad_name_changes_nothing() {
+        let mut conn = Conn::new();
+        let long = "a".repeat(200);
+        let bad = [
+            json!({ "msgType": "a", "kitId": 200, "typeId": 1, "name": "x1" }),
+            json!({ "msgType": "a", "parentId": ROOT, "typeId": 1, "name": "x1" }),
+            json!({ "msgType": "a", "parentId": ROOT, "kitId": 200, "name": "x1" }),
+            json!({ "msgType": "a", "parentId": ROOT, "kitId": 200, "typeId": 1 }),
+            json!({ "msgType": "a", "parentId": ROOT, "kitId": 200, "typeId": 1, "name": 5 }),
+            json!({ "msgType": "a", "parentId": ROOT, "kitId": 200, "typeId": 1, "name": "" }),
+            json!({ "msgType": "a", "parentId": ROOT, "kitId": 200, "typeId": 1, "name": "ünlü" }),
+            json!({ "msgType": "a", "parentId": ROOT, "kitId": 200, "typeId": 1, "name": long }),
+            json!({ "msgType": "a", "parentId": 999, "kitId": 200, "typeId": 1, "name": "x1" }),
+        ];
+        for msg in bad {
+            let reply = conn.send_json(msg.clone());
+            assert!(is_error(&reply), "{msg} gave {reply}");
+        }
+        assert_eq!(conn.comp_count(), 3);
+    }
+
+    #[test]
+    fn delete_of_a_missing_or_system_component_is_an_error() {
+        let mut conn = Conn::new();
+        assert!(is_error(&conn.send(r#"{"msgType":"d","compId":999}"#)));
+        assert!(is_error(&conn.send(r#"{"msgType":"d","compId":0}"#)));
+        assert!(is_error(&conn.send(r#"{"msgType":"d","compId":"200"}"#)));
+        assert_eq!(conn.comp_count(), 3);
+    }
+
+    /// A component id that does not fit 16 bits must not be cut down to
+    /// another component's id (`numeric-output.md`: range check before `as`).
+    #[test]
+    fn a_component_id_above_u16_does_not_reach_another_component() {
+        let mut conn = Conn::new();
+        let wrapped = 65_536 + u64::from(SRC);
+
+        let reply = conn.send_json(json!({ "msgType": "d", "compId": wrapped }));
+        assert!(is_error(&reply), "{reply}");
+        assert!(
+            conn.exists(SRC),
+            "delete of {wrapped} removed component {SRC}"
+        );
+
+        let reply =
+            conn.send_json(json!({ "msgType": "n", "compId": wrapped, "newName": "hijack" }));
+        assert!(is_error(&reply), "{reply}");
+        assert_eq!(conn.name(SRC), "src");
+
+        let reply = conn.send_json(json!({
+            "msgType": "w", "compId": wrapped, "slotId": S_FLOAT, "value": b64(&9.0f32.to_be_bytes())
+        }));
+        assert!(is_error(&reply), "{reply}");
+        assert_eq!(conn.slot(SRC, S_FLOAT), SlotValue::Float(0.0));
+    }
+
+    #[test]
+    fn rename_accepts_both_field_names_and_validates_the_name() {
+        let mut conn = Conn::new();
+        let reply = conn
+            .send_json(json!({ "msgType": "n", "replyNum": 1, "compId": SRC, "newName": "one" }));
+        assert_eq!(reply["msgType"], "N");
+        assert_eq!(conn.name(SRC), "one");
+        let reply = conn.send_json(json!({ "msgType": "n", "compId": SRC, "name": "two" }));
+        assert_eq!(reply["msgType"], "N");
+        assert_eq!(conn.name(SRC), "two");
+
+        for bad in [
+            json!({ "msgType": "n", "compId": SRC }),
+            json!({ "msgType": "n", "newName": "x1" }),
+            json!({ "msgType": "n", "compId": SRC, "newName": "" }),
+            json!({ "msgType": "n", "compId": SRC, "newName": "şemsiye" }),
+            json!({ "msgType": "n", "compId": SRC, "newName": "1x" }),
+            json!({ "msgType": "n", "compId": 999, "newName": "x1" }),
+        ] {
+            let reply = conn.send_json(bad.clone());
+            assert!(is_error(&reply), "{bad} gave {reply}");
+        }
+        assert_eq!(conn.name(SRC), "two");
+    }
+
+    #[test]
+    fn small_fields_above_their_range_are_errors() {
+        let mut conn = Conn::new();
+        let bad = [
+            json!({ "msgType": "a", "parentId": ROOT, "kitId": 256, "typeId": 1, "name": "x1" }),
+            json!({ "msgType": "a", "parentId": ROOT, "kitId": 200, "typeId": 257, "name": "x1" }),
+            json!({ "msgType": "a", "parentId": 65_536, "kitId": 200, "typeId": 1, "name": "x1" }),
+            json!({ "msgType": "c", "compId": 65_536 + u64::from(SRC), "what": "c" }),
+            json!({
+                "msgType": "l", "op": "a",
+                "fromCompId": SRC, "fromSlotId": 257, "toCompId": DST, "toSlotId": S_FLOAT
+            }),
+        ];
+        for msg in bad {
+            let reply = conn.send_json(msg.clone());
+            assert!(is_error(&reply), "{msg} gave {reply}");
+        }
+        assert_eq!(conn.comp_count(), 3);
+        assert_eq!(conn.links(DST), 0);
+    }
+
+    #[test]
+    fn reorder_needs_a_complete_list_of_ids() {
+        let mut conn = Conn::new();
+        let children = |conn: &Conn| {
+            conn.state
+                .tree
+                .read()
+                .unwrap()
+                .get(ROOT)
+                .unwrap()
+                .children
+                .clone()
+        };
+        for bad in [
+            json!({ "msgType": "o", "compId": ROOT }),
+            json!({ "msgType": "o", "compId": ROOT, "childrenIds": "200,201" }),
+            json!({ "msgType": "o", "compId": ROOT, "childrenIds": [DST, 70_000] }),
+            json!({ "msgType": "o", "compId": ROOT, "childrenIds": [DST, "200"] }),
+            json!({ "msgType": "o", "compId": ROOT, "childrenIds": [DST, -1] }),
+        ] {
+            let reply = conn.send_json(bad.clone());
+            assert!(is_error(&reply), "{bad} gave {reply}");
+        }
+        assert_eq!(children(&conn), vec![SRC, DST]);
+
+        let reply =
+            conn.send_json(json!({ "msgType": "o", "compId": ROOT, "childrenIds": [DST, SRC] }));
+        assert_eq!(reply["msgType"], "O");
+        assert_eq!(children(&conn), vec![DST, SRC]);
+    }
+
+    // ── links ──────────────────────────────────────
+
+    fn link_msg(op: &str) -> JsonValue {
+        json!({
+            "msgType": "l", "replyNum": 9, "op": op,
+            "fromCompId": SRC, "fromSlotId": S_FLOAT, "toCompId": DST, "toSlotId": S_FLOAT
+        })
+    }
+
+    #[test]
+    fn link_add_carries_the_value_and_link_delete_removes_the_link() {
+        let mut conn = Conn::new();
+        conn.send_json(write_msg(SRC, S_FLOAT, &42.0f32.to_be_bytes()));
+
+        let reply = conn.send_json(link_msg("a"));
+        assert_eq!(reply["msgType"], "L");
+        assert_eq!(conn.links(SRC), 1);
+        assert_eq!(conn.links(DST), 1);
+        assert_eq!(conn.slot(DST, S_FLOAT), SlotValue::Float(42.0));
+
+        let reply = conn.send_json(link_msg("d"));
+        assert_eq!(reply["msgType"], "L");
+        assert_eq!(conn.links(SRC), 0);
+        assert_eq!(conn.links(DST), 0);
+
+        // With the link gone a new source value stays where it is.
+        conn.send_json(write_msg(SRC, S_FLOAT, &7.0f32.to_be_bytes()));
+        assert_eq!(conn.slot(DST, S_FLOAT), SlotValue::Float(42.0));
+    }
+
+    #[test]
+    fn link_accepts_the_short_field_names() {
+        let mut conn = Conn::new();
+        let reply = conn.send_json(json!({
+            "msgType": "l", "op": "a",
+            "fromComp": SRC, "fromSlot": S_FLOAT, "toComp": DST, "toSlot": S_FLOAT
+        }));
+        assert_eq!(reply["msgType"], "L");
+        assert_eq!(conn.links(DST), 1);
+    }
+
+    #[test]
+    fn link_with_a_bad_op_or_missing_field_changes_nothing() {
+        let mut conn = Conn::new();
+        let mut bad = vec![link_msg("x"), link_msg(""), link_msg("ş")];
+        for field in ["op", "fromCompId", "fromSlotId", "toCompId", "toSlotId"] {
+            let mut msg = link_msg("a");
+            msg.as_object_mut().unwrap().remove(field);
+            bad.push(msg);
+        }
+        let mut wrong_type = link_msg("a");
+        wrong_type["toCompId"] = json!("201");
+        bad.push(wrong_type);
+
+        for msg in bad {
+            let reply = conn.send_json(msg.clone());
+            assert!(is_error(&reply), "{msg} gave {reply}");
+        }
+        assert_eq!(conn.links(SRC), 0);
+        assert_eq!(conn.links(DST), 0);
+
+        // Deleting a link that was never added is an error too.
+        assert!(is_error(&conn.send_json(link_msg("d"))));
+    }
+
+    // ── events ─────────────────────────────────────
+
+    fn subscribe(conn: &mut Conn, ids: &[u16]) {
+        let reply = conn.send_json(json!({ "msgType": "s", "replyNum": 1, "compIds": ids }));
+        assert_eq!(reply["msgType"], "S");
+        assert_eq!(reply["numSubscribed"], ids.len());
+    }
+
+    #[test]
+    fn no_event_without_a_change() {
+        let mut conn = Conn::new();
+        subscribe(&mut conn, &[SRC, DST]);
+        assert!(conn.events().is_empty());
+        assert!(conn.events().is_empty());
+    }
+
+    #[test]
+    fn a_write_gives_one_event_for_the_subscribed_component_only() {
+        let mut conn = Conn::new();
+        subscribe(&mut conn, &[SRC]);
+
+        conn.send_json(write_msg(SRC, S_FLOAT, &5.0f32.to_be_bytes()));
+        conn.send_json(write_msg(DST, S_FLOAT, &6.0f32.to_be_bytes()));
+
+        let events = conn.events();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["msgType"], "e");
+        assert_eq!(events[0]["compId"], SRC);
+        assert_eq!(events[0]["what"], "c");
+        assert!(events[0]["compProps"]["propValues"].is_string());
+        // The change is reported once.
+        assert!(conn.events().is_empty());
+    }
+
+    #[test]
+    fn a_linked_write_reaches_the_subscriber_of_the_target() {
+        let mut conn = Conn::new();
+        conn.send_json(link_msg("a"));
+        subscribe(&mut conn, &[DST]);
+
+        conn.send_json(write_msg(SRC, S_FLOAT, &8.0f32.to_be_bytes()));
+
+        let events = conn.events();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["compId"], DST);
+        assert_eq!(conn.slot(DST, S_FLOAT), SlotValue::Float(8.0));
+    }
+
+    #[test]
+    fn adding_a_child_gives_a_tree_event_for_the_parent() {
+        let mut conn = Conn::new();
+        subscribe(&mut conn, &[ROOT]);
+
+        conn.send_json(json!({
+            "msgType": "a", "parentId": ROOT, "kitId": 200, "typeId": 1, "name": "kid"
+        }));
+
+        let events = conn.events();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["compId"], ROOT);
+        assert_eq!(events[0]["what"], "t");
+    }
+
+    #[test]
+    fn deleting_a_subscribed_component_gives_one_delete_event() {
+        let mut conn = Conn::new();
+        subscribe(&mut conn, &[SRC]);
+
+        conn.send_json(json!({ "msgType": "d", "compId": SRC }));
+
+        let events = conn.events();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["what"], "d");
+        assert_eq!(events[0]["compId"], SRC);
+        assert!(conn.events().is_empty());
+    }
+
+    #[test]
+    fn unsubscribe_and_close_watch_stop_events() {
+        let mut conn = Conn::new();
+        subscribe(&mut conn, &[SRC, DST]);
+
+        let reply = conn.send_json(json!({ "msgType": "u", "compIds": [SRC] }));
+        assert_eq!(reply["msgType"], "U");
+        conn.send_json(write_msg(SRC, S_FLOAT, &1.0f32.to_be_bytes()));
+        assert!(conn.events().is_empty());
+
+        let reply = conn.send_json(json!({ "msgType": "x", "watchId": "w" }));
+        assert_eq!(reply["msgType"], "X");
+        conn.send_json(write_msg(DST, S_FLOAT, &2.0f32.to_be_bytes()));
+        assert!(conn.events().is_empty());
     }
 }

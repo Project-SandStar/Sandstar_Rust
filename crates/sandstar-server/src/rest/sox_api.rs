@@ -266,18 +266,28 @@ pub(crate) fn slot_value_to_json(value: &SlotValue) -> serde_json::Value {
     }
 }
 
+/// A JSON integer that fits `i32`; a larger one is refused, not cut down.
+fn json_i32(json: &serde_json::Value) -> Option<i32> {
+    json.as_i64().and_then(|v| i32::try_from(v).ok())
+}
+
 /// Coerce a JSON value to a typed SlotValue based on the slot's type_id.
 pub(crate) fn json_to_slot_value(json: &serde_json::Value, type_id: u8) -> Option<SlotValue> {
     match type_id {
         t if t == SoxValueType::Bool as u8 => json.as_bool().map(SlotValue::Bool),
-        t if t == SoxValueType::Int as u8 => json.as_i64().map(|v| SlotValue::Int(v as i32)),
+        t if t == SoxValueType::Int as u8 => json_i32(json).map(SlotValue::Int),
         t if t == SoxValueType::Long as u8 => json.as_i64().map(SlotValue::Long),
-        t if t == SoxValueType::Float as u8 => json.as_f64().map(|v| SlotValue::Float(v as f32)),
+        // A number too large for f32 would become infinity.
+        t if t == SoxValueType::Float as u8 => json
+            .as_f64()
+            .map(|v| v as f32)
+            .filter(|v| v.is_finite())
+            .map(SlotValue::Float),
         t if t == SoxValueType::Double as u8 => json.as_f64().map(SlotValue::Double),
         t if t == SoxValueType::Buf as u8 => json.as_str().map(|s| SlotValue::Str(s.to_string())),
         // Byte / Short treated as Int
         t if t == SoxValueType::Byte as u8 || t == SoxValueType::Short as u8 => {
-            json.as_i64().map(|v| SlotValue::Int(v as i32))
+            json_i32(json).map(SlotValue::Int)
         }
         _ => None,
     }
@@ -680,8 +690,16 @@ pub async fn invoke_action(
             // Generic action: if body provided, write value to the slot.
             if let Some(Json(req)) = body {
                 let type_id = comp.slots[slot_idx].type_id;
-                if let Some(val) = json_to_slot_value(&req.value, type_id) {
-                    comp.slots[slot_idx].value = val;
+                match json_to_slot_value(&req.value, type_id) {
+                    Some(val) => comp.slots[slot_idx].value = val,
+                    // A value that was not written is not reported as done.
+                    None => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            format!("cannot coerce value to type_id {type_id}"),
+                        )
+                            .into_response()
+                    }
                 }
             }
         }

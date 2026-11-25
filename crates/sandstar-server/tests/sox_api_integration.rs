@@ -380,3 +380,20 @@ async fn add_with_invalid_name_is_rejected() {
     .await;
     assert_eq!(s, 400, "empty name should be 400, got {s} body={body}");
 }
+
+/// A value the slot cannot hold is refused, not skipped and reported as
+/// done (S-54).
+#[tokio::test]
+async fn invoke_with_a_value_that_does_not_fit_the_slot_is_rejected() {
+    let ctx = boot().await;
+    let id = add(&ctx, 0, "inv1").await;
+    let path = format!("/api/sox/comp/{id}/invoke/meta");
+
+    for bad in [json!(3_000_000_000u64), json!("5"), json!(1.5)] {
+        let (s, b) = http("POST", &ctx.host_port, &path, Some(json!({ "value": bad }))).await;
+        assert_eq!(s, 400, "value {bad}: status={s}, body={b}");
+    }
+
+    let (s, b) = http("POST", &ctx.host_port, &path, Some(json!({ "value": 5 }))).await;
+    assert_eq!(s, 204, "status={s}, body={b}");
+}

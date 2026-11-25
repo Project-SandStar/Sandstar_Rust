@@ -264,7 +264,7 @@ cargo test -p sandstar-server
 cargo test -- --ignored
 ```
 
-2,998 tests across the workspace (2.10.0). Platform-specific tests (sysfs GPIO, I2C, PWM) are gated behind `#[cfg(target_os = "linux")]`. Live-network tests (mDNS multicast) are marked `#[ignore]` and require a multicast-capable host.
+3,066 tests across the workspace (2.10.0). Platform-specific tests (sysfs GPIO, I2C, PWM) are gated behind `#[cfg(target_os = "linux")]`. Live-network tests (mDNS multicast) are marked `#[ignore]` and require a multicast-capable host.
 
 ## Documentation
 
