@@ -19,7 +19,7 @@ Bu kod gerçek ekipmanı (vana, damper, fan, PWM) sürer. Yanlış bir sayı fiz
 
 ## Priority array (17 seviye)
 - Yazmalar `channel_write_level(level, who, duration)` üzerinden gider. Seviye bilinçli seçilir; yeni bir kaynak eklerken mevcut atamalara uy:
-  - control/PID: 8 (`crates/sandstar-server/src/main.rs:685-698`)
+  - control/PID: 8 (varsayılan; `crates/sandstar-server/src/control.rs` `default_write_level`)
   - SOX `w`: 8
   - logic → channel: 17
   

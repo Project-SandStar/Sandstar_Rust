@@ -7,7 +7,7 @@
 > - `CONSECUTIVE_FAIL_THRESHOLD` → `engine.rs:42`. The code comment describes it as the count before the fail counter resets.
 > - `ERR_YIELD` / `ERR_RESTART` / `ERR_HIBERNATE` → `sandstar-svm/src/types.rs:72-74`.
 > - `args.rs`: rate limit line 75, port 53, bind 57.
-> - `main.rs`: command channel 423, watch expiry 380, poll result timeout 1020, slow-poll warning 873.
+> - `main.rs`: command channel 439, watch expiry 396. `run_loop.rs` (the event loop, moved out of `main.rs` in S-61): poll result timeout 521, slow-poll warning 320.
 >
 > **Changed or removed:**
 > - `RETRY_COOLDOWN` is gone. It is now `RETRY_COOLDOWN_BASE = 30` and `RETRY_COOLDOWN_MAX = 300` with exponential backoff (`engine.rs:35,39`).
@@ -158,7 +158,7 @@ Audited: 2026-03-10
 | `SOX_FILE_XFER_IDLE` | 60s | `sandstar-server/src/sox/sox_handlers.rs` | 4210 | **Keep** — one SOX file transfer at a time, owned by the session that opened it; dropped (nothing written) when that session is gone or sends nothing for this long, checked on the 10 s cleanup tick. The owner's next fileClose then answers "transfer expired" (R-15, S-45). |
 | `SOX_WRITE_QUEUE` | 64 | `sandstar-server/src/sox/write_queue.rs` | 30 | **Keep** — SOX channel writes (client `w`, logic→channel) wait here for the single SOX writer, which sends one at a time and keeps the last value per channel and level. A full queue or a non-finite value drops the write; after an engine timeout the rest of the batch is dropped as stale. Drops and engine errors are counted; one `warn` a minute for both, each dropped write at `debug` with channel, level and value. A dropped write is not retried (R-40, S-47). |
 | `SOX_CHUNK_SIZE` | 256 | `sandstar-server/src/sox/sox_handlers.rs` | 4400 | **Keep** — file transfer chunk size when the client asks for 0. A put is written only when every chunk arrived with its exact size (else fileClose answers "incomplete"); the path is checked again and directories created at fileClose, and the file is replaced atomically (temp file + rename) (S-45). |
-| Command channel capacity | 64 | `sandstar-server/src/main.rs` | 423 | **Document** — mpsc channel buffer for REST commands. |
+| Command channel capacity | 64 | `sandstar-server/src/main.rs` | 439 | **Document** — mpsc channel buffer for REST commands. |
 
 ## Sedona VM (SVM)
 
@@ -188,9 +188,9 @@ Audited: 2026-03-10
 
 | Constant | Value | File | Line | Recommendation |
 |----------|-------|------|------|----------------|
-| Watch expiry timer | 60s | `sandstar-server/src/main.rs` | 316 | **Document** — periodic stale watch cleanup interval. |
-| Poll result timeout | 5s | `sandstar-server/src/main.rs` | 705 | **Document** — max wait for in-flight poll during shutdown. |
-| Slow poll warning threshold | 1s | `sandstar-server/src/main.rs` | 560 | **Document** — logs warning when poll exceeds 1 second. |
+| Watch expiry timer | 60s | `sandstar-server/src/main.rs` | 396 | **Document** — periodic stale watch cleanup interval. |
+| Poll result timeout | 5s | `sandstar-server/src/run_loop.rs` | 521 | **Document** — max wait for in-flight poll during shutdown. |
+| Slow poll warning threshold | 1s | `sandstar-server/src/run_loop.rs` | 320 | **Document** — logs warning when poll exceeds 1 second. |
 
 ---
 
