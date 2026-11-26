@@ -1073,4 +1073,67 @@ mod tests {
             Some(MISSING_TABLE)
         );
     }
+
+    // ── S-59: an auto-detected sensor is not "modified" on every reload ──
+
+    /// database.zinc with one polled physical row for channel 1113 that
+    /// names thermistor10K2 and gives no low/high (the device's row).
+    fn write_sensor_row(dir: &std::path::Path, label: &str) {
+        fs::write(
+            dir.join("database.zinc"),
+            format!(
+                "ver:\"3.0\"\nchannel,enabled,navName,unit,cur,thermistor10K2\n1113,M,\"{label}\",\"°C\",M,M\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn an_auto_detected_sensor_is_unchanged_on_a_reload_of_the_same_config() {
+        let dir = TempDir::new().unwrap();
+        write_tables(dir.path(), &["thermistor10K2"]);
+        write_sensor_row(dir.path(), "probe");
+        let mut engine = make_engine_with_channel(1113);
+        reload_config(&mut engine, dir.path()).unwrap();
+
+        // The first read completes the conversion from the table.
+        engine.hal.set_analog(0, 0, Ok(1100.0));
+        let before = engine.channel_read(1113).unwrap();
+        let conv = engine.channels.get(1113).unwrap().conv.clone();
+        assert!(
+            conv.low.is_some() && conv.high.is_some(),
+            "not auto-detected"
+        );
+
+        let summary = reload_config(&mut engine, dir.path()).unwrap();
+        assert_eq!(summary.channels_updated, 0, "{summary}");
+        assert_eq!(summary.channels_unchanged, 1, "{summary}");
+
+        // The reading is the same after the reload.
+        let after = engine.channel_read(1113).unwrap();
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.cur, before.cur);
+
+        // Before any read (a reload right after a reload) it is unchanged too.
+        let summary = reload_config(&mut engine, dir.path()).unwrap();
+        assert_eq!(summary.channels_updated, 0, "{summary}");
+        let summary = reload_config(&mut engine, dir.path()).unwrap();
+        assert_eq!(summary.channels_updated, 0, "{summary}");
+    }
+
+    #[test]
+    fn a_real_change_to_an_auto_detected_sensor_still_counts_as_modified() {
+        let dir = TempDir::new().unwrap();
+        write_tables(dir.path(), &["thermistor10K2"]);
+        write_sensor_row(dir.path(), "probe");
+        let mut engine = make_engine_with_channel(1113);
+        reload_config(&mut engine, dir.path()).unwrap();
+        engine.hal.set_analog(0, 0, Ok(1100.0));
+        engine.channel_read(1113).unwrap();
+
+        write_sensor_row(dir.path(), "renamed");
+        let summary = reload_config(&mut engine, dir.path()).unwrap();
+        assert_eq!(summary.channels_updated, 1, "{summary}");
+        assert_eq!(engine.channels.get(1113).unwrap().label, "renamed");
+    }
 }

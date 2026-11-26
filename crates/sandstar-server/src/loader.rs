@@ -9,6 +9,7 @@ use std::fs;
 use std::path::Path;
 
 use sandstar_engine::channel::{Channel, ChannelDirection, ChannelType};
+use sandstar_engine::conversion::auto_detect::auto_detect_sensor;
 use sandstar_engine::conversion::{RateLimitConfig, SmoothMethod, SmoothingConfig, SpikeConfig};
 use sandstar_engine::error::EngineError;
 use sandstar_engine::table::{TableRanges, TableStore, MISSING_TABLE};
@@ -624,9 +625,19 @@ pub fn load_database_granular<H: HalRead + HalWrite + HalDiagnostics>(
                 continue;
             }
 
-            // Check if config actually changed before updating
+            // Check if config actually changed before updating.
+            //
+            // On its first read the engine fills in the table bounds and
+            // the range of an auto-detected sensor (auto_detect_sensor), so
+            // the channel no longer equals its bare row. It is compared
+            // with the row as the engine would complete it as well;
+            // otherwise such a channel counts as modified on every reload.
             let changed = if let Some(ch) = engine.channels.get(channel_id) {
-                channel_config_changed(ch, &conv, &label, &tags, enabled)
+                channel_config_changed(ch, &conv, &label, &tags, enabled) && {
+                    let mut completed = conv.clone();
+                    auto_detect_sensor(channel_id, &mut completed, &engine.tables);
+                    channel_config_changed(ch, &completed, &label, &tags, enabled)
+                }
             } else {
                 false
             };
