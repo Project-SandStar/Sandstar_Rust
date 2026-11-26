@@ -1,9 +1,9 @@
 # Sandstar Rust — Progress Overview
 
 **Last updated:** 2026-11-18 (audited against `master` `b48484b`; earlier text last updated 2026-04-20)
-**Current version:** workspace `2.10.0` (`Cargo.toml`, 2026-11-25); `CHANGELOG.md` covers 2.9.0, 2.9.1 and 2.10.0. Earlier tags: `v2.9.0` (2026-04-25) and `v2.9.1` (2026-04-29; that tag had no `Cargo.toml` bump).
-**Deployed:** one field BeagleBone runs `2.9.0+1beb2b1` (2026-11-24; version + git hash, readable from `/api/about` `buildInfo`). It has every 2.10.0 change except S-51 (MQTT reconnect) and S-52 (package contents); 2.10.0 itself is not deployed yet.
-**Workspace:** 7 crates. Tests: 2748 passed on Windows, 2764 on Linux CI, 0 failed (26 suites). `test_sys_ticks` is flaky.
+**Current version:** workspace `2.11.0` (`Cargo.toml`, 2026-11-27); `CHANGELOG.md` covers 2.9.0 to 2.11.0. Tag `v2.10.0` (2026-11-26) is on `master`. Earlier tags: `v2.9.0` (2026-04-25) and `v2.9.1` (2026-04-29; that tag had no `Cargo.toml` bump).
+**Deployed:** one field BeagleBone runs `2.10.0+90b4be3` (2026-11-26; version + git hash, readable from `/api/about` `buildInfo`). 2.11.0 is not deployed yet.
+**Workspace:** 7 crates. Tests: 3163 passed on Windows, 0 failed (29 suites; Linux CI also runs the platform-gated tests). `test_sys_ticks` is flaky.
 **Quality gate:** `bash tools/gates.sh` (fmt, clippy `-D warnings`, `test --no-fail-fast`, `linux-hal,svm` check). CI is green on `master`.
 **GitHub:** https://github.com/Project-SandStar/Sandstar_Rust
 **Research docs:** each `../research/NN_*.md` now starts with a "Status (2026-11-18)" block; the doc-by-doc summary is [`../research/PROGRESS_REPORT_2026_11_18.md`](../research/PROGRESS_REPORT_2026_11_18.md).
@@ -291,7 +291,7 @@ Host addresses, SSH details and site names are deliberately not written in this 
   3. `cargo test --workspace --no-fail-fast`
   4. `cargo check -p sandstar-server --no-default-features --features linux-hal,svm`
   5. `docs` reminder (not a gate): lists documents from `tools/docs-map.tsv` whose code paths changed on the branch while the document did not (rule: `.claude/rules/workflow.md` "Doküman disiplini").
-- **Tests:** 2748 passed on Windows, 2764 on Linux CI, 0 failed. `test_sys_ticks` is flaky.
+- **Tests:** 3163 passed on Windows, 0 failed (Linux CI also runs the platform-gated tests). `test_sys_ticks` is flaky.
 - **Toolchain:** pinned to 1.99.1 (`rust-toolchain.toml`, CI); MSRV 1.82.
 - **Not clean yet:** `cargo clippy --all-targets` (lints in test code).
 - **CI:** fmt, clippy, tests, then an ARM build on push. The ARM build uses `linux-hal` without `svm` and produces no `.deb`.
@@ -371,6 +371,7 @@ One-week sprint 2026-04-10 → 2026-04-17:
 | 2026-04-29 | tag v2.9.1 | 14.0G fix-pack (`44de90b`); `Cargo.toml` still says 2.9.0 |
 | 2026-11 | 2.9.0+hash | Maintenance steps S-5 to S-52 deployed as hash builds; field device on `2.9.0+1beb2b1` (2026-11-24) |
 | 2026-11-25 | 2.10.0 | Hardening release: version number for S-5 to S-52 (auth layering, input validation, driver recovery, package cleanup); see `CHANGELOG.md` |
+| 2026-11-27 | 2.11.0 | Reload and control loops: a sensor channel without its table reads as fault, every reload path reloads `control.toml` and keeps loop state when the file is unchanged, a SIGHUP during a poll is not lost, event loop moved to `run_loop.rs` (S-58 to S-64); see `CHANGELOG.md` |
 
 ---
 

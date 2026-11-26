@@ -11,7 +11,7 @@
 > **Known inaccuracies in the text below** (section: current fact):
 > - *Rust Equivalent* (config loading): no libhaystack, no `csv` crate. Parsing is in-house (`zinc.rs`, `loader.rs`).
 > - *Rust Equivalent* (conversion): `f64::clamp()` is a panic hazard here (release builds use `panic = "abort"`, and bounds come from config); see R-10. The error type is `EngineError`, not `ConversionError`. Table search is hand-written, not `binary_search_by`.
-> - *Rust Equivalent* (engine loop): `Engine<H>` has no async `run` loop or `watchdog`/`config` fields. The loop is in `crates/sandstar-server/src/main.rs`; the watchdog is `crates/sandstar-server/src/watchdog.rs`.
+> - *Rust Equivalent* (engine loop): `Engine<H>` has no async `run` loop or `watchdog`/`config` fields. The loop is in `crates/sandstar-server/src/run_loop.rs` (moved out of `main.rs` in S-61); the watchdog is `crates/sandstar-server/src/watchdog.rs`.
 > - *4. Poll / Watch / Notify Subsystems*: watch/notify are `Vec` with linear scans, not O(1) maps.
 > - *ENGINE_VALUE*: the Rust struct uses `flags: ValueFlags`, not `has_raw`/`has_cur` booleans.
 > - *Summary: Lines of Code Comparison*: `crates/sandstar-engine/src` is ~9,000 lines (with PID, sequencer, components and tests), not ~1,510.

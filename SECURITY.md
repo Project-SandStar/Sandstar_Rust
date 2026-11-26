@@ -6,8 +6,8 @@ Sandstar is deployed as a single-binary `.deb` to embedded BeagleBone devices. S
 
 | Version | Supported |
 |---------|-----------|
-| 2.10.x  | ✅ Latest; all security fixes land here |
-| 2.0.x – 2.9.x | ❌ No backports; upgrade to 2.10.x (2.10.0 carries the auth, input-validation and secret-handling fixes; see `CHANGELOG.md`) |
+| 2.11.x  | ✅ Latest; all security fixes land here |
+| 2.0.x – 2.10.x | ❌ No backports; upgrade to 2.11.x (2.10.0 carries the auth, input-validation and secret-handling fixes; see `CHANGELOG.md`) |
 | 1.x     | ❌ End of life (pre-`csrc/` removal) |
 
 ## What counts as a security issue

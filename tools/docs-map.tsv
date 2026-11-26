@@ -17,7 +17,7 @@
 # Packaging, unit files, device init, deploy tooling
 ^(etc/|crates/sandstar-server/deb/)	-	docs/Progress/DEPLOYMENT_CHECKLIST.md	package scripts, conffiles, verify steps
 ^crates/sandstar-server/Cargo\.toml$	/home/eacio|conf-files|maintainer-scripts|depends	docs/Progress/DEPLOYMENT_CHECKLIST.md	.deb assets or conffiles
-^crates/sandstar-server/src/(logging|watchdog)\.rs$	(info|warn|error)!	docs/Progress/DEPLOYMENT_CHECKLIST.md	§7 log lines used for verification
+^crates/sandstar-server/src/(logging|watchdog|reload|run_loop|loader)\.rs$	(info|warn|error)!	docs/Progress/DEPLOYMENT_CHECKLIST.md	§7 log lines used for verification
 # Driver operator guides
 ^crates/sandstar-server/src/drivers/bacnet/	-	docs/Progress/BACNET_SETUP.md	config, defaults, log strings
 ^crates/sandstar-server/src/drivers/mqtt	-	docs/Progress/MQTT_SETUP.md	config, defaults, log strings

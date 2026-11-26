@@ -1,7 +1,7 @@
 # Sandstar Rust — Deploy and Rollback Runbook
 
 **Rewritten:** 2026-11-18. This replaces the 2026-03 checklist, which covered a Linux VM build, a jump-host flow and C side-by-side validation; that version remains in git history.
-**Applies to:** `sandstar` `.deb` 2.9.x on a BeagleBone (Debian 9, kernel 4.9, armv7, systemd).
+**Applies to:** `sandstar` `.deb` 2.9.0 to 2.11.0 on a BeagleBone (Debian 9, kernel 4.9, armv7, systemd).
 
 > **No site data in this file.** Host addresses, SSH users and ports, jump hosts, connection names and passwords live only in the machine-local connection files used by `tools/installSandstar.sh`. Those files are git-ignored. Examples below use placeholders such as `<device>` and `<hash>`.
 
@@ -101,7 +101,7 @@ Do **not** run a recursive `chmod`/`chown` of your own; `postinst` already sets 
 
 Read the journal soon after the start: it is volatile and holds well under an hour.
 
-1. **Build:** `curl -s http://localhost:8085/api/about` shows `2.9.x` with the new `<hash>`.
+1. **Build:** `curl -s http://localhost:8085/api/about` shows the new version with the new `<hash>` (for example `2.11.0+<hash>`).
    - `curl -sf http://localhost:8085/health` must succeed. Since S-21 it returns 503 (and `curl -f` fails) when the engine does not answer within 2 s; `tools/health-monitor.sh` and `tools/soak-monitor.sh` rely on this.
 2. **Unit:** `systemctl status sandstar-engine` is `active (running)`. The device's systemd has no `NRestarts` property, so use `systemctl show -p ActiveEnterTimestamp` instead.
 3. **`initialize.sh` output** (`journalctl -u sandstar-engine -b`, needs `sudo`): one GPIO60 line: `already exported`, `exported (attempt n)` or `export failed … ; pinmux`. It never fails the start.
@@ -113,7 +113,12 @@ Read the journal soon after the start: it is volatile and holds well under an ho
    - with `--cluster` and no mTLS certificates (the packaged unit): `roxWarp: no mTLS configured, cluster listener disabled` and `cluster listener not started`, so port 7443 is not listening (S-36). With certificates expect `starting mTLS listener`; `mTLS config failed` means the certificate files need fixing.
 5. **Warnings:** count ERROR and WARN lines from the start time and compare them with the known types for this device (for example BACnet `comm fault` when a BACnet drop-in is active). Investigate anything new.
 6. **Data:** `curl -s http://localhost:8085/api/status` and spot-read a few channels with `/api/read`.
-7. **Next day:** confirm that log pruning kept at most 14 dated files in `/var/log/sandstar/`.
+7. **Reload (optional; an unchanged configuration changes nothing):** `sandstar-cli reload` prints `ok` and exits 0. In the engine log:
+   - `loaded tables count=<n> skipped=0`;
+   - `config reloaded via IPC` with a summary that says `0 modified` for an unchanged configuration (from 2.11.0; 2.10.0 counts the auto-detected sensor channels as modified, 2 on device 1-6);
+   - from 2.11.0 the summary ends with what happened to the control loops: `control: unchanged`, `control: reloaded <n> loops, <m> components`, `control: no control file` or `control: disabled`. `control: reloaded` on a file nobody edited needs a look: every loop restarted from its initial state.
+   - The channel status counts are the same before and after, and the service did not restart.
+8. **Next day:** confirm that log pruning kept at most 14 dated files in `/var/log/sandstar/`.
 
 ## 7a. Turning REST auth on or off
 

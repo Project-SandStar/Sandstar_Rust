@@ -3,16 +3,15 @@
 > **Status (2026-11-18)**: audited against `master` `b48484b`. The analysis below is kept as rationale; this block records where the code stands. Doc-by-doc report: [PROGRESS_REPORT_2026_11_18.md](PROGRESS_REPORT_2026_11_18.md).
 >
 > **Verdict:** largely true for safe-Rust code (about 70%). Some bug classes remain reachable through `unsafe` in the SVM natives and the HAL, and two mechanisms this doc relies on are not enabled.
-> - **Implemented:** serde/bincode IPC instead of a raw union (`crates/sandstar-ipc`); channels in a `HashMap`; SIGPIPE ignored (`crates/sandstar-server/src/main.rs`).
+> - **Implemented:** serde/bincode IPC instead of a raw union (`crates/sandstar-ipc`); channels in a `HashMap`; SIGPIPE ignored (`crates/sandstar-server/src/main.rs`); SIGTERM runs the same graceful shutdown as Ctrl+C since S-43 (`crates/sandstar-server/src/signal.rs`, R-13 closed).
 > - **Done differently:** the I2C HAL caches raw `libc` file descriptors and closes them manually; there is no RAII `File`/`Drop`.
 > - **Not done / open:**
->   - SIGTERM is not handled; only Ctrl+C and SIGHUP are (R-13).
 >   - `overflow-checks` is not enabled in the release profile (`.cargo/config.toml`).
 >   - VM natives copy memory through raw pointers using VM-supplied addresses without bounds checks (`crates/sandstar-svm/src/native_sys.rs`, R-12); `unsafe impl Send` for the handle table.
 >   - 25 `unsafe` blocks in `crates/sandstar-hal-linux/src/i2c.rs` and `uart.rs` have no `// SAFETY:` comments; some `libc::write` results are discarded.
 > - **Superseded by:** the project rules `.claude/rules/panic-safety.md` and `.claude/rules/svm-unsafe.md`.
 >
-> **Known inaccuracies in the text below:** the claims that Rust makes each bug class "impossible", that `File` closes descriptors on every path, that a SIGTERM handler exists, and that `#[must_use]` prevents unchecked returns do not hold for the `unsafe`/libc parts listed above. The C file:line citations cannot be checked; the C sources are not in this repo.
+> **Known inaccuracies in the text below:** the claims that Rust makes each bug class "impossible", that `File` closes descriptors on every path, and that `#[must_use]` prevents unchecked returns do not hold for the `unsafe`/libc parts listed above. The C file:line citations cannot be checked; the C sources are not in this repo.
 
 This document provides a systematic, bug-by-bug analysis of memory safety issues present in the Sandstar C/C++ codebase and demonstrates how each issue class is structurally eliminated by Rust's type system and ownership model. Every example references real code from the Sandstar repository with file paths and line numbers.
 

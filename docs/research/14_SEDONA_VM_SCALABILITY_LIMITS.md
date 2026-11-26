@@ -3,7 +3,7 @@
 > **Status (2026-11-18)**: audited against `master` `b48484b`. The analysis below is kept as rationale; this block records what is wired today. Doc-by-doc report: [PROGRESS_REPORT_2026_11_18.md](PROGRESS_REPORT_2026_11_18.md).
 >
 > **Verdict:** about 25%. The scalability structures exist in `sandstar-svm` but nothing uses them, and the production SOX dataflow keeps 16-bit component ids.
-> - **Implemented:** engine channels in a `HashMap`; poll-overrun detection (`crates/sandstar-server/src/main.rs`); limits on watches and channels per watch (`crates/sandstar-server/src/cmd_handler.rs`).
+> - **Implemented:** engine channels in a `HashMap`; poll-overrun detection (`crates/sandstar-server/src/run_loop.rs`); limits on watches and channels per watch (`crates/sandstar-server/src/cmd_handler.rs`).
 > - **Built but not wired:** `ComponentStore` (u32 ids, free list, iterative walk; `crates/sandstar-svm/src/component_store.rs`) and `VmConfig` (`vm_config.rs`) are referenced nowhere outside their own modules. The interpreter hardcodes a 4096-cell (16 KB) stack and a 512-frame limit.
 > - **Done differently:** production components live in `HashMap<u16, …>` with per-component link lists (`crates/sandstar-server/src/sox/sox_handlers.rs`). Watches are fixed at 64. The engine command queue holds 64.
 > - **Not done / open:** link arena; TOML runtime limits; SVM scan-cycle overrun; the stress-test matrix.
