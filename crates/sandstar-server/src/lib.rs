@@ -20,6 +20,7 @@ pub mod pid;
 pub mod reload;
 pub mod rest;
 pub mod roxwarp;
+pub mod run_loop;
 pub mod sax_converter;
 pub mod sd_notify;
 pub mod signal;

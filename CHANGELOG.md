@@ -18,6 +18,9 @@ On `develop`, not on the field device.
 ### Fixed
 - A reload of an unchanged configuration no longer reports auto-detected sensor channels as modified (S-59).
 
+### Internal
+- The main event loop and its shutdown steps moved from `main()` to `run_loop.rs`, and are tested there. No behavior change (R-36, R-33, S-61).
+
 ### Tests
 - Log capture in unit tests goes through one global subscriber; a log-counting test failed about twice in fifteen runs (S-58).
 
