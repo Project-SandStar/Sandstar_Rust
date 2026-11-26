@@ -2800,4 +2800,61 @@ mod tests {
         assert_eq!(writes.len(), 1);
         assert_eq!(writes[0].duty, 100.0);
     }
+
+    // ── S-60: the table a channel number stands for is not loaded ──
+
+    fn sensor_channel(id: u32) -> Channel {
+        Channel::new(
+            id,
+            ChannelType::Analog,
+            ChannelDirection::In,
+            0,
+            0,
+            false,
+            ValueConv {
+                unit: "F".to_string(),
+                ..Default::default()
+            },
+            "temp",
+        )
+    }
+
+    #[test]
+    fn read_of_a_sensor_whose_table_is_not_loaded_is_a_fault() {
+        let mut engine = make_engine();
+        engine
+            .tables
+            .add_with_values(
+                "thermistor10K2",
+                "temp",
+                vec![32000.0, 16000.0, 8000.0],
+                TableRanges::default(),
+            )
+            .unwrap();
+        // 1122 stands for pt1000, which is not loaded.
+        engine.channels.add(sensor_channel(1122)).unwrap();
+        engine.hal.set_analog(0, 0, Ok(8000.0));
+
+        for _ in 0..2 {
+            let value = engine.channel_read(1122).unwrap();
+            assert_eq!(value.status, EngineStatus::Fault);
+        }
+        assert_eq!(
+            engine.channels.get(1122).unwrap().conv.table_index,
+            Some(crate::table::MISSING_TABLE)
+        );
+    }
+
+    /// Demo and simulator run without tables; their readings stay as they are.
+    #[test]
+    fn read_of_a_sensor_without_any_table_is_unchanged() {
+        let mut engine = make_engine();
+        engine.channels.add(sensor_channel(1122)).unwrap();
+        engine.hal.set_analog(0, 0, Ok(2048.0));
+
+        let value = engine.channel_read(1122).unwrap();
+        assert_eq!(value.status, EngineStatus::Ok);
+        assert_eq!(value.cur, 2048.0);
+        assert_eq!(engine.channels.get(1122).unwrap().conv.table_index, None);
+    }
 }
