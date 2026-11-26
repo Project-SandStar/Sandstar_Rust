@@ -11,7 +11,7 @@ use std::path::Path;
 use sandstar_engine::channel::{Channel, ChannelDirection, ChannelType};
 use sandstar_engine::conversion::{RateLimitConfig, SmoothMethod, SmoothingConfig, SpikeConfig};
 use sandstar_engine::error::EngineError;
-use sandstar_engine::table::{TableRanges, TableStore};
+use sandstar_engine::table::{TableRanges, TableStore, MISSING_TABLE};
 use sandstar_engine::value::{ConversionFn, FilterConfig, FlowConfig, ValueConv};
 use sandstar_engine::Engine;
 use sandstar_hal::{HalDiagnostics, HalRead, HalWrite};
@@ -104,6 +104,54 @@ fn resolve_table_path(table_dir: &Path, csv_path: &str) -> Option<std::path::Pat
     by_name.or_else(|| Some(csv_path.to_path_buf()).filter(|p| p.is_file()))
 }
 
+/// A table that `load_tables` did not load, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedTable {
+    /// Line in tables.csv (1-based).
+    pub line: usize,
+    /// Table name from the first column (may be empty on a malformed line).
+    pub name: String,
+    pub reason: String,
+}
+
+impl std::fmt::Display for SkippedTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (line {}): {}", self.name, self.line, self.reason)
+    }
+}
+
+/// What `load_tables` did: how many tables went in and which did not (R-63).
+///
+/// A table is loaded whole or not at all. Start-up carries on with the
+/// tables that loaded; a reload treats any skipped table as a failure.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct TableLoadReport {
+    pub loaded: usize,
+    pub skipped: Vec<SkippedTable>,
+}
+
+impl TableLoadReport {
+    /// The skipped tables on one line, for an error message.
+    pub fn skipped_summary(&self) -> String {
+        self.skipped
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+}
+
+/// A range column of tables.csv. Empty means "no range for this unit"
+/// (voltage and current tables leave the Celsius and Kelvin columns empty)
+/// and reads as 0. Anything else must be a finite number.
+fn parse_range_field(field: &str) -> Option<f64> {
+    let trimmed = field.trim();
+    if trimmed.is_empty() {
+        return Some(0.0);
+    }
+    trimmed.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
 /// Load lookup tables from tables.csv and their data files.
 ///
 /// CSV format: `name,description,path,unit_type,range_F_min,range_F_max,...,tag`
@@ -112,85 +160,116 @@ fn resolve_table_path(table_dir: &Path, csv_path: &str) -> Option<std::path::Pat
 /// We search for the file by name in `table_dir` first; if it is not there,
 /// the `path` column itself is tried (SAHA-9: on the device a table that
 /// only exists at its `tables.csv` path was reported as missing).
+///
+/// `Err` only when tables.csv itself cannot be read. A table that cannot be
+/// loaded is left out and listed in the report; the others still load.
 pub fn load_tables(
     tables: &mut TableStore,
     csv_path: &Path,
     table_dir: &Path,
-) -> Result<usize, Box<dyn std::error::Error>> {
+) -> Result<TableLoadReport, Box<dyn std::error::Error>> {
     let content = fs::read_to_string(csv_path)?;
-    let mut count = 0;
+    let mut report = TableLoadReport::default();
 
     for (line_num, line) in content.lines().enumerate() {
         if line_num == 0 || line.trim().is_empty() {
             continue; // skip header
         }
+        let line_no = line_num + 1;
 
         let fields: Vec<&str> = line.split(',').collect();
-        if fields.len() < 11 {
-            warn!(line = line_num + 1, "skipping malformed line in tables.csv");
-            continue;
+        let name = fields.first().map_or("", |f| f.trim()).to_string();
+        match load_one_table(tables, &fields, table_dir) {
+            Ok(()) => report.loaded += 1,
+            Err(reason) => {
+                warn!(line = line_no, table = %name, %reason, "table not loaded");
+                report.skipped.push(SkippedTable {
+                    line: line_no,
+                    name,
+                    reason,
+                });
+            }
         }
+    }
 
-        let name = fields[0].trim().to_string();
-        let remote_path = fields[2].trim();
-        let unit_type = fields[3].trim().to_string();
-        let tag = fields[10].trim().to_string();
+    info!(
+        count = report.loaded,
+        skipped = report.skipped.len(),
+        path = %csv_path.display(),
+        "loaded tables"
+    );
+    Ok(report)
+}
 
-        // Parse ranges
-        let f_min: f64 = fields[4].trim().parse().unwrap_or(0.0);
-        let f_max: f64 = fields[5].trim().parse().unwrap_or(0.0);
-        let c_min: f64 = fields[6].trim().parse().unwrap_or(0.0);
-        let c_max: f64 = fields[7].trim().parse().unwrap_or(0.0);
-        let k_min: f64 = fields[8].trim().parse().unwrap_or(0.0);
-        let k_max: f64 = fields[9].trim().parse().unwrap_or(0.0);
+/// Load the table of one tables.csv line. `Err` is the reason it was left out.
+fn load_one_table(
+    tables: &mut TableStore,
+    fields: &[&str],
+    table_dir: &Path,
+) -> Result<(), String> {
+    let [_name, _desc, remote_path, unit_type, f_min, f_max, c_min, c_max, k_min, k_max, tag, ..] =
+        fields
+    else {
+        return Err(format!("{} fields, 11 expected", fields.len()));
+    };
+    let remote_path = remote_path.trim();
+    let tag = tag.trim();
+    if tag.is_empty() {
+        return Err("empty tag".to_string());
+    }
 
+    // The second of two tables with one tag could never be reached: tables
+    // are found by tag, first match.
+    if tables.find_by_tag(tag).is_some() {
+        return Err(format!("tag {tag:?} is already used by an earlier table"));
+    }
+
+    let range = |column: &str, field: &str| {
+        parse_range_field(field)
+            .ok_or_else(|| format!("{column} is not a number: {:?}", field.trim()))
+    };
+    let ranges = TableRanges {
+        fahrenheit: (range("range_F_min", f_min)?, range("range_F_max", f_max)?),
+        celsius: (range("range_C_min", c_min)?, range("range_C_max", c_max)?),
+        kelvin: (range("range_K_min", k_min)?, range("range_K_max", k_max)?),
+    };
+
+    let Some(local_path) = resolve_table_path(table_dir, remote_path) else {
         // Find the data file locally: extract filename from remote path
         let filename = Path::new(remote_path)
             .file_name()
             .and_then(|f| f.to_str())
             .unwrap_or("");
+        return Err(format!(
+            "data file not found at {} or {remote_path}",
+            table_dir.join(filename).display()
+        ));
+    };
 
-        let Some(local_path) = resolve_table_path(table_dir, remote_path) else {
-            warn!(
-                table = %name,
-                path = %table_dir.join(filename).display(),
-                csv_path = remote_path,
-                "table data file not found"
-            );
-            continue;
-        };
-
-        // Load table values (one f64 per line)
-        let values = load_table_values(&local_path)?;
-        if values.len() < 2 {
-            warn!(table = %name, count = values.len(), "table has too few values");
-            continue;
-        }
-
-        let ranges = TableRanges {
-            fahrenheit: (f_min, f_max),
-            celsius: (c_min, c_max),
-            kelvin: (k_min, k_max),
-        };
-
-        match tables.add_with_values(&tag, &unit_type, values, ranges) {
-            Ok(()) => {
-                count += 1;
-            }
-            Err(e) => warn!(table = %name, err = %e, "failed to add table"),
-        }
+    let values =
+        load_table_values(&local_path).map_err(|e| format!("{}: {e}", local_path.display()))?;
+    if values.len() < 2 {
+        return Err(format!(
+            "{} has {} values, at least 2 needed",
+            local_path.display(),
+            values.len()
+        ));
     }
 
-    info!(count, path = %csv_path.display(), "loaded tables");
-    Ok(count)
+    tables
+        .add_with_values(tag, unit_type.trim(), values, ranges)
+        .map_err(|e| e.to_string())
 }
 
 /// Load table data values from a text file (one f64 per line).
-fn load_table_values(path: &Path) -> Result<Vec<f64>, Box<dyn std::error::Error>> {
-    let content = fs::read_to_string(path)?;
+///
+/// A line that is not a number fails the whole file: leaving the line out
+/// would change the number of steps and move every point of the curve.
+fn load_table_values(path: &Path) -> Result<Vec<f64>, String> {
+    let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
     let mut values = Vec::new();
 
-    for line in content.lines() {
+    for (index, line) in content.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -198,7 +277,8 @@ fn load_table_values(path: &Path) -> Result<Vec<f64>, Box<dyn std::error::Error>
         match trimmed.parse::<f64>() {
             Ok(v) => values.push(v),
             Err(_) => {
-                warn!(path = %path.display(), line = trimmed, "non-numeric value in table file");
+                let shown: String = trimmed.chars().take(40).collect();
+                return Err(format!("line {} is not a number: {shown:?}", index + 1));
             }
         }
     }
@@ -729,13 +809,21 @@ fn build_value_conv<H: HalRead + HalWrite + HalDiagnostics>(
         "range0to20mA",
         "range4to20mA",
     ];
+    let mut asked_for_a_table = false;
     for tag in &known_table_tags {
         if grid.marker(row, tag) {
+            asked_for_a_table = true;
             if let Some(idx) = engine.tables.find_by_tag(tag) {
                 conv.table_index = Some(idx);
                 break;
             }
         }
+    }
+    // The row names a table and none of the named ones is loaded. Without
+    // the mark the channel would convert by range scaling, or get a table
+    // picked by its channel number, and report a good value (R-63).
+    if asked_for_a_table && conv.table_index.is_none() {
+        conv.table_index = Some(MISSING_TABLE);
     }
 
     // --- Flow config (SDP610/SDP810) ---
@@ -928,7 +1016,11 @@ mod tests {
         std::fs::write(&csv, body).unwrap();
 
         let mut tables = TableStore::new();
-        assert_eq!(load_tables(&mut tables, &csv, dir).unwrap(), 1);
+        let report = load_tables(&mut tables, &csv, dir).unwrap();
+        assert_eq!(report.loaded, 1);
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].name, "Bad");
+        assert_eq!(report.skipped[0].line, 2);
         assert!(tables.find_by_tag("bad").is_none());
         assert!(tables.find_by_tag("good").is_some());
     }
@@ -979,8 +1071,11 @@ mod tests {
         std::fs::write(&csv, body).unwrap();
 
         let mut tables = TableStore::new();
-        let n = load_tables(&mut tables, &csv, &table_dir).unwrap();
-        assert_eq!(n, 2);
+        let report = load_tables(&mut tables, &csv, &table_dir).unwrap();
+        assert_eq!(report.loaded, 2);
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].name, "Missing");
+        assert!(report.skipped[0].reason.contains("not found"));
 
         let a = tables.get(tables.find_by_tag("a").unwrap()).unwrap();
         assert_eq!(a.values, vec![1.0, 2.0]);
@@ -1177,5 +1272,163 @@ mod tests {
         let ch = engine.channels.get(615).unwrap();
         assert_eq!(ch.conv.offset, Some(32.0));
         assert_eq!(ch.conv.scale, Some(0.009));
+    }
+
+    // ── S-56: load_tables reports what it left out (R-63) ──
+
+    /// tables.csv with the given body lines and data files, in a new dir.
+    fn tables_dir(rows: &[String], files: &[(&str, &str)]) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        for (name, body) in files {
+            std::fs::write(root.path().join(name), body).unwrap();
+        }
+        let mut body = vec![TABLES_HEADER.to_string()];
+        body.extend(rows.iter().cloned());
+        std::fs::write(root.path().join("tables.csv"), body.join("\n")).unwrap();
+        root
+    }
+
+    fn load_report(root: &tempfile::TempDir) -> (TableStore, TableLoadReport) {
+        let mut tables = TableStore::new();
+        let report =
+            load_tables(&mut tables, &root.path().join("tables.csv"), root.path()).unwrap();
+        (tables, report)
+    }
+
+    #[test]
+    fn load_tables_reports_nothing_skipped_for_a_good_set() {
+        let root = tables_dir(
+            &[
+                "A,desc,a.txt,temp,-40,257,-40,125,233.15,398.15,a".to_string(),
+                // Voltage tables leave the Celsius and Kelvin columns empty.
+                "V,desc,v.txt,voltage,0,5,,,,,v".to_string(),
+            ],
+            &[("a.txt", "1\n2\n3\n"), ("v.txt", "0\n\n4095\n")],
+        );
+        let (tables, report) = load_report(&root);
+        assert_eq!(report.loaded, 2);
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert_eq!(tables.count(), 2);
+        let v = tables.get(tables.find_by_tag("v").unwrap()).unwrap();
+        assert_eq!(v.ranges.celsius, (0.0, 0.0));
+        assert_eq!(v.values, vec![0.0, 4095.0]);
+    }
+
+    #[test]
+    fn load_tables_skips_and_names_every_kind_of_bad_table() {
+        let root = tables_dir(
+            &[
+                "Short,desc,a.txt,temp,1,2".to_string(),
+                "BadRange,desc,a.txt,temp,-40,abc,-40,125,233,398,badrange".to_string(),
+                "InfRange,desc,a.txt,temp,-40,inf,-40,125,233,398,infrange".to_string(),
+                "NoFile,desc,none.txt,temp,-40,257,-40,125,233,398,nofile".to_string(),
+                "Text,desc,text.txt,temp,-40,257,-40,125,233,398,text".to_string(),
+                "One,desc,one.txt,temp,-40,257,-40,125,233,398,one".to_string(),
+                "Empty,desc,empty.txt,temp,-40,257,-40,125,233,398,empty".to_string(),
+                "Nan,desc,nan.txt,temp,-40,257,-40,125,233,398,nan".to_string(),
+                "NoTag,desc,a.txt,temp,-40,257,-40,125,233,398, ".to_string(),
+                "Good,desc,a.txt,temp,-40,257,-40,125,233,398,good".to_string(),
+                "Twin,desc,a.txt,voltage,-40,257,-40,125,233,398,good".to_string(),
+            ],
+            &[
+                ("a.txt", "1\n2\n3\n"),
+                ("text.txt", "1\n2\nthree\n4\n"),
+                ("one.txt", "1\n"),
+                ("empty.txt", ""),
+                ("nan.txt", "1\nnan\n3\n"),
+            ],
+        );
+        let (tables, report) = load_report(&root);
+
+        assert_eq!(report.loaded, 1);
+        assert_eq!(tables.count(), 1);
+        assert_eq!(tables.find_by_tag("good"), Some(0));
+        let names: Vec<&str> = report.skipped.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Short", "BadRange", "InfRange", "NoFile", "Text", "One", "Empty", "Nan", "NoTag",
+                "Twin"
+            ]
+        );
+        let lines: Vec<usize> = report.skipped.iter().map(|s| s.line).collect();
+        assert_eq!(lines, [2, 3, 4, 5, 6, 7, 8, 9, 10, 12]);
+        for skipped in &report.skipped {
+            assert!(!skipped.reason.is_empty(), "{skipped}");
+        }
+        let summary = report.skipped_summary();
+        assert!(summary.contains("BadRange (line 3)"), "{summary}");
+    }
+
+    /// Dropping the line would leave a three-step table where four were
+    /// meant, and every reading would move.
+    #[test]
+    fn a_data_file_with_a_non_numeric_line_is_not_loaded_short() {
+        let root = tables_dir(
+            &["T,desc,t.txt,temp,-40,257,-40,125,233,398,t".to_string()],
+            &[("t.txt", "100\n200\n3OO\n400\n")],
+        );
+        let (tables, report) = load_report(&root);
+        assert_eq!(report.loaded, 0);
+        assert!(tables.find_by_tag("t").is_none());
+        assert!(
+            report.skipped[0].reason.contains("line 3"),
+            "{}",
+            report.skipped[0]
+        );
+    }
+
+    #[test]
+    fn load_tables_handles_empty_header_only_and_multibyte_input() {
+        for body in ["", "name,description\n", "\n\n\n"] {
+            let root = tempfile::tempdir().unwrap();
+            let csv = root.path().join("tables.csv");
+            std::fs::write(&csv, body).unwrap();
+            let mut tables = TableStore::new();
+            let report = load_tables(&mut tables, &csv, root.path()).unwrap();
+            assert_eq!(report, TableLoadReport::default(), "{body:?}");
+        }
+
+        // Multi-byte text in every column and in a data file.
+        let root = tables_dir(
+            &[
+                "Isı,açıklama,ş.txt,sıcaklık,ö,257,-40,125,233,398,ısı".to_string(),
+                "Çok,açıklama,ç.txt,temp,-40,257,-40,125,233,398,çok".to_string(),
+                "ğ".to_string(),
+            ],
+            &[(
+                "ç.txt",
+                "1\n2\nüç değil sayı ğğğğğğğğğğğğğğğğğğğğğğğğğğğğğğğğğğğğğğğğğğ\n",
+            )],
+        );
+        let (tables, report) = load_report(&root);
+        assert_eq!(report.loaded, 0);
+        assert_eq!(report.skipped.len(), 3);
+        assert_eq!(tables.count(), 0);
+    }
+
+    #[test]
+    fn load_tables_fails_only_when_the_csv_cannot_be_read() {
+        let root = tempfile::tempdir().unwrap();
+        let mut tables = TableStore::new();
+        assert!(load_tables(&mut tables, &root.path().join("none.csv"), root.path()).is_err());
+        // Not UTF-8.
+        let csv = root.path().join("tables.csv");
+        std::fs::write(&csv, [0xff, 0xfe, 0x00, 0x41]).unwrap();
+        assert!(load_tables(&mut tables, &csv, root.path()).is_err());
+        // A data file that is not UTF-8 costs its table only.
+        std::fs::write(root.path().join("bin.txt"), [0xff, 0xfe, 0x00]).unwrap();
+        std::fs::write(root.path().join("ok.txt"), "1\n2\n").unwrap();
+        std::fs::write(
+            &csv,
+            format!(
+                "{TABLES_HEADER}\nBin,d,bin.txt,temp,0,1,0,1,0,1,bin\nOk,d,ok.txt,temp,0,1,0,1,0,1,ok\n"
+            ),
+        )
+        .unwrap();
+        let report = load_tables(&mut tables, &csv, root.path()).unwrap();
+        assert_eq!(report.loaded, 1);
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].name, "Bin");
     }
 }

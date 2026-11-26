@@ -238,7 +238,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if tables_csv.exists() {
             match loader::load_tables(&mut engine.tables, &tables_csv, &table_dir) {
-                Ok(n) => info!(count = n, "tables loaded"),
+                Ok(report) => {
+                    info!(count = report.loaded, "tables loaded");
+                    // The service still starts: the watchdog and the other
+                    // channels do not wait for one table (R-63). A channel
+                    // that needs a missing table has no conversion table.
+                    for skipped in &report.skipped {
+                        error!(
+                            table = %skipped.name,
+                            line = skipped.line,
+                            reason = %skipped.reason,
+                            "table not loaded at start-up"
+                        );
+                    }
+                }
                 Err(e) => error!(err = %e, "failed to load tables.csv"),
             }
         } else {

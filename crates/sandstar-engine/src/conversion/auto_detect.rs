@@ -3,7 +3,7 @@
 //! Channel numbering format: XXYY where XX = physical input (11-71), YY = sensor variant.
 //! The sensor variant maps to a lookup table tag.
 
-use crate::table::TableStore;
+use crate::table::{TableStore, MISSING_TABLE};
 use crate::value::ValueConv;
 use crate::ChannelId;
 
@@ -42,6 +42,12 @@ pub fn auto_detect_sensor(channel: ChannelId, conv: &mut ValueConv, tables: &Tab
     // Skip if table already configured (e.g., from database.zinc loader
     // with explicit low/high/min/max for custom sensor calibration).
     if conv.table_index.is_some() && conv.low.is_some() && conv.high.is_some() {
+        return false;
+    }
+
+    // The configuration named a table that is not loaded. Picking one by
+    // channel number would convert with a table nobody asked for (R-63).
+    if conv.table_index == Some(MISSING_TABLE) {
         return false;
     }
 
@@ -259,5 +265,27 @@ mod tests {
         assert_eq!(variant_to_tag(22), Some("pt1000"));
         assert_eq!(variant_to_tag(23), Some("ni1000"));
         assert_eq!(variant_to_tag(99), None);
+    }
+
+    #[test]
+    fn a_channel_marked_as_missing_its_table_is_not_given_another_one() {
+        let mut tables = TableStore::new();
+        tables
+            .add_with_values(
+                "thermistor10K2",
+                "temp",
+                vec![100.0, 200.0, 300.0],
+                crate::table::TableRanges::default(),
+            )
+            .unwrap();
+        let mut conv = ValueConv {
+            unit: "°C".to_string(),
+            table_index: Some(MISSING_TABLE),
+            ..Default::default()
+        };
+        // 1113 would auto-detect thermistor10K2.
+        assert!(!auto_detect_sensor(1113, &mut conv, &tables));
+        assert_eq!(conv.table_index, Some(MISSING_TABLE));
+        assert!(conv.low.is_none() && conv.high.is_none());
     }
 }
