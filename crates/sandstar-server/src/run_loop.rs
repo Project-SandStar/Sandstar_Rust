@@ -99,6 +99,46 @@ pub struct LoopEnd<H> {
     pub svm_runner: Option<RustSvmRunner>,
 }
 
+/// Reload the configuration directory, and `control.toml` with it, on SIGHUP.
+/// A failure is logged and leaves the previous state in place.
+fn reload_on_sighup<H>(
+    engine: &mut Engine<H>,
+    control_runner: &mut Option<ControlRunner>,
+    config: &ServerConfig,
+    no_control: bool,
+    control_config: &Option<std::path::PathBuf>,
+) where
+    H: HalRead + HalWrite + HalDiagnostics + HalControl,
+{
+    let Some(ref dir) = config.config_dir else {
+        warn!("SIGHUP ignored — no config dir (demo mode)");
+        return;
+    };
+    info!("reloading configuration");
+    match reload::reload_config(engine, dir) {
+        Ok(summary) => info!(%summary, "config reload complete"),
+        Err(e) => error!(err = %e, "config reload failed"),
+    }
+
+    // Reload control.toml if present
+    if !no_control && !config.read_only {
+        let control_path = control_config
+            .clone()
+            .unwrap_or_else(|| dir.join("control.toml"));
+        if control_path.exists() {
+            match ControlRunner::load(&control_path) {
+                Ok(new_runner) => {
+                    info!(loops = new_runner.loop_count(), "control config reloaded");
+                    *control_runner = Some(new_runner);
+                }
+                Err(e) => {
+                    error!(error = %e, "failed to reload control config (keeping previous)");
+                }
+            }
+        }
+    }
+}
+
 /// Run the event loop until a stop signal or an IPC `Shutdown`.
 pub async fn run<H, S>(parts: LoopParts<H>, config: &ServerConfig, signals: &mut S) -> LoopEnd<H>
 where
@@ -137,6 +177,8 @@ where
 
     let mut ipc_shutdown = false;
     let mut stop_signal: Option<&'static str> = None;
+    // A SIGHUP arrived while a poll had the engine.
+    let mut reload_pending = false;
 
     loop {
         tokio::select! {
@@ -331,6 +373,15 @@ where
                         "poll cycle exceeded 1s — consider reducing poll load"
                     );
                 }
+
+                // A SIGHUP that arrived during this poll: reload now.
+                if reload_pending {
+                    reload_pending = false;
+                    if let Some(ref mut eng) = engine {
+                        info!("running the reload deferred by the poll");
+                        reload_on_sighup(eng, &mut control_runner, config, no_control, &control_config);
+                    }
+                }
             }
 
             // --- REST API command (only when engine is available) ---
@@ -426,36 +477,15 @@ where
             signal = signals.next() => match signal {
                 // --- SIGHUP: config reload ---
                 Signal::Hup => {
-                if let Some(ref mut eng) = engine {
-                    if let Some(ref dir) = config.config_dir {
-                        info!("SIGHUP received — reloading configuration");
-                        match reload::reload_config(eng, dir) {
-                            Ok(summary) => info!(%summary, "config reload complete"),
-                            Err(e) => error!(err = %e, "config reload failed"),
-                        }
-
-                        // Reload control.toml if present
-                        if !no_control && !config.read_only {
-                            let control_path = control_config.clone()
-                                .unwrap_or_else(|| dir.join("control.toml"));
-                            if control_path.exists() {
-                                match ControlRunner::load(&control_path) {
-                                    Ok(new_runner) => {
-                                        info!(loops = new_runner.loop_count(), "control config reloaded");
-                                        control_runner = Some(new_runner);
-                                    }
-                                    Err(e) => {
-                                        error!(error = %e, "failed to reload control config (keeping previous)");
-                                    }
-                                }
-                            }
-                        }
+                    if let Some(ref mut eng) = engine {
+                        info!("SIGHUP received");
+                        reload_on_sighup(eng, &mut control_runner, config, no_control, &control_config);
                     } else {
-                        warn!("SIGHUP ignored — no config dir (demo mode)");
+                        // The engine is away with the poll; the reload runs
+                        // when the poll hands it back.
+                        info!("SIGHUP received — deferring reload (poll in progress)");
+                        reload_pending = true;
                     }
-                } else {
-                    info!("SIGHUP received — deferring reload (poll in progress)");
-                }
                 }
                 Signal::Sigint => {
                     info!("shutdown signal received (SIGINT / Ctrl+C)");
@@ -889,6 +919,34 @@ mod tests {
                 assert!(Instant::now() < deadline, "SIGHUP did not load the table");
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
+            d.signals.send(Signal::Sigterm).await.unwrap();
+        })
+        .await;
+    }
+
+    /// A SIGHUP that arrives while a poll has the engine is not lost: the
+    /// reload runs when the poll hands the engine back.
+    #[tokio::test]
+    async fn sighup_during_a_poll_reloads_when_the_poll_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        write_tables(dir.path());
+        let config = config(Some(dir.path().to_path_buf()), 60_000);
+        let engine = engine(1.0);
+        // The first poll starts within a few ms and holds the engine for 500 ms.
+        engine.hal.set_read_delay(Duration::from_millis(500));
+        run_with(engine, &config, |d| async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let sent = Instant::now();
+            d.signals.send(Signal::Hup).await.unwrap();
+            // Answered only once the poll has returned the engine.
+            let tables = d.tables().await;
+            assert!(
+                sent.elapsed() >= Duration::from_millis(200),
+                "the signal did not arrive during the poll: {:?}",
+                sent.elapsed()
+            );
+            assert_eq!(tables.len(), 1, "the deferred reload did not run");
+            assert_eq!(d.status().await.poll_count, 1);
             d.signals.send(Signal::Sigterm).await.unwrap();
         })
         .await;

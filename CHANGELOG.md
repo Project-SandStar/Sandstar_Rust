@@ -17,6 +17,7 @@ On `develop`, not on the field device.
 
 ### Fixed
 - A reload of an unchanged configuration no longer reports auto-detected sensor channels as modified (S-59).
+- A SIGHUP that arrives while a poll cycle is running is no longer lost. The log said the reload was deferred, but it never ran; now it runs when the poll returns (R-29, S-63).
 
 ### Internal
 - The main event loop and its shutdown steps moved from `main()` to `run_loop.rs`, and are tested there. No behavior change (R-36, R-33, S-61).
