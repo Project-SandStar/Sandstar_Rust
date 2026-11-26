@@ -24,6 +24,8 @@ pub mod sax_converter;
 pub mod sd_notify;
 pub mod signal;
 pub mod sox;
+#[cfg(test)]
+pub(crate) mod test_log;
 pub mod tls;
 pub mod watchdog;
 pub mod zinc;
