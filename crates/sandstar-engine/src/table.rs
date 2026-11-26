@@ -1,6 +1,24 @@
 use crate::error::{EngineError, Result};
 use std::fs;
 
+/// End of step `n` of a table with `n_values` points spread over
+/// `min..max`. Rounding can leave `min + (n_values - 1) * unit_step` just
+/// below `max`, so the last step ends at `max` itself.
+fn step_end(min: f64, max: f64, unit_step: f64, n: usize, n_values: usize) -> f64 {
+    if n + 2 >= n_values {
+        max
+    } else {
+        min + (n + 1) as f64 * unit_step
+    }
+}
+
+/// A table index that never names a table.
+///
+/// A channel gets it when the table it was bound to is gone after a reload
+/// (R-63). Lookups with it find nothing, so the channel reads as fault and
+/// refuses writes instead of converting with another table or with none.
+pub const MISSING_TABLE: usize = usize::MAX;
+
 /// Direction of values in a lookup table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableDirection {
@@ -223,6 +241,8 @@ impl TableStore {
     }
 
     /// Find a table index by tag (first match).
+    ///
+    /// Never returns [`MISSING_TABLE`].
     pub fn find_by_tag(&self, tag: &str) -> Option<usize> {
         self.tables
             .iter()
@@ -334,8 +354,11 @@ impl TableStore {
 
                 // Linear scan to find the interval
                 for n in 0..n_values - 1 {
+                    // The end of a step is computed like the start of the
+                    // next one, and the last step ends at max, so no
+                    // value between min and max falls outside every step.
                     let c1 = min + n as f64 * unit_step;
-                    let c2 = c1 + unit_step;
+                    let c2 = step_end(min, max, unit_step, n, n_values);
                     if cur >= c1 && cur <= c2 {
                         let frac = (cur - c1) / (c2 - c1);
                         let raw = lerp(item.values[n], item.values[n + 1], frac);
@@ -353,8 +376,11 @@ impl TableStore {
                 }
 
                 for n in 0..n_values - 1 {
+                    // The end of a step is computed like the start of the
+                    // next one, and the last step ends at max, so no
+                    // value between min and max falls outside every step.
                     let c1 = min + n as f64 * unit_step;
-                    let c2 = c1 + unit_step;
+                    let c2 = step_end(min, max, unit_step, n, n_values);
                     if cur >= c1 && cur <= c2 {
                         let frac = (cur - c1) / (c2 - c1);
                         let raw = lerp(item.values[n], item.values[n + 1], frac);
@@ -640,5 +666,100 @@ mod tests {
         assert_eq!(store.count(), 0);
         assert!(store.find_by_tag("t1").is_none());
         assert!(store.find_by_tag("t2").is_none());
+    }
+
+    /// Every value between min and max lands in a step: the steps share
+    /// their end points (R-63; a miss is now a refused write).
+    #[test]
+    fn reverse_lookup_has_no_gaps_between_steps() {
+        let mut store = TableStore::new();
+        let rising: Vec<f64> = (0..343).map(|i| 100.0 + i as f64 * 11.0).collect();
+        let falling: Vec<f64> = rising.iter().rev().copied().collect();
+        store
+            .add_with_values("up", "temp", rising, TableRanges::default())
+            .unwrap();
+        store
+            .add_with_values("down", "temp", falling, TableRanges::default())
+            .unwrap();
+        // Gaps are one step of f64 wide and sit at the step ends, so the
+        // values next to every step end are the ones to try.
+        let n_values = 343;
+        let ranges = [
+            (-40.0, 125.0),
+            (0.1, 0.7),
+            (-1e-3, 1e9),
+            (233.15, 398.15),
+            (11.2, 36.699999999999996),
+        ];
+        for (min, max) in ranges {
+            let unit_step = (max - min) / (n_values as f64 - 1.0);
+            for index in 0..2 {
+                for n in 0..n_values {
+                    let edge: f64 = min + n as f64 * unit_step;
+                    for bits in [edge.to_bits() - 1, edge.to_bits(), edge.to_bits() + 1] {
+                        let cur = f64::from_bits(bits);
+                        let raw = store.reverse_lookup(index, cur, min, max);
+                        assert!(
+                            raw.is_some_and(f64::is_finite),
+                            "table {index} range {min}..{max} cur {cur}: {raw:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The case that used to find no step: the last step end, computed as
+    /// min + (n - 1) * step, is below max, and the value lies in between.
+    #[test]
+    fn reverse_lookup_finds_a_value_just_below_max() {
+        // A fixed pseudo-random walk over ranges and table sizes.
+        let mut seed: u64 = 0x5eed_1234_abcd_0001;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut with_a_gap = 0;
+        for _ in 0..20_000 {
+            let min = (next() - 0.5) * 400.0;
+            let max = min + 0.1 + next() * 500.0;
+            let n_values = 2 + (next() * 400.0) as usize;
+            let unit_step = (max - min) / (n_values as f64 - 1.0);
+            let last_end = min + (n_values - 1) as f64 * unit_step;
+            let cur = f64::from_bits(max.to_bits() - 1);
+            // Only the cases with room between the last step end and max.
+            if !(last_end < cur && cur < max && cur > min) {
+                continue;
+            }
+            with_a_gap += 1;
+
+            let mut store = TableStore::new();
+            let values: Vec<f64> = (0..n_values).map(|i| 500.0 + i as f64 * 7.0).collect();
+            let top = 500.0 + (n_values - 1) as f64 * 7.0;
+            store
+                .add_with_values("t", "temp", values, TableRanges::default())
+                .unwrap();
+            let raw = store.reverse_lookup(0, cur, min, max);
+            assert!(
+                raw.is_some_and(|r| (r - top).abs() <= 7.0),
+                "range {min}..{max}, {n_values} values, cur {cur}: {raw:?}"
+            );
+        }
+        assert!(with_a_gap > 0, "no case with a gap was tried");
+    }
+
+    #[test]
+    fn missing_table_index_finds_nothing() {
+        let mut store = TableStore::new();
+        store
+            .add_with_values("t", "temp", vec![1.0, 2.0], TableRanges::default())
+            .unwrap();
+        assert!(store.get(MISSING_TABLE).is_none());
+        assert!(store.lookup(MISSING_TABLE, 1.5, 0.0, 1.0).is_none());
+        assert!(store.reverse_lookup(MISSING_TABLE, 0.5, 0.0, 1.0).is_none());
+        store.remove(MISSING_TABLE);
+        assert_eq!(store.count(), 1);
     }
 }

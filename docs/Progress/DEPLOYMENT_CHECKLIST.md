@@ -106,7 +106,7 @@ Read the journal soon after the start: it is volatile and holds well under an ho
 2. **Unit:** `systemctl status sandstar-engine` is `active (running)`. The device's systemd has no `NRestarts` property, so use `systemctl show -p ActiveEnterTimestamp` instead.
 3. **`initialize.sh` output** (`journalctl -u sandstar-engine -b`, needs `sudo`): one GPIO60 line: `already exported`, `exported (attempt n)` or `export failed … ; pinmux`. It never fails the start.
 4. **Engine log** `/var/log/sandstar/sandstar-engine.log.<UTC-date>`:
-   - `tables loaded` with the expected count;
+   - `tables loaded` with the expected count (17 on device 1-6), and `loaded tables … skipped=0`. From S-56 on, each table that was left out has its own `table not loaded at start-up` error line with the table name and the reason; the service still starts, and a channel whose `database.zinc` row names that table reads as fault and refuses writes of engineering values;
    - a watchdog line saying GPIO60 was opened, or why not (the engine retries for about 5 minutes);
    - no repeated `poll cycle exceeded`;
    - from S-43 on, a stop or restart ends the previous run with `shutdown signal received (SIGTERM)`, `engine stopped … reason="SIGTERM"` and `watchdog: /dev/watchdog closed (magic close)` when `/dev/watchdog` was open. On the first deploy of S-43 the old binary is stopped, so these lines appear from the next restart on. `magic close failed`, `HAL shutdown skipped` or `exiting without waiting for the stuck poll` need a look;
