@@ -188,6 +188,7 @@ async fn cmd_loop(
             watches: &mut watches,
             watch_counter: &mut watch_counter,
             history_store: &history_store,
+            control: None,
         };
         cmd_handler::handle_engine_cmd(cmd, &mut engine, &mut ctx);
 

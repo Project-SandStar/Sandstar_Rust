@@ -115,28 +115,24 @@ fn reload_on_sighup<H>(
         return;
     };
     info!("reloading configuration");
-    match reload::reload_config(engine, dir) {
+    let mut control = control_target(control_runner, no_control, control_config);
+    match reload::reload_all(engine, dir, config.read_only, control.as_mut()) {
         Ok(summary) => info!(%summary, "config reload complete"),
         Err(e) => error!(err = %e, "config reload failed"),
     }
+}
 
-    // Reload control.toml if present
-    if !no_control && !config.read_only {
-        let control_path = control_config
-            .clone()
-            .unwrap_or_else(|| dir.join("control.toml"));
-        if control_path.exists() {
-            match ControlRunner::load(&control_path) {
-                Ok(new_runner) => {
-                    info!(loops = new_runner.loop_count(), "control config reloaded");
-                    *control_runner = Some(new_runner);
-                }
-                Err(e) => {
-                    error!(error = %e, "failed to reload control config (keeping previous)");
-                }
-            }
-        }
-    }
+/// The control runner as a reload target. `None` while a poll has the runner.
+fn control_target<'a>(
+    control_runner: &'a mut Option<ControlRunner>,
+    no_control: bool,
+    control_config: &'a Option<std::path::PathBuf>,
+) -> Option<reload::ControlTarget<'a>> {
+    control_runner.as_mut().map(|runner| reload::ControlTarget {
+        runner,
+        no_control,
+        path: control_config.as_deref(),
+    })
 }
 
 /// Run the event loop until a stop signal or an IPC `Shutdown`.
@@ -414,6 +410,7 @@ where
                         watches: &mut watches,
                         watch_counter: &mut watch_counter,
                         history_store: &history_store,
+                        control: control_target(&mut control_runner, no_control, &control_config),
                     };
                     cmd_handler::handle_engine_cmd(
                         cmd,
@@ -431,12 +428,14 @@ where
                     warn!(cmd = %name, "IPC: client gave up while the command was queued; not run");
                     continue;
                 }
+                let mut control = control_target(&mut control_runner, no_control, &control_config);
                 let (conn_result, response) = dispatch::run(
                     req.cmd,
                     engine.as_mut().expect("select! guard ensures engine.is_some()"),
                     config,
                     start_time,
                     &history_store,
+                    control.as_mut(),
                 );
                 if req.reply.send(response).is_err() {
                     warn!(cmd = %name, "IPC: command ran, but the client gave up before the reply");
@@ -670,6 +669,14 @@ mod tests {
     }
 
     fn parts(engine: Engine<MockHal>, poll_ms: u64) -> (LoopParts<MockHal>, Driver, TestSignals) {
+        parts_with(engine, poll_ms, true)
+    }
+
+    fn parts_with(
+        engine: Engine<MockHal>,
+        poll_ms: u64,
+        no_control: bool,
+    ) -> (LoopParts<MockHal>, Driver, TestSignals) {
         let (cmd, cmd_rx) = mpsc::channel(64);
         let (ipc_tx, ipc_rx) = mpsc::channel(8);
         let (signals, signal_rx) = mpsc::channel(8);
@@ -692,7 +699,7 @@ mod tests {
                 alerts::AlertConfig::default(),
             ))),
             start_time: Instant::now(),
-            no_control: true,
+            no_control,
             control_config: None,
             #[cfg(feature = "svm")]
             svm_runner: None,
@@ -721,6 +728,15 @@ mod tests {
                 .await
                 .unwrap();
             rx.await.expect("the loop dropped a ListTables command")
+        }
+
+        async fn reload(&self) -> Result<String, String> {
+            let (reply, rx) = oneshot::channel();
+            self.cmd
+                .send(EngineCmd::ReloadConfig { reply })
+                .await
+                .unwrap();
+            rx.await.expect("the loop dropped a ReloadConfig command")
         }
 
         async fn polls(&self) -> Vec<sandstar_ipc::types::PollInfo> {
@@ -773,7 +789,18 @@ mod tests {
         F: FnOnce(Driver) -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
-        let (parts, driver, mut signals) = parts(engine, config.poll_interval_ms);
+        run_parts(parts(engine, config.poll_interval_ms), config, drive).await
+    }
+
+    async fn run_parts<F, Fut>(
+        (parts, driver, mut signals): (LoopParts<MockHal>, Driver, TestSignals),
+        config: &ServerConfig,
+        drive: F,
+    ) -> LoopEnd<MockHal>
+    where
+        F: FnOnce(Driver) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
         let looped = run(parts, config, &mut signals);
         let (end, ()) = tokio::time::timeout(Duration::from_secs(20), async {
             tokio::join!(looped, drive(driver))
@@ -947,6 +974,63 @@ mod tests {
             );
             assert_eq!(tables.len(), 1, "the deferred reload did not run");
             assert_eq!(d.status().await.poll_count, 1);
+            d.signals.send(Signal::Sigterm).await.unwrap();
+        })
+        .await;
+    }
+
+    /// REST, IPC and SIGHUP reload the same things, control.toml included,
+    /// and a reload of an unchanged control.toml leaves the runner alone
+    /// (R-29, S-64).
+    #[tokio::test]
+    async fn every_reload_path_reloads_the_control_file() {
+        use crate::reload::test_support::{control_toml, write_config_dir};
+
+        let dir = tempfile::tempdir().unwrap();
+        let control = dir.path().join("control.toml");
+        std::fs::write(&control, control_toml(1.0)).unwrap();
+        let config = config(Some(dir.path().to_path_buf()), 60_000);
+        let dir_path = dir.path().to_path_buf();
+        let parts = parts_with(engine(1.0), 60_000, false);
+        run_parts(parts, &config, |d| async move {
+            d.wait_for_a_poll().await;
+            write_config_dir(&dir_path);
+
+            // REST: the loop started without control loops, the file has one.
+            let text = d.reload().await.unwrap();
+            assert!(
+                text.ends_with("; control: reloaded 1 loops, 0 components"),
+                "{text}"
+            );
+            let text = d.reload().await.unwrap();
+            assert!(text.ends_with("; control: unchanged"), "{text}");
+
+            // IPC: a changed file is loaded; REST then finds it unchanged.
+            std::fs::write(&control, control_toml(2.0)).unwrap();
+            assert!(matches!(
+                d.ipc(EngineCommand::ReloadConfig).await,
+                EngineResponse::Ok
+            ));
+            let text = d.reload().await.unwrap();
+            assert!(text.ends_with("; control: unchanged"), "{text}");
+
+            // SIGHUP: the same. Its reload is done once the second table shows.
+            std::fs::write(&control, control_toml(3.0)).unwrap();
+            std::fs::write(
+                dir_path.join("tables.csv"),
+                "name,description,path,unit_type,f_min,f_max,c_min,c_max,k_min,k_max,tag\n\
+                 T,Test,t.txt,temp,-40,303,-40,150,233,423,testTherm\n\
+                 U,Test,t.txt,temp,-40,303,-40,150,233,423,otherTherm\n",
+            )
+            .unwrap();
+            d.signals.send(Signal::Hup).await.unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while d.tables().await.len() != 2 {
+                assert!(Instant::now() < deadline, "SIGHUP did not reload");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let text = d.reload().await.unwrap();
+            assert!(text.ends_with("; control: unchanged"), "{text}");
             d.signals.send(Signal::Sigterm).await.unwrap();
         })
         .await;

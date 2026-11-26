@@ -22,7 +22,97 @@ use sandstar_engine::Engine;
 use sandstar_hal::{HalDiagnostics, HalRead, HalWrite};
 use tracing::{error, info, warn};
 
+use crate::control::{ControlReload, ControlRunner};
 use crate::loader;
+
+/// The control runner a reload may replace, with the settings that decide
+/// whether and from where `control.toml` is read.
+pub struct ControlTarget<'a> {
+    pub runner: &'a mut ControlRunner,
+    /// `--no-control`: the control engine is off; the file is not read.
+    pub no_control: bool,
+    /// `--control-config`; `None` means `control.toml` in the config directory.
+    pub path: Option<&'a Path>,
+}
+
+/// One reload for every entry point (SIGHUP, REST, IPC): the configuration
+/// directory first, then `control.toml`.
+///
+/// - The configuration fails: `Err`, and `control.toml` is not read.
+/// - `control.toml` fails: `Err` that says so and carries the summary; the
+///   tables and channels are reloaded, the previous control loops keep running.
+/// - Both fine: the summary followed by what happened to the control loops.
+///
+/// `control` is `None` where there is no runner to reload; the reply says so.
+pub fn reload_all<H: HalRead + HalWrite + HalDiagnostics>(
+    engine: &mut Engine<H>,
+    config_dir: &Path,
+    read_only: bool,
+    control: Option<&mut ControlTarget<'_>>,
+) -> Result<String, String> {
+    let summary = reload_config(engine, config_dir).map_err(|e| e.to_string())?;
+    let Some(control) = control else {
+        return Ok(format!("{summary}; control: not reloaded (no runner)"));
+    };
+    if control.no_control || read_only {
+        return Ok(format!("{summary}; control: disabled"));
+    }
+    let path = match control.path {
+        Some(path) => path.to_path_buf(),
+        None => config_dir.join("control.toml"),
+    };
+    // Only "not found" counts as a missing file; any other failure to reach
+    // it is an error, like a failure to read it.
+    let missing = match std::fs::metadata(&path) {
+        Ok(_) => false,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(e) => {
+            return Err(control_failure(
+                &format!("cannot access {}: {}", path.display(), e),
+                &summary,
+                control.runner,
+            ));
+        }
+    };
+    if missing {
+        if !control.runner.is_empty() {
+            warn!(
+                path = %path.display(),
+                loops = control.runner.loop_count(),
+                components = control.runner.component_count(),
+                "control file is gone; the loaded control loops keep running until restart"
+            );
+            return Ok(format!(
+                "{summary}; control: file missing, loaded loops kept"
+            ));
+        }
+        return Ok(format!("{summary}; control: no control file"));
+    }
+    match control.runner.reload(&path) {
+        Ok(ControlReload::Unchanged) => Ok(format!("{summary}; control: unchanged")),
+        Ok(ControlReload::Replaced { loops, components }) => {
+            info!(loops, components, "control config reloaded");
+            Ok(format!(
+                "{summary}; control: reloaded {loops} loops, {components} components"
+            ))
+        }
+        Err(e) => Err(control_failure(&e, &summary, control.runner)),
+    }
+}
+
+/// The error for a control file that could not be reloaded: the cause, and
+/// what the reload did do.
+fn control_failure(cause: &str, summary: &ReloadSummary, runner: &ControlRunner) -> String {
+    error!(error = %cause, "failed to reload control config (keeping previous)");
+    let kept = if runner.is_empty() {
+        "no control loops are loaded"
+    } else {
+        "previous control loops kept"
+    };
+    format!(
+        "control config reload failed: {cause} (tables and channels reloaded: {summary}; {kept})"
+    )
+}
 
 /// Summary of what changed during a config reload.
 #[derive(Debug)]
@@ -301,6 +391,275 @@ fn rebind_tables<H: HalRead + HalWrite + HalDiagnostics>(
         }
     }
     changed
+}
+
+/// Fixtures for the reload tests here and at the three entry points.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::Path;
+
+    /// A config directory `reload_config` accepts: one table.
+    pub(crate) fn write_config_dir(dir: &Path) {
+        std::fs::write(
+            dir.join("tables.csv"),
+            "name,description,path,unit_type,f_min,f_max,c_min,c_max,k_min,k_max,tag\n\
+             T,Test,t.txt,temp,-40,303,-40,150,233,423,testTherm\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("t.txt"), "100\n200\n300\n").unwrap();
+    }
+
+    /// A control file with one loop.
+    pub(crate) fn control_toml(kp: f64) -> String {
+        format!(
+            "[[loop]]\nname = \"zone\"\nfeedback_channel = 4\nsetpoint_channel = 75\n\
+             output_channels = [35]\n\n[loop.pid]\nkp = {kp:?}\n"
+        )
+    }
+
+    pub(crate) const BAD_CONTROL_TOML: &str = "[[loop]]\nname = ";
+}
+
+#[cfg(test)]
+mod reload_all_tests {
+    use super::test_support::*;
+    use super::*;
+    use sandstar_hal::mock::MockHal;
+    use tempfile::TempDir;
+
+    fn engine() -> Engine<MockHal> {
+        Engine::new(MockHal::new())
+    }
+
+    fn target(runner: &mut ControlRunner) -> ControlTarget<'_> {
+        ControlTarget {
+            runner,
+            no_control: false,
+            path: None,
+        }
+    }
+
+    #[test]
+    fn loads_a_new_control_file_and_leaves_an_unchanged_one_alone() {
+        let dir = TempDir::new().unwrap();
+        write_config_dir(dir.path());
+        std::fs::write(dir.path().join("control.toml"), control_toml(1.0)).unwrap();
+        let mut engine = engine();
+        let mut runner = ControlRunner::new();
+
+        let first = reload_all(
+            &mut engine,
+            dir.path(),
+            false,
+            Some(&mut target(&mut runner)),
+        )
+        .unwrap();
+        assert!(
+            first.ends_with("; control: reloaded 1 loops, 0 components"),
+            "{first}"
+        );
+        assert_eq!(engine.tables.count(), 1);
+        assert_eq!(runner.loop_count(), 1);
+
+        let second = reload_all(
+            &mut engine,
+            dir.path(),
+            false,
+            Some(&mut target(&mut runner)),
+        )
+        .unwrap();
+        assert!(second.ends_with("; control: unchanged"), "{second}");
+        std::fs::write(
+            dir.path().join("control.toml"),
+            control_toml(1.0) + "# note\n",
+        )
+        .unwrap();
+        let third = reload_all(
+            &mut engine,
+            dir.path(),
+            false,
+            Some(&mut target(&mut runner)),
+        )
+        .unwrap();
+        assert!(
+            third.ends_with("; control: reloaded 1 loops, 0 components"),
+            "{third}"
+        );
+    }
+
+    #[test]
+    fn a_failed_configuration_reload_does_not_read_the_control_file() {
+        let dir = TempDir::new().unwrap();
+        // Unreadable tables.csv: a directory where the file should be.
+        std::fs::create_dir(dir.path().join("tables.csv")).unwrap();
+        std::fs::write(dir.path().join("control.toml"), control_toml(1.0)).unwrap();
+        let mut engine = engine();
+        let mut runner = ControlRunner::new();
+
+        let err = reload_all(
+            &mut engine,
+            dir.path(),
+            false,
+            Some(&mut target(&mut runner)),
+        )
+        .unwrap_err();
+        assert!(!err.contains("control"), "{err}");
+        assert!(runner.is_empty());
+    }
+
+    #[test]
+    fn a_bad_control_file_is_an_error_that_keeps_the_loops_and_names_both_results() {
+        let dir = TempDir::new().unwrap();
+        write_config_dir(dir.path());
+        let control = dir.path().join("control.toml");
+        std::fs::write(&control, control_toml(1.0)).unwrap();
+        let mut engine = engine();
+        let mut runner = ControlRunner::load(&control).unwrap();
+
+        std::fs::write(&control, BAD_CONTROL_TOML).unwrap();
+        let err = reload_all(
+            &mut engine,
+            dir.path(),
+            false,
+            Some(&mut target(&mut runner)),
+        )
+        .unwrap_err();
+        assert!(err.starts_with("control config reload failed: "), "{err}");
+        assert!(err.contains("tables and channels reloaded"), "{err}");
+        assert!(err.contains("previous control loops kept"), "{err}");
+        assert_eq!(engine.tables.count(), 1);
+        assert_eq!(runner.loop_count(), 1);
+    }
+
+    #[test]
+    fn no_control_and_read_only_leave_the_control_file_unread() {
+        let dir = TempDir::new().unwrap();
+        write_config_dir(dir.path());
+        std::fs::write(dir.path().join("control.toml"), control_toml(1.0)).unwrap();
+        let mut engine = engine();
+
+        let mut runner = ControlRunner::new();
+        let mut off = target(&mut runner);
+        off.no_control = true;
+        let text = reload_all(&mut engine, dir.path(), false, Some(&mut off)).unwrap();
+        assert!(text.ends_with("; control: disabled"), "{text}");
+        assert!(runner.is_empty());
+
+        let text = reload_all(
+            &mut engine,
+            dir.path(),
+            true,
+            Some(&mut target(&mut runner)),
+        )
+        .unwrap();
+        assert!(text.ends_with("; control: disabled"), "{text}");
+        assert!(runner.is_empty());
+    }
+
+    #[test]
+    fn a_missing_control_file_keeps_what_is_loaded() {
+        let dir = TempDir::new().unwrap();
+        write_config_dir(dir.path());
+        let control = dir.path().join("control.toml");
+        let mut engine = engine();
+
+        let mut runner = ControlRunner::new();
+        let text = reload_all(
+            &mut engine,
+            dir.path(),
+            false,
+            Some(&mut target(&mut runner)),
+        )
+        .unwrap();
+        assert!(text.ends_with("; control: no control file"), "{text}");
+
+        std::fs::write(&control, control_toml(1.0)).unwrap();
+        let mut runner = ControlRunner::load(&control).unwrap();
+        std::fs::remove_file(&control).unwrap();
+        let text = reload_all(
+            &mut engine,
+            dir.path(),
+            false,
+            Some(&mut target(&mut runner)),
+        )
+        .unwrap();
+        assert!(
+            text.ends_with("; control: file missing, loaded loops kept"),
+            "{text}"
+        );
+        assert_eq!(runner.loop_count(), 1);
+    }
+
+    #[test]
+    fn the_control_config_path_is_used_instead_of_the_directory_file() {
+        let dir = TempDir::new().unwrap();
+        write_config_dir(dir.path());
+        std::fs::write(dir.path().join("control.toml"), BAD_CONTROL_TOML).unwrap();
+        let elsewhere = TempDir::new().unwrap();
+        let path = elsewhere.path().join("my-control.toml");
+        std::fs::write(&path, control_toml(1.0)).unwrap();
+        let mut engine = engine();
+        let mut runner = ControlRunner::new();
+
+        let mut control = target(&mut runner);
+        control.path = Some(&path);
+        let text = reload_all(&mut engine, dir.path(), false, Some(&mut control)).unwrap();
+        assert!(
+            text.ends_with("; control: reloaded 1 loops, 0 components"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn without_a_runner_only_the_configuration_is_reloaded() {
+        let dir = TempDir::new().unwrap();
+        write_config_dir(dir.path());
+        std::fs::write(dir.path().join("control.toml"), BAD_CONTROL_TOML).unwrap();
+        let mut engine = engine();
+        let text = reload_all(&mut engine, dir.path(), false, None).unwrap();
+        assert!(
+            text.ends_with("; control: not reloaded (no runner)"),
+            "{text}"
+        );
+        assert_eq!(engine.tables.count(), 1);
+    }
+
+    /// A control file that is there but cannot be read is an error, not a
+    /// missing file.
+    #[test]
+    fn an_unreadable_control_file_is_an_error() {
+        let dir = TempDir::new().unwrap();
+        write_config_dir(dir.path());
+        let control = dir.path().join("control.toml");
+        std::fs::write(&control, control_toml(1.0)).unwrap();
+        let mut engine = engine();
+        let mut runner = ControlRunner::load(&control).unwrap();
+
+        // A directory where the file should be.
+        std::fs::remove_file(&control).unwrap();
+        std::fs::create_dir(&control).unwrap();
+        let err = reload_all(
+            &mut engine,
+            dir.path(),
+            false,
+            Some(&mut target(&mut runner)),
+        )
+        .unwrap_err();
+        assert!(err.starts_with("control config reload failed: "), "{err}");
+        assert!(err.contains("previous control loops kept"), "{err}");
+        assert_eq!(runner.loop_count(), 1);
+
+        // With nothing loaded the reply does not claim loops were kept.
+        let mut empty = ControlRunner::new();
+        let err = reload_all(
+            &mut engine,
+            dir.path(),
+            false,
+            Some(&mut target(&mut empty)),
+        )
+        .unwrap_err();
+        assert!(err.contains("no control loops are loaded"), "{err}");
+    }
 }
 
 #[cfg(test)]

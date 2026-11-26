@@ -14,6 +14,7 @@ On `develop`, not on the field device.
 ### Behavior changes (read before upgrading)
 - **A sensor channel whose table is not loaded reads as fault.** For analog inputs 1100-1723 the channel number stands for a sensor table. When tables are loaded but that one is not, the channel used to convert without a table and report a good value; it now reads as fault and logs one warning. Unchanged: a set-up with no tables at all (demo, simulator), and a row that gives `low` and `high` itself (R-63, S-60).
 - **A `database.zinc` row can name `thermistor20K4` and `thermistor10K2_wts`.** These two tables were loaded but no channel could use them; a marker with the table's tag now binds it (S-60).
+- **Every reload path reloads `control.toml`, and only when it changed.** `sandstar-cli reload` and `POST /api/reload` used to leave `control.toml` alone; they now reload it like SIGHUP does. On all three paths a `control.toml` with unchanged text no longer rebuilds the control loops, so a reload does not reset PID integrals, sequencer and timer state. A changed file still rebuilds all of them. A `control.toml` that cannot be parsed makes the reload reply an error (tables and channels are reloaded, the loaded loops keep running). When the tables or channels fail to reload, SIGHUP no longer reads `control.toml` (R-29, S-64).
 
 ### Fixed
 - A reload of an unchanged configuration no longer reports auto-detected sensor channels as modified (S-59).

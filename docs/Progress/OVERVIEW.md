@@ -250,6 +250,7 @@ Router: `router_with_auth` in `crates/sandstar-server/src/rest/mod.rs`, plus rou
   - Watches of closed `/api/ws` connections are closed by one shared task that retries after a timeout (pauses growing from 10 s to 10 min) and gives up after the 1 h lease. A push result taken before a client `refresh` or re-subscribe is dropped, so an older `update` never follows a newer `snapshot`.
   - `localIo` marks the points `Down` (`RemoteDown`) instead of `Fault` and stops the round.
 - Signals: SIGINT (Ctrl+C) and SIGTERM (`systemctl stop`) stop the event loop and run the graceful shutdown; SIGHUP reloads the configuration directory. A SIGHUP that arrives while a poll cycle has the engine is carried out when that poll returns.
+- Reload: SIGHUP, `sandstar-cli reload` and `POST /api/reload` do the same thing. `tables.csv` and `database.zinc` are reloaded first; if that fails nothing changes and `control.toml` is not read. Then `control.toml` (or the `--control-config` file) is read, unless the server runs with `--no-control` or read-only. A file with the same text as the loaded one is left alone, so PID integrals, sequencer and timer state survive; a changed file rebuilds every loop and component from scratch; a file that cannot be read or parsed gives an error reply and the loaded loops keep running. If the file is gone, the loaded loops keep running until restart.
 
 ---
 

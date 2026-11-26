@@ -40,6 +40,9 @@ pub struct CmdContext<'a> {
     pub watches: &'a mut HashMap<String, WatchState>,
     pub watch_counter: &'a mut u64,
     pub history_store: &'a HistoryStore,
+    /// The control runner `ReloadConfig` reloads with the configuration;
+    /// `None` where there is none.
+    pub control: Option<reload::ControlTarget<'a>>,
 }
 
 /// Read a single channel through the engine pipeline.
@@ -185,9 +188,10 @@ pub fn handle_engine_cmd<H: HalRead + HalWrite + HalDiagnostics>(
         }
         EngineCmd::ReloadConfig { reply } => {
             let result = match &ctx.config.config_dir {
-                Some(dir) => reload::reload_config(engine, dir)
-                    .map(|s| s.to_string())
-                    .map_err(|e| format!("reload failed: {}", e)),
+                Some(dir) => {
+                    reload::reload_all(engine, dir, ctx.config.read_only, ctx.control.as_mut())
+                        .map_err(|e| format!("reload failed: {}", e))
+                }
                 None => Err("no config directory — running in demo mode".into()),
             };
             let _ = reply.send(result);
@@ -450,6 +454,7 @@ mod tests {
             watches,
             watch_counter: counter,
             history_store: history,
+            control: None,
         }
     }
 
@@ -946,6 +951,53 @@ mod tests {
             "should report poll complete: {}",
             msg
         );
+    }
+
+    /// REST `reload` reloads control.toml with the configuration (R-29, S-64).
+    #[test]
+    fn reload_config_reloads_the_control_file_and_reports_a_bad_one() {
+        use crate::control::ControlRunner;
+        use crate::reload::test_support::*;
+
+        let dir = tempfile::tempdir().unwrap();
+        write_config_dir(dir.path());
+        let control = dir.path().join("control.toml");
+        std::fs::write(&control, control_toml(1.0)).unwrap();
+        let mut engine = make_engine();
+        let mut config = make_config();
+        config.config_dir = Some(dir.path().to_path_buf());
+        let history = HistoryStore::new(100);
+        let mut runner = ControlRunner::new();
+
+        let mut reload = |runner: &mut ControlRunner| {
+            let mut watches = HashMap::new();
+            let mut counter = 0u64;
+            let mut ctx = make_ctx(&config, &mut watches, &mut counter, &history);
+            ctx.control = Some(reload::ControlTarget {
+                runner,
+                no_control: false,
+                path: None,
+            });
+            let (reply, rx) = oneshot::channel();
+            handle_engine_cmd(EngineCmd::ReloadConfig { reply }, &mut engine, &mut ctx);
+            rx.blocking_recv().unwrap()
+        };
+
+        let text = reload(&mut runner).unwrap();
+        assert!(
+            text.ends_with("; control: reloaded 1 loops, 0 components"),
+            "{text}"
+        );
+        let text = reload(&mut runner).unwrap();
+        assert!(text.ends_with("; control: unchanged"), "{text}");
+
+        std::fs::write(&control, BAD_CONTROL_TOML).unwrap();
+        let err = reload(&mut runner).unwrap_err();
+        assert!(
+            err.starts_with("reload failed: control config reload failed: "),
+            "{err}"
+        );
+        assert_eq!(runner.loop_count(), 1);
     }
 
     #[test]
