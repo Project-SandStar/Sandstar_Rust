@@ -2,7 +2,7 @@
 
 Embedded IoT control engine for BeagleBone, replacing a C/C++ system.
 
-**Version:** 2.10.0 · **Production:** one field BeagleBone (local I/O + control loop; the BACnet and MQTT drivers are available but not configured on it) · **Tests:** 2,998 passing, 0 clippy warnings · **Dependencies:** 0 C/C++ (pure Rust, no FFI)
+**Version:** 2.10.0 (released, tag `v2.10.0`; `develop` carries unreleased changes, see [`CHANGELOG.md`](CHANGELOG.md)) · **Production:** one field BeagleBone running 2.10.0 (local I/O + control loop; the BACnet and MQTT drivers are available but not configured on it) · **Tests:** 3,147 passing on `develop`, 0 clippy warnings · **Dependencies:** 0 C/C++ (pure Rust, no FFI)
 
 ## Overview
 
@@ -10,7 +10,7 @@ Sandstar is a channel-based hardware I/O abstraction layer for HVAC control. It 
 
 - **Target:** BeagleBone Black (ARM Cortex-A8, 512 MB RAM, Debian Linux)
 - **Replaces:** ~27,000 lines C/C++ engine + 6,839 lines C SVM + 500,000 lines POCO framework
-- **Result:** ~40,000 lines pure Rust, zero C sources, statically-linked ARM binary (no `.so` dependencies)
+- **Result:** ~125,000 lines of Rust including tests (server ~87,000, Sedona VM ~21,000, engine ~11,000), zero C sources, statically-linked ARM binary (no `.so` dependencies)
 - **Observability:** Prometheus `/metrics` endpoint with 18 counters + 5 gauges
 - **Clustering:** roxWarp gossip protocol with mDNS peer discovery (opt-in)
 
@@ -247,7 +247,7 @@ Protocol spec in [`docs/research/16_ROXWARP_PROTOCOL.md`](docs/research/16_ROXWA
 | `tools/kaldirilanlar/` | Retired C-era and early deploy scripts; not used, not packaged |
 | `tools/bacnet_sim.py` | Hand-crafted BACnet/IP simulator for driver validation |
 | `tools/ws_latency_test.py` | Live validator for the 12.0D.WS push bridge |
-| `tools/connections/*.sh` | expect-based SSH connection scripts per device |
+| `tools/gates.sh` | Quality gates in one command: fmt, clippy, tests, ARM feature check |
 
 ## Testing
 
@@ -264,7 +264,14 @@ cargo test -p sandstar-server
 cargo test -- --ignored
 ```
 
-3,117 tests across the workspace (2.10.0). Platform-specific tests (sysfs GPIO, I2C, PWM) are gated behind `#[cfg(target_os = "linux")]`. Live-network tests (mDNS multicast) are marked `#[ignore]` and require a multicast-capable host.
+3,147 tests across the workspace on `develop` (3,117 in the 2.10.0 release). Platform-specific tests (sysfs GPIO, I2C, PWM) are gated behind `#[cfg(target_os = "linux")]`. Live-network tests (mDNS multicast) are marked `#[ignore]` and require a multicast-capable host.
+
+## Development
+
+- **Branches:** `master` is the stable branch; field builds are made from it. `develop` is the integration branch. Each change is made on its own branch cut from `develop` and merged through a pull request; both branches require the CI `Test` job.
+- **Before a pull request:** `bash tools/gates.sh` runs `cargo fmt --check`, `cargo clippy --workspace -D warnings`, `cargo test --workspace --no-fail-fast` and a check of the ARM feature set (`linux-hal,svm`). It prints one line per gate and exits non-zero if one fails.
+- **Toolchain:** pinned in `rust-toolchain.toml`; the minimum supported Rust version is 1.82.
+- **Device and site credentials** are not in the repository.
 
 ## Documentation
 
@@ -272,8 +279,11 @@ cargo test -- --ignored
 - [`docs/Progress/ROADMAP_v2.md`](docs/Progress/ROADMAP_v2.md) — full roadmap, master status tracker, research-doc coverage
 - [`docs/Progress/DRIVER_REST_API.md`](docs/Progress/DRIVER_REST_API.md) — operator + integrator guide for the REST surface
 - [`docs/Progress/BACNET_SETUP.md`](docs/Progress/BACNET_SETUP.md), [`docs/Progress/MQTT_SETUP.md`](docs/Progress/MQTT_SETUP.md) — driver enablement
-- [`CHANGELOG.md`](CHANGELOG.md) — per-version highlights
-- `docs/research/` — 20 research documents covering the original migration analysis
+- [`docs/Progress/DEPLOYMENT_CHECKLIST.md`](docs/Progress/DEPLOYMENT_CHECKLIST.md) — rollout runbook: backup, install, verification
+- [`docs/Progress/HARDCODED_LIMITS.md`](docs/Progress/HARDCODED_LIMITS.md) — constants and limits, with where they live
+- [`CHANGELOG.md`](CHANGELOG.md) — per-version highlights and behavior changes to read before upgrading
+- [`SECURITY.md`](SECURITY.md) — supported versions and vulnerability reporting
+- `docs/research/` — research documents from the original migration analysis, each with a status block (done, done differently, open)
 
 ## License
 
