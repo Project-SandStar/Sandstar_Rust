@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::path::Path;
 
+use sandstar_engine::conversion::auto_detect::auto_detect_tag;
 use sandstar_engine::table::{TableStore, MISSING_TABLE};
 use sandstar_engine::Engine;
 use sandstar_hal::{HalDiagnostics, HalRead, HalWrite};
@@ -271,11 +272,24 @@ fn rebind_tables<H: HalRead + HalWrite + HalDiagnostics>(
         let Some(old_index) = ch.conv.table_index else {
             continue;
         };
+        if old_index == MISSING_TABLE {
+            // Marked by auto-detection, and the table its channel number
+            // stands for is loaded now: take the mark off, the next read
+            // binds the table. Without this a channel that no database
+            // row rebuilds would stay in fault until a restart.
+            let table_is_back =
+                auto_detect_tag(id, &ch.conv).is_some_and(|tag| tables.find_by_tag(tag).is_some());
+            if table_is_back {
+                changed.push((id, Some(MISSING_TABLE)));
+                ch.conv.table_index = None;
+            }
+            continue;
+        }
         let new_index = previous
             .get(old_index)
             .and_then(|table| tables.find_by_tag_and_unit(&table.tag, &table.unit_type))
             .unwrap_or(MISSING_TABLE);
-        if new_index == MISSING_TABLE && old_index != MISSING_TABLE {
+        if new_index == MISSING_TABLE {
             warn!(
                 channel = id,
                 "conversion table is gone after reload: channel reads as fault and rejects writes"
@@ -1135,5 +1149,138 @@ mod tests {
         let summary = reload_config(&mut engine, dir.path()).unwrap();
         assert_eq!(summary.channels_updated, 1, "{summary}");
         assert_eq!(engine.channels.get(1113).unwrap().label, "renamed");
+    }
+
+    // ── S-60: tables by channel number, and the two tags without a number ──
+
+    /// database.zinc with one polled physical row: a unit, and optionally a
+    /// marker column.
+    fn write_row(dir: &std::path::Path, channel: u32, marker: Option<&str>) {
+        let (col, cell) = match marker {
+            Some(m) => (format!(",{m}"), ",M"),
+            None => (String::new(), ""),
+        };
+        fs::write(
+            dir.join("database.zinc"),
+            format!(
+                "ver:\"3.0\"\nchannel,enabled,navName,unit,cur{col}\n{channel},M,\"probe\",\"°C\",M{cell}\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_sensor_faults_when_its_table_leaves_tables_csv_and_recovers_when_it_returns() {
+        let dir = TempDir::new().unwrap();
+        // 1122 stands for pt1000; the row names no table.
+        write_tables(dir.path(), &["pt1000", "thermistor10K2"]);
+        write_row(dir.path(), 1122, None);
+        let mut engine = make_engine_with_channel(1122);
+        reload_config(&mut engine, dir.path()).unwrap();
+        engine.hal.set_analog(0, 0, Ok(1100.0));
+        assert_eq!(bound_tag_of(&engine, 1122).as_deref(), None);
+        let good = engine.channel_read(1122).unwrap();
+        assert_eq!(good.status, sandstar_engine::EngineStatus::Ok);
+        assert_eq!(bound_tag_of(&engine, 1122).as_deref(), Some("pt1000"));
+
+        // pt1000 is gone, other tables remain.
+        write_tables(dir.path(), &["thermistor10K2"]);
+        reload_config(&mut engine, dir.path()).unwrap();
+        let value = engine.channel_read(1122).unwrap();
+        assert_eq!(value.status, sandstar_engine::EngineStatus::Fault);
+        assert_eq!(
+            engine.channels.get(1122).unwrap().conv.table_index,
+            Some(MISSING_TABLE)
+        );
+        // A reload of the same files does not count the channel as modified.
+        let summary = reload_config(&mut engine, dir.path()).unwrap();
+        assert_eq!(summary.channels_updated, 0, "{summary}");
+
+        // The table is back (second in the file now: values 2000..2200).
+        write_tables(dir.path(), &["thermistor10K2", "pt1000"]);
+        reload_config(&mut engine, dir.path()).unwrap();
+        engine.hal.set_analog(0, 0, Ok(2100.0));
+        let value = engine.channel_read(1122).unwrap();
+        assert_eq!(value.status, sandstar_engine::EngineStatus::Ok);
+        assert_eq!(bound_tag_of(&engine, 1122).as_deref(), Some("pt1000"));
+    }
+
+    fn bound_tag_of(engine: &Engine<MockHal>, channel: u32) -> Option<String> {
+        let index = engine.channels.get(channel).unwrap().conv.table_index?;
+        engine.tables.get(index).map(|t| t.tag.clone())
+    }
+
+    #[test]
+    fn a_row_can_name_the_two_tables_that_have_no_channel_number() {
+        for tag in ["thermistor20K4", "thermistor10K2_wts"] {
+            let dir = TempDir::new().unwrap();
+            write_tables(dir.path(), &["pt1000", tag]);
+            // 500 is outside the auto-detected range.
+            write_row(dir.path(), 500, Some(tag));
+            let mut engine = make_engine_with_channel(500);
+            reload_config(&mut engine, dir.path()).unwrap();
+            assert_eq!(bound_tag_of(&engine, 500).as_deref(), Some(tag));
+
+            // Named but not loaded: marked, as for the other tags.
+            write_tables(dir.path(), &["pt1000"]);
+            reload_config(&mut engine, dir.path()).unwrap();
+            assert_eq!(
+                engine.channels.get(500).unwrap().conv.table_index,
+                Some(MISSING_TABLE),
+                "{tag}"
+            );
+        }
+    }
+
+    /// No database.zinc at all: nothing rebuilds the channel's conversion,
+    /// so the reload itself has to take the mark off when the table returns.
+    #[test]
+    fn a_marked_sensor_without_a_database_row_recovers_when_its_table_returns() {
+        let dir = TempDir::new().unwrap();
+        write_tables(dir.path(), &["thermistor10K2"]);
+        let mut engine = make_engine_with_channel(1122);
+        engine.channels.get_mut(1122).unwrap().conv.unit = "°C".into();
+        reload_config(&mut engine, dir.path()).unwrap();
+        engine.hal.set_analog(0, 0, Ok(2100.0));
+        assert_eq!(
+            engine.channel_read(1122).unwrap().status,
+            sandstar_engine::EngineStatus::Fault
+        );
+
+        // Still no pt1000: the mark stays.
+        reload_config(&mut engine, dir.path()).unwrap();
+        assert_eq!(
+            engine.channels.get(1122).unwrap().conv.table_index,
+            Some(MISSING_TABLE)
+        );
+
+        write_tables(dir.path(), &["thermistor10K2", "pt1000"]);
+        reload_config(&mut engine, dir.path()).unwrap();
+        assert_eq!(engine.channels.get(1122).unwrap().conv.table_index, None);
+        let value = engine.channel_read(1122).unwrap();
+        assert_eq!(value.status, sandstar_engine::EngineStatus::Ok);
+        assert_eq!(bound_tag_of(&engine, 1122).as_deref(), Some("pt1000"));
+    }
+
+    /// A failed reload puts the mark back with the tables.
+    #[test]
+    fn a_bad_database_puts_an_auto_detection_mark_back() {
+        let dir = TempDir::new().unwrap();
+        write_tables(dir.path(), &["thermistor10K2"]);
+        let mut engine = make_engine_with_channel(1122);
+        engine.channels.get_mut(1122).unwrap().conv.unit = "°C".into();
+        reload_config(&mut engine, dir.path()).unwrap();
+        engine.hal.set_analog(0, 0, Ok(2100.0));
+        engine.channel_read(1122).unwrap();
+
+        write_tables(dir.path(), &["thermistor10K2", "pt1000"]);
+        fs::write(dir.path().join("database.zinc"), "not zinc {{{\n").unwrap();
+        reload_config(&mut engine, dir.path()).unwrap_err();
+
+        assert_eq!(engine.tables.count(), 1);
+        assert_eq!(
+            engine.channels.get(1122).unwrap().conv.table_index,
+            Some(MISSING_TABLE)
+        );
     }
 }

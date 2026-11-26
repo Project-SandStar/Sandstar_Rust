@@ -7,6 +7,22 @@ This project uses a single workspace version — bumps apply to every crate.
 
 ---
 
+## [Unreleased]
+
+On `develop`, not on the field device.
+
+### Behavior changes (read before upgrading)
+- **A sensor channel whose table is not loaded reads as fault.** For analog inputs 1100-1723 the channel number stands for a sensor table. When tables are loaded but that one is not, the channel used to convert without a table and report a good value; it now reads as fault and logs one warning. Unchanged: a set-up with no tables at all (demo, simulator), and a row that gives `low` and `high` itself (R-63, S-60).
+- **A `database.zinc` row can name `thermistor20K4` and `thermistor10K2_wts`.** These two tables were loaded but no channel could use them; a marker with the table's tag now binds it (S-60).
+
+### Fixed
+- A reload of an unchanged configuration no longer reports auto-detected sensor channels as modified (S-59).
+
+### Tests
+- Log capture in unit tests goes through one global subscriber; a log-counting test failed about twice in fifteen runs (S-58).
+
+---
+
 ## [2.10.0] — 2026-11-25
 
 Hardening release: 73 commits since the `v2.9.1` tag (maintenance steps S-5 to S-52). All of them were deployed to the field device as `2.9.0+<git hash>` builds while they were made; this entry gives them a version number. IDs in parentheses refer to the risk register and step log kept with the project notes.

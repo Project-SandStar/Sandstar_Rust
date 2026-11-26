@@ -6,6 +6,7 @@
 use crate::table::{TableStore, MISSING_TABLE};
 use crate::value::ValueConv;
 use crate::ChannelId;
+use tracing::warn;
 
 /// Map sensor variant (last 2 digits of channel ID) to table tag.
 fn variant_to_tag(variant: u32) -> Option<&'static str> {
@@ -39,6 +40,39 @@ fn variant_to_tag(variant: u32) -> Option<&'static str> {
 ///
 /// Returns true if detection succeeded.
 pub fn auto_detect_sensor(channel: ChannelId, conv: &mut ValueConv, tables: &TableStore) -> bool {
+    detect(channel, conv, tables, true)
+}
+
+/// What [`auto_detect_sensor`] would do to `conv`, without the warning.
+///
+/// For a caller that works on a copy to see what the engine will make of a
+/// configuration (the reload compares channels this way); the warning is
+/// for the channel that is really read.
+pub fn auto_detect_preview(channel: ChannelId, conv: &mut ValueConv, tables: &TableStore) -> bool {
+    detect(channel, conv, tables, false)
+}
+
+/// The table tag the channel number stands for, if auto-detection covers
+/// this channel at all: an analog input 1100-1723 with a unit and a sensor
+/// variant that has a table.
+pub fn auto_detect_tag(channel: ChannelId, conv: &ValueConv) -> Option<&'static str> {
+    // Only auto-detect for analog input channels (1100-1723)
+    if !(1100..=1723).contains(&channel) {
+        return None;
+    }
+    // Validate physical input range
+    if !(11..=71).contains(&(channel / 100)) {
+        return None;
+    }
+    // Need a unit string to be set
+    if conv.unit.is_empty() {
+        return None;
+    }
+    // Map variant to table tag
+    variant_to_tag(channel % 100)
+}
+
+fn detect(channel: ChannelId, conv: &mut ValueConv, tables: &TableStore, log: bool) -> bool {
     // Skip if table already configured (e.g., from database.zinc loader
     // with explicit low/high/min/max for custom sensor calibration).
     if conv.table_index.is_some() && conv.low.is_some() && conv.high.is_some() {
@@ -51,34 +85,40 @@ pub fn auto_detect_sensor(channel: ChannelId, conv: &mut ValueConv, tables: &Tab
         return false;
     }
 
-    // Only auto-detect for analog input channels (1100-1723)
-    if !(1100..=1723).contains(&channel) {
+    let Some(tag) = auto_detect_tag(channel, conv) else {
         return false;
-    }
-
-    let physical_input = channel / 100;
-    let sensor_variant = channel % 100;
-
-    // Validate physical input range
-    if !(11..=71).contains(&physical_input) {
-        return false;
-    }
-
-    // Need a unit string to be set
-    if conv.unit.is_empty() {
-        return false;
-    }
-
-    // Map variant to table tag
-    let tag = match variant_to_tag(sensor_variant) {
-        Some(t) => t,
-        None => return false,
     };
 
     // Find table by tag
     let table_idx = match tables.find_by_tag(tag) {
         Some(idx) => idx,
-        None => return false,
+        None => {
+            // Tables are loaded, the one this channel number stands for is
+            // not among them, and the configuration names no other table:
+            // mark the channel. It reads as fault instead of converting
+            // without a table and reporting a good value (R-63). The mark
+            // also stops this function, so the warning comes once.
+            //
+            // Not marked:
+            // - no table at all (demo, simulator, a set-up without
+            //   tables.csv): conversion without tables is what it runs on;
+            // - a row that gives low and high itself: that is a range
+            //   scaling somebody configured, not a sensor waiting for its
+            //   table.
+            let own_range = conv.low.is_some() && conv.high.is_some();
+            if tables.count() > 0 && conv.table_index.is_none() && !own_range {
+                conv.table_index = Some(MISSING_TABLE);
+                if log {
+                    warn!(
+                        channel,
+                        table = tag,
+                        "conversion table for this channel number is not loaded: \
+                     channel reads as fault and rejects writes"
+                    );
+                }
+            }
+            return false;
+        }
     };
 
     let table = match tables.get(table_idx) {
@@ -287,5 +327,110 @@ mod tests {
         assert!(!auto_detect_sensor(1113, &mut conv, &tables));
         assert_eq!(conv.table_index, Some(MISSING_TABLE));
         assert!(conv.low.is_none() && conv.high.is_none());
+    }
+
+    // ── S-60: the table this channel number stands for is not loaded ──
+
+    fn conv_with_unit() -> ValueConv {
+        ValueConv {
+            unit: "F".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_missing_table_marks_the_channel_when_tables_are_loaded() {
+        // make_test_tables has thermistor10K2 and range0to10V, not pt1000.
+        let tables = make_test_tables();
+        let mut conv = conv_with_unit();
+
+        // 1122 stands for pt1000.
+        assert!(!auto_detect_sensor(1122, &mut conv, &tables));
+        assert_eq!(conv.table_index, Some(MISSING_TABLE));
+        assert!(conv.low.is_none() && conv.high.is_none());
+        assert!(conv.min.is_none() && conv.max.is_none());
+
+        // The second call changes nothing.
+        assert!(!auto_detect_sensor(1122, &mut conv, &tables));
+        assert_eq!(conv.table_index, Some(MISSING_TABLE));
+    }
+
+    #[test]
+    fn a_missing_table_marks_nothing_when_no_table_is_loaded() {
+        let tables = TableStore::new();
+        let mut conv = conv_with_unit();
+        assert!(!auto_detect_sensor(1122, &mut conv, &tables));
+        assert_eq!(conv.table_index, None);
+    }
+
+    #[test]
+    fn a_missing_table_does_not_mark_channels_auto_detection_does_not_cover() {
+        let tables = make_test_tables();
+        // Outside 1100-1723, no unit, a variant without a table.
+        for (channel, unit) in [(900, "F"), (2022, "F"), (1122, ""), (1199, "F")] {
+            let mut conv = ValueConv {
+                unit: unit.to_string(),
+                ..Default::default()
+            };
+            assert!(!auto_detect_sensor(channel, &mut conv, &tables));
+            assert_eq!(conv.table_index, None, "channel {channel} unit {unit:?}");
+        }
+    }
+
+    /// A table the configuration named stays; only a channel without any
+    /// table is marked.
+    #[test]
+    fn a_missing_table_does_not_replace_a_table_the_configuration_named() {
+        let tables = make_test_tables();
+        let named = tables.find_by_tag("range0to10V").unwrap();
+        let mut conv = conv_with_unit();
+        conv.table_index = Some(named);
+        assert!(!auto_detect_sensor(1122, &mut conv, &tables));
+        assert_eq!(conv.table_index, Some(named));
+    }
+
+    /// A row with its own low and high is a configured range scaling; it
+    /// keeps working when the table of its channel number is not loaded.
+    #[test]
+    fn a_missing_table_does_not_mark_a_channel_with_its_own_range() {
+        let tables = make_test_tables();
+        let mut conv = conv_with_unit();
+        conv.low = Some(0.0);
+        conv.high = Some(4096.0);
+        assert!(!auto_detect_sensor(1122, &mut conv, &tables));
+        assert_eq!(conv.table_index, None);
+        // Half a range is not a range.
+        let mut conv = conv_with_unit();
+        conv.low = Some(0.0);
+        assert!(!auto_detect_sensor(1122, &mut conv, &tables));
+        assert_eq!(conv.table_index, Some(MISSING_TABLE));
+    }
+
+    #[test]
+    fn preview_marks_like_the_real_call() {
+        let tables = make_test_tables();
+        let (mut a, mut b) = (conv_with_unit(), conv_with_unit());
+        assert_eq!(
+            auto_detect_sensor(1122, &mut a, &tables),
+            auto_detect_preview(1122, &mut b, &tables)
+        );
+        assert_eq!(a.table_index, b.table_index);
+        let (mut a, mut b) = (conv_with_unit(), conv_with_unit());
+        assert!(auto_detect_sensor(1113, &mut a, &tables));
+        assert!(auto_detect_preview(1113, &mut b, &tables));
+        assert_eq!(
+            (a.table_index, a.low, a.high),
+            (b.table_index, b.low, b.high)
+        );
+    }
+
+    #[test]
+    fn auto_detect_tag_covers_only_sensor_channels_with_a_unit() {
+        let conv = conv_with_unit();
+        assert_eq!(auto_detect_tag(1113, &conv), Some("thermistor10K2"));
+        assert_eq!(auto_detect_tag(1122, &conv), Some("pt1000"));
+        assert_eq!(auto_detect_tag(1199, &conv), None);
+        assert_eq!(auto_detect_tag(900, &conv), None);
+        assert_eq!(auto_detect_tag(1113, &ValueConv::default()), None);
     }
 }

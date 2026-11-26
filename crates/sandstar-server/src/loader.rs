@@ -9,7 +9,7 @@ use std::fs;
 use std::path::Path;
 
 use sandstar_engine::channel::{Channel, ChannelDirection, ChannelType};
-use sandstar_engine::conversion::auto_detect::auto_detect_sensor;
+use sandstar_engine::conversion::auto_detect::auto_detect_preview;
 use sandstar_engine::conversion::{RateLimitConfig, SmoothMethod, SmoothingConfig, SpikeConfig};
 use sandstar_engine::error::EngineError;
 use sandstar_engine::table::{TableRanges, TableStore, MISSING_TABLE};
@@ -635,7 +635,7 @@ pub fn load_database_granular<H: HalRead + HalWrite + HalDiagnostics>(
             let changed = if let Some(ch) = engine.channels.get(channel_id) {
                 channel_config_changed(ch, &conv, &label, &tags, enabled) && {
                     let mut completed = conv.clone();
-                    auto_detect_sensor(channel_id, &mut completed, &engine.tables);
+                    auto_detect_preview(channel_id, &mut completed, &engine.tables);
                     channel_config_changed(ch, &completed, &label, &tags, enabled)
                 }
             } else {
@@ -819,6 +819,9 @@ fn build_value_conv<H: HalRead + HalWrite + HalDiagnostics>(
         "range0to5V",
         "range0to20mA",
         "range4to20mA",
+        // In tables.csv but not reachable by channel number (S-60).
+        "thermistor20K4",
+        "thermistor10K2_wts",
     ];
     let mut asked_for_a_table = false;
     for tag in &known_table_tags {
