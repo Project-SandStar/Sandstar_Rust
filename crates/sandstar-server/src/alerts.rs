@@ -944,30 +944,12 @@ mod tests {
         assert!(err.contains("secret must be a string"));
     }
 
-    /// Log lines written while `f` runs (no new dependency: tracing-subscriber
-    /// with a writer into a buffer).
+    /// Log lines written while `f` runs.
     #[cfg(unix)]
     fn captured_logs(f: impl FnOnce()) -> String {
-        #[derive(Clone)]
-        struct Buf(Arc<Mutex<Vec<u8>>>);
-        impl std::io::Write for Buf {
-            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(b);
-                Ok(b.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let buf = Buf(Arc::new(Mutex::new(Vec::new())));
-        let writer = buf.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(move || writer.clone())
-            .with_ansi(false)
-            .finish();
-        tracing::subscriber::with_default(subscriber, f);
-        let out = String::from_utf8_lossy(&buf.0.lock().unwrap()).into_owned();
-        out
+        let capture = crate::test_log::capture();
+        f();
+        capture.finish()
     }
 
     #[cfg(unix)]

@@ -651,36 +651,10 @@ mod tests {
         ));
     }
 
-    /// Log output written while the returned guard lives (this thread).
-    fn capture_logs() -> (
-        Arc<std::sync::Mutex<Vec<u8>>>,
-        tracing::subscriber::DefaultGuard,
-    ) {
-        #[derive(Clone)]
-        struct Buf(Arc<std::sync::Mutex<Vec<u8>>>);
-        impl std::io::Write for Buf {
-            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(b);
-                Ok(b.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let writer = Buf(buf.clone());
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(move || writer.clone())
-            .with_max_level(tracing::Level::DEBUG)
-            .with_ansi(false)
-            .finish();
-        (buf, tracing::subscriber::set_default(subscriber))
-    }
-
     #[tokio::test]
     async fn a_repeated_point_error_is_logged_once_until_it_recovers() {
         let (eh, _seen) = engine(false);
-        let (buf, guard) = capture_logs();
+        let capture = crate::test_log::capture();
         let mut log = TickLog::default();
         let failing = vec![("d".into(), 7, Err(DriverError::CommFault("down".into())))];
         for _ in 0..3 {
@@ -690,8 +664,7 @@ mod tests {
         for _ in 0..2 {
             deliver_tick(&eh, "T", "t", &ok, &mut log).await;
         }
-        drop(guard);
-        let out = String::from_utf8_lossy(&buf.lock().unwrap()).into_owned();
+        let out = capture.finish();
         let lines = |level: &str, msg: &str| {
             out.lines()
                 .filter(|l| l.contains(level) && l.contains(msg))
@@ -708,15 +681,14 @@ mod tests {
     #[tokio::test]
     async fn a_repeated_write_channel_error_is_logged_once() {
         let eh = engine_rejecting();
-        let (buf, guard) = capture_logs();
+        let capture = crate::test_log::capture();
         let mut log = TickLog::default();
         let ok = vec![("d".into(), 7, Ok(2.0))];
         for _ in 0..3 {
             let counts = deliver_tick(&eh, "T", "t", &ok, &mut log).await;
             assert_eq!(counts.write_err, 1);
         }
-        drop(guard);
-        let out = String::from_utf8_lossy(&buf.lock().unwrap()).into_owned();
+        let out = capture.finish();
         let warn = out
             .lines()
             .filter(|l| l.contains("WARN") && l.contains("T engine write_channel failed"))
@@ -749,14 +721,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_changed_summary_with_failures_is_a_warning() {
-        let (buf, guard) = capture_logs();
+        let capture = crate::test_log::capture();
         let mut log = TickLog::default();
         log_tick_summary("T", &counts(1, 0), &mut log);
         log.point("d", 1, Some("down".into()));
         log_tick_summary("T", &counts(0, 1), &mut log);
         log_tick_summary("T", &counts(0, 1), &mut log);
-        drop(guard);
-        let out = String::from_utf8_lossy(&buf.lock().unwrap()).into_owned();
+        let out = capture.finish();
         let at = |level: &str| {
             out.lines()
                 .filter(|l| l.contains(level) && l.contains("T poll tick complete"))
