@@ -529,6 +529,8 @@ pub mod mock {
         pwm_writes: RefCell<Vec<PwmWrite>>,
         /// Queued results for `reinit_i2c_sensor` calls. If empty, returns Ok(()).
         reinit_results: RefCell<Vec<Result<(), HalError>>>,
+        /// Time each analog read takes (zero by default). See `set_read_delay`.
+        read_delay: std::cell::Cell<std::time::Duration>,
     }
 
     impl MockHal {
@@ -541,7 +543,14 @@ pub mod mock {
                 digital_writes: RefCell::new(Vec::new()),
                 pwm_writes: RefCell::new(Vec::new()),
                 reinit_results: RefCell::new(Vec::new()),
+                read_delay: std::cell::Cell::new(std::time::Duration::ZERO),
             }
+        }
+
+        /// Make every analog read block for `delay`, like a slow bus does.
+        /// Tests use it to keep a poll cycle running for a known time.
+        pub fn set_read_delay(&self, delay: std::time::Duration) {
+            self.read_delay.set(delay);
         }
 
         /// Queue an analog read result for (device, address).
@@ -654,6 +663,10 @@ pub mod mock {
 
     impl HalRead for MockHal {
         fn read_analog(&self, device: u32, address: u32) -> Result<f64, HalError> {
+            let delay = self.read_delay.get();
+            if !delay.is_zero() {
+                std::thread::sleep(delay);
+            }
             self.pop_read(&ReadKey::Analog { device, address })
         }
 

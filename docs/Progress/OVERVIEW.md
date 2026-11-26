@@ -249,7 +249,7 @@ Router: `router_with_auth` in `crates/sandstar-server/src/rest/mod.rs`, plus rou
   - Since S-22, `/api/ws` push polls and the SOX tree refresh run beside their event loops, so pings, client messages and DASP packets are still handled while the engine is slow. The next round or refresh waits 10 s after a timeout. Since S-23 each `/api/ws` connection has a single engine slot: client requests (`subscribe`, `unsubscribe`, `refresh`) and push rounds share it, so a connection has at most one engine command in flight. Client requests wait in a per-connection queue of 16 and are answered in order; replies that need no engine (`pong`, auth, errors) are sent at once and may overtake them. Client messages over 16 KiB close the connection, and a `subscribe` with more than 256 ids gets `CHANNEL_LIMIT` at once.
   - Watches of closed `/api/ws` connections are closed by one shared task that retries after a timeout (pauses growing from 10 s to 10 min) and gives up after the 1 h lease. A push result taken before a client `refresh` or re-subscribe is dropped, so an older `update` never follows a newer `snapshot`.
   - `localIo` marks the points `Down` (`RemoteDown`) instead of `Fault` and stops the round.
-- Only Ctrl+C (SIGINT) and SIGHUP are handled; `systemctl stop` (SIGTERM) ends the process without graceful shutdown.
+- Signals: SIGINT (Ctrl+C) and SIGTERM (`systemctl stop`) stop the event loop and run the graceful shutdown; SIGHUP reloads the configuration directory. A SIGHUP that arrives while a poll cycle has the engine is carried out when that poll returns.
 
 ---
 
