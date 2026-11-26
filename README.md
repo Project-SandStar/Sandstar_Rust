@@ -125,7 +125,7 @@ Core Haystack + Sandstar endpoints:
 | `/api/watchUnsub` | POST | Unsubscribe |
 | `/api/history/{channel}` | GET | Historical data |
 | `/api/pollNow` | POST | Trigger immediate poll |
-| `/api/reload` | POST | Reload configuration (error reply and nothing changed if a file cannot be read) |
+| `/api/reload` | POST | Reload configuration and, if it changed, `control.toml` (error reply and nothing changed if a configuration file cannot be read) |
 | `/api/auth` | POST | SCRAM-SHA-256 authentication |
 | `/api/metrics` | GET | Internal metrics as JSON |
 | `/metrics` | GET | **Prometheus exposition format** (scraper-friendly) |

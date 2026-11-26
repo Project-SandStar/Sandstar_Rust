@@ -210,6 +210,19 @@ pub struct ControlRunner {
     /// unusable. Used to log the transition once, not every cycle (R-35).
     held_loops: HashSet<usize>,
     held_components: HashSet<usize>,
+    /// Text of the file this runner was built from; `None` for a runner
+    /// that was not loaded from a file. `reload` compares against it.
+    source: Option<String>,
+}
+
+/// What `ControlRunner::reload` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlReload {
+    /// The file has the text the runner was built from; nothing was touched.
+    Unchanged,
+    /// The runner was rebuilt from the file; all loop and component state
+    /// starts fresh.
+    Replaced { loops: usize, components: usize },
 }
 
 impl ControlRunner {
@@ -220,7 +233,27 @@ impl ControlRunner {
             components: Vec::new(),
             held_loops: HashSet::new(),
             held_components: HashSet::new(),
+            source: None,
         }
+    }
+
+    /// Load `path` again. A file with the same text as the one this runner
+    /// was built from leaves the runner alone, so PID integrals, sequencer
+    /// and timer state and the enabled flags survive. A changed file replaces
+    /// the runner. On an error the runner stays as it was.
+    pub fn reload(&mut self, path: &Path) -> Result<ControlReload, String> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+        if self.source.as_deref() == Some(content.as_str()) {
+            return Ok(ControlReload::Unchanged);
+        }
+        let runner = Self::from_text(content, path)?;
+        let done = ControlReload::Replaced {
+            loops: runner.loop_count(),
+            components: runner.component_count(),
+        };
+        *self = runner;
+        Ok(done)
     }
 
     /// Load control configuration from a TOML file.
@@ -228,7 +261,11 @@ impl ControlRunner {
     pub fn load(path: &Path) -> Result<Self, String> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+        Self::from_text(content, path)
+    }
 
+    /// Build a runner from the text of a control file; `path` is for messages.
+    fn from_text(content: String, path: &Path) -> Result<Self, String> {
         let toml_cfg: ControlToml = toml::from_str(&content)
             .map_err(|e| format!("failed to parse {}: {}", path.display(), e))?;
 
@@ -338,6 +375,7 @@ impl ControlRunner {
         Ok(Self {
             loops,
             components,
+            source: Some(content),
             ..Self::new()
         })
     }
@@ -877,6 +915,116 @@ mod tests {
     fn seed_hal_value(engine: &Engine<MockHal>, channel_id: u32, value: f64) {
         // Address matches channel ID (set in make_engine).
         engine.hal.set_analog(0, channel_id, Ok(value));
+    }
+
+    // ── reload ──
+
+    fn one_loop_toml(kp: f64) -> String {
+        format!(
+            "[[loop]]\nname = \"zone\"\nfeedback_channel = 4\nsetpoint_channel = 75\n\
+             output_channels = [35]\n\n[loop.pid]\nkp = {kp:?}\nki = 1.0\n"
+        )
+    }
+
+    /// A runner loaded from `one_loop_toml(1.0)` that has run two cycles
+    /// with an error of 7, and has its loop switched off.
+    fn used_runner(path: &Path) -> ControlRunner {
+        fs::write(path, one_loop_toml(1.0)).unwrap();
+        let mut runner = ControlRunner::load(path).unwrap();
+        let fresh = runner.loops[0].pid.output();
+        let mut engine = make_engine(&[
+            (4, ChannelDirection::In),
+            (75, ChannelDirection::In),
+            (35, ChannelDirection::Out),
+        ]);
+        seed_hal_value(&engine, 4, 70.0);
+        seed_hal_value(&engine, 75, 77.0);
+        let t0 = Instant::now();
+        runner.execute(&mut engine, t0);
+        runner.execute(&mut engine, t0 + Duration::from_millis(1000));
+        assert_ne!(
+            runner.loops[0].pid.output(),
+            fresh,
+            "the fixture must leave PID state behind"
+        );
+        assert!(runner.set_enabled("zone", false));
+        runner
+    }
+
+    #[test]
+    fn reload_of_the_same_text_keeps_the_loop_state() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("control.toml");
+        let mut runner = used_runner(&path);
+        let output = runner.loops[0].pid.output();
+
+        assert_eq!(runner.reload(&path), Ok(ControlReload::Unchanged));
+        assert_eq!(runner.loops[0].pid.output(), output);
+        assert!(!runner.loops[0].enabled);
+    }
+
+    #[test]
+    fn reload_of_a_changed_file_replaces_the_runner() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("control.toml");
+        let mut runner = used_runner(&path);
+        let fresh = ControlRunner::load(&path).unwrap().loops[0].pid.output();
+
+        fs::write(&path, one_loop_toml(2.0)).unwrap();
+        assert_eq!(
+            runner.reload(&path),
+            Ok(ControlReload::Replaced {
+                loops: 1,
+                components: 0
+            })
+        );
+        assert_eq!(runner.loops[0].pid.kp, 2.0);
+        assert_eq!(runner.loops[0].pid.output(), fresh);
+        assert!(runner.loops[0].enabled);
+        // The new text is now the reference.
+        assert_eq!(runner.reload(&path), Ok(ControlReload::Unchanged));
+    }
+
+    #[test]
+    fn reload_of_a_bad_or_unreadable_file_keeps_the_runner() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("control.toml");
+        let mut runner = used_runner(&path);
+        let output = runner.loops[0].pid.output();
+
+        for bad in ["[[loop]]\nname = ", "[[loop]]\nname = \"zone\"\nfeedback_channel = 4\nsetpoint_channel = 75\noutput_channels = [35]\nwrite_level = 99\n[loop.pid]\n"] {
+            fs::write(&path, bad).unwrap();
+            let err = runner.reload(&path).unwrap_err();
+            assert!(err.contains("control.toml") || err.contains("write_level"), "{err}");
+            assert_eq!(runner.loop_count(), 1);
+            assert_eq!(runner.loops[0].pid.kp, 1.0);
+            assert_eq!(runner.loops[0].pid.output(), output);
+            assert!(!runner.loops[0].enabled);
+        }
+        fs::remove_file(&path).unwrap();
+        assert!(runner.reload(&path).unwrap_err().contains("failed to read"));
+        assert_eq!(runner.loop_count(), 1);
+
+        // The good text again: still the text the runner was built from.
+        fs::write(&path, one_loop_toml(1.0)).unwrap();
+        assert_eq!(runner.reload(&path), Ok(ControlReload::Unchanged));
+        assert_eq!(runner.loops[0].pid.output(), output);
+    }
+
+    #[test]
+    fn reload_loads_the_file_into_a_runner_that_had_none() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("control.toml");
+        fs::write(&path, one_loop_toml(1.0)).unwrap();
+        let mut runner = ControlRunner::new();
+        assert_eq!(
+            runner.reload(&path),
+            Ok(ControlReload::Replaced {
+                loops: 1,
+                components: 0
+            })
+        );
+        assert_eq!(runner.loop_count(), 1);
     }
 
     #[test]

@@ -31,6 +31,7 @@ pub fn run<H: HalRead + HalWrite + HalDiagnostics>(
     config: &ServerConfig,
     start_time: Instant,
     history_store: &HistoryStore,
+    control: Option<&mut reload::ControlTarget<'_>>,
 ) -> (ConnectionResult, EngineResponse) {
     debug!(?cmd, "received command");
     crate::metrics::metrics()
@@ -44,7 +45,7 @@ pub fn run<H: HalRead + HalWrite + HalDiagnostics>(
     };
     (
         result,
-        execute(cmd, engine, config, start_time, history_store),
+        execute(cmd, engine, config, start_time, history_store, control),
     )
 }
 
@@ -55,6 +56,7 @@ fn execute<H: HalRead + HalWrite + HalDiagnostics>(
     config: &ServerConfig,
     start_time: Instant,
     history_store: &HistoryStore,
+    control: Option<&mut reload::ControlTarget<'_>>,
 ) -> EngineResponse {
     match cmd {
         EngineCommand::Shutdown => {
@@ -190,13 +192,15 @@ fn execute<H: HalRead + HalWrite + HalDiagnostics>(
         }
 
         EngineCommand::ReloadConfig => match &config.config_dir {
-            Some(config_dir) => match reload::reload_config(engine, config_dir) {
-                Ok(summary) => {
-                    info!(%summary, "config reloaded via IPC");
-                    EngineResponse::Ok
+            Some(config_dir) => {
+                match reload::reload_all(engine, config_dir, config.read_only, control) {
+                    Ok(summary) => {
+                        info!(%summary, "config reloaded via IPC");
+                        EngineResponse::Ok
+                    }
+                    Err(e) => EngineResponse::Error(format!("reload failed: {}", e)),
                 }
-                Err(e) => EngineResponse::Error(format!("reload failed: {}", e)),
-            },
+            }
             None => EngineResponse::Error("no config directory — running in demo mode".to_string()),
         },
 
@@ -314,7 +318,7 @@ mod tests {
         config: &ServerConfig,
     ) -> (ConnectionResult, EngineResponse) {
         let history = HistoryStore::new(16);
-        run(cmd, engine, config, Instant::now(), &history)
+        run(cmd, engine, config, Instant::now(), &history, None)
     }
 
     /// Level 8 of the priority array, or `None` if nothing is written there.
@@ -664,6 +668,51 @@ mod tests {
         assert_eq!(engine.polls.count(), 1);
     }
 
+    /// IPC `reload` reloads control.toml with the configuration (R-29, S-64).
+    #[test]
+    fn reload_reloads_the_control_file_and_reports_a_bad_one() {
+        use crate::control::ControlRunner;
+        use crate::reload::test_support::*;
+
+        let dir = tempfile::tempdir().unwrap();
+        write_config_dir(dir.path());
+        let control = dir.path().join("control.toml");
+        std::fs::write(&control, control_toml(1.0)).unwrap();
+        let mut engine = make_engine();
+        let mut config = make_config(false);
+        config.config_dir = Some(dir.path().to_path_buf());
+        let history = HistoryStore::new(16);
+        let mut runner = ControlRunner::new();
+
+        let mut reload = |runner: &mut ControlRunner| {
+            let mut target = reload::ControlTarget {
+                runner,
+                no_control: false,
+                path: None,
+            };
+            run(
+                EngineCommand::ReloadConfig,
+                &mut engine,
+                &config,
+                Instant::now(),
+                &history,
+                Some(&mut target),
+            )
+            .1
+        };
+
+        assert!(matches!(reload(&mut runner), EngineResponse::Ok));
+        assert_eq!(runner.loop_count(), 1);
+
+        std::fs::write(&control, BAD_CONTROL_TOML).unwrap();
+        let resp = reload(&mut runner);
+        assert!(
+            error_text(&resp).starts_with("reload failed: control config reload failed: "),
+            "{resp:?}"
+        );
+        assert_eq!(runner.loop_count(), 1);
+    }
+
     #[test]
     fn history_honours_channel_since_and_limit() {
         let mut engine = make_engine();
@@ -691,6 +740,7 @@ mod tests {
                 &config,
                 Instant::now(),
                 &history,
+                None,
             );
             match resp {
                 EngineResponse::History(entries) => entries,

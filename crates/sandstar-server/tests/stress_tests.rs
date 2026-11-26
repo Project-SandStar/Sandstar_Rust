@@ -1062,6 +1062,7 @@ async fn stress_rate_limiter_server_integration() {
                 watches: &mut watches,
                 watch_counter: &mut watch_counter,
                 history_store: &history_store,
+                control: None,
             };
             cmd_handler::handle_engine_cmd(cmd, &mut engine, &mut ctx);
         }
