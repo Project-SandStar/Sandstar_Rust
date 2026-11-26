@@ -7,9 +7,9 @@ This project uses a single workspace version — bumps apply to every crate.
 
 ---
 
-## [Unreleased]
+## [2.11.0] — 2026-11-27
 
-On `develop`, not on the field device.
+Reload and control-loop release: steps S-58 to S-64.
 
 ### Behavior changes (read before upgrading)
 - **A sensor channel whose table is not loaded reads as fault.** For analog inputs 1100-1723 the channel number stands for a sensor table. When tables are loaded but that one is not, the channel used to convert without a table and report a good value; it now reads as fault and logs one warning. Unchanged: a set-up with no tables at all (demo, simulator), and a row that gives `low` and `high` itself (R-63, S-60).

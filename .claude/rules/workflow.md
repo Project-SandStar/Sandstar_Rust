@@ -134,6 +134,7 @@ Gerekçe: git'teki `docs/Progress` ve `docs/research` altı ay koddan koptu (R-3
 | Her S-n adımı | 08, gerekiyorsa 10 |
 
 - **Hatırlatma:** `tools/gates.sh` sonundaki `docs` satırı, dalın `develop` ile (yoksa `master` ile) ortak atasına göre değişen yolları `tools/docs-map.tsv` ile eşler. Kod yolu değişip doküman değişmediyse dokümanı listeler. Eşlemenin tek kaynağı `docs-map.tsv`'dir; yukarıdaki tablo onun okunur özetidir. İkisi birlikte değişir.
+- **Hatırlatmanın göremedikleri `doc-sync` skill'i ile taranır** (`.claude/skills/doc-sync/`, karar 2026-11-27). Hatırlatma yalnız eşlemedeki kod yollarını görür; bir dokümanın düz yazıyla anlattığı davranışı, taşınan kodun `dosya:satır` başvurularını ve sürüm, kurulu sürüm, test sayısı gibi satırları görmez. Skill her S adımı bitince (commit sorulmadan önce), sürüm artışında ve deploy'dan sonra çalıştırılır.
 - **Hatırlatma kapı değildir.** Doküman gerekmiyorsa (ör. yalnız yorum ya da test değişti) atlanır; commit gövdesine bir satır yazılır: "docs: <doküman> gerekmedi, çünkü …".
 - DevelopingMds git dışında olduğu için hatırlatma onu göremez; 08/06/10 için yukarıdaki "Sürüm ve kayıt" geçerlidir.
 - Dokümanda sonuç doğrulanmadan "tamamlandı" yazılmaz; sahaya giden işlerde durum basamakları (yukarıda) uygulanır.

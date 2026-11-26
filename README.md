@@ -2,7 +2,7 @@
 
 Embedded IoT control engine for BeagleBone, replacing a C/C++ system.
 
-**Version:** 2.10.0 (released, tag `v2.10.0`; `develop` carries unreleased changes, see [`CHANGELOG.md`](CHANGELOG.md)) · **Production:** one field BeagleBone running 2.10.0 (local I/O + control loop; the BACnet and MQTT drivers are available but not configured on it) · **Tests:** 3,147 passing on `develop`, 0 clippy warnings · **Dependencies:** 0 C/C++ (pure Rust, no FFI)
+**Version:** 2.11.0 (see [`CHANGELOG.md`](CHANGELOG.md)) · **Production:** one field BeagleBone running 2.10.0 (local I/O + control loop; the BACnet and MQTT drivers are available but not configured on it) · **Tests:** 3,163 passing, 0 clippy warnings · **Dependencies:** 0 C/C++ (pure Rust, no FFI)
 
 ## Overview
 
@@ -264,7 +264,7 @@ cargo test -p sandstar-server
 cargo test -- --ignored
 ```
 
-3,147 tests across the workspace on `develop` (3,117 in the 2.10.0 release). Platform-specific tests (sysfs GPIO, I2C, PWM) are gated behind `#[cfg(target_os = "linux")]`. Live-network tests (mDNS multicast) are marked `#[ignore]` and require a multicast-capable host.
+3,163 tests across the workspace in 2.11.0 (3,117 in 2.10.0). Platform-specific tests (sysfs GPIO, I2C, PWM) are gated behind `#[cfg(target_os = "linux")]`. Live-network tests (mDNS multicast) are marked `#[ignore]` and require a multicast-capable host.
 
 ## Development
 

@@ -13,7 +13,7 @@
 > - *Migration Status: Complete*: version is 2.9.0 (`Cargo.toml`), not 1.0.0. Metrics today: 2748 tests (Windows) / 2764 (Linux CI), 16 CLI subcommands, 14 IPC command variants, 30+ REST routes. "Security issues open: 0" is wrong: R-1, R-2 and R-13 (SIGTERM not handled) are open.
 > - *System Overview*, *What Rust Delivered*: "Sedona VM retained as C via FFI" and "replaced by libhaystack" are wrong (see above). Control logic is ~4,300 lines (`control.rs`, `pid.rs`, `sequencer.rs`, `components.rs`), not ~400.
 > - *ROX Split*, *Decision Log*: 8.0B and 9.0 are no longer deferred or blocked. `rustls`/`axum-server` are non-optional dependencies even though TLS code is feature-gated.
-> - *Binary Size and Performance*: the runtime is `current_thread`; the poll runs in `spawn_blocking` (`crates/sandstar-server/src/main.rs:695`).
+> - *Binary Size and Performance*: the runtime is `current_thread`; the poll runs in `spawn_blocking` (`crates/sandstar-server/src/run_loop.rs`, `run`).
 > - *Blocker*: the cutover is done; the device runs the Rust build. Host addresses were removed from this section (2026-11-18).
 
 ## Document Index
