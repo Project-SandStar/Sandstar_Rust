@@ -266,18 +266,28 @@ pub(crate) fn slot_value_to_json(value: &SlotValue) -> serde_json::Value {
     }
 }
 
+/// A JSON integer that fits `i32`; a larger one is refused, not cut down.
+fn json_i32(json: &serde_json::Value) -> Option<i32> {
+    json.as_i64().and_then(|v| i32::try_from(v).ok())
+}
+
 /// Coerce a JSON value to a typed SlotValue based on the slot's type_id.
 pub(crate) fn json_to_slot_value(json: &serde_json::Value, type_id: u8) -> Option<SlotValue> {
     match type_id {
         t if t == SoxValueType::Bool as u8 => json.as_bool().map(SlotValue::Bool),
-        t if t == SoxValueType::Int as u8 => json.as_i64().map(|v| SlotValue::Int(v as i32)),
+        t if t == SoxValueType::Int as u8 => json_i32(json).map(SlotValue::Int),
         t if t == SoxValueType::Long as u8 => json.as_i64().map(SlotValue::Long),
-        t if t == SoxValueType::Float as u8 => json.as_f64().map(|v| SlotValue::Float(v as f32)),
+        // A number too large for f32 would become infinity.
+        t if t == SoxValueType::Float as u8 => json
+            .as_f64()
+            .map(|v| v as f32)
+            .filter(|v| v.is_finite())
+            .map(SlotValue::Float),
         t if t == SoxValueType::Double as u8 => json.as_f64().map(SlotValue::Double),
         t if t == SoxValueType::Buf as u8 => json.as_str().map(|s| SlotValue::Str(s.to_string())),
         // Byte / Short treated as Int
         t if t == SoxValueType::Byte as u8 || t == SoxValueType::Short as u8 => {
-            json.as_i64().map(|v| SlotValue::Int(v as i32))
+            json_i32(json).map(SlotValue::Int)
         }
         _ => None,
     }
@@ -536,23 +546,17 @@ pub async fn delete_comp(State(state): State<SoxApiState>, Path(id): Path<u16>) 
 
     let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
 
-    // Remove all links involving this component from other components.
-    let link_peers: Vec<(u16, u8, u16, u8)> = tree
-        .get(id)
-        .map(|c| {
-            c.links
-                .iter()
-                .map(|l| (l.from_comp, l.from_slot, l.to_comp, l.to_slot))
-                .collect()
-        })
-        .unwrap_or_default();
-    for (fc, fs, tc, ts) in &link_peers {
-        tree.remove_link(*fc, *fs, *tc, *ts);
-    }
-
-    match tree.remove(id) {
-        Some(_) => {
+    // The whole subtree goes, with its links (R-61).
+    match tree.remove_subtree(id) {
+        Some(removed) => {
             tree.mark_dirty();
+            drop(tree);
+            crate::sox::sox_ops::forget_tags(state.dyn_store.as_ref(), &removed);
+            tracing::info!(
+                comp_id = id,
+                removed = removed.len(),
+                "SOX: component deleted"
+            );
             StatusCode::NO_CONTENT.into_response()
         }
         None => (StatusCode::NOT_FOUND, format!("component {id} not found")).into_response(),
@@ -680,8 +684,16 @@ pub async fn invoke_action(
             // Generic action: if body provided, write value to the slot.
             if let Some(Json(req)) = body {
                 let type_id = comp.slots[slot_idx].type_id;
-                if let Some(val) = json_to_slot_value(&req.value, type_id) {
-                    comp.slots[slot_idx].value = val;
+                match json_to_slot_value(&req.value, type_id) {
+                    Some(val) => comp.slots[slot_idx].value = val,
+                    // A value that was not written is not reported as done.
+                    None => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            format!("cannot coerce value to type_id {type_id}"),
+                        )
+                            .into_response()
+                    }
                 }
             }
         }
@@ -694,15 +706,19 @@ pub async fn invoke_action(
 /// POST /api/sox/link — add a link.
 pub async fn add_link(State(state): State<SoxApiState>, Json(req): Json<LinkRequest>) -> Response {
     let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
-    if tree.add_link(req.from_comp, req.from_slot, req.to_comp, req.to_slot) {
-        tree.mark_dirty();
-        StatusCode::CREATED.into_response()
-    } else {
-        (
+    use crate::sox::sox_handlers::LinkError;
+    match tree.try_add_link(req.from_comp, req.from_slot, req.to_comp, req.to_slot) {
+        Ok(()) => {
+            tree.mark_dirty();
+            StatusCode::CREATED.into_response()
+        }
+        Err(e @ LinkError::NotFound) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+        Err(e @ LinkError::BadSlot) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(LinkError::Duplicate | LinkError::Cycle) => (
             StatusCode::CONFLICT,
             "link already exists or would create a cycle",
         )
-            .into_response()
+            .into_response(),
     }
 }
 

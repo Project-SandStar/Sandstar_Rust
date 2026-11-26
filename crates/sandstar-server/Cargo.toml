@@ -93,14 +93,11 @@ assets = [
     ["target/release/sandstar-cli",          "/home/eacio/sandstar/bin/sandstar-cli",          "755"],
     # Systemd services
     ["../../etc/sandstar-engine.service", "/etc/systemd/system/sandstar-engine.service", "644"],
-    ["../../etc/sandstar-rust-validate.service", "/etc/systemd/system/sandstar-rust-validate.service", "644"],
     # Hardware initialization script
     ["../../etc/initialize.sh", "/home/eacio/sandstar/etc/init/initialize.sh", "755"],
     # Operations scripts
-    ["../../tools/validate-engines.sh", "/home/eacio/sandstar/bin/validate-engines.sh", "755"],
     ["../../tools/soak-monitor.sh",     "/home/eacio/sandstar/bin/soak-monitor.sh",     "755"],
-    ["../../tools/cutover-to-rust.sh",  "/home/eacio/sandstar/bin/cutover-to-rust.sh",  "755"],
-    ["../../tools/rollback-to-c.sh",    "/home/eacio/sandstar/bin/rollback-to-c.sh",    "755"],
+    ["../../tools/health-monitor.sh",   "/home/eacio/sandstar/bin/health-monitor.sh",   "755"],
     # Logrotate
     ["../../etc/logrotate.d/sandstar",  "/etc/logrotate.d/sandstar",                    "644"],
     # Lookup tables (ADC-to-engineering-unit conversion)
@@ -123,7 +120,6 @@ assets = [
 ]
 conf-files = [
     "/etc/systemd/system/sandstar-engine.service",
-    "/etc/systemd/system/sandstar-rust-validate.service",
     "/home/eacio/sandstar/etc/init/initialize.sh",
     "/etc/logrotate.d/sandstar",
 ]

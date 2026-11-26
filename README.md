@@ -2,7 +2,7 @@
 
 Embedded IoT control engine for BeagleBone, replacing a C/C++ system.
 
-**Version:** 2.8.10 · **Production:** live on BeagleBone (BACnet + MQTT + LocalIo drivers + HVAC control loop) · **Tests:** 2,677 passing, 0 clippy warnings · **Dependencies:** 0 C/C++ (pure Rust, no FFI)
+**Version:** 2.10.0 · **Production:** one field BeagleBone (local I/O + control loop; the BACnet and MQTT drivers are available but not configured on it) · **Tests:** 2,998 passing, 0 clippy warnings · **Dependencies:** 0 C/C++ (pure Rust, no FFI)
 
 ## Overview
 
@@ -125,7 +125,7 @@ Core Haystack + Sandstar endpoints:
 | `/api/watchUnsub` | POST | Unsubscribe |
 | `/api/history/{channel}` | GET | Historical data |
 | `/api/pollNow` | POST | Trigger immediate poll |
-| `/api/reload` | POST | Reload configuration |
+| `/api/reload` | POST | Reload configuration (error reply and nothing changed if a file cannot be read) |
 | `/api/auth` | POST | SCRAM-SHA-256 authentication |
 | `/api/metrics` | GET | Internal metrics as JSON |
 | `/metrics` | GET | **Prometheus exposition format** (scraper-friendly) |
@@ -237,13 +237,14 @@ Protocol spec in [`docs/research/16_ROXWARP_PROTOCOL.md`](docs/research/16_ROXWA
 ### Systemd services
 
 - `sandstar-engine.service` — production service
-- `sandstar-rust-validate.service` — read-only validation alongside another engine
 
 ### Scripts
 
 | Script | Purpose |
 |--------|---------|
-| `tools/installSandstarRust.sh` | Deploy `.deb` to a named device |
+| `tools/soak-monitor.sh` | Long-running check of the service on the device (shipped in the `.deb`) |
+| `tools/health-monitor.sh` | Cron health line every 5 minutes (shipped in the `.deb`) |
+| `tools/kaldirilanlar/` | Retired C-era and early deploy scripts; not used, not packaged |
 | `tools/bacnet_sim.py` | Hand-crafted BACnet/IP simulator for driver validation |
 | `tools/ws_latency_test.py` | Live validator for the 12.0D.WS push bridge |
 | `tools/connections/*.sh` | expect-based SSH connection scripts per device |
@@ -263,7 +264,7 @@ cargo test -p sandstar-server
 cargo test -- --ignored
 ```
 
-2,677 tests across the workspace. Platform-specific tests (sysfs GPIO, I2C, PWM) are gated behind `#[cfg(target_os = "linux")]`. Live-network tests (mDNS multicast) are marked `#[ignore]` and require a multicast-capable host.
+3,117 tests across the workspace (2.10.0). Platform-specific tests (sysfs GPIO, I2C, PWM) are gated behind `#[cfg(target_os = "linux")]`. Live-network tests (mDNS multicast) are marked `#[ignore]` and require a multicast-capable host.
 
 ## Documentation
 

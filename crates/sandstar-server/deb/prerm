@@ -6,7 +6,3 @@ if systemctl is-active --quiet sandstar-engine; then
     echo "Sandstar engine stopped"
 fi
 
-if systemctl is-active --quiet sandstar-rust-validate; then
-    systemctl stop sandstar-rust-validate
-    echo "Sandstar validation service stopped"
-fi

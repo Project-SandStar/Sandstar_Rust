@@ -4,9 +4,7 @@ set -e
 case "$1" in
     purge)
         systemctl disable sandstar-engine 2>/dev/null || true
-        systemctl disable sandstar-rust-validate 2>/dev/null || true
         rm -f /etc/systemd/system/sandstar-engine.service
-        rm -f /etc/systemd/system/sandstar-rust-validate.service
         systemctl daemon-reload
         rm -rf /var/run/sandstar
         rm -rf /var/log/sandstar
@@ -14,7 +12,6 @@ case "$1" in
         ;;
     remove)
         systemctl disable sandstar-engine 2>/dev/null || true
-        systemctl disable sandstar-rust-validate 2>/dev/null || true
         systemctl daemon-reload
         ;;
 esac

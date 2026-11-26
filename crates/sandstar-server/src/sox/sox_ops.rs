@@ -16,7 +16,7 @@ use serde_json::Value as JsonValue;
 
 use crate::sox::dyn_slots::DynValue;
 use crate::sox::sox_handlers::{
-    ComponentTree, ManifestDb, SlotValue, VirtualComponent, VirtualSlot, DEFAULT_KITS,
+    ComponentTree, LinkError, ManifestDb, SlotValue, VirtualComponent, VirtualSlot, DEFAULT_KITS,
     SLOT_FLAG_ACTION, SLOT_FLAG_CONFIG,
 };
 use crate::sox::sox_protocol::SoxValueType;
@@ -362,22 +362,13 @@ fn handle_delete_comp(state: &SoxState, comp_id: u16) -> SoxResponse {
 
     let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
 
-    let link_peers: Vec<(u16, u8, u16, u8)> = tree
-        .get(comp_id)
-        .map(|c| {
-            c.links
-                .iter()
-                .map(|l| (l.from_comp, l.from_slot, l.to_comp, l.to_slot))
-                .collect()
-        })
-        .unwrap_or_default();
-    for (fc, fs, tc, ts) in &link_peers {
-        tree.remove_link(*fc, *fs, *tc, *ts);
-    }
-
-    match tree.remove(comp_id) {
-        Some(_) => {
+    // The whole subtree goes, with its links (R-61).
+    match tree.remove_subtree(comp_id) {
+        Some(removed) => {
             tree.mark_dirty();
+            drop(tree);
+            forget_tags(state.dyn_store.as_ref(), &removed);
+            tracing::info!(comp_id, removed = removed.len(), "SOX: component deleted");
             SoxResponse::ok(serde_json::json!({ "ok": true }))
         }
         None => SoxResponse::error("NOT_FOUND", format!("component {comp_id} not found")),
@@ -406,11 +397,17 @@ fn handle_add_link(
     to_slot: u8,
 ) -> SoxResponse {
     let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
-    if tree.add_link(from_comp, from_slot, to_comp, to_slot) {
-        tree.mark_dirty();
-        SoxResponse::ok(serde_json::json!({ "ok": true }))
-    } else {
-        SoxResponse::error("CONFLICT", "link already exists or would create a cycle")
+    match tree.try_add_link(from_comp, from_slot, to_comp, to_slot) {
+        Ok(()) => {
+            tree.mark_dirty();
+            SoxResponse::ok(serde_json::json!({ "ok": true }))
+        }
+        Err(e @ LinkError::NotFound) => SoxResponse::error("NOT_FOUND", e.to_string()),
+        Err(e @ LinkError::BadSlot) => SoxResponse::error("BAD_REQUEST", e.to_string()),
+        // The text the clients have always had for these two.
+        Err(LinkError::Duplicate | LinkError::Cycle) => {
+            SoxResponse::error("CONFLICT", "link already exists or would create a cycle")
+        }
     }
 }
 
@@ -695,13 +692,17 @@ fn handle_version_ext() -> SoxResponse {
 
 fn handle_reorder(state: &SoxState, comp_id: u16, children: Vec<u16>) -> SoxResponse {
     let mut tree = crate::lock::write_or_recover(&state.tree, "SOX component tree");
-    let comp = match tree.get_mut(comp_id) {
-        Some(c) => c,
-        None => return SoxResponse::error("NOT_FOUND", format!("component {comp_id} not found")),
-    };
-    // Match Fantom semantics: accept the client's ordering verbatim (no
-    // membership validation). Callers are trusted to pass valid child IDs.
-    comp.children = children;
+    if tree.get(comp_id).is_none() {
+        return SoxResponse::error("NOT_FOUND", format!("component {comp_id} not found"));
+    }
+    // The new order must be the same set of children: a list that leaves
+    // one out, or names a stranger, would change the tree, not its order.
+    if !tree.reorder_children(comp_id, &children) {
+        return SoxResponse::error(
+            "BAD_REQUEST",
+            "children must be the component's current children in a new order",
+        );
+    }
     tree.mark_dirty();
     SoxResponse::ok(serde_json::json!({ "ok": true }))
 }
@@ -819,8 +820,896 @@ pub(crate) fn comp_to_detail_json(comp: &VirtualComponent, tree: &ComponentTree)
     })
 }
 
+/// Drop the tags of removed components. Ids are reused (`max + 1`), so a
+/// tag left behind would show up on the next component that gets the id.
+pub(crate) fn forget_tags(dyn_store: Option<&DynSlotStoreHandle>, removed: &[u16]) {
+    let Some(dyn_store) = dyn_store else {
+        return;
+    };
+    let mut store = crate::lock::write_or_recover(dyn_store, "dyn slot store");
+    for &id in removed {
+        store.remove_all(id);
+    }
+}
+
+// ── Request field helpers (shared by the envelopes) ─
+
+/// A list of component ids for an op that replaces state with it (reorder).
+/// `None` if the field is missing, not an array, or holds anything that is
+/// not a 16-bit id: dropping one element would drop a child from the parent.
+pub(crate) fn strict_u16_list(value: Option<&JsonValue>) -> Option<Vec<u16>> {
+    value?
+        .as_array()?
+        .iter()
+        .map(|v| v.as_u64().and_then(|n| u16::try_from(n).ok()))
+        .collect()
+}
+
 // ── Name validation ────────────────────────────────
 
 fn validate_name(name: &str) -> Option<&'static str> {
     crate::sox::name_intern::NameInternTable::validate_name(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sox::dyn_slots::DynSlotStore;
+    use crate::sox::sox_handlers::NO_PARENT;
+    use serde_json::json;
+    use std::sync::RwLock;
+
+    const ROOT: u16 = 0;
+    const A: u16 = 10;
+    const B: u16 = 11;
+    const MISSING: u16 = 999;
+
+    // Slot indices of the test component.
+    const S_META: usize = 0;
+    const S_FLOAT: usize = 1;
+    const S_INT: usize = 2;
+    const S_BOOL: usize = 3;
+    const S_ACTION: usize = 4;
+    const S_STR: usize = 5;
+
+    fn slot(name: &str, ty: SoxValueType, flags: u8, value: SlotValue) -> VirtualSlot {
+        VirtualSlot {
+            name: name.into(),
+            type_id: ty as u8,
+            flags,
+            value,
+        }
+    }
+
+    fn comp(comp_id: u16, parent_id: u16, name: &str) -> VirtualComponent {
+        VirtualComponent {
+            comp_id,
+            parent_id,
+            name: name.into(),
+            type_name: "Test".into(),
+            kit_id: 200,
+            type_id: 1,
+            children: Vec::new(),
+            slots: vec![
+                slot(
+                    "meta",
+                    SoxValueType::Int,
+                    SLOT_FLAG_CONFIG,
+                    SlotValue::Int(1),
+                ),
+                slot("out", SoxValueType::Float, 0, SlotValue::Float(0.0)),
+                slot("count", SoxValueType::Int, 0, SlotValue::Int(0)),
+                slot("flag", SoxValueType::Bool, 0, SlotValue::Bool(false)),
+                slot(
+                    "setTrue",
+                    SoxValueType::Void,
+                    SLOT_FLAG_ACTION,
+                    SlotValue::Null,
+                ),
+                slot("label", SoxValueType::Buf, 0, SlotValue::Str(String::new())),
+            ],
+            links: Vec::new(),
+        }
+    }
+
+    /// Root (id 0) with two children A and B; tags enabled.
+    fn make_state() -> SoxState {
+        let mut manifest = ManifestDb::load("");
+        manifest.know_type_for_test(200, 1);
+        let manifest_db = Arc::new(manifest);
+        let mut tree = ComponentTree::new_with_manifest(manifest_db.clone());
+        tree.add(comp(ROOT, NO_PARENT, "app"));
+        tree.add(comp(A, ROOT, "compA"));
+        tree.add(comp(B, ROOT, "compB"));
+        SoxState {
+            tree: Arc::new(RwLock::new(tree)),
+            manifest_db,
+            dyn_store: Some(Arc::new(RwLock::new(DynSlotStore::new(4, 100)))),
+        }
+    }
+
+    #[derive(Default)]
+    struct Session {
+        subscribed: HashSet<u16>,
+        cov_cache: HashMap<u16, Vec<JsonValue>>,
+        tree_cache: HashMap<u16, Vec<u16>>,
+        compact_cov: bool,
+    }
+
+    impl Session {
+        fn apply(&mut self, state: &SoxState, op: SoxOp) -> SoxResponse {
+            let mut session = SessionState {
+                subscribed: &mut self.subscribed,
+                cov_cache: &mut self.cov_cache,
+                tree_cache: &mut self.tree_cache,
+                compact_cov: &mut self.compact_cov,
+            };
+            apply_op(state, op, &mut session)
+        }
+    }
+
+    fn apply(state: &SoxState, op: SoxOp) -> SoxResponse {
+        Session::default().apply(state, op)
+    }
+
+    fn ok(resp: SoxResponse) -> JsonValue {
+        match resp {
+            SoxResponse::Ok(v) => v,
+            SoxResponse::Error { code, message } => panic!("expected Ok, got {code}: {message}"),
+        }
+    }
+
+    fn err_code(resp: SoxResponse) -> &'static str {
+        match resp {
+            SoxResponse::Error { code, .. } => code,
+            SoxResponse::Ok(v) => panic!("expected Error, got Ok({v})"),
+        }
+    }
+
+    fn slot_value(state: &SoxState, comp_id: u16, idx: usize) -> SlotValue {
+        state.tree.read().unwrap().get(comp_id).unwrap().slots[idx]
+            .value
+            .clone()
+    }
+
+    fn link_count(state: &SoxState, comp_id: u16) -> usize {
+        state.tree.read().unwrap().get(comp_id).unwrap().links.len()
+    }
+
+    fn write(comp_id: u16, slot_idx: usize, value: JsonValue) -> SoxOp {
+        SoxOp::WriteSlot {
+            comp_id,
+            slot_idx,
+            value,
+        }
+    }
+
+    fn link(from_comp: u16, from_slot: u8, to_comp: u16, to_slot: u8) -> SoxOp {
+        SoxOp::AddLink {
+            from_comp,
+            from_slot,
+            to_comp,
+            to_slot,
+        }
+    }
+
+    // ── read ───────────────────────────────────────
+
+    #[test]
+    fn ping_answers_pong() {
+        let state = make_state();
+        assert_eq!(ok(apply(&state, SoxOp::Ping)), json!({ "pong": true }));
+    }
+
+    #[test]
+    fn read_comp_returns_slots_and_missing_is_not_found() {
+        let state = make_state();
+        let detail = ok(apply(&state, SoxOp::ReadComp { comp_id: A }));
+        assert_eq!(detail["compId"], A);
+        assert_eq!(detail["parentId"], ROOT);
+        assert_eq!(detail["name"], "compA");
+        assert_eq!(detail["slots"].as_array().unwrap().len(), 6);
+
+        assert_eq!(
+            err_code(apply(&state, SoxOp::ReadComp { comp_id: MISSING })),
+            "NOT_FOUND"
+        );
+    }
+
+    // ── write slot ─────────────────────────────────
+
+    #[test]
+    fn write_slot_stores_each_supported_type() {
+        let state = make_state();
+        ok(apply(&state, write(A, S_FLOAT, json!(21.5))));
+        ok(apply(&state, write(A, S_INT, json!(-7))));
+        ok(apply(&state, write(A, S_BOOL, json!(true))));
+        ok(apply(&state, write(A, S_STR, json!("çğü"))));
+
+        assert_eq!(slot_value(&state, A, S_FLOAT), SlotValue::Float(21.5));
+        assert_eq!(slot_value(&state, A, S_INT), SlotValue::Int(-7));
+        assert_eq!(slot_value(&state, A, S_BOOL), SlotValue::Bool(true));
+        assert_eq!(slot_value(&state, A, S_STR), SlotValue::Str("çğü".into()));
+        // The other component is untouched.
+        assert_eq!(slot_value(&state, B, S_FLOAT), SlotValue::Float(0.0));
+    }
+
+    #[test]
+    fn write_slot_rejects_missing_component_and_slot() {
+        let state = make_state();
+        assert_eq!(
+            err_code(apply(&state, write(MISSING, S_FLOAT, json!(1.0)))),
+            "NOT_FOUND"
+        );
+        assert_eq!(
+            err_code(apply(&state, write(A, 6, json!(1.0)))),
+            "BAD_REQUEST"
+        );
+        assert_eq!(
+            err_code(apply(&state, write(A, usize::MAX, json!(1.0)))),
+            "BAD_REQUEST"
+        );
+    }
+
+    #[test]
+    fn write_slot_rejects_a_value_of_the_wrong_type() {
+        let state = make_state();
+        for (idx, bad) in [
+            (S_FLOAT, json!("12")),
+            (S_FLOAT, json!(null)),
+            (S_INT, json!(1.5)),
+            (S_INT, json!("1")),
+            (S_BOOL, json!(1)),
+            (S_STR, json!(5)),
+            (S_FLOAT, json!([1.0])),
+            (S_FLOAT, json!({ "v": 1.0 })),
+        ] {
+            assert_eq!(
+                err_code(apply(&state, write(A, idx, bad.clone()))),
+                "BAD_REQUEST",
+                "slot {idx} accepted {bad}"
+            );
+        }
+        assert_eq!(slot_value(&state, A, S_FLOAT), SlotValue::Float(0.0));
+        assert_eq!(slot_value(&state, A, S_INT), SlotValue::Int(0));
+    }
+
+    /// A number too large for `f32` must not become infinity in the slot
+    /// (`numeric-output.md`: non-finite values are rejected, not stored).
+    #[test]
+    fn write_slot_rejects_a_float_that_does_not_fit_f32() {
+        let state = make_state();
+        for big in [1e300, -1e300, 3.5e38] {
+            assert_eq!(
+                err_code(apply(&state, write(A, S_FLOAT, json!(big)))),
+                "BAD_REQUEST",
+                "{big} accepted"
+            );
+        }
+        assert_eq!(slot_value(&state, A, S_FLOAT), SlotValue::Float(0.0));
+    }
+
+    /// An integer outside `i32` must not be cut down silently
+    /// (`numeric-output.md`: range check before `as`).
+    #[test]
+    fn write_slot_rejects_an_int_outside_i32() {
+        let state = make_state();
+        for big in [i64::from(i32::MAX) + 1, i64::from(i32::MIN) - 1, i64::MAX] {
+            assert_eq!(
+                err_code(apply(&state, write(A, S_INT, json!(big)))),
+                "BAD_REQUEST",
+                "{big} accepted"
+            );
+        }
+        assert_eq!(slot_value(&state, A, S_INT), SlotValue::Int(0));
+    }
+
+    // ── add / delete / rename ──────────────────────
+
+    fn add(parent_id: u16, name: &str) -> SoxOp {
+        SoxOp::AddComp {
+            parent_id,
+            kit_id: 200,
+            type_id: 2,
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn add_comp_creates_a_child_with_a_fresh_id() {
+        let state = make_state();
+        let reply = ok(apply(&state, add(A, "child1")));
+        let id = reply["compId"].as_u64().unwrap() as u16;
+        assert!(id > B);
+
+        let tree = state.tree.read().unwrap();
+        let child = tree.get(id).unwrap();
+        assert_eq!(child.parent_id, A);
+        assert_eq!(child.name, "child1");
+        assert!(!child.slots.is_empty());
+        assert_eq!(tree.get(A).unwrap().children, vec![id]);
+    }
+
+    #[test]
+    fn add_comp_rejects_bad_names_and_missing_parent() {
+        let state = make_state();
+        let too_long = "a".repeat(32);
+        for bad in ["", "1abc", "has space", "ünlü", "a-b", too_long.as_str()] {
+            assert_eq!(
+                err_code(apply(&state, add(A, bad))),
+                "BAD_REQUEST",
+                "name {bad:?} accepted"
+            );
+        }
+        assert_eq!(err_code(apply(&state, add(MISSING, "ok1"))), "NOT_FOUND");
+        assert_eq!(state.tree.read().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn delete_comp_removes_it_from_its_parent() {
+        let state = make_state();
+        ok(apply(&state, SoxOp::DeleteComp { comp_id: A }));
+        let tree = state.tree.read().unwrap();
+        assert!(tree.get(A).is_none());
+        assert_eq!(tree.get(ROOT).unwrap().children, vec![B]);
+    }
+
+    #[test]
+    fn delete_comp_refuses_system_ids_and_reports_missing() {
+        let state = make_state();
+        for id in 0..7u16 {
+            assert_eq!(
+                err_code(apply(&state, SoxOp::DeleteComp { comp_id: id })),
+                "FORBIDDEN"
+            );
+        }
+        assert_eq!(
+            err_code(apply(&state, SoxOp::DeleteComp { comp_id: MISSING })),
+            "NOT_FOUND"
+        );
+        assert_eq!(state.tree.read().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn delete_comp_drops_its_links_from_the_other_end() {
+        let state = make_state();
+        ok(apply(&state, link(A, 1, B, 1)));
+        assert_eq!(link_count(&state, B), 1);
+
+        ok(apply(&state, SoxOp::DeleteComp { comp_id: A }));
+        assert_eq!(link_count(&state, B), 0);
+    }
+
+    #[test]
+    fn rename_changes_the_name_and_validates_it() {
+        let state = make_state();
+        ok(apply(
+            &state,
+            SoxOp::Rename {
+                comp_id: A,
+                name: "renamed".into(),
+            },
+        ));
+        assert_eq!(state.tree.read().unwrap().get(A).unwrap().name, "renamed");
+
+        let bad = |comp_id, name: &str| {
+            err_code(apply(
+                &state,
+                SoxOp::Rename {
+                    comp_id,
+                    name: name.into(),
+                },
+            ))
+        };
+        assert_eq!(bad(A, ""), "BAD_REQUEST");
+        assert_eq!(bad(A, "9x"), "BAD_REQUEST");
+        assert_eq!(bad(A, "şç"), "BAD_REQUEST");
+        assert_eq!(bad(MISSING, "fine"), "NOT_FOUND");
+        assert_eq!(state.tree.read().unwrap().get(A).unwrap().name, "renamed");
+    }
+
+    // ── links ──────────────────────────────────────
+
+    #[test]
+    fn add_link_is_stored_on_both_ends_and_delete_removes_both() {
+        let state = make_state();
+        ok(apply(&state, link(A, 1, B, 1)));
+        assert_eq!(link_count(&state, A), 1);
+        assert_eq!(link_count(&state, B), 1);
+
+        ok(apply(
+            &state,
+            SoxOp::DeleteLink {
+                from_comp: A,
+                from_slot: 1,
+                to_comp: B,
+                to_slot: 1,
+            },
+        ));
+        assert_eq!(link_count(&state, A), 0);
+        assert_eq!(link_count(&state, B), 0);
+    }
+
+    #[test]
+    fn duplicate_link_and_cycle_are_conflicts() {
+        let state = make_state();
+        ok(apply(&state, link(A, 1, B, 1)));
+        assert_eq!(err_code(apply(&state, link(A, 1, B, 1))), "CONFLICT");
+        assert_eq!(err_code(apply(&state, link(B, 1, A, 1))), "CONFLICT");
+        assert_eq!(link_count(&state, A), 1);
+        assert_eq!(link_count(&state, B), 1);
+    }
+
+    #[test]
+    fn a_second_source_replaces_the_link_on_the_same_input() {
+        let state = make_state();
+        let c = 12;
+        state.tree.write().unwrap().add(comp(c, ROOT, "compC"));
+        ok(apply(&state, link(A, 1, B, 1)));
+        ok(apply(&state, link(c, 1, B, 1)));
+
+        let tree = state.tree.read().unwrap();
+        let incoming: Vec<u16> = tree
+            .get(B)
+            .unwrap()
+            .links
+            .iter()
+            .filter(|l| l.to_comp == B && l.to_slot == 1)
+            .map(|l| l.from_comp)
+            .collect();
+        assert_eq!(incoming, vec![c]);
+        assert!(tree.get(A).unwrap().links.is_empty());
+    }
+
+    #[test]
+    fn delete_of_a_missing_link_is_not_found() {
+        let state = make_state();
+        assert_eq!(
+            err_code(apply(
+                &state,
+                SoxOp::DeleteLink {
+                    from_comp: A,
+                    from_slot: 1,
+                    to_comp: B,
+                    to_slot: 1,
+                },
+            )),
+            "NOT_FOUND"
+        );
+    }
+
+    #[test]
+    fn add_link_refuses_a_missing_end() {
+        let state = make_state();
+        assert_eq!(err_code(apply(&state, link(A, 1, MISSING, 1))), "NOT_FOUND");
+        assert_eq!(err_code(apply(&state, link(MISSING, 1, B, 1))), "NOT_FOUND");
+        assert_eq!(link_count(&state, A), 0);
+        assert_eq!(link_count(&state, B), 0);
+    }
+
+    #[test]
+    fn add_link_refuses_a_slot_out_of_range() {
+        let state = make_state();
+        // The test component has 6 slots: 5 is the last one.
+        assert_eq!(err_code(apply(&state, link(A, 1, B, 6))), "BAD_REQUEST");
+        assert_eq!(err_code(apply(&state, link(A, 6, B, 1))), "BAD_REQUEST");
+        assert_eq!(err_code(apply(&state, link(A, 255, B, 255))), "BAD_REQUEST");
+        assert_eq!(link_count(&state, A), 0);
+        assert_eq!(link_count(&state, B), 0);
+        ok(apply(&state, link(A, 5, B, 5)));
+    }
+
+    /// A type the manifest does not know gets its slots as they are
+    /// written, so a link to a slot it does not have yet is not refused.
+    #[test]
+    fn add_link_to_an_unknown_type_accepts_any_slot() {
+        let state = make_state();
+        let c = ok(apply(&state, add(ROOT, "compC")))["compId"]
+            .as_u64()
+            .unwrap() as u16;
+        assert_eq!(state.tree.read().unwrap().get(c).unwrap().slots.len(), 1);
+        ok(apply(&state, link(A, 1, c, 3)));
+        ok(apply(&state, link(c, 4, B, 2)));
+    }
+
+    /// A `children` list can name a component that belongs elsewhere (a
+    /// saved file from before reorder was checked). Deleting the component
+    /// with that list must not take the stranger, a system component or a
+    /// channel component along.
+    #[test]
+    fn delete_comp_does_not_follow_a_children_list_to_strangers() {
+        let state = make_state();
+        {
+            let mut tree = state.tree.write().unwrap();
+            for id in 1..7u16 {
+                tree.add(comp(id, ROOT, &format!("sys{id}")));
+            }
+            tree.get_mut(A).unwrap().children = vec![B, 3, ROOT];
+        }
+        ok(apply(&state, SoxOp::DeleteComp { comp_id: A }));
+        let tree = state.tree.read().unwrap();
+        assert!(tree.get(A).is_none());
+        assert!(
+            tree.get(B).is_some(),
+            "a sibling named in the list was deleted"
+        );
+        assert!(tree.get(3).is_some(), "a system component was deleted");
+        assert!(tree.get(ROOT).is_some());
+    }
+
+    /// A system component is not deleted as part of a subtree even when its
+    /// `parent_id` puts it there.
+    #[test]
+    fn delete_comp_never_takes_a_system_component() {
+        let state = make_state();
+        state.tree.write().unwrap().add(comp(4, A, "sys4"));
+        ok(apply(&state, SoxOp::DeleteComp { comp_id: A }));
+        assert!(state.tree.read().unwrap().get(4).is_some());
+    }
+
+    #[test]
+    fn delete_comp_drops_the_tags_of_the_whole_subtree() {
+        let state = make_state();
+        state.tree.write().unwrap().add(comp(12, A, "kid"));
+        ok(apply(&state, set_tags(A, json!({ "a": 1 }))));
+        ok(apply(&state, set_tags(12, json!({ "b": 2 }))));
+        ok(apply(&state, set_tags(B, json!({ "c": 3 }))));
+
+        ok(apply(&state, SoxOp::DeleteComp { comp_id: A }));
+
+        let tags = |id| ok(apply(&state, SoxOp::ReadTags { comp_id: id }))["tags"].clone();
+        assert!(tags(A).as_object().unwrap().is_empty());
+        assert!(tags(12).as_object().unwrap().is_empty());
+        assert_eq!(tags(B).as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_link_from_a_component_to_itself_is_still_accepted() {
+        let state = make_state();
+        ok(apply(&state, link(A, 1, A, 2)));
+        assert_eq!(link_count(&state, A), 1);
+    }
+
+    #[test]
+    fn delete_comp_removes_the_whole_subtree() {
+        let state = make_state();
+        // A -> child -> grandchild, plus a sibling of child.
+        let add_under = |parent| {
+            ok(apply(
+                &state,
+                SoxOp::AddComp {
+                    parent_id: parent,
+                    kit_id: 200,
+                    type_id: 2,
+                    name: format!("n{parent}x{}", state.tree.read().unwrap().len()),
+                },
+            ))["compId"]
+                .as_u64()
+                .unwrap() as u16
+        };
+        let child = add_under(A);
+        let sibling = add_under(A);
+        let grandchild = add_under(child);
+
+        ok(apply(&state, SoxOp::DeleteComp { comp_id: A }));
+
+        let tree = state.tree.read().unwrap();
+        for id in [A, child, sibling, grandchild] {
+            assert!(tree.get(id).is_none(), "component {id} is still there");
+            assert!(!tree.is_user_added(id), "{id} is still marked user-added");
+        }
+        assert!(tree.get(B).is_some());
+        assert_eq!(tree.get(ROOT).unwrap().children, vec![B]);
+        assert_eq!(tree.integrity_report().orphans, 0);
+    }
+
+    #[test]
+    fn delete_comp_drops_links_between_the_subtree_and_the_rest() {
+        let state = make_state();
+        let (child, other) = (12, 13);
+        {
+            let mut tree = state.tree.write().unwrap();
+            tree.add(comp(child, A, "kid"));
+            tree.add(comp(other, ROOT, "other"));
+        }
+        // One link out of the subtree, one into it, one inside it.
+        ok(apply(&state, link(child, 1, B, 1)));
+        ok(apply(&state, link(other, 2, child, 2)));
+        ok(apply(&state, link(A, 1, child, 1)));
+        assert_eq!(link_count(&state, B), 1);
+        assert_eq!(link_count(&state, other), 1);
+
+        ok(apply(&state, SoxOp::DeleteComp { comp_id: A }));
+
+        assert_eq!(link_count(&state, B), 0);
+        assert_eq!(link_count(&state, other), 0);
+        let report = state.tree.read().unwrap().integrity_report();
+        assert_eq!(report.bad_links, 0);
+    }
+
+    /// A child that is missing from its parent's `children` list (only
+    /// `parent_id` says where it belongs) goes with the parent too.
+    #[test]
+    fn delete_comp_finds_children_by_parent_id() {
+        let state = make_state();
+        {
+            let mut tree = state.tree.write().unwrap();
+            tree.add(comp(12, A, "kid"));
+            tree.get_mut(A).unwrap().children.clear();
+        }
+        ok(apply(&state, SoxOp::DeleteComp { comp_id: A }));
+        assert!(state.tree.read().unwrap().get(12).is_none());
+    }
+
+    /// Parent ids that point at each other must not hang the delete.
+    #[test]
+    fn delete_comp_ends_on_a_parent_loop() {
+        let state = make_state();
+        {
+            let mut tree = state.tree.write().unwrap();
+            tree.add(comp(12, A, "kid"));
+            let a = tree.get_mut(A).unwrap();
+            a.parent_id = 12;
+            a.children = vec![12, A];
+        }
+        ok(apply(&state, SoxOp::DeleteComp { comp_id: A }));
+        let tree = state.tree.read().unwrap();
+        assert!(tree.get(A).is_none());
+        assert!(tree.get(12).is_none());
+        assert!(tree.get(B).is_some());
+    }
+
+    #[test]
+    fn reorder_refuses_a_list_that_is_not_the_same_children() {
+        let state = make_state();
+        let reorder = |children: Vec<u16>| {
+            apply(
+                &state,
+                SoxOp::Reorder {
+                    comp_id: ROOT,
+                    children,
+                },
+            )
+        };
+        for bad in [
+            vec![],
+            vec![A],
+            vec![A, B, MISSING],
+            vec![A, A],
+            vec![B, MISSING],
+        ] {
+            assert_eq!(
+                err_code(reorder(bad.clone())),
+                "BAD_REQUEST",
+                "{bad:?} accepted"
+            );
+        }
+        assert_eq!(
+            state.tree.read().unwrap().get(ROOT).unwrap().children,
+            vec![A, B]
+        );
+    }
+
+    // ── position / invoke / reorder / query ────────
+
+    #[test]
+    fn update_pos_writes_the_meta_slot() {
+        let state = make_state();
+        ok(apply(
+            &state,
+            SoxOp::UpdatePos {
+                comp_id: A,
+                x: 12,
+                y: 34,
+            },
+        ));
+        assert_eq!(decode_position(&slot_value(&state, A, S_META)), (12, 34));
+        assert_eq!(
+            err_code(apply(
+                &state,
+                SoxOp::UpdatePos {
+                    comp_id: MISSING,
+                    x: 1,
+                    y: 1,
+                },
+            )),
+            "NOT_FOUND"
+        );
+    }
+
+    #[test]
+    fn invoke_runs_set_true_and_rejects_non_action_slots() {
+        let state = make_state();
+        ok(apply(
+            &state,
+            SoxOp::Invoke {
+                comp_id: A,
+                slot_idx: S_ACTION,
+            },
+        ));
+        assert_eq!(slot_value(&state, A, S_BOOL), SlotValue::Bool(true));
+
+        let bad = |comp_id, slot_idx| err_code(apply(&state, SoxOp::Invoke { comp_id, slot_idx }));
+        assert_eq!(bad(A, S_FLOAT), "BAD_REQUEST");
+        assert_eq!(bad(A, 99), "BAD_REQUEST");
+        assert_eq!(bad(MISSING, S_ACTION), "NOT_FOUND");
+    }
+
+    #[test]
+    fn reorder_sets_children_and_missing_is_not_found() {
+        let state = make_state();
+        ok(apply(
+            &state,
+            SoxOp::Reorder {
+                comp_id: ROOT,
+                children: vec![B, A],
+            },
+        ));
+        assert_eq!(
+            state.tree.read().unwrap().get(ROOT).unwrap().children,
+            vec![B, A]
+        );
+        assert_eq!(
+            err_code(apply(
+                &state,
+                SoxOp::Reorder {
+                    comp_id: MISSING,
+                    children: vec![],
+                },
+            )),
+            "NOT_FOUND"
+        );
+    }
+
+    #[test]
+    fn query_rejects_unknown_query_type_and_unknown_type() {
+        let state = make_state();
+        let q = |query_type, kit_id, type_id| {
+            apply(
+                &state,
+                SoxOp::Query {
+                    query_type,
+                    kit_id,
+                    type_id,
+                },
+            )
+        };
+        assert_eq!(err_code(q('x', 0, 0)), "BAD_REQUEST");
+        assert_eq!(err_code(q('s', 250, 250)), "NOT_FOUND");
+    }
+
+    // ── subscriptions ──────────────────────────────
+
+    #[test]
+    fn subscribe_unsubscribe_and_close_watch_track_the_session() {
+        let state = make_state();
+        let mut session = Session::default();
+
+        let reply = ok(session.apply(
+            &state,
+            SoxOp::Subscribe {
+                comp_ids: vec![A, B, MISSING],
+            },
+        ));
+        assert_eq!(reply["count"], 3);
+        // Only components that exist get a primed cache.
+        assert_eq!(session.cov_cache.len(), 2);
+        assert_eq!(session.cov_cache[&A].len(), 6);
+
+        let reply = ok(session.apply(&state, SoxOp::Unsubscribe { comp_ids: vec![A] }));
+        assert_eq!(reply["count"], 2);
+        assert!(!session.subscribed.contains(&A));
+        assert!(!session.cov_cache.contains_key(&A));
+
+        let reply = ok(session.apply(
+            &state,
+            SoxOp::CloseWatch {
+                watch_id: "w1".into(),
+            },
+        ));
+        assert_eq!(reply["unsubscribed"], 2);
+        assert!(session.subscribed.is_empty());
+        assert!(session.cov_cache.is_empty());
+        assert!(session.tree_cache.is_empty());
+    }
+
+    // ── tags ───────────────────────────────────────
+
+    fn set_tags(comp_id: u16, tags: JsonValue) -> SoxOp {
+        SoxOp::SetTags { comp_id, tags }
+    }
+
+    #[test]
+    fn tags_round_trip_and_delete() {
+        let state = make_state();
+        ok(apply(
+            &state,
+            set_tags(A, json!({ "site": "roof", "n": 3 })),
+        ));
+
+        let tags = ok(apply(&state, SoxOp::ReadTags { comp_id: A }));
+        assert_eq!(tags["tags"].as_object().unwrap().len(), 2);
+        // Tags also show up in the component detail.
+        let detail = ok(apply(&state, SoxOp::ReadComp { comp_id: A }));
+        assert_eq!(detail["tags"].as_object().unwrap().len(), 2);
+
+        let del = |key: &str| {
+            ok(apply(
+                &state,
+                SoxOp::DeleteTag {
+                    comp_id: A,
+                    key: key.into(),
+                },
+            ))
+        };
+        assert_eq!(del("site")["removed"], true);
+        assert_eq!(del("site")["removed"], false);
+        let tags = ok(apply(&state, SoxOp::ReadTags { comp_id: A }));
+        assert_eq!(tags["tags"].as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn set_tags_rejects_bad_input_and_keeps_nothing_of_a_failed_batch() {
+        let state = make_state();
+        assert_eq!(
+            err_code(apply(&state, set_tags(A, json!([1, 2])))),
+            "BAD_REQUEST"
+        );
+        assert_eq!(
+            err_code(apply(&state, set_tags(A, json!("x")))),
+            "BAD_REQUEST"
+        );
+        // One good and one bad name: nothing is stored.
+        assert_eq!(
+            err_code(apply(
+                &state,
+                set_tags(A, json!({ "good": 1, "Bad Name": 2 }))
+            )),
+            "BAD_REQUEST"
+        );
+        // Per-component limit is 4 in this test state.
+        assert_eq!(
+            err_code(apply(
+                &state,
+                set_tags(A, json!({ "a": 1, "b": 2, "c": 3, "d": 4, "e": 5 }))
+            )),
+            "LIMIT_EXCEEDED"
+        );
+        let tags = ok(apply(&state, SoxOp::ReadTags { comp_id: A }));
+        assert!(tags["tags"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn tag_ops_without_a_store_are_not_supported() {
+        let mut state = make_state();
+        state.dyn_store = None;
+        assert_eq!(
+            err_code(apply(&state, SoxOp::ReadTags { comp_id: A })),
+            "NOT_SUPPORTED"
+        );
+        assert_eq!(
+            err_code(apply(&state, set_tags(A, json!({ "a": 1 })))),
+            "NOT_SUPPORTED"
+        );
+        assert_eq!(
+            err_code(apply(
+                &state,
+                SoxOp::DeleteTag {
+                    comp_id: A,
+                    key: "a".into(),
+                },
+            )),
+            "NOT_SUPPORTED"
+        );
+    }
+
+    #[test]
+    fn set_format_accepts_json_and_trio_only() {
+        let state = make_state();
+        let f = |s: &str| apply(&state, SoxOp::SetFormat { format: s.into() });
+        ok(f("json"));
+        ok(f("trio"));
+        assert_eq!(err_code(f("xml")), "BAD_REQUEST");
+        assert_eq!(err_code(f("")), "BAD_REQUEST");
+    }
 }

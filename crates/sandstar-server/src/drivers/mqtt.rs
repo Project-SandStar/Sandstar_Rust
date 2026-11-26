@@ -129,6 +129,46 @@ fn qos_from_u8(qos: u8) -> QoS {
 /// Maximum age for a cached value before `sync_cur()` treats it as stale.
 const MQTT_CACHE_MAX_AGE: Duration = Duration::from_secs(600);
 
+/// First wait before the event loop tries the broker again after an
+/// error. Doubles on each error in a row (R-25, S-51).
+pub const MQTT_RECONNECT_MIN: Duration = Duration::from_secs(1);
+
+/// Longest wait between two connection attempts.
+pub const MQTT_RECONNECT_MAX: Duration = Duration::from_secs(60);
+
+/// How long `open()` waits for the first CONNACK before it returns with
+/// the driver still down (the event loop keeps trying).
+pub const MQTT_OPEN_WAIT: Duration = Duration::from_secs(2);
+
+/// The error of reads and writes while the broker is not connected.
+const NOT_CONNECTED: &str = "mqtt broker not connected";
+
+/// Wait before the next connection attempt: 1 s, 2 s, 4 s, ... 60 s.
+#[derive(Debug)]
+struct ReconnectDelay {
+    next: Duration,
+}
+
+impl ReconnectDelay {
+    fn new() -> Self {
+        Self {
+            next: MQTT_RECONNECT_MIN,
+        }
+    }
+
+    /// The wait for this attempt; the following one is twice as long.
+    fn next(&mut self) -> Duration {
+        let d = self.next;
+        self.next = self.next.saturating_mul(2).min(MQTT_RECONNECT_MAX);
+        d
+    }
+
+    /// Connected: start over.
+    fn reset(&mut self) {
+        self.next = MQTT_RECONNECT_MIN;
+    }
+}
+
 // ── Value cache ────────────────────────────────────────────
 
 /// The latest payload of a topic with the time it arrived.
@@ -182,6 +222,12 @@ impl MqttValueCache {
             .get(topic)
             .filter(|e| e.updated_at.elapsed() < max_age)
             .cloned()
+    }
+
+    /// Forget every value: after a reconnect only what the broker sends
+    /// again counts as a reading.
+    fn clear(&mut self) {
+        self.entries.clear();
     }
 
     /// Drop the cached entry for a topic, if any.
@@ -278,6 +324,9 @@ pub struct MqttDriver {
     objects: HashMap<u32, MqttObjectConfig>,
     /// Shared value cache populated by the event-loop task.
     cache: Arc<Mutex<MqttValueCache>>,
+    /// Whether the broker connection is up, as reported by the event-loop
+    /// task. `None` until `open()` and after `close()`.
+    connected: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 impl MqttDriver {
@@ -316,7 +365,27 @@ impl MqttDriver {
             event_loop_task: None,
             objects,
             cache: Arc::new(Mutex::new(MqttValueCache::new())),
+            connected: None,
         }
+    }
+
+    /// Whether the broker connection is up right now.
+    fn is_connected(&self) -> bool {
+        self.connected.as_ref().is_some_and(|rx| *rx.borrow())
+    }
+
+    /// Bring `status` in line with the connection: `Ok` while connected,
+    /// `Down` while the event loop is reconnecting. A driver that was
+    /// never opened, was closed or faulted keeps its status.
+    fn refresh_status(&mut self) {
+        if self.connected.is_none() {
+            return;
+        }
+        self.status = if self.is_connected() {
+            DriverStatus::Ok
+        } else {
+            DriverStatus::Down
+        };
     }
 
     /// Immutable view of the parsed config.
@@ -369,7 +438,13 @@ impl AsyncDriver for MqttDriver {
     }
 
     fn status(&self) -> &DriverStatus {
-        &self.status
+        // While open, the status is the connection state as the event loop
+        // reports it, not what the last poll saw (S-51).
+        match &self.connected {
+            Some(rx) if *rx.borrow() => &DriverStatus::Ok,
+            Some(_) => &DriverStatus::Down,
+            None => &self.status,
+        }
     }
 
     fn poll_mode(&self) -> PollMode {
@@ -385,6 +460,14 @@ impl AsyncDriver for MqttDriver {
         }
         if let Some(task) = self.event_loop_task.take() {
             task.abort();
+        }
+        self.connected = None;
+
+        // A config that asks for TLS must not connect in plain text.
+        if self.config.tls {
+            let msg = "mqtt TLS is not supported in this build";
+            self.status = DriverStatus::Fault(msg.into());
+            return Err(DriverError::ConfigFault(msg.into()));
         }
 
         // Build MqttOptions from config.
@@ -415,18 +498,62 @@ impl AsyncDriver for MqttDriver {
         );
         let cache = Arc::clone(&self.cache);
         let task_topic_map = Arc::clone(&topic_map);
+        let (connected_tx, mut connected_rx) = tokio::sync::watch::channel(false);
+        let task_client = client.clone();
+        let subscriptions: Vec<(String, QoS)> = self
+            .config
+            .objects
+            .iter()
+            .filter_map(|o| {
+                o.subscribe_topic
+                    .as_ref()
+                    .map(|t| (t.clone(), qos_from_u8(o.qos)))
+            })
+            .collect();
 
         // Spawn the event loop task. Incoming publishes are parsed and
-        // pushed into the shared value cache.
+        // pushed into the shared value cache. After an error the loop
+        // waits and polls again: rumqttc reconnects on the next poll.
         let task = tokio::spawn(async move {
+            let mut delay = ReconnectDelay::new();
+            // Whether the current outage has been logged at warn.
+            let mut outage_logged = false;
+            // Subscribes of the latest connection; replaced on reconnect.
+            let mut subscriber: Option<JoinHandle<()>> = None;
             loop {
                 match eventloop.poll().await {
                     Ok(Event::Incoming(Incoming::ConnAck(ack))) => {
-                        tracing::debug!(
+                        tracing::info!(
                             driver = %driver_id,
                             ?ack,
                             "mqtt connected"
                         );
+                        delay.reset();
+                        outage_logged = false;
+                        // Values from before the outage are not readings.
+                        cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
+                        // The broker forgot the subscriptions (clean
+                        // session). Subscribe from a separate task: this
+                        // loop must keep polling to drain the request queue.
+                        if let Some(old) = subscriber.take() {
+                            old.abort();
+                        }
+                        let client = task_client.clone();
+                        let topics = subscriptions.clone();
+                        let id = driver_id.clone();
+                        subscriber = Some(tokio::spawn(async move {
+                            for (topic, qos) in topics {
+                                if let Err(e) = client.subscribe(topic.clone(), qos).await {
+                                    tracing::warn!(
+                                        driver = %id,
+                                        topic = %topic,
+                                        error = %e,
+                                        "mqtt subscribe failed"
+                                    );
+                                }
+                            }
+                        }));
+                        connected_tx.send_replace(true);
                     }
                     Ok(Event::Incoming(Incoming::Publish(p))) => {
                         let payload_str = match std::str::from_utf8(&p.payload) {
@@ -473,6 +600,20 @@ impl AsyncDriver for MqttDriver {
                             }
                         }
                     }
+                    Ok(Event::Incoming(Incoming::SubAck(ack))) => {
+                        let refused = ack
+                            .return_codes
+                            .iter()
+                            .filter(|c| matches!(c, rumqttc::SubscribeReasonCode::Failure))
+                            .count();
+                        if refused > 0 {
+                            tracing::warn!(
+                                driver = %driver_id,
+                                refused,
+                                "mqtt broker refused a subscription; its topic will not deliver"
+                            );
+                        }
+                    }
                     Ok(ev) => {
                         tracing::debug!(
                             driver = %driver_id,
@@ -481,34 +622,55 @@ impl AsyncDriver for MqttDriver {
                         );
                     }
                     Err(e) => {
-                        tracing::warn!(
-                            driver = %driver_id,
-                            error = %e,
-                            "mqtt event loop error"
-                        );
-                        break;
+                        connected_tx.send_replace(false);
+                        if let Some(old) = subscriber.take() {
+                            old.abort();
+                        }
+                        // rumqttc keeps unacknowledged and unsent requests
+                        // and replays them after the reconnect. A publish
+                        // must not reach equipment that late, and the
+                        // subscriptions are made again on CONNACK.
+                        let dropped = eventloop.pending.len();
+                        eventloop.pending.clear();
+                        if dropped > 0 {
+                            tracing::warn!(
+                                driver = %driver_id,
+                                dropped,
+                                "mqtt requests not delivered before the disconnect were dropped"
+                            );
+                        }
+                        let wait = delay.next();
+                        if outage_logged {
+                            tracing::debug!(
+                                driver = %driver_id,
+                                error = %e,
+                                retry_in_secs = wait.as_secs(),
+                                "mqtt still not connected"
+                            );
+                        } else {
+                            outage_logged = true;
+                            tracing::warn!(
+                                driver = %driver_id,
+                                error = %e,
+                                retry_in_secs = wait.as_secs(),
+                                "mqtt not connected; retrying"
+                            );
+                        }
+                        tokio::time::sleep(wait).await;
                     }
                 }
             }
         });
 
-        // Subscribe to every configured subscribe_topic.
-        for object in &self.config.objects {
-            if let Some(topic) = object.subscribe_topic.as_ref() {
-                let qos = qos_from_u8(object.qos);
-                if let Err(e) = client.subscribe(topic.clone(), qos).await {
-                    self.status = DriverStatus::Fault(format!("subscribe failed: {e}"));
-                    task.abort();
-                    return Err(DriverError::CommFault(format!(
-                        "mqtt subscribe '{topic}': {e}"
-                    )));
-                }
-            }
-        }
+        // Give the first CONNACK a moment, so that a reachable broker
+        // shows as Ok right away. If it does not come, the driver is Down
+        // and the event loop keeps trying.
+        let _ = tokio::time::timeout(MQTT_OPEN_WAIT, connected_rx.wait_for(|up| *up)).await;
 
         self.client = Some(client);
         self.event_loop_task = Some(task);
-        self.status = DriverStatus::Ok;
+        self.connected = Some(connected_rx);
+        self.refresh_status();
 
         Ok(DriverMeta {
             model: Some(format!("MQTT {}:{}", self.config.host, self.config.port)),
@@ -523,15 +685,22 @@ impl AsyncDriver for MqttDriver {
         if let Some(task) = self.event_loop_task.take() {
             task.abort();
         }
+        self.connected = None;
         self.status = DriverStatus::Down;
     }
 
     async fn ping(&mut self) -> Result<DriverMeta, DriverError> {
+        self.refresh_status();
         match &self.event_loop_task {
-            Some(task) if !task.is_finished() => Ok(DriverMeta {
-                model: Some(format!("MQTT {}:{}", self.config.host, self.config.port)),
-                ..Default::default()
-            }),
+            Some(task) if !task.is_finished() => {
+                if !self.is_connected() {
+                    return Err(DriverError::CommFault(NOT_CONNECTED.into()));
+                }
+                Ok(DriverMeta {
+                    model: Some(format!("MQTT {}:{}", self.config.host, self.config.port)),
+                    ..Default::default()
+                })
+            }
             _ => Err(DriverError::CommFault("mqtt event loop dead".into())),
         }
     }
@@ -556,6 +725,8 @@ impl AsyncDriver for MqttDriver {
     }
 
     async fn sync_cur(&mut self, points: &[DriverPointRef], ctx: &mut SyncContext) {
+        self.refresh_status();
+        let connected = self.is_connected();
         for point in points {
             let obj = match self.objects.get(&point.point_id) {
                 Some(o) => o,
@@ -581,6 +752,13 @@ impl AsyncDriver for MqttDriver {
                     continue;
                 }
             };
+
+            // Not connected: nothing arrives, so a cached value is not a
+            // reading (S-51).
+            if !connected {
+                ctx.update_cur_err(point.point_id, DriverError::CommFault(NOT_CONNECTED.into()));
+                continue;
+            }
 
             let cached = {
                 let guard = match self.cache.lock() {
@@ -611,6 +789,7 @@ impl AsyncDriver for MqttDriver {
     }
 
     async fn write(&mut self, writes: &[(u32, f64)], ctx: &mut WriteContext) {
+        self.refresh_status();
         for &(point_id, value) in writes {
             // 1. Look up per-point config.
             let obj = match self.objects.get(&point_id).cloned() {
@@ -660,6 +839,13 @@ impl AsyncDriver for MqttDriver {
                 }
             };
 
+            // A publish queued while disconnected would reach the
+            // equipment late, after the reconnect (S-51).
+            if !self.is_connected() {
+                ctx.update_write_err(point_id, DriverError::CommFault(NOT_CONNECTED.into()));
+                continue;
+            }
+
             // 6. Publish (retain=false). Map errors to CommFault.
             match client
                 .publish(topic, qos, false, payload)
@@ -685,6 +871,13 @@ impl MqttDriver {
         let mut ctx = SyncContext::new();
         <Self as AsyncDriver>::sync_cur(self, points, &mut ctx).await;
         ctx.into_results()
+    }
+
+    /// Test helper: behave as if the broker connection were up, without a
+    /// broker.
+    fn mark_connected_for_test(&mut self) {
+        let (_tx, rx) = tokio::sync::watch::channel(true);
+        self.connected = Some(rx);
     }
 
     /// Test helper: call `write` and collect results as a Vec.
@@ -910,6 +1103,7 @@ mod tests {
             objects: vec![sample_object(12, "t/12")],
         };
         let mut d = MqttDriver::from_config(config);
+        d.mark_connected_for_test();
         let refs = vec![DriverPointRef {
             point_id: 12,
             address: "12".into(),
@@ -1103,6 +1297,7 @@ mod tests {
             objects: vec![sample_object(12, "t/12")],
         };
         let mut d = MqttDriver::from_config(config);
+        d.mark_connected_for_test();
         // Populate the cache directly — tests can reach private fields
         // because they live in the same module.
         d.cache.lock().unwrap().update("t/12", 73.25);
@@ -1261,5 +1456,344 @@ mod tests {
             .to_string();
         assert!(!err.contains("987654321"), "{err}");
         assert!(err.contains("secret must be a string"));
+    }
+
+    // ── Reconnect and connection state (R-25, S-51) ─────────
+
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    enum BrokerCmd {
+        /// Send a QoS 0 PUBLISH to the connected client.
+        Publish(String, String),
+        /// Close the current connection.
+        Drop,
+    }
+
+    /// A minimal MQTT 3.1.1 broker: CONNACK, SUBACK, PUBACK, PINGRESP, and
+    /// publishes on command. While `down` is set it closes every new
+    /// connection at once.
+    struct MockBroker {
+        port: u16,
+        cmd: tokio::sync::mpsc::Sender<BrokerCmd>,
+        down: Arc<AtomicBool>,
+        connects: Arc<AtomicUsize>,
+        subscribed: Arc<Mutex<Vec<String>>>,
+        published: Arc<Mutex<Vec<(String, String)>>>,
+        /// Whether QoS 1 publishes are acknowledged (default: yes).
+        ack_publishes: Arc<AtomicBool>,
+    }
+
+    fn remaining_length(mut n: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let mut b = (n % 128) as u8;
+            n /= 128;
+            if n > 0 {
+                b |= 0x80;
+            }
+            out.push(b);
+            if n == 0 {
+                return out;
+            }
+        }
+    }
+
+    /// Read one packet: (first header byte, body).
+    async fn read_packet(s: &mut tokio::net::TcpStream) -> Option<(u8, Vec<u8>)> {
+        let head = s.read_u8().await.ok()?;
+        let (mut len, mut shift) = (0usize, 0u32);
+        loop {
+            let b = s.read_u8().await.ok()?;
+            len |= ((b & 0x7f) as usize) << shift;
+            if b & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+            if shift > 21 {
+                return None;
+            }
+        }
+        let mut body = vec![0u8; len];
+        s.read_exact(&mut body).await.ok()?;
+        Some((head, body))
+    }
+
+    fn take_str(body: &[u8], at: usize) -> Option<(String, usize)> {
+        let len = u16::from_be_bytes([*body.get(at)?, *body.get(at + 1)?]) as usize;
+        let s = body.get(at + 2..at + 2 + len)?;
+        Some((String::from_utf8_lossy(s).into_owned(), at + 2 + len))
+    }
+
+    impl MockBroker {
+        async fn start() -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (cmd, mut cmd_rx) = tokio::sync::mpsc::channel::<BrokerCmd>(16);
+            let down = Arc::new(AtomicBool::new(false));
+            let connects = Arc::new(AtomicUsize::new(0));
+            let subscribed = Arc::new(Mutex::new(Vec::new()));
+            let published = Arc::new(Mutex::new(Vec::new()));
+            let ack_publishes = Arc::new(AtomicBool::new(true));
+            let (d, c, s, p, ap) = (
+                down.clone(),
+                connects.clone(),
+                subscribed.clone(),
+                published.clone(),
+                ack_publishes.clone(),
+            );
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut sock, _)) = listener.accept().await else {
+                        return;
+                    };
+                    if d.load(Ordering::SeqCst) {
+                        continue; // closes the connection
+                    }
+                    loop {
+                        tokio::select! {
+                            pkt = read_packet(&mut sock) => {
+                                let Some((head, body)) = pkt else { break };
+                                match head >> 4 {
+                                    1 => {
+                                        c.fetch_add(1, Ordering::SeqCst);
+                                        let _ = sock.write_all(&[0x20, 0x02, 0x00, 0x00]).await;
+                                    }
+                                    8 => {
+                                        let mut at = 2;
+                                        let mut granted = Vec::new();
+                                        while let Some((topic, next)) = take_str(&body, at) {
+                                            s.lock().unwrap().push(topic);
+                                            granted.push(*body.get(next).unwrap_or(&0));
+                                            at = next + 1;
+                                        }
+                                        let mut ack = vec![0x90, (2 + granted.len()) as u8, body[0], body[1]];
+                                        ack.extend(granted);
+                                        let _ = sock.write_all(&ack).await;
+                                    }
+                                    3 => {
+                                        let qos = (head >> 1) & 3;
+                                        if let Some((topic, mut at)) = take_str(&body, 0) {
+                                            if qos > 0 {
+                                                if ap.load(Ordering::SeqCst) {
+                                                    let _ = sock.write_all(&[0x40, 0x02, body[at], body[at + 1]]).await;
+                                                }
+                                                at += 2;
+                                            }
+                                            let payload = String::from_utf8_lossy(&body[at..]).into_owned();
+                                            p.lock().unwrap().push((topic, payload));
+                                        }
+                                    }
+                                    12 => { let _ = sock.write_all(&[0xD0, 0x00]).await; }
+                                    14 => break,
+                                    _ => {}
+                                }
+                            }
+                            cmd = cmd_rx.recv() => match cmd {
+                                Some(BrokerCmd::Publish(topic, payload)) => {
+                                    let mut body = (topic.len() as u16).to_be_bytes().to_vec();
+                                    body.extend(topic.as_bytes());
+                                    body.extend(payload.as_bytes());
+                                    let mut pkt = vec![0x30];
+                                    pkt.extend(remaining_length(body.len()));
+                                    pkt.extend(body);
+                                    let _ = sock.write_all(&pkt).await;
+                                }
+                                Some(BrokerCmd::Drop) => break,
+                                None => return,
+                            }
+                        }
+                    }
+                }
+            });
+            Self {
+                port,
+                cmd,
+                down,
+                connects,
+                subscribed,
+                published,
+                ack_publishes,
+            }
+        }
+
+        async fn publish(&self, topic: &str, payload: &str) {
+            self.cmd
+                .send(BrokerCmd::Publish(topic.into(), payload.into()))
+                .await
+                .unwrap();
+        }
+    }
+
+    fn broker_driver(port: u16) -> MqttDriver {
+        MqttDriver::from_config(MqttConfig {
+            id: "mq".into(),
+            host: "127.0.0.1".into(),
+            port,
+            client_id: "sandstar-test".into(),
+            username: None,
+            password: None,
+            tls: false,
+            keep_alive_secs: 60,
+            objects: vec![MqttObjectConfig {
+                point_id: 7,
+                subscribe_topic: Some("t/7".into()),
+                publish_topic: Some("t/7/set".into()),
+                value_path: None,
+                qos: 1,
+            }],
+        })
+    }
+
+    fn point7() -> Vec<DriverPointRef> {
+        vec![DriverPointRef {
+            point_id: 7,
+            address: String::new(),
+        }]
+    }
+
+    /// Wait (real time, at most `secs`) until `cond` holds.
+    async fn until(secs: u64, mut cond: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        while Instant::now() < deadline {
+            if cond() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        cond()
+    }
+
+    /// Poll `sync_cur` until point 7 reads `want`.
+    async fn reads(d: &mut MqttDriver, want: f64, secs: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        loop {
+            if matches!(d.sync_cur_vec(&point7()).await[0].1, Ok(v) if v == want) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[test]
+    fn the_reconnect_wait_doubles_up_to_a_minute_and_starts_over() {
+        let mut d = ReconnectDelay::new();
+        let waits: Vec<u64> = (0..9).map(|_| d.next().as_secs()).collect();
+        assert_eq!(waits, vec![1, 2, 4, 8, 16, 32, 60, 60, 60]);
+        d.reset();
+        assert_eq!(d.next(), MQTT_RECONNECT_MIN);
+    }
+
+    #[tokio::test]
+    async fn a_config_that_asks_for_tls_is_refused() {
+        let mut cfg = broker_driver(1).config().clone();
+        cfg.tls = true;
+        let mut d = MqttDriver::from_config(cfg);
+        let err = d.open().await.unwrap_err();
+        assert!(matches!(err, DriverError::ConfigFault(m) if m.contains("TLS")));
+        assert!(matches!(d.status(), DriverStatus::Fault(_)));
+        assert!(d.client.is_none());
+    }
+
+    #[tokio::test]
+    async fn open_without_a_broker_leaves_the_driver_down_and_retrying() {
+        // Nothing listens on this port.
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let mut d = broker_driver(port);
+        d.open()
+            .await
+            .expect("open returns while the loop keeps trying");
+        assert_eq!(d.status(), &DriverStatus::Down);
+        assert!(matches!(
+            &d.sync_cur_vec(&point7()).await[0].1,
+            Err(DriverError::CommFault(m)) if m == NOT_CONNECTED
+        ));
+        assert!(d.ping().await.is_err());
+        // The event loop is still alive.
+        assert!(d.event_loop_task.as_ref().is_some_and(|t| !t.is_finished()));
+        d.close().await;
+    }
+
+    #[tokio::test]
+    async fn the_driver_reconnects_resubscribes_and_hides_nothing_meanwhile() {
+        let broker = MockBroker::start().await;
+        let mut d = broker_driver(broker.port);
+        d.open().await.expect("open");
+        assert_eq!(d.status(), &DriverStatus::Ok);
+        assert!(until(3, || broker.subscribed.lock().unwrap().len() == 1).await);
+        broker.publish("t/7", "21.5").await;
+        assert!(reads(&mut d, 21.5, 3).await);
+
+        // The broker goes away.
+        broker.down.store(true, Ordering::SeqCst);
+        broker.cmd.send(BrokerCmd::Drop).await.unwrap();
+        assert!(until(3, || !d.is_connected()).await);
+        // The status shows it before any poll.
+        assert_eq!(d.status(), &DriverStatus::Down);
+        // The value from before is not served.
+        let res = d.sync_cur_vec(&point7()).await;
+        assert!(
+            matches!(&res[0].1, Err(DriverError::CommFault(m)) if m == NOT_CONNECTED),
+            "{res:?}"
+        );
+        assert_eq!(d.status(), &DriverStatus::Down);
+        // A write is refused, not queued.
+        let w = d.write_vec(&[(7, 5.0)]).await;
+        assert!(matches!(&w[0].1, Err(DriverError::CommFault(m)) if m == NOT_CONNECTED));
+
+        // The broker comes back: reconnect and subscribe again.
+        broker.down.store(false, Ordering::SeqCst);
+        assert!(until(10, || d.is_connected()).await, "no reconnect");
+        assert!(broker.connects.load(Ordering::SeqCst) >= 2);
+        assert!(until(3, || broker.subscribed.lock().unwrap().len() == 2).await);
+        // Nothing cached from before the outage.
+        let res = d.sync_cur_vec(&point7()).await;
+        assert!(
+            matches!(&res[0].1, Err(DriverError::CommFault(_))),
+            "{res:?}"
+        );
+        assert_eq!(d.status(), &DriverStatus::Ok);
+        broker.publish("t/7", "22").await;
+        assert!(reads(&mut d, 22.0, 3).await);
+
+        // A write now goes out; the refused one never did.
+        let w = d.write_vec(&[(7, 6.0)]).await;
+        assert!(w[0].1.is_ok(), "{w:?}");
+        assert!(until(3, || !broker.published.lock().unwrap().is_empty()).await);
+        assert_eq!(
+            *broker.published.lock().unwrap(),
+            vec![("t/7/set".to_string(), "6".to_string())]
+        );
+        d.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_write_the_broker_never_acknowledged_is_not_sent_again_after_a_reconnect() {
+        let broker = MockBroker::start().await;
+        let mut d = broker_driver(broker.port);
+        d.open().await.expect("open");
+        assert!(until(3, || broker.subscribed.lock().unwrap().len() == 1).await);
+
+        // The broker receives the publish but never acknowledges it, then
+        // the connection drops.
+        broker.ack_publishes.store(false, Ordering::SeqCst);
+        let w = d.write_vec(&[(7, 5.0)]).await;
+        assert!(w[0].1.is_ok(), "{w:?}");
+        assert!(until(3, || broker.published.lock().unwrap().len() == 1).await);
+        broker.cmd.send(BrokerCmd::Drop).await.unwrap();
+        assert!(until(3, || !d.is_connected()).await);
+
+        // After the reconnect the old publish is not delivered again.
+        assert!(until(10, || d.is_connected()).await, "no reconnect");
+        assert!(until(3, || broker.subscribed.lock().unwrap().len() == 2).await);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(broker.published.lock().unwrap().len(), 1);
+        d.close().await;
     }
 }

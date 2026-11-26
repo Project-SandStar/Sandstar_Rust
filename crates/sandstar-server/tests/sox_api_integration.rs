@@ -380,3 +380,80 @@ async fn add_with_invalid_name_is_rejected() {
     .await;
     assert_eq!(s, 400, "empty name should be 400, got {s} body={body}");
 }
+
+/// A value the slot cannot hold is refused, not skipped and reported as
+/// done (S-54).
+#[tokio::test]
+async fn invoke_with_a_value_that_does_not_fit_the_slot_is_rejected() {
+    let ctx = boot().await;
+    let id = add(&ctx, 0, "inv1").await;
+    let path = format!("/api/sox/comp/{id}/invoke/meta");
+
+    for bad in [json!(3_000_000_000u64), json!("5"), json!(1.5)] {
+        let (s, b) = http("POST", &ctx.host_port, &path, Some(json!({ "value": bad }))).await;
+        assert_eq!(s, 400, "value {bad}: status={s}, body={b}");
+    }
+
+    let (s, b) = http("POST", &ctx.host_port, &path, Some(json!({ "value": 5 }))).await;
+    assert_eq!(s, 204, "status={s}, body={b}");
+}
+
+/// Deleting a parent takes its children with it (R-61, S-55).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_comp_removes_its_children_too() {
+    let ctx = boot().await;
+    let parent = add(&ctx, 0, "par1").await;
+    let child = add(&ctx, parent, "kid1").await;
+    let grandchild = add(&ctx, child, "kid2").await;
+    let other = add(&ctx, 0, "oth1").await;
+
+    let link = json!({ "fromComp": grandchild, "fromSlot": 0, "toComp": other, "toSlot": 0 });
+    let (s, b) = http("POST", &ctx.host_port, "/api/sox/link", Some(link)).await;
+    assert_eq!(s, 201, "link: {b}");
+
+    let (s, _) = http(
+        "DELETE",
+        &ctx.host_port,
+        &format!("/api/sox/comp/{parent}"),
+        None,
+    )
+    .await;
+    assert_eq!(s, 204);
+
+    for id in [parent, child, grandchild] {
+        let (s, _) = http("GET", &ctx.host_port, &format!("/api/sox/comp/{id}"), None).await;
+        assert_eq!(s, 404, "component {id} is still there");
+    }
+    let (s, b) = http(
+        "GET",
+        &ctx.host_port,
+        &format!("/api/sox/comp/{other}"),
+        None,
+    )
+    .await;
+    assert_eq!(s, 200);
+    let v: Value = serde_json::from_str(&b).expect("comp JSON");
+    assert_eq!(v["links"].as_array().map(Vec::len), Some(0), "{b}");
+}
+
+/// A link needs two components that exist (R-60, S-55). Slot range is only
+/// checked for types the manifest knows; that is covered by unit tests.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn link_to_a_missing_component_is_rejected() {
+    let ctx = boot().await;
+    let src = add(&ctx, 0, "src2").await;
+    let dst = add(&ctx, 0, "dst2").await;
+    let post = |body: Value| http("POST", &ctx.host_port, "/api/sox/link", Some(body));
+
+    let (s, _) =
+        post(json!({ "fromComp": src, "fromSlot": 0, "toComp": 60000, "toSlot": 0 })).await;
+    assert_eq!(s, 404, "missing target");
+    let (s, _) =
+        post(json!({ "fromComp": 60000, "fromSlot": 0, "toComp": dst, "toSlot": 0 })).await;
+    assert_eq!(s, 404, "missing source");
+
+    let (s, _) = post(json!({ "fromComp": src, "fromSlot": 0, "toComp": dst, "toSlot": 0 })).await;
+    assert_eq!(s, 201);
+    let (s, _) = post(json!({ "fromComp": src, "fromSlot": 0, "toComp": dst, "toSlot": 0 })).await;
+    assert_eq!(s, 409, "duplicate keeps its old status");
+}

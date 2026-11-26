@@ -42,19 +42,20 @@ cargo arm-deb --no-strip
 - Check it with `dpkg-deb -I <deb>` (version, maintainer scripts) and `dpkg-deb -c <deb>` (binaries, unit files, `initialize.sh`, 16 tables).
 
 **Package facts that matter for a deploy:**
-- **`prerm`** stops `sandstar-engine` (and the legacy `sandstar-rust-validate` unit if it runs).
+- **`prerm`** stops `sandstar-engine`.
 - **`postinst`:**
   - creates the directories;
   - runs `chown -R eacio:root /home/eacio/sandstar/`, `daemon-reload` and `enable`;
+  - removes an old `/etc/systemd/system/sandstar-rust-validate.service` (retired in S-52) unless that unit is running;
   - **starts or restarts the engine itself**. `dpkg -i` alone brings the service back up.
 - **`postrm purge` deletes `/var/log/sandstar`.** Never use `dpkg -P` / `--purge` on a device whose logs matter.
-- **Conffiles:** `sandstar-engine.service`, `sandstar-rust-validate.service`, `initialize.sh`, `/etc/logrotate.d/sandstar`. If the device copy differs from the packaged one, `dpkg -i` asks what to do. Compare first (§4).
+- **Conffiles:** `sandstar-engine.service`, `initialize.sh`, `/etc/logrotate.d/sandstar`. If the device copy differs from the packaged one, `dpkg -i` asks what to do. Compare first (§4).
 - **Not package-owned** (survive upgrades; must be in the backup):
   - systemd drop-ins under `/etc/systemd/system/sandstar-engine.service.d/` (driver configs, file-root);
   - `/etc/sandstar`;
   - site configuration under `/home/eacio/sandstar/etc/`;
   - any device-only table files.
-- **Legacy contents:** the package still ships C-era helper scripts (`cutover-to-rust.sh`, `rollback-to-c.sh`, `validate-engines.sh`, `soak-monitor.sh`) and the `sandstar-rust-validate` unit. The C engine no longer exists on the device. Do not use these scripts.
+- **Monitoring scripts in the package (S-52):** `soak-monitor.sh` (run by hand for a soak; checks the `sandstar-engine` unit, `/health` on 8085, RSS, restarts (from changes of the unit start time: systemd 232 has no `NRestarts`) and new `ERROR` lines in the engine log file (the service user cannot read the journal); exit code 1 if any alert) and `health-monitor.sh` (cron, one line every 5 minutes: `OK fault= down= overruns= poll_ms= mem_kb= max_poll_ms=`, or `CRITICAL engine not healthy` / `WARNING diagnostics unreadable`). The C-era scripts (`cutover-to-rust.sh`, `rollback-to-c.sh`, `validate-engines.sh`) and the `sandstar-rust-validate` unit are no longer shipped; an upgrade removes them from the device. They are kept, unused, in `tools/kaldirilanlar/`.
 
 ## 4. Inspect the device (read-only)
 
@@ -101,11 +102,11 @@ Do **not** run a recursive `chmod`/`chown` of your own; `postinst` already sets 
 Read the journal soon after the start: it is volatile and holds well under an hour.
 
 1. **Build:** `curl -s http://localhost:8085/api/about` shows `2.9.x` with the new `<hash>`.
-   - `curl -sf http://localhost:8085/health` must succeed. Since S-21 it returns 503 (and `curl -f` fails) when the engine does not answer within 2 s; `tools/deploy-baha.sh` relies on this.
+   - `curl -sf http://localhost:8085/health` must succeed. Since S-21 it returns 503 (and `curl -f` fails) when the engine does not answer within 2 s; `tools/health-monitor.sh` and `tools/soak-monitor.sh` rely on this.
 2. **Unit:** `systemctl status sandstar-engine` is `active (running)`. The device's systemd has no `NRestarts` property, so use `systemctl show -p ActiveEnterTimestamp` instead.
 3. **`initialize.sh` output** (`journalctl -u sandstar-engine -b`, needs `sudo`): one GPIO60 line: `already exported`, `exported (attempt n)` or `export failed … ; pinmux`. It never fails the start.
 4. **Engine log** `/var/log/sandstar/sandstar-engine.log.<UTC-date>`:
-   - `tables loaded` with the expected count;
+   - `tables loaded` with the expected count (17 on device 1-6), and `loaded tables … skipped=0`. From S-56 on, each table that was left out has its own `table not loaded at start-up` error line with the table name and the reason; the service still starts, and a channel whose `database.zinc` row names that table reads as fault and refuses writes of engineering values;
    - a watchdog line saying GPIO60 was opened, or why not (the engine retries for about 5 minutes);
    - no repeated `poll cycle exceeded`;
    - from S-43 on, a stop or restart ends the previous run with `shutdown signal received (SIGTERM)`, `engine stopped … reason="SIGTERM"` and `watchdog: /dev/watchdog closed (magic close)` when `/dev/watchdog` was open. On the first deploy of S-43 the old binary is stopped, so these lines appear from the next restart on. `magic close failed`, `HAL shutdown skipped` or `exiting without waiting for the stuck poll` need a look;

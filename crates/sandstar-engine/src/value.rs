@@ -305,9 +305,17 @@ impl ValueConv {
             // Table reverse lookup
             let min = self.min.unwrap_or(0.0);
             let max = self.max.unwrap_or(100.0);
+            // No table, no write: the engineering value is not a raw value
+            // (R-63). It used to be written as it was.
             tables
                 .reverse_lookup(table_idx, cur, min, max)
-                .unwrap_or(cur)
+                .ok_or_else(|| {
+                    EngineError::ConversionFault(
+                        channel,
+                        "no raw value from the conversion table (table not loaded?); value not written"
+                            .to_string(),
+                    )
+                })?
         } else {
             // Range un-scaling
             let low = self.low.unwrap_or(0.0);
@@ -397,16 +405,17 @@ impl ValueConv {
                 return Ok(());
             }
 
-            // Normal table lookup (raw is within valid range)
-            tables.lookup(table_idx, raw, min, max).unwrap_or_else(|| {
-                // Fallback: range scaling
-                let range = high - low;
-                if range != 0.0 {
-                    raw / range
-                } else {
-                    0.0
+            // Normal table lookup (raw is within valid range). Without the
+            // table there is no reading: it used to fall back to range
+            // scaling and report the result as good (R-63).
+            match tables.lookup(table_idx, raw, min, max) {
+                Some(cur) => cur,
+                None => {
+                    value.status = EngineStatus::Fault;
+                    value.trigger = false;
+                    return Ok(());
                 }
-            })
+            }
         } else if self.low.is_some() && self.high.is_some() {
             // Range scaling (no table)
             let range = high - low;
@@ -1216,5 +1225,73 @@ mod tests {
         value.cur = 0.5;
         conv.revert(&mut value, &tables, 0).unwrap();
         assert!(value.raw.is_finite());
+    }
+
+    // ── S-56: a channel whose table is not there (R-63) ──
+
+    fn conv_with_table(index: usize) -> ValueConv {
+        ValueConv {
+            table_index: Some(index),
+            low: Some(0.0),
+            high: Some(4096.0),
+            min: Some(-40.0),
+            max: Some(120.0),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn convert_without_the_table_is_a_fault_not_a_scaled_reading() {
+        let tables = make_table_store();
+        for index in [7, crate::table::MISSING_TABLE] {
+            let mut value = EngineValue::default();
+            value.set_raw(2048.0);
+            let mut flow = None;
+            conv_with_table(index)
+                .convert(&mut value, &tables, 5, &mut flow)
+                .unwrap();
+            assert_eq!(value.status, crate::EngineStatus::Fault, "index {index}");
+            assert!(!value.trigger);
+            // It used to read 0.5 (raw / range) with status Ok.
+            assert!((value.cur - 0.5).abs() > 1e-9, "cur {}", value.cur);
+        }
+    }
+
+    #[test]
+    fn revert_without_the_table_is_refused_not_written_unconverted() {
+        let tables = make_table_store();
+        for index in [7, crate::table::MISSING_TABLE] {
+            let mut value = EngineValue::default();
+            value.set_cur(40.0);
+            let err = conv_with_table(index)
+                .revert(&mut value, &tables, 5)
+                .unwrap_err();
+            match err {
+                EngineError::ConversionFault(channel, reason) => {
+                    assert_eq!(channel, 5);
+                    assert!(reason.contains("table"), "{reason}");
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn revert_with_the_table_still_writes_a_finite_raw_value() {
+        let tables = make_table_store();
+        let idx = tables.find_by_tag("test_table").unwrap();
+        for cur in [
+            -1000.0, -40.0, -39.999, 0.0, 39.9999, 40.0, 79.123, 120.0, 1000.0,
+        ] {
+            let mut value = EngineValue::default();
+            value.set_cur(cur);
+            conv_with_table(idx).revert(&mut value, &tables, 5).unwrap();
+            assert!(value.raw.is_finite(), "cur {cur} -> raw {}", value.raw);
+            assert!(
+                (0.0..=4096.0).contains(&value.raw),
+                "cur {cur} -> raw {}",
+                value.raw
+            );
+        }
     }
 }

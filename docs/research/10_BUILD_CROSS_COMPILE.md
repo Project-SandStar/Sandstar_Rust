@@ -12,7 +12,7 @@
 > - *5. Linking Sedona VM (C) into Rust*: obsolete; `crates/sandstar-svm/build.rs` compiles no C. The server `build.rs` only embeds build time and git hash.
 > - *Configure Linker*, *4. `.cargo/config.toml` Configuration*: no `arm-linux-gnueabihf-gcc`, runner, `jobs` or `+neon`. Aliases and the `lint` definition (`clippy --all-targets -- -W clippy::all`) differ.
 > - *Rust Approach*: the device runs Debian 9 with glibc 2.24, not >= 2.28.
-> - *Configuration in `Cargo.toml`* (deb): assets are `sandstar-engine-server` + `sandstar-cli`, `sandstar-engine.service`, `sandstar-rust-validate.service`, cutover/rollback scripts, lookup tables; `initialize.sh` and the unit files are conf-files; there is a `linux-hal` variant.
+> - *Configuration in `Cargo.toml`* (deb): assets are `sandstar-engine-server` + `sandstar-cli`, `sandstar-engine.service`, `soak-monitor.sh`, `health-monitor.sh`, lookup tables; `initialize.sh`, the unit file and the logrotate file are conf-files (the validate unit and the cutover/rollback scripts were retired in S-52, see `tools/kaldirilanlar/`); there is a `linux-hal` variant.
 > - *GitHub Actions CI*: the real CI is `ci.yml` on `master` and `develop` (push and pull request, since 2026-11-19) with toolchain 1.99.1: fmt + clippy + test, then a zigbuild ARM build (`linux-hal`, no `svm`) on push only, without `.deb` or artifacts.
 > - *Release Profile Optimization*: `opt-level = "s"`, `lto = "thin"`.
 > - *Build*: the binary is `sandstar-engine-server`, not `sandstar`.

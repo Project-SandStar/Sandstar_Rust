@@ -1,8 +1,8 @@
 # Sandstar Rust — Progress Overview
 
 **Last updated:** 2026-11-18 (audited against `master` `b48484b`; earlier text last updated 2026-04-20)
-**Current version:** workspace `2.9.0` (`Cargo.toml`); tags `v2.9.0` (2026-04-25) and `v2.9.1` (2026-04-29). The v2.9.1 tag has no matching `Cargo.toml` bump, and `CHANGELOG.md` stops at 2.8.10.
-**Deployed:** one field BeagleBone runs `2.9.0+3b8e97c` (version + git hash, readable from `/api/about` `buildInfo`). Since that build, `master` changed only tooling and documentation.
+**Current version:** workspace `2.10.0` (`Cargo.toml`, 2026-11-25); `CHANGELOG.md` covers 2.9.0, 2.9.1 and 2.10.0. Earlier tags: `v2.9.0` (2026-04-25) and `v2.9.1` (2026-04-29; that tag had no `Cargo.toml` bump).
+**Deployed:** one field BeagleBone runs `2.9.0+1beb2b1` (2026-11-24; version + git hash, readable from `/api/about` `buildInfo`). It has every 2.10.0 change except S-51 (MQTT reconnect) and S-52 (package contents); 2.10.0 itself is not deployed yet.
 **Workspace:** 7 crates. Tests: 2748 passed on Windows, 2764 on Linux CI, 0 failed (26 suites). `test_sys_ticks` is flaky.
 **Quality gate:** `bash tools/gates.sh` (fmt, clippy `-D warnings`, `test --no-fail-fast`, `linux-hal,svm` check). CI is green on `master`.
 **GitHub:** https://github.com/Project-SandStar/Sandstar_Rust
@@ -260,7 +260,7 @@ Host addresses, SSH details and site names are deliberately not written in this 
 | Item | State |
 |---|---|
 | Field devices | One BeagleBone (Debian 9, kernel 4.9, armv7). Older device labels in this repo's history refer to the same unit. |
-| Installed build | `2.9.0+76888b2` (2026-11-20) |
+| Installed build | `2.9.0+1beb2b1` (2026-11-24) |
 | Service | `sandstar-engine.service`: `--http-bind 0.0.0.0 --sox --cluster`, no auth configured. The C service no longer exists. |
 | Drivers | A site-local systemd drop-in enables a BACnet driver; it logs a steady stream of `comm fault` warnings that are not yet explained. No MQTT driver is confirmed. |
 | Logs | `/var/log/sandstar/sandstar-engine.log.YYYY-MM-DD`, newest 14 kept. The systemd journal is volatile and holds well under an hour. |
@@ -332,7 +332,7 @@ Rewritten 2026-11-18. Ranked by risk first, then value.
 11. **roxWarp 9.0d** (Fantom pod) and putting the typed binary-Trio format on the wire, if a non-Rust peer is planned.
 12. **Haystack ops not implemented:** `watchList`, `hisWrite`, `commit`, `root`, `xeto`.
 13. **Field validation:** 24-48 h soak test; vendor BACnet device; resolve the BACnet `comm fault` stream and the implausible table-converted reading.
-14. **Housekeeping:** align `Cargo.toml`, `CHANGELOG.md` and the `v2.9.1` tag; README version; `clippy --all-targets`.
+14. **Housekeeping:** `clippy --all-targets`. (Version, `CHANGELOG.md` and README were aligned in 2.10.0, S-53.)
 
 ---
 
@@ -368,7 +368,8 @@ One-week sprint 2026-04-10 → 2026-04-17:
 | 2026-04-20 | 2.8.10 | Prometheus `GET /metrics` (18 counters + 5 gauges, `sandstar_build_info`) |
 | 2026-04-25 | 2.9.0 | Phase 14.0G native editor backend, production bring-up fixes (`03b4979`) |
 | 2026-04-29 | tag v2.9.1 | 14.0G fix-pack (`44de90b`); `Cargo.toml` still says 2.9.0 |
-| 2026-11 | 2.9.0+hash | Maintenance steps S-5 to S-9 (§2.9); field device on `2.9.0+3b8e97c` |
+| 2026-11 | 2.9.0+hash | Maintenance steps S-5 to S-52 deployed as hash builds; field device on `2.9.0+1beb2b1` (2026-11-24) |
+| 2026-11-25 | 2.10.0 | Hardening release: version number for S-5 to S-52 (auth layering, input validation, driver recovery, package cleanup); see `CHANGELOG.md` |
 
 ---
 
