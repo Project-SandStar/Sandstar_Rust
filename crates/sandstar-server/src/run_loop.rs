@@ -574,3 +574,461 @@ where
     ipc::cleanup(&config.socket_path);
     poll_stuck
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use sandstar_engine::channel::{Channel, ChannelDirection, ChannelType};
+    use sandstar_engine::value::ValueConv;
+    use sandstar_hal::mock::MockHal;
+    use sandstar_ipc::types::{EngineCommand, EngineResponse};
+    use tokio::sync::oneshot;
+
+    const CH: u32 = 1100;
+
+    /// Signals from a channel. A closed channel means "no more signals".
+    struct TestSignals(mpsc::Receiver<Signal>);
+
+    impl Signals for TestSignals {
+        async fn next(&mut self) -> Signal {
+            match self.0.recv().await {
+                Some(signal) => signal,
+                None => std::future::pending().await,
+            }
+        }
+    }
+
+    fn config(config_dir: Option<PathBuf>, poll_interval_ms: u64) -> ServerConfig {
+        ServerConfig {
+            socket_path: String::new(),
+            poll_interval_ms,
+            config_dir,
+            read_only: false,
+            auth_store: crate::auth::AuthStore::new(),
+            auth_token: None,
+            rate_limit: 0,
+        }
+    }
+
+    /// An engine with one polled analog input that reads `raw`.
+    fn engine(raw: f64) -> Engine<MockHal> {
+        let mut engine = Engine::new(MockHal::new());
+        let ch = Channel::new(
+            CH,
+            ChannelType::Analog,
+            ChannelDirection::In,
+            0,
+            0,
+            false,
+            ValueConv::default(),
+            "in",
+        );
+        engine.channels.add(ch).unwrap();
+        engine.channels.get_mut(CH).unwrap().enabled = true;
+        engine.polls.add(CH).unwrap();
+        engine.hal.set_analog(0, 0, Ok(raw));
+        engine
+    }
+
+    /// The handles a test drives the loop with.
+    struct Driver {
+        cmd: mpsc::Sender<EngineCmd>,
+        ipc: mpsc::Sender<ipc::IpcRequest>,
+        signals: mpsc::Sender<Signal>,
+    }
+
+    fn parts(engine: Engine<MockHal>, poll_ms: u64) -> (LoopParts<MockHal>, Driver, TestSignals) {
+        let (cmd, cmd_rx) = mpsc::channel(64);
+        let (ipc_tx, ipc_rx) = mpsc::channel(8);
+        let (signals, signal_rx) = mpsc::channel(8);
+        let timer = |ms: u64| {
+            let mut t = tokio::time::interval(Duration::from_millis(ms));
+            t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            t
+        };
+        let parts = LoopParts {
+            engine,
+            control_runner: ControlRunner::default(),
+            cmd_rx,
+            ipc_rx,
+            poll_timer: timer(poll_ms),
+            watch_expiry_timer: timer(60_000),
+            watchdog_timer: timer(500),
+            watchdog: Watchdog::disabled(),
+            history_store: HistoryStore::new(100),
+            alert_manager: Arc::new(Mutex::new(alerts::AlertManager::new(
+                alerts::AlertConfig::default(),
+            ))),
+            start_time: Instant::now(),
+            no_control: true,
+            control_config: None,
+            #[cfg(feature = "svm")]
+            svm_runner: None,
+            #[cfg(feature = "svm")]
+            svm_snapshot: Arc::new(RwLock::new(ChannelSnapshot::new())),
+        };
+        let driver = Driver {
+            cmd,
+            ipc: ipc_tx,
+            signals,
+        };
+        (parts, driver, TestSignals(signal_rx))
+    }
+
+    impl Driver {
+        async fn status(&self) -> sandstar_ipc::types::StatusInfo {
+            let (reply, rx) = oneshot::channel();
+            self.cmd.send(EngineCmd::Status { reply }).await.unwrap();
+            rx.await.expect("the loop dropped a Status command")
+        }
+
+        async fn tables(&self) -> Vec<String> {
+            let (reply, rx) = oneshot::channel();
+            self.cmd
+                .send(EngineCmd::ListTables { reply })
+                .await
+                .unwrap();
+            rx.await.expect("the loop dropped a ListTables command")
+        }
+
+        async fn polls(&self) -> Vec<sandstar_ipc::types::PollInfo> {
+            let (reply, rx) = oneshot::channel();
+            self.cmd.send(EngineCmd::ListPolls { reply }).await.unwrap();
+            rx.await.expect("the loop dropped a ListPolls command")
+        }
+
+        /// Wait until a poll has stored a value for the channel.
+        async fn wait_for_a_poll(&self) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let polls = self.polls().await;
+                if polls
+                    .iter()
+                    .any(|p| p.channel == CH && p.last_status != "Unknown")
+                {
+                    return;
+                }
+                assert!(Instant::now() < deadline, "no poll within 5 s: {polls:?}");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+
+        async fn ipc(&self, cmd: EngineCommand) -> EngineResponse {
+            let (reply, rx) = oneshot::channel();
+            let (written_tx, written) = oneshot::channel();
+            self.ipc
+                .send(ipc::IpcRequest {
+                    cmd,
+                    reply,
+                    written,
+                })
+                .await
+                .unwrap();
+            let response = rx.await.expect("the loop dropped an IPC command");
+            // The connection task reports the reply as written.
+            let _ = written_tx.send(());
+            response
+        }
+    }
+
+    /// Run the loop next to `drive`; the loop's end state comes back.
+    async fn run_with<F, Fut>(
+        engine: Engine<MockHal>,
+        config: &ServerConfig,
+        drive: F,
+    ) -> LoopEnd<MockHal>
+    where
+        F: FnOnce(Driver) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let (parts, driver, mut signals) = parts(engine, config.poll_interval_ms);
+        let looped = run(parts, config, &mut signals);
+        let (end, ()) = tokio::time::timeout(Duration::from_secs(20), async {
+            tokio::join!(looped, drive(driver))
+        })
+        .await
+        .expect("the loop did not stop");
+        end
+    }
+
+    #[tokio::test]
+    async fn a_poll_tick_reads_the_channel_and_the_engine_comes_back() {
+        let config = config(None, 10);
+        let end = run_with(engine(2048.0), &config, |d| async move {
+            d.wait_for_a_poll().await;
+            let polls = d.polls().await;
+            let poll = polls.iter().find(|p| p.channel == CH).unwrap();
+            assert_eq!(poll.last_status, "Ok", "{poll:?}");
+            assert_eq!(poll.last_cur, 2048.0);
+            d.signals.send(Signal::Sigterm).await.unwrap();
+        })
+        .await;
+
+        assert_eq!(end.stop_signal, Some("SIGTERM"));
+        assert!(!end.ipc_shutdown);
+        // The engine is either back or still out with a poll that started
+        // just before the stop; shutdown brings it back in that case.
+        assert!(end.engine.is_some() || end.poll_in_progress);
+        assert!(!shutdown(end, &config).await);
+    }
+
+    #[tokio::test]
+    async fn every_command_is_answered_while_polls_keep_taking_the_engine() {
+        // 1 ms polls: the engine is away with a blocking task most of the time.
+        let config = config(None, 1);
+        let end = run_with(engine(100.0), &config, |d| async move {
+            d.wait_for_a_poll().await;
+            for _ in 0..200 {
+                let status = d.status().await;
+                assert_eq!(status.channel_count, 1);
+                assert_eq!(status.poll_count, 1);
+            }
+            d.signals.send(Signal::Sigint).await.unwrap();
+        })
+        .await;
+        assert_eq!(end.stop_signal, Some("SIGINT"));
+    }
+
+    #[tokio::test]
+    async fn poll_now_over_rest_and_ipc_is_answered() {
+        // No timer poll after the first one: the interval is long.
+        let config = config(None, 60_000);
+        run_with(engine(7.0), &config, |d| async move {
+            d.wait_for_a_poll().await;
+            let (reply, rx) = oneshot::channel();
+            d.cmd.send(EngineCmd::PollNow { reply }).await.unwrap();
+            assert_eq!(rx.await.unwrap(), Ok("poll triggered".to_string()));
+            // The engine is back before the next command is served.
+            assert_eq!(d.status().await.poll_count, 1);
+            let response = d.ipc(EngineCommand::PollNow).await;
+            assert!(
+                !matches!(response, EngineResponse::Error(_)),
+                "{response:?}"
+            );
+            assert_eq!(d.status().await.poll_count, 1);
+            d.signals.send(Signal::Sigterm).await.unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_ipc_shutdown_ends_the_loop_after_its_reply() {
+        let config = config(None, 60_000);
+        let end = run_with(engine(1.0), &config, |d| async move {
+            d.wait_for_a_poll().await;
+            let response = d.ipc(EngineCommand::Shutdown).await;
+            assert!(
+                !matches!(response, EngineResponse::Error(_)),
+                "{response:?}"
+            );
+        })
+        .await;
+
+        assert!(end.ipc_shutdown);
+        assert_eq!(end.stop_signal, None);
+        assert!(end.engine.is_some());
+    }
+
+    /// The client gave up while the command was queued: it must not run.
+    /// A `Shutdown` that ran would end the loop with `ipc_shutdown`.
+    #[tokio::test]
+    async fn an_ipc_command_whose_client_gave_up_is_not_run() {
+        let config = config(None, 60_000);
+        let end = run_with(engine(1.0), &config, |d| async move {
+            d.wait_for_a_poll().await;
+            let (reply, rx) = oneshot::channel();
+            let (_written_tx, written) = oneshot::channel();
+            drop(rx);
+            d.ipc
+                .send(ipc::IpcRequest {
+                    cmd: EngineCommand::Shutdown,
+                    reply,
+                    written,
+                })
+                .await
+                .unwrap();
+            // The loop is still there and still answers.
+            assert_eq!(d.status().await.channel_count, 1);
+            assert!(matches!(
+                d.ipc(EngineCommand::Status).await,
+                EngineResponse::Status(_)
+            ));
+            d.signals.send(Signal::Sigterm).await.unwrap();
+        })
+        .await;
+
+        assert!(!end.ipc_shutdown);
+        assert_eq!(end.stop_signal, Some("SIGTERM"));
+    }
+
+    fn write_tables(dir: &std::path::Path) {
+        std::fs::write(
+            dir.join("tables.csv"),
+            "name,description,path,unit_type,f_min,f_max,c_min,c_max,k_min,k_max,tag\n\
+             T,Test,t.txt,temp,-40,303,-40,150,233,423,testTherm\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("t.txt"), "100\n200\n300\n").unwrap();
+    }
+
+    #[tokio::test]
+    async fn sighup_reloads_the_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        write_tables(dir.path());
+        let config = config(Some(dir.path().to_path_buf()), 60_000);
+        run_with(engine(1.0), &config, |d| async move {
+            d.wait_for_a_poll().await;
+            assert!(d.tables().await.is_empty());
+            d.signals.send(Signal::Hup).await.unwrap();
+            // Commands queue behind the signal; the reload is done by the
+            // time one is answered, or shortly after.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while d.tables().await.len() != 1 {
+                assert!(Instant::now() < deadline, "SIGHUP did not load the table");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            d.signals.send(Signal::Sigterm).await.unwrap();
+        })
+        .await;
+    }
+
+    /// A reload that fails changes nothing and the loop carries on.
+    #[tokio::test]
+    async fn sighup_with_a_bad_configuration_keeps_the_state_and_the_loop() {
+        let good = tempfile::tempdir().unwrap();
+        write_tables(good.path());
+        let mut engine = engine(1.0);
+        crate::reload::reload_config(&mut engine, good.path()).unwrap();
+        assert_eq!(engine.tables.count(), 1);
+
+        let bad = tempfile::tempdir().unwrap();
+        // Unreadable: a directory where the file should be.
+        std::fs::create_dir(bad.path().join("tables.csv")).unwrap();
+        let config = config(Some(bad.path().to_path_buf()), 60_000);
+        let end = run_with(engine, &config, |d| async move {
+            d.wait_for_a_poll().await;
+            d.signals.send(Signal::Hup).await.unwrap();
+            for _ in 0..20 {
+                assert_eq!(d.tables().await.len(), 1);
+                assert_eq!(d.status().await.poll_count, 1);
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            d.signals.send(Signal::Sigterm).await.unwrap();
+        })
+        .await;
+        assert_eq!(end.stop_signal, Some("SIGTERM"));
+    }
+
+    #[tokio::test]
+    async fn sighup_without_a_config_dir_is_ignored() {
+        let config = config(None, 60_000);
+        run_with(engine(1.0), &config, |d| async move {
+            d.wait_for_a_poll().await;
+            d.signals.send(Signal::Hup).await.unwrap();
+            assert_eq!(d.status().await.channel_count, 1);
+            d.signals.send(Signal::Sigterm).await.unwrap();
+        })
+        .await;
+    }
+
+    // ── shutdown ──
+
+    fn end_with(
+        engine: Option<Engine<MockHal>>,
+        poll_in_progress: bool,
+    ) -> (LoopEnd<MockHal>, mpsc::Sender<PollResult<MockHal>>) {
+        let (tx, poll_result_rx) = mpsc::channel(1);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(1);
+        let (_ipc_tx, ipc_rx) = mpsc::channel(1);
+        let end = LoopEnd {
+            engine,
+            poll_in_progress,
+            poll_result_rx,
+            poll_result_tx: tx.clone(),
+            cmd_rx,
+            ipc_rx,
+            watchdog: Watchdog::disabled(),
+            start_time: Instant::now(),
+            ipc_shutdown: false,
+            stop_signal: Some("SIGTERM"),
+            #[cfg(feature = "svm")]
+            svm_runner: None,
+        };
+        (end, tx)
+    }
+
+    #[tokio::test]
+    async fn shutdown_with_the_engine_at_hand_is_not_stuck() {
+        let config = config(None, 1000);
+        let (end, _tx) = end_with(Some(engine(1.0)), false);
+        assert!(!shutdown(end, &config).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_waits_for_a_poll_that_comes_back() {
+        let config = config(None, 1000);
+        let (end, tx) = end_with(None, true);
+        let late = async {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            tx.send((
+                engine(1.0),
+                ControlRunner::default(),
+                Vec::new(),
+                Duration::from_secs(3),
+            ))
+            .await
+            .unwrap();
+        };
+        let started = tokio::time::Instant::now();
+        let (stuck, ()) = tokio::join!(shutdown(end, &config), late);
+        assert!(!stuck);
+        // It did wait for the poll (3 s), and not for the whole 5 s.
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_secs(3) && waited < Duration::from_secs(4),
+            "{waited:?}"
+        );
+    }
+
+    /// The poll never returns: after 5 s shutdown reports it, so `main` can
+    /// leave with `process::exit` instead of waiting for the blocking task.
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_gives_up_on_a_poll_after_five_seconds() {
+        let config = config(None, 1000);
+        let (end, _tx) = end_with(None, true);
+        let started = tokio::time::Instant::now();
+        assert!(shutdown(end, &config).await);
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_secs(5) && waited < Duration::from_secs(6),
+            "{waited:?}"
+        );
+    }
+
+    /// The blocking task died without sending the engine back. The loop's
+    /// own sender keeps the channel open, so this is a stuck poll (5 s and
+    /// `process::exit` in `main`), not a closed channel.
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_treats_a_poll_task_that_died_as_stuck() {
+        let config = config(None, 1000);
+        let (end, tx) = end_with(None, true);
+        drop(tx);
+        assert!(shutdown(end, &config).await);
+    }
+
+    /// What the loop hands to shutdown keeps the channels as `main()` used to.
+    #[tokio::test]
+    async fn the_loop_end_keeps_the_command_channels_open() {
+        let config = config(None, 60_000);
+        let (parts, driver, mut signals) = parts(engine(1.0), 60_000);
+        driver.signals.send(Signal::Sigterm).await.unwrap();
+        let end = run(parts, &config, &mut signals).await;
+        assert!(!driver.cmd.is_closed());
+        assert!(!driver.ipc.is_closed());
+        assert!(!end.poll_result_tx.is_closed());
+        drop(end);
+        assert!(driver.cmd.is_closed());
+    }
+}
